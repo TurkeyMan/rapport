@@ -38,6 +38,14 @@ foreach(backend null gtk3 gtk4)
     endif()
 endforeach()
 
+# One program can hold only one GTK: gtk3 and gtk4 both bring in libgtk
+# (and GTK's own type names would clash), so a static build may link one.
+if(ANYUI_STATIC AND TARGET anyui_gtk3 AND TARGET anyui_gtk4)
+    message(FATAL_ERROR "ANYUI_STATIC links backends into one program, and GTK 3 and GTK 4 "
+                        "can't coexist there. Pick one: -DANYUI_BACKEND_GTK3=OFF or "
+                        "-DANYUI_BACKEND_GTK4=OFF.")
+endif()
+
 if(ANYUI_EXAMPLES)
     add_subdirectory(examples)
 endif()
