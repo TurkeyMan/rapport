@@ -9,12 +9,27 @@ anyui is shared by two applications, developed in parallel:
   sizing and fullscreen, image clipboard, the static-backend build option,
   and the win32 backend.
 
-Rules:
+## Where to work
 
-- Work on a branch named for the app (`ifritview/canvas`, `pengit/qt6`);
-  `main` only takes finished, building work.
-- Before changing `backend.h`, `widgets.h` or `layout.h`, or bumping
-  `kAbiVersion`, tell the other side what changes; both apps break on it.
+`/mnt/wsl/home/manu/anyui` holds `main` and nobody edits in it. Each app's
+session works in its own worktree on its own branch:
+
+    git -C ../anyui worktree add ../anyui-ifritview ifritview/<topic>
+    git -C ../anyui worktree add ../anyui-pengit pengit/<topic>
+
+## Merging
+
+1. Rebase your branch onto `main`; it must build (plugin and
+   `-DANYUI_STATIC=ON`) and the examples must run.
+2. Propose it to the other side: what changed, and the diff of any shared
+   header (`backend.h`, `widgets.h`, `layout.h`, `anyui.h`), plus any
+   `kAbiVersion` bump.
+3. Merge only once they agree: fast-forward `main` to your branch
+   (`git -C ../anyui merge --ff-only <branch>`).
+4. Tell them it's in; they rebase their branch onto the new `main`.
+
+## Rules
+
 - A backend that lacks a new feature gets a stub, which its owner fills.
 - Style: the Allman `.clang-format` at the root.
 
@@ -22,5 +37,8 @@ Rules:
 
     cmake -S . -B build -G Ninja && cmake --build build
     ./build/bin/anyui-gallery
+
+    # one self-contained executable per example, backends linked in
+    cmake -S . -B build-static -G Ninja -DANYUI_STATIC=ON && cmake --build build-static
 
 Backends whose toolkit isn't installed are skipped with a message.
