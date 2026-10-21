@@ -1092,6 +1092,20 @@ public:
         gtk_tree_view_set_headers_visible(view, s.headers);
         gtk_tree_view_set_fixed_height_mode(view, true);
         gtk_tree_view_set_rubber_banding(view, s.selection == SelectionMode::Multi);
+        compact_ = s.compact;
+        if (compact_)
+        {
+            // Font size is inherited by the header and the cells, and by the
+            // Pango layouts painted columns draw with.
+            GtkCssProvider* css = gtk_css_provider_new();
+            gtk_css_provider_load_from_data(
+                css, "treeview { font-size: 92%; -GtkTreeView-vertical-separator: 0; }", -1,
+                nullptr);
+            gtk_style_context_add_provider(gtk_widget_get_style_context(w_),
+                                           GTK_STYLE_PROVIDER(css),
+                                           GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+            g_object_unref(css);
+        }
 
         sel_ = gtk_tree_view_get_selection(view);
         gtk_tree_selection_set_mode(sel_, s.selection == SelectionMode::None ? GTK_SELECTION_NONE
@@ -1348,7 +1362,7 @@ private:
             auto* pr = ANYUI_PAINT_RENDERER(r);
             pr->ctx = ctx.get();
             pr->draw = &WList::paintCell;
-            pr->height = int(g_metrics.lineHeight + 0.5f);
+            pr->height = int(g_metrics.lineHeight * (compact_ ? kCompactScale : 1.f) + 0.5f);
             gtk_tree_view_column_pack_start(col, r, true);
             gtk_tree_view_column_set_cell_data_func(
                 col, r,
@@ -1364,6 +1378,7 @@ private:
                          : c.align == Align::End  ? 1.0f
                                                   : 0.0f,
                          nullptr);
+            if (compact_) g_object_set(r, "ypad", 0, nullptr);
             gtk_tree_view_column_pack_start(col, r, true);
             gtk_tree_view_column_set_cell_data_func(col, r, &WList::textCell, ctx.get(), nullptr);
         }
@@ -1494,6 +1509,8 @@ private:
     std::vector<GtkTreeViewColumn*> cols_;
     std::vector<std::unique_ptr<ColumnCtx>> ctxs_;
     bool alive_ = true;
+    bool compact_ = false;
+    static constexpr float kCompactScale = 0.92f;
 
     std::function<void()> selChanged_;
     std::function<void(size_t)> activate_;

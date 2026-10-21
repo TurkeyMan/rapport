@@ -195,6 +195,9 @@ struct List
     ListModel* model = nullptr;
     SelectionMode selection = SelectionMode::Multi;
     bool headers = true;
+    // Denser rows: a slightly smaller font and less cell padding, closer
+    // to Windows list views than the toolkit default.
+    bool compact = false;
     std::function<void()> onSelectionChanged;
     std::function<void(size_t)> onActivate;
     std::function<void(size_t, SortOrder)> onSortRequested;
@@ -609,6 +612,11 @@ public:
     List& selection(SelectionMode m)
     {
         s().selection = m;
+        return *this;
+    }
+    List& compact(bool v = true)
+    {
+        s().compact = v;
         return *this;
     }
     List& headers(bool v)
