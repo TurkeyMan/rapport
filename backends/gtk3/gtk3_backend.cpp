@@ -1493,4 +1493,4 @@ private:
 }  // namespace
 }  // namespace anyui::gtk3
 
-ANYUI_BACKEND_ENTRY(anyui::gtk3::Gtk3Backend)
+ANYUI_BACKEND_ENTRY(gtk3, anyui::gtk3::Gtk3Backend)

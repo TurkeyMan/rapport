@@ -20,7 +20,12 @@ if(NOT GTK4_FOUND)
     return()
 endif()
 
-add_library(anyui_gtk4 MODULE gtk4_backend.cpp)
+if(ANYUI_STATIC)
+    add_library(anyui_gtk4 STATIC gtk4_backend.cpp)
+else()
+    add_library(anyui_gtk4 MODULE gtk4_backend.cpp)
+endif()
+add_library(anyui::backend_gtk4 ALIAS anyui_gtk4)
 target_include_directories(anyui_gtk4 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../gtk-common)
 target_link_libraries(anyui_gtk4 PRIVATE anyui::headers PkgConfig::GTK4)
 set_target_properties(anyui_gtk4 PROPERTIES

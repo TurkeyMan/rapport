@@ -16,7 +16,7 @@
 namespace anyui
 {
 
-inline constexpr int kAbiVersion = 1;
+inline constexpr int kAbiVersion = 2;
 
 struct MessageSpec
 {
@@ -83,16 +83,31 @@ public:
     virtual void setClipboard(const std::string&) = 0;
 };
 
-// Plugin entry point. Returns nullptr if the ABI doesn't match or the
+// Backend entry point. Returns nullptr if the ABI doesn't match or the
 // toolkit can't start (e.g. no display), so the loader can fall back.
+//
+// Each backend exports it as anyui_create_backend_<name> (see
+// ANYUI_BACKEND_ENTRY), so several can be linked into one program: as
+// plugins they are dlopened by name, and statically linked ones are
+// registered with ANYUI_BUILTIN_BACKEND (anyui.h).
 using CreateBackendFn = Backend*(int abi, int* argc, char** argv);
-inline constexpr const char* kCreateBackendSymbol = "anyui_create_backend";
+inline std::string createBackendSymbol(std::string_view name)
+{
+    return "anyui_create_backend_" + std::string(name);
+}
 
 }  // namespace anyui
 
-#define ANYUI_BACKEND_ENTRY(...)                                                                   \
-    extern "C" __attribute__((visibility("default"))) anyui::Backend* anyui_create_backend(        \
-        int abi, int* argc, char** argv)                                                           \
+#if defined(_WIN32)
+#define ANYUI_EXPORT __declspec(dllexport)
+#else
+#define ANYUI_EXPORT __attribute__((visibility("default")))
+#endif
+
+// In the backend: ANYUI_BACKEND_ENTRY(gtk3, anyui::gtk3::Gtk3Backend)
+#define ANYUI_BACKEND_ENTRY(name, ...)                                                             \
+    extern "C" ANYUI_EXPORT anyui::Backend* anyui_create_backend_##name(int abi, int* argc,       \
+                                                                        char** argv)              \
     {                                                                                              \
         if (abi != anyui::kAbiVersion) return nullptr;                                             \
         return __VA_ARGS__::create(argc, argv);                                                    \

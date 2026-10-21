@@ -20,6 +20,11 @@ if(PROJECT_IS_TOP_LEVEL)
 endif()
 
 option(ANYUI_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
+# Static: the core and each backend become static libraries
+# (anyui::anyui, anyui::backend_<name>) to link into one executable, which
+# registers its backends with ANYUI_BUILTIN_BACKEND. Default: shared core,
+# backends as dlopened plugins.
+option(ANYUI_STATIC "Build static libraries instead of a shared core and plugins" OFF)
 
 add_subdirectory(core)
 

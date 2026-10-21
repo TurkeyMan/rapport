@@ -371,4 +371,4 @@ private:
 }  // namespace
 }  // namespace anyui::null
 
-ANYUI_BACKEND_ENTRY(anyui::null::NullBackend)
+ANYUI_BACKEND_ENTRY(null, anyui::null::NullBackend)

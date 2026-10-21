@@ -1346,4 +1346,4 @@ private:
 }  // namespace
 }  // namespace anyui::gtk4
 
-ANYUI_BACKEND_ENTRY(anyui::gtk4::Gtk4Backend)
+ANYUI_BACKEND_ENTRY(gtk4, anyui::gtk4::Gtk4Backend)

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <sstream>
 
 #ifndef ANYUI_INSTALL_PLUGIN_DIR
@@ -80,6 +81,12 @@ std::vector<fs::path> pluginDirs(const LoadOptions& opts)
     }
     if (*ANYUI_INSTALL_PLUGIN_DIR) dirs.emplace_back(ANYUI_INSTALL_PLUGIN_DIR);
     return dirs;
+}
+
+std::map<std::string, CreateBackendFn*>& builtins()
+{
+    static std::map<std::string, CreateBackendFn*> registry;
+    return registry;
 }
 
 // Applies everything the backend leaves to the core: callbacks, binds,
@@ -169,6 +176,11 @@ private:
 
 }  // namespace
 
+void registerBuiltinBackend(std::string name, CreateBackendFn* create)
+{
+    builtins()[std::move(name)] = create;
+}
+
 Detection detect(const LoadOptions& opts)
 {
     Detection d;
@@ -228,6 +240,13 @@ std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
 
     for (auto& name : det.preference)
     {
+        if (auto it = builtins().find(name); it != builtins().end())
+        {
+            if (Backend* b = it->second(kAbiVersion, &argc, argv))
+                return std::unique_ptr<Ui>(new Ui(std::unique_ptr<Backend>(b)));
+            errors += "  " + name + ": built in, but failed to start (no display?)\n";
+            continue;
+        }
         std::string file = "anyui_" + name + kPluginSuffix;
         bool found = false;
         for (auto& dir : dirs)
@@ -243,7 +262,7 @@ std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
                 errors += "  " + name + ": " + lib.error() + "\n";
                 break;
             }
-            auto* create = lib->function<CreateBackendFn>(kCreateBackendSymbol);
+            auto* create = lib->function<CreateBackendFn>(createBackendSymbol(name).c_str());
             if (!create)
             {
                 errors += "  " + name + ": " + sys::pathToUtf8(path) + " is not an anyui backend\n";

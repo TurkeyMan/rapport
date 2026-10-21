@@ -20,7 +20,12 @@ if(NOT GTK3_FOUND)
     return()
 endif()
 
-add_library(anyui_gtk3 MODULE gtk3_backend.cpp)
+if(ANYUI_STATIC)
+    add_library(anyui_gtk3 STATIC gtk3_backend.cpp)
+else()
+    add_library(anyui_gtk3 MODULE gtk3_backend.cpp)
+endif()
+add_library(anyui::backend_gtk3 ALIAS anyui_gtk3)
 target_include_directories(anyui_gtk3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../gtk-common)
 target_link_libraries(anyui_gtk3 PRIVATE anyui::headers PkgConfig::GTK3)
 set_target_properties(anyui_gtk3 PROPERTIES

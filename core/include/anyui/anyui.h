@@ -39,6 +39,13 @@ struct Detection
 // diagnostics (`--version`-style output, bug reports).
 Detection detect(const LoadOptions& = {});
 
+// A backend linked into the program (ANYUI_STATIC builds, e.g. one
+// self-contained .exe). Builtins are tried before plugins of the same name.
+// Use the macro below, at namespace scope in one of the app's own source
+// files: a registration inside a static library would be dropped by the
+// linker as unreferenced.
+void registerBuiltinBackend(std::string name, CreateBackendFn* create);
+
 class Ui
 {
 public:
@@ -76,3 +83,9 @@ private:
 };
 
 }  // namespace anyui
+
+// ANYUI_BUILTIN_BACKEND(gtk3) registers the statically linked gtk3 backend.
+#define ANYUI_BUILTIN_BACKEND(name)                                                                \
+    extern "C" anyui::Backend* anyui_create_backend_##name(int, int*, char**);                     \
+    static const bool anyui_builtin_backend_##name =                                               \
+        (anyui::registerBuiltinBackend(#name, &anyui_create_backend_##name), true)
