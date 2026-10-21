@@ -1492,7 +1492,20 @@ private:
         ListModel* model = ctx->list->model_;
         if (!model || !ctx->list->alive_) return;
         size_t row = rowOf(iter);
-        PangoAttrList* attrs = pangoAttrs(ctx->list->w_, model->style(row, ctx->column));
+        TextStyle style = model->style(row, ctx->column);
+        // A style background colours the whole cell, not just behind the
+        // glyphs; selected rows keep the selection colour.
+        std::optional<Paint> bg;
+        std::swap(bg, style.bg);
+        if (bg && !gtk_tree_selection_iter_is_selected(ctx->list->sel_, iter))
+        {
+            Color c = resolve(ctx->list->w_, *bg);
+            GdkRGBA rgba{c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0};
+            g_object_set(r, "cell-background-rgba", &rgba, nullptr);
+        }
+        else
+            g_object_set(r, "cell-background-set", false, nullptr);
+        PangoAttrList* attrs = pangoAttrs(ctx->list->w_, style);
         g_object_set(r, "text", model->text(row, ctx->column).c_str(), "attributes", attrs,
                      nullptr);
         if (attrs) pango_attr_list_unref(attrs);
@@ -1510,6 +1523,12 @@ private:
         cairo_rectangle(cr, area->x, area->y, area->width, area->height);
         cairo_clip(cr);
         cairo_translate(cr, area->x, area->y);
+        if (auto bg = model->style(row, ctx->column).bg; bg && !selected)
+        {
+            Color c = resolve(widget, *bg);
+            cairo_set_source_rgba(cr, c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0);
+            cairo_paint(cr);
+        }
         auto& soft = ctx->list->soft_;
         CairoPainter painter(cr, widget,
                              selected && !soft ? std::optional<Paint>{ThemeColor::HighlightText}

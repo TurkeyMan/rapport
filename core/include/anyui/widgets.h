@@ -322,6 +322,7 @@ public:
 
     virtual size_t rowCount() const = 0;
     virtual std::string text(size_t row, size_t column) const = 0;
+    // A background (bg) colours the whole cell, except on selected rows.
     virtual TextStyle style(size_t /*row*/, size_t /*column*/) const { return {}; }
     // Called for columns declared `painted`; text() is still used for
     // accessibility, type-ahead and copy.
