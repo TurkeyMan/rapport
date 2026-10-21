@@ -1109,7 +1109,9 @@ public:
         gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), GTK_SHADOW_IN);
         gtk_tree_view_set_headers_visible(view, s.headers);
         gtk_tree_view_set_fixed_height_mode(view, true);
-        gtk_tree_view_set_rubber_banding(view, s.selection == SelectionMode::Multi);
+        // No rubber-band (drag-rectangle) selection: report-style lists on
+        // Windows don't have it; Shift/Ctrl-click select ranges and sets.
+        gtk_tree_view_set_rubber_banding(view, false);
         compact_ = s.compact;
         if (s.softSelection)
         {
