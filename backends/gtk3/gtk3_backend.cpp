@@ -1611,7 +1611,11 @@ private:
         }
         // else: empty space below the last row, so the end.
 
-        if (count)
+        // Dropping a contiguous block onto its own place changes nothing, so
+        // that shows no drop line and a "not allowed" cursor.
+        bool noop = isNoopDrop(dest);
+        setDragCursor(noop ? "not-allowed" : "grabbing");
+        if (count && !noop)
         {
             bool atEnd = dest >= count;
             GtkTreePath* line = gtk_tree_path_new_from_indices(int(atEnd ? count - 1 : dest), -1);
@@ -1619,7 +1623,17 @@ private:
                 view, line, atEnd ? GTK_TREE_VIEW_DROP_AFTER : GTK_TREE_VIEW_DROP_BEFORE);
             gtk_tree_path_free(line);
         }
+        else
+            gtk_tree_view_set_drag_dest_row(view, nullptr, GTK_TREE_VIEW_DROP_BEFORE);
         return dest;
+    }
+
+    bool isNoopDrop(size_t dest) const
+    {
+        auto sel = selection();
+        if (sel.empty()) return true;
+        bool contiguous = sel.back() - sel.front() + 1 == sel.size();
+        return contiguous && dest >= sel.front() && dest <= sel.back() + 1;
     }
 
     void setDragCursor(const char* name)
@@ -1666,7 +1680,6 @@ private:
             if (std::abs(e->x - drag_.x0) < threshold && std::abs(e->y - drag_.y0) < threshold)
                 return true;
             drag_.dragging = true;
-            setDragCursor("grabbing");
         }
         dropTarget(e->x, e->y);
 
@@ -1692,7 +1705,7 @@ private:
             size_t dest = dropTarget(e->x, e->y);
             gtk_tree_view_set_drag_dest_row(GTK_TREE_VIEW(w_), nullptr, GTK_TREE_VIEW_DROP_BEFORE);
             setDragCursor(nullptr);
-            if (reorder_) reorder_(selection(), dest);
+            if (reorder_ && !isNoopDrop(dest)) reorder_(selection(), dest);
             return true;
         }
         if (d.deferSelect)
