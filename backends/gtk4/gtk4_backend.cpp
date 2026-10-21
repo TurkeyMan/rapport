@@ -801,6 +801,100 @@ private:
 
 // ---------------------------------------------------------------- window
 
+// ---------------------------------------------------------------- canvas
+
+// Paint, resize, cursor and frame callbacks. Written without a GTK 4 build
+// to check it against.
+// TODO(pengit): input (GtkGestureClick, GtkEventControllerMotion /Scroll
+// /Key) and focus, mirroring the gtk3 WCanvas.
+class WCanvas : public W<anyui::Canvas>
+{
+public:
+    explicit WCanvas(const spec::Canvas& s)
+        : W(gtk_drawing_area_new())
+    {
+        gtk_widget_set_focusable(w_, s.focusable);
+        gtk_drawing_area_set_draw_func(
+            GTK_DRAWING_AREA(w_),
+            +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
+            {
+                auto* self = static_cast<WCanvas*>(p);
+                if (!self->paint_) return;
+                CairoPainter painter(cr, GTK_WIDGET(area));
+                self->paint_(painter, {float(w), float(h)});
+            },
+            this, nullptr);
+        connect(
+            w_, "resize",
+            +[](GtkDrawingArea*, int w, int h, gpointer p)
+            {
+                auto* self = static_cast<WCanvas*>(p);
+                if (self->resize_) self->resize_({float(w), float(h)});
+            },
+            this);
+    }
+
+    ~WCanvas() override { onDisconnect(); }
+
+    void invalidate() override { gtk_widget_queue_draw(w_); }
+    SizeF size() const override
+    {
+        return {float(gtk_widget_get_width(w_)), float(gtk_widget_get_height(w_))};
+    }
+    float deviceScale() const override { return float(gtk_widget_get_scale_factor(w_)); }
+    void setCursor(Cursor c) override
+    {
+        static const char* names[] = {"default", "pointer",  "text",    "crosshair",
+                                      "grab",    "grabbing", "zoom-in", "zoom-out",
+                                      "move",    "wait",     "none"};
+        gtk_widget_set_cursor_from_name(w_, c == Cursor::Default ? nullptr : names[int(c)]);
+    }
+
+    void onPaint(std::function<void(Painter&, SizeF)> f) override { paint_ = std::move(f); }
+    void onResize(std::function<void(SizeF)> f) override { resize_ = std::move(f); }
+    void onPointer(std::function<bool(const PointerEvent&)>) override {}
+    void onScroll(std::function<bool(const ScrollEvent&)>) override {}
+    void onKey(std::function<bool(const KeyEvent&)>) override {}
+
+    Subscription onFrame(std::function<void(double)> f) override
+    {
+        if (!*alive_) return {};
+        guint id = gtk_widget_add_tick_callback(
+            w_,
+            +[](GtkWidget*, GdkFrameClock* clock, gpointer p) -> gboolean
+            {
+                (*static_cast<std::function<void(double)>*>(p))(
+                    double(gdk_frame_clock_get_frame_time(clock)) / 1e6);
+                return G_SOURCE_CONTINUE;
+            },
+            new std::function<void(double)>(std::move(f)),
+            +[](gpointer p) { delete static_cast<std::function<void(double)>*>(p); });
+        ticks_.push_back(id);
+        return Subscription(
+            [this, alive = alive_, id]
+            {
+                if (!*alive) return;
+                gtk_widget_remove_tick_callback(w_, id);
+                std::erase(ticks_, id);
+            });
+    }
+
+protected:
+    void onDisconnect() override
+    {
+        if (!*alive_) return;
+        *alive_ = false;
+        for (guint id : ticks_) gtk_widget_remove_tick_callback(w_, id);
+        ticks_.clear();
+    }
+
+private:
+    std::function<void(Painter&, SizeF)> paint_;
+    std::function<void(SizeF)> resize_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    std::vector<guint> ticks_;
+};
+
 class WWindow : public anyui::Window, public Part
 {
 public:
@@ -1087,6 +1181,11 @@ private:
         return add<WList>(n, s).outer();
     }
 
+    GtkWidget* make(const Node& n, const spec::Canvas& s, Orientation)
+    {
+        return add<WCanvas>(n, s).outer();
+    }
+
     GtkWidget* make(const Node&, const spec::Buttons& s, Orientation)
     {
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -1330,6 +1429,41 @@ public:
     {
         if (GdkDisplay* d = gdk_display_get_default())
             gdk_clipboard_set_text(gdk_display_get_clipboard(d), s.c_str());
+    }
+
+    // TODO(pengit): a GdkTexture-backed Image would avoid cairo for painting.
+    std::unique_ptr<anyui::Image> createImage(int w, int h, PixelFormat format,
+                                              const uint8_t* pixels, size_t stride) override
+    {
+        return std::make_unique<CairoImage>(w, h, format, pixels, stride);
+    }
+
+    Subscription timer(int ms, bool repeat, std::function<void()> fn) override
+    {
+        struct State
+        {
+            std::function<void()> fn;
+            bool repeat;
+            guint id = 0;
+        };
+        auto state = std::make_shared<State>(State{std::move(fn), repeat});
+        state->id = g_timeout_add_full(
+            G_PRIORITY_DEFAULT, guint(std::max(ms, 0)),
+            +[](gpointer p) -> gboolean
+            {
+                auto state = *static_cast<std::shared_ptr<State>*>(p);
+                const bool again = state->repeat;
+                if (!again) state->id = 0;
+                state->fn();
+                return again && state->id ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+            },
+            new std::shared_ptr<State>(state),
+            +[](gpointer p) { delete static_cast<std::shared_ptr<State>*>(p); });
+        return Subscription(
+            [state]
+            {
+                if (state->id) g_source_remove(std::exchange(state->id, 0));
+            });
     }
 
 private:

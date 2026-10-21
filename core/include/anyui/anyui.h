@@ -74,6 +74,16 @@ public:
     }
     void setClipboard(const std::string& s) { backend_->setClipboard(s); }
 
+    std::unique_ptr<Image> createImage(int width, int height, PixelFormat format,
+                                       const uint8_t* pixels, size_t stride)
+    {
+        return backend_->createImage(width, height, format, pixels, stride);
+    }
+    [[nodiscard]] Subscription timer(int ms, bool repeat, std::function<void()> fn)
+    {
+        return backend_->timer(ms, repeat, std::move(fn));
+    }
+
 private:
     explicit Ui(std::unique_ptr<Backend> b)
         : backend_(std::move(b))

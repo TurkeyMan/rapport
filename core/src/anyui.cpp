@@ -170,6 +170,16 @@ private:
         if (s.onContextMenu) l.onContextMenu(s.onContextMenu);
         bind(s.bind, w);
     }
+    static void apply(const spec::Canvas& s, Widget& w)
+    {
+        auto& c = static_cast<Canvas&>(w);
+        if (s.onPaint) c.onPaint(s.onPaint);
+        if (s.onResize) c.onResize(s.onResize);
+        if (s.onPointer) c.onPointer(s.onPointer);
+        if (s.onScroll) c.onScroll(s.onScroll);
+        if (s.onKey) c.onKey(s.onKey);
+        bind(s.bind, w);
+    }
     // Containers with no widget interface of their own.
     static void apply(const auto&, Widget&) {}
 };

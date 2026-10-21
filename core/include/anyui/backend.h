@@ -16,7 +16,7 @@
 namespace anyui
 {
 
-inline constexpr int kAbiVersion = 2;
+inline constexpr int kAbiVersion = 3;
 
 struct MessageSpec
 {
@@ -81,6 +81,13 @@ public:
     virtual void chooseFiles(Window* parent, const FileDialogSpec&,
                              std::function<void(std::vector<std::string>)>) = 0;
     virtual void setClipboard(const std::string&) = 0;
+
+    // Pixels for Painter::image; `pixels` is copied (or uploaded).
+    virtual std::unique_ptr<Image> createImage(int width, int height, PixelFormat,
+                                               const uint8_t* pixels, size_t stride) = 0;
+    // Calls `fn` after `ms` milliseconds, then every `ms` if `repeat`, on
+    // the UI thread, until the subscription is dropped.
+    [[nodiscard]] virtual Subscription timer(int ms, bool repeat, std::function<void()> fn) = 0;
 };
 
 // Backend entry point. Returns nullptr if the ABI doesn't match or the
@@ -106,8 +113,8 @@ inline std::string createBackendSymbol(std::string_view name)
 
 // In the backend: ANYUI_BACKEND_ENTRY(gtk3, anyui::gtk3::Gtk3Backend)
 #define ANYUI_BACKEND_ENTRY(name, ...)                                                             \
-    extern "C" ANYUI_EXPORT anyui::Backend* anyui_create_backend_##name(int abi, int* argc,       \
-                                                                        char** argv)              \
+    extern "C" ANYUI_EXPORT anyui::Backend* anyui_create_backend_##name(int abi, int* argc,        \
+                                                                        char** argv)               \
     {                                                                                              \
         if (abi != anyui::kAbiVersion) return nullptr;                                             \
         return __VA_ARGS__::create(argc, argv);                                                    \

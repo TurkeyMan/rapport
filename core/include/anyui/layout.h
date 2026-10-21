@@ -158,6 +158,18 @@ struct List
     anyui::List** bind = nullptr;
 };
 
+// App-drawn surface; see anyui::Canvas.
+struct Canvas
+{
+    bool focusable = true;  // takes keyboard focus on click (needed for onKey)
+    std::function<void(Painter&, SizeF)> onPaint;
+    std::function<void(SizeF)> onResize;
+    std::function<bool(const PointerEvent&)> onPointer;
+    std::function<bool(const ScrollEvent&)> onScroll;
+    std::function<bool(const KeyEvent&)> onKey;
+    anyui::Canvas** bind = nullptr;
+};
+
 // Without onClick, a dialog button ends the dialog with its role.
 struct DialogButton
 {
@@ -177,7 +189,7 @@ struct Buttons
 using Spec =
     std::variant<spec::Box, spec::Form, spec::Splitter, spec::Group, spec::Tabs, spec::Spacer,
                  spec::Separator, spec::Label, spec::Button, spec::Check, spec::Entry, spec::Select,
-                 spec::Combo, spec::TextView, spec::List, spec::Buttons>;
+                 spec::Combo, spec::TextView, spec::List, spec::Canvas, spec::Buttons>;
 
 struct Node
 {
@@ -539,6 +551,47 @@ public:
         return *this;
     }
     List& bind(anyui::List*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class Canvas : public Builder<Canvas, spec::Canvas>
+{
+public:
+    Canvas() = default;
+    Canvas& focusable(bool v)
+    {
+        s().focusable = v;
+        return *this;
+    }
+    Canvas& onPaint(std::function<void(Painter&, SizeF)> f)
+    {
+        s().onPaint = std::move(f);
+        return *this;
+    }
+    Canvas& onResize(std::function<void(SizeF)> f)
+    {
+        s().onResize = std::move(f);
+        return *this;
+    }
+    Canvas& onPointer(std::function<bool(const PointerEvent&)> f)
+    {
+        s().onPointer = std::move(f);
+        return *this;
+    }
+    Canvas& onScroll(std::function<bool(const ScrollEvent&)> f)
+    {
+        s().onScroll = std::move(f);
+        return *this;
+    }
+    Canvas& onKey(std::function<bool(const KeyEvent&)> f)
+    {
+        s().onKey = std::move(f);
+        return *this;
+    }
+    Canvas& bind(anyui::Canvas*& h)
     {
         s().bind = &h;
         return *this;

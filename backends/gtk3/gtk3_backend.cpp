@@ -8,6 +8,8 @@
 
 #include "gtk_common.h"
 
+#include <cmath>
+#include <cstdlib>
 #include <memory>
 
 // ---------------------------------------------------------------- AnyuiTreeRows
@@ -999,8 +1001,340 @@ private:
 
 // ---------------------------------------------------------------- window
 
+// ---------------------------------------------------------------- canvas
+
+unsigned modifiers(guint state)
+{
+    unsigned m = 0;
+    if (state & GDK_SHIFT_MASK) m |= ModShift;
+    if (state & GDK_CONTROL_MASK) m |= ModCtrl;
+    if (state & GDK_MOD1_MASK) m |= ModAlt;
+    if (state & (GDK_SUPER_MASK | GDK_META_MASK)) m |= ModMeta;
+    return m;
+}
+
+Key keyFor(guint keyval)
+{
+    switch (keyval)
+    {
+    case GDK_KEY_Escape: return Key::Escape;
+    case GDK_KEY_Return:
+    case GDK_KEY_KP_Enter:
+    case GDK_KEY_ISO_Enter: return Key::Enter;
+    case GDK_KEY_Tab:
+    case GDK_KEY_ISO_Left_Tab: return Key::Tab;
+    case GDK_KEY_BackSpace: return Key::Backspace;
+    case GDK_KEY_Delete:
+    case GDK_KEY_KP_Delete: return Key::Delete;
+    case GDK_KEY_Insert:
+    case GDK_KEY_KP_Insert: return Key::Insert;
+    case GDK_KEY_space: return Key::Space;
+    case GDK_KEY_Left:
+    case GDK_KEY_KP_Left: return Key::Left;
+    case GDK_KEY_Right:
+    case GDK_KEY_KP_Right: return Key::Right;
+    case GDK_KEY_Up:
+    case GDK_KEY_KP_Up: return Key::Up;
+    case GDK_KEY_Down:
+    case GDK_KEY_KP_Down: return Key::Down;
+    case GDK_KEY_Home:
+    case GDK_KEY_KP_Home: return Key::Home;
+    case GDK_KEY_End:
+    case GDK_KEY_KP_End: return Key::End;
+    case GDK_KEY_Page_Up:
+    case GDK_KEY_KP_Page_Up: return Key::PageUp;
+    case GDK_KEY_Page_Down:
+    case GDK_KEY_KP_Page_Down: return Key::PageDown;
+    default: break;
+    }
+    if (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12)
+        return Key(int(Key::F1) + int(keyval - GDK_KEY_F1));
+    return gdk_keyval_to_unicode(keyval) ? Key::Character : Key::Other;
+}
+
+const char* cursorName(Cursor c)
+{
+    switch (c)
+    {
+    case Cursor::Default: return "default";
+    case Cursor::Pointer: return "pointer";
+    case Cursor::Text: return "text";
+    case Cursor::Crosshair: return "crosshair";
+    case Cursor::Grab: return "grab";
+    case Cursor::Grabbing: return "grabbing";
+    case Cursor::ZoomIn: return "zoom-in";
+    case Cursor::ZoomOut: return "zoom-out";
+    case Cursor::Move: return "move";
+    case Cursor::Wait: return "wait";
+    case Cursor::Hidden: return "none";
+    }
+    return "default";
+}
+
+class WCanvas : public W<anyui::Canvas>
+{
+public:
+    explicit WCanvas(const spec::Canvas& s)
+        : W(gtk_drawing_area_new())
+    {
+        gtk_widget_add_events(
+            w_, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK |
+                    GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK | GDK_ENTER_NOTIFY_MASK |
+                    GDK_LEAVE_NOTIFY_MASK | GDK_KEY_PRESS_MASK | GDK_KEY_RELEASE_MASK);
+        gtk_widget_set_can_focus(w_, s.focusable);
+        focusable_ = s.focusable;
+        connect(
+            w_, "draw",
+            +[](GtkWidget* w, cairo_t* cr, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<WCanvas*>(p);
+                if (!self->paint_) return false;
+                CairoPainter painter(cr, w);
+                self->paint_(painter, self->size());
+                return true;
+            },
+            this);
+        connect(
+            w_, "size-allocate",
+            +[](GtkWidget*, GdkRectangle* a, gpointer p)
+            {
+                auto* self = static_cast<WCanvas*>(p);
+                if (self->resize_) self->resize_({float(a->width), float(a->height)});
+            },
+            this);
+        connect(
+            w_, "realize", +[](GtkWidget*, gpointer p) { static_cast<WCanvas*>(p)->applyCursor(); },
+            this);
+        connect(w_, "button-press-event", &WCanvas::button, this);
+        connect(w_, "button-release-event", &WCanvas::button, this);
+        connect(
+            w_, "motion-notify-event",
+            +[](GtkWidget*, GdkEventMotion* e, gpointer p) -> gboolean
+            {
+                return static_cast<WCanvas*>(p)->pointer({PointerEvent::Type::Move,
+                                                          {float(e->x), float(e->y)},
+                                                          0,
+                                                          1,
+                                                          modifiers(e->state)});
+            },
+            this);
+        connect(w_, "enter-notify-event", &WCanvas::crossing, this);
+        connect(w_, "leave-notify-event", &WCanvas::crossing, this);
+        connect(
+            w_, "scroll-event",
+            +[](GtkWidget*, GdkEventScroll* e, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<WCanvas*>(p);
+                // With the smooth mask, GTK also emulates direction events
+                // from smooth ones; take each motion once.
+                if (!self->scroll_ || gdk_event_get_pointer_emulated((GdkEvent*)e)) return false;
+                ScrollEvent ev{{float(e->x), float(e->y)}, 0, 0, false, modifiers(e->state)};
+                switch (e->direction)
+                {
+                case GDK_SCROLL_UP: ev.dy = -1; break;
+                case GDK_SCROLL_DOWN: ev.dy = 1; break;
+                case GDK_SCROLL_LEFT: ev.dx = -1; break;
+                case GDK_SCROLL_RIGHT: ev.dx = 1; break;
+                case GDK_SCROLL_SMOOTH:
+                {
+                    ev.dx = float(e->delta_x);
+                    ev.dy = float(e->delta_y);
+                    GdkDevice* d = gdk_event_get_source_device((GdkEvent*)e);
+                    GdkInputSource src = d ? gdk_device_get_source(d) : GDK_SOURCE_MOUSE;
+                    ev.precise = src == GDK_SOURCE_TOUCHPAD || src == GDK_SOURCE_TOUCHSCREEN;
+                    break;
+                }
+                }
+                return self->scroll_(ev);
+            },
+            this);
+        connect(w_, "key-press-event", &WCanvas::keyEvent, this);
+        connect(w_, "key-release-event", &WCanvas::keyEvent, this);
+    }
+
+    ~WCanvas() override { onDisconnect(); }
+
+    void invalidate() override { gtk_widget_queue_draw(w_); }
+    SizeF size() const override
+    {
+        return {float(gtk_widget_get_allocated_width(w_)),
+                float(gtk_widget_get_allocated_height(w_))};
+    }
+    float deviceScale() const override { return float(gtk_widget_get_scale_factor(w_)); }
+    void setCursor(Cursor c) override
+    {
+        cursor_ = c;
+        applyCursor();
+    }
+
+    void onPaint(std::function<void(Painter&, SizeF)> f) override { paint_ = std::move(f); }
+    void onResize(std::function<void(SizeF)> f) override { resize_ = std::move(f); }
+    void onPointer(std::function<bool(const PointerEvent&)> f) override { pointer_ = std::move(f); }
+    void onScroll(std::function<bool(const ScrollEvent&)> f) override { scroll_ = std::move(f); }
+    void onKey(std::function<bool(const KeyEvent&)> f) override { key_ = std::move(f); }
+
+    Subscription onFrame(std::function<void(double)> f) override
+    {
+        if (!alive_) return {};
+        auto* fn = new std::function<void(double)>(std::move(f));
+        guint id = gtk_widget_add_tick_callback(
+            w_,
+            +[](GtkWidget*, GdkFrameClock* clock, gpointer p) -> gboolean
+            {
+                (*static_cast<std::function<void(double)>*>(p))(
+                    double(gdk_frame_clock_get_frame_time(clock)) / 1e6);
+                return G_SOURCE_CONTINUE;
+            },
+            fn, +[](gpointer p) { delete static_cast<std::function<void(double)>*>(p); });
+        ticks_.push_back(id);
+        return Subscription(
+            [this, alive = alive_, id]
+            {
+                if (!*alive) return;  // the widget went first; GTK dropped its ticks
+                gtk_widget_remove_tick_callback(w_, id);
+                std::erase(ticks_, id);
+            });
+    }
+
+protected:
+    void onDisconnect() override
+    {
+        if (!*alive_) return;
+        *alive_ = false;
+        for (guint id : ticks_) gtk_widget_remove_tick_callback(w_, id);
+        ticks_.clear();
+    }
+
+private:
+    bool pointer(const PointerEvent& e) { return pointer_ && pointer_(e); }
+
+    static gboolean button(GtkWidget*, GdkEventButton* e, gpointer p)
+    {
+        auto* self = static_cast<WCanvas*>(p);
+        // GTK adds 2BUTTON/3BUTTON events after the presses; count clicks
+        // ourselves instead so each press arrives once.
+        if (e->type != GDK_BUTTON_PRESS && e->type != GDK_BUTTON_RELEASE) return true;
+        PointerEvent ev{e->type == GDK_BUTTON_PRESS ? PointerEvent::Type::Press
+                                                    : PointerEvent::Type::Release,
+                        {float(e->x), float(e->y)},
+                        int(e->button),
+                        1,
+                        modifiers(e->state)};
+        if (ev.type == PointerEvent::Type::Press)
+        {
+            if (self->focusable_ && !gtk_widget_has_focus(self->w_))
+                gtk_widget_grab_focus(self->w_);
+            int time = 400, distance = 5;
+            g_object_get(gtk_widget_get_settings(self->w_), "gtk-double-click-time", &time,
+                         "gtk-double-click-distance", &distance, nullptr);
+            const bool again = ev.button == self->lastButton_ &&
+                               e->time - self->lastTime_ <= guint32(time) &&
+                               std::abs(ev.pos.x - self->lastPos_.x) <= distance &&
+                               std::abs(ev.pos.y - self->lastPos_.y) <= distance;
+            self->clicks_ = again ? self->clicks_ + 1 : 1;
+            ev.clicks = self->clicks_;
+            self->lastButton_ = ev.button;
+            self->lastTime_ = e->time;
+            self->lastPos_ = ev.pos;
+        }
+        return self->pointer(ev);
+    }
+
+    static gboolean crossing(GtkWidget*, GdkEventCrossing* e, gpointer p)
+    {
+        auto* self = static_cast<WCanvas*>(p);
+        return self->pointer(
+            {e->type == GDK_ENTER_NOTIFY ? PointerEvent::Type::Enter : PointerEvent::Type::Leave,
+             {float(e->x), float(e->y)},
+             0,
+             1,
+             modifiers(e->state)});
+    }
+
+    static gboolean keyEvent(GtkWidget*, GdkEventKey* e, gpointer p)
+    {
+        auto* self = static_cast<WCanvas*>(p);
+        if (!self->key_) return false;
+        KeyEvent ev;
+        ev.press = e->type == GDK_KEY_PRESS;
+        ev.key = keyFor(e->keyval);
+        if (ev.key == Key::Character)
+            ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(e->keyval));
+        ev.modifiers = modifiers(e->state);
+        if (ev.press)
+        {
+            ev.repeat = std::ranges::find(self->held_, e->hardware_keycode) != self->held_.end();
+            if (!ev.repeat) self->held_.push_back(e->hardware_keycode);
+        }
+        else
+        {
+            std::erase(self->held_, e->hardware_keycode);
+        }
+        return self->key_(ev);
+    }
+
+    void applyCursor()
+    {
+        GdkWindow* win = gtk_widget_get_window(w_);
+        if (!win) return;  // applied on realize
+        GdkCursor* c =
+            cursor_ == Cursor::Default
+                ? nullptr
+                : gdk_cursor_new_from_name(gtk_widget_get_display(w_), cursorName(cursor_));
+        gdk_window_set_cursor(win, c);
+        if (c) g_object_unref(c);
+    }
+
+    std::function<void(Painter&, SizeF)> paint_;
+    std::function<void(SizeF)> resize_;
+    std::function<bool(const PointerEvent&)> pointer_;
+    std::function<bool(const ScrollEvent&)> scroll_;
+    std::function<bool(const KeyEvent&)> key_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    std::vector<guint> ticks_;
+    std::vector<guint16> held_;
+    Cursor cursor_ = Cursor::Default;
+    bool focusable_ = true;
+    int clicks_ = 0, lastButton_ = 0;
+    guint32 lastTime_ = 0;
+    PointF lastPos_;
+};
+
 class WWindow : public anyui::Window, public Part
 {
+    // Development aid: ANYUI_SNAPSHOT=file.png saves the first window shown,
+    // ANYUI_SNAPSHOT_DELAY ms (default 500) after it appears, then quits
+    // the main loop. For checking layouts and canvases without a screen
+    // grabber.
+    void snapshotIfAsked()
+    {
+        static bool taken = false;
+        const char* path = std::getenv("ANYUI_SNAPSHOT");
+        if (taken || !path || !*path) return;
+        taken = true;
+        const char* delay = std::getenv("ANYUI_SNAPSHOT_DELAY");
+        g_timeout_add(
+            delay ? guint(std::atoi(delay)) : 500u,
+            +[](gpointer p) -> gboolean
+            {
+                GtkWidget* win = static_cast<GtkWidget*>(p);
+                const int scale = gtk_widget_get_scale_factor(win);
+                const int w = gtk_widget_get_allocated_width(win);
+                const int h = gtk_widget_get_allocated_height(win);
+                cairo_surface_t* surface =
+                    cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w * scale, h * scale);
+                cairo_surface_set_device_scale(surface, scale, scale);
+                cairo_t* cr = cairo_create(surface);
+                gtk_widget_draw(win, cr);
+                cairo_destroy(cr);
+                cairo_surface_write_to_png(surface, std::getenv("ANYUI_SNAPSHOT"));
+                cairo_surface_destroy(surface);
+                gtk_main_quit();
+                return G_SOURCE_REMOVE;
+            },
+            win_);
+    }
+
 public:
     WWindow(const WindowSpec& spec, WWindow* parent)
         : win_(gtk_window_new(GTK_WINDOW_TOPLEVEL))
@@ -1049,6 +1383,7 @@ public:
     {
         finished_ = false;
         gtk_window_present(GTK_WINDOW(win_));
+        snapshotIfAsked();
     }
     void close() override { gtk_widget_hide(win_); }
     void onFinished(std::function<void(DialogRole)> f) override { onFinished_ = std::move(f); }
@@ -1291,6 +1626,11 @@ private:
         return add<WList>(n, s).outer();
     }
 
+    GtkWidget* make(const Node& n, const spec::Canvas& s, Orientation)
+    {
+        return add<WCanvas>(n, s).outer();
+    }
+
     GtkWidget* make(const Node&, const spec::Buttons& s, Orientation)
     {
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -1370,6 +1710,41 @@ public:
             },
             new std::function<void()>(std::move(f)),
             +[](gpointer p) { delete static_cast<std::function<void()>*>(p); });
+    }
+
+    std::unique_ptr<anyui::Image> createImage(int w, int h, PixelFormat format,
+                                              const uint8_t* pixels, size_t stride) override
+    {
+        return std::make_unique<CairoImage>(w, h, format, pixels, stride);
+    }
+
+    Subscription timer(int ms, bool repeat, std::function<void()> fn) override
+    {
+        struct State
+        {
+            std::function<void()> fn;
+            bool repeat;
+            guint id = 0;
+        };
+        auto state = std::make_shared<State>(State{std::move(fn), repeat});
+        state->id = g_timeout_add_full(
+            G_PRIORITY_DEFAULT, guint(std::max(ms, 0)),
+            +[](gpointer p) -> gboolean
+            {
+                auto state =
+                    *static_cast<std::shared_ptr<State>*>(p);  // fn may drop the subscription
+                const bool again = state->repeat;
+                if (!again) state->id = 0;
+                state->fn();
+                return again && state->id ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+            },
+            new std::shared_ptr<State>(state),
+            +[](gpointer p) { delete static_cast<std::shared_ptr<State>*>(p); });
+        return Subscription(
+            [state]
+            {
+                if (state->id) g_source_remove(std::exchange(state->id, 0));
+            });
     }
 
     void message(anyui::Window* parent, const MessageSpec& m,

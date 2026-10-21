@@ -181,6 +181,57 @@ inline std::string gtkAccel(std::string s)
     return out + s;
 }
 
+// An Image as a cairo image surface (ARGB32 premultiplied, i.e. anyui's
+// Bgra8Premultiplied byte order on little-endian machines).
+class CairoImage : public Image
+{
+public:
+    CairoImage(int w, int h, PixelFormat format, const uint8_t* pixels, size_t stride)
+        : surface_(cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h))
+        , format_(format)
+    {
+        update(pixels, stride);
+    }
+    ~CairoImage() override { cairo_surface_destroy(surface_); }
+
+    int width() const override { return cairo_image_surface_get_width(surface_); }
+    int height() const override { return cairo_image_surface_get_height(surface_); }
+
+    void update(const uint8_t* pixels, size_t stride) override
+    {
+        if (!pixels) return;
+        cairo_surface_flush(surface_);
+        uint8_t* dst = cairo_image_surface_get_data(surface_);
+        const int dstStride = cairo_image_surface_get_stride(surface_);
+        const int w = width(), h = height();
+        for (int y = 0; y < h; ++y)
+        {
+            const uint8_t* src = pixels + size_t(y) * stride;
+            uint8_t* row = dst + size_t(y) * dstStride;
+            if (format_ == PixelFormat::Bgra8Premultiplied)
+            {
+                std::memcpy(row, src, size_t(w) * 4);
+                continue;
+            }
+            for (int x = 0; x < w; ++x)  // straight RGBA -> premultiplied BGRA
+            {
+                const unsigned a = src[x * 4 + 3];
+                row[x * 4 + 0] = uint8_t((src[x * 4 + 2] * a + 127) / 255);
+                row[x * 4 + 1] = uint8_t((src[x * 4 + 1] * a + 127) / 255);
+                row[x * 4 + 2] = uint8_t((src[x * 4 + 0] * a + 127) / 255);
+                row[x * 4 + 3] = uint8_t(a);
+            }
+        }
+        cairo_surface_mark_dirty(surface_);
+    }
+
+    cairo_surface_t* surface() const { return surface_; }
+
+private:
+    cairo_surface_t* surface_;
+    PixelFormat format_;
+};
+
 class CairoPainter : public Painter
 {
 public:
@@ -238,6 +289,57 @@ public:
         finish(fill, stroke);
     }
 
+    void polygon(const std::vector<PointF>& pts, std::optional<Paint> fill,
+                 std::optional<Paint> stroke, float width) override
+    {
+        if (pts.empty()) return;
+        cairo_new_path(cr_);
+        cairo_move_to(cr_, pts[0].x, pts[0].y);
+        for (size_t i = 1; i < pts.size(); ++i) cairo_line_to(cr_, pts[i].x, pts[i].y);
+        cairo_close_path(cr_);
+        finish(fill, stroke, width);
+    }
+
+    void arc(PointF c, float r, float start, float end, const Paint& p, float width) override
+    {
+        source(p);
+        cairo_set_line_width(cr_, width);
+        cairo_new_path(cr_);
+        cairo_arc(cr_, c.x, c.y, r, start, end);
+        cairo_stroke(cr_);
+    }
+
+    void image(const Image& img, RectF src, RectF dst, Filter filter, float alpha) override
+    {
+        if (src.w <= 0 || src.h <= 0 || dst.w <= 0 || dst.h <= 0) return;
+        cairo_save(cr_);
+        cairo_rectangle(cr_, dst.x, dst.y, dst.w, dst.h);
+        cairo_clip(cr_);
+        cairo_translate(cr_, dst.x, dst.y);
+        cairo_scale(cr_, dst.w / src.w, dst.h / src.h);
+        cairo_set_source_surface(cr_, static_cast<const CairoImage&>(img).surface(), -src.x,
+                                 -src.y);
+        cairo_pattern_t* pattern = cairo_get_source(cr_);
+        cairo_pattern_set_filter(pattern, filter == Filter::Nearest ? CAIRO_FILTER_NEAREST
+                                                                    : CAIRO_FILTER_BILINEAR);
+        cairo_pattern_set_extend(pattern, CAIRO_EXTEND_PAD);  // no dark fringe at the edges
+        if (alpha >= 1)
+            cairo_paint(cr_);
+        else
+            cairo_paint_with_alpha(cr_, alpha);
+        cairo_restore(cr_);
+    }
+
+    float deviceScale() const override { return float(gtk_widget_get_scale_factor(w_)); }
+
+    void pushClip(RectF r) override
+    {
+        cairo_save(cr_);
+        cairo_rectangle(cr_, r.x, r.y, r.w, r.h);
+        cairo_clip(cr_);
+    }
+    void popClip() override { cairo_restore(cr_); }
+
     void text(PointF at, const std::string& s, const TextStyle& style) override
     {
         PangoLayout* layout = makeLayout(s, style);
@@ -284,7 +386,8 @@ private:
         cairo_set_source_rgba(cr_, c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0);
     }
 
-    void finish(const std::optional<Paint>& fill, const std::optional<Paint>& stroke)
+    void finish(const std::optional<Paint>& fill, const std::optional<Paint>& stroke,
+                float width = 1)
     {
         if (fill)
         {
@@ -297,7 +400,7 @@ private:
         if (stroke)
         {
             source(*stroke);
-            cairo_set_line_width(cr_, 1);
+            cairo_set_line_width(cr_, width);
             cairo_stroke(cr_);
         }
     }

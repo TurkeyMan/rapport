@@ -1,6 +1,9 @@
 add_executable(anyui-demo demo.cpp)
 target_link_libraries(anyui-demo PRIVATE anyui::anyui)
 
+add_executable(anyui-canvas canvas.cpp)
+target_link_libraries(anyui-canvas PRIVATE anyui::anyui)
+
 add_executable(anyui-gallery gallery.cpp)
 target_link_libraries(anyui-gallery PRIVATE anyui::anyui)
 target_compile_options(anyui-gallery PRIVATE -Wno-missing-field-initializers)
@@ -19,7 +22,7 @@ if(ANYUI_STATIC)
         endif()
     endforeach()
     file(GENERATE OUTPUT ${builtins_cpp} CONTENT "${builtins}")
-    foreach(example anyui-demo anyui-gallery)
+    foreach(example anyui-demo anyui-gallery anyui-canvas)
         target_sources(${example} PRIVATE ${builtins_cpp})
         target_link_libraries(${example} PRIVATE ${backend_targets})
     endforeach()

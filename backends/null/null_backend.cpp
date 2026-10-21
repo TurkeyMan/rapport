@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <deque>
+#include <memory>
 #include <mutex>
 
 namespace anyui::null
@@ -120,6 +121,38 @@ public:
     int current() const override { return 0; }
     void setCurrent(int) override {}
     void onChanged(std::function<void(int)>) override {}
+};
+
+class NCanvas : public Stub<anyui::Canvas>
+{
+public:
+    void invalidate() override {}
+    SizeF size() const override { return {}; }
+    float deviceScale() const override { return 1; }
+    void setCursor(Cursor) override {}
+    void onPaint(std::function<void(Painter&, SizeF)>) override {}
+    void onResize(std::function<void(SizeF)>) override {}
+    void onPointer(std::function<bool(const PointerEvent&)>) override {}
+    void onScroll(std::function<bool(const ScrollEvent&)>) override {}
+    void onKey(std::function<bool(const KeyEvent&)>) override {}
+    Subscription onFrame(std::function<void(double)>) override { return {}; }
+};
+
+// Keeps its size; there is nothing to draw on.
+class NImage : public anyui::Image
+{
+public:
+    NImage(int w, int h)
+        : w_(w)
+        , h_(h)
+    {
+    }
+    int width() const override { return w_; }
+    int height() const override { return h_; }
+    void update(const uint8_t*, size_t) override {}
+
+private:
+    int w_, h_;
 };
 
 class NWindow : public anyui::Window
@@ -282,6 +315,12 @@ private:
         suffix(n);
         make<NList>(n);
     }
+    void visit(const Node& n, const spec::Canvas& s, int)
+    {
+        std::printf("Canvas%s", s.focusable ? " focusable" : "");
+        suffix(n);
+        make<NCanvas>(n);
+    }
     void visit(const Node& n, const spec::Buttons& s, int)
     {
         std::printf("Buttons");
@@ -360,6 +399,25 @@ public:
     }
 
     void setClipboard(const std::string&) override {}
+
+    std::unique_ptr<anyui::Image> createImage(int w, int h, PixelFormat, const uint8_t*,
+                                              size_t) override
+    {
+        return std::make_unique<NImage>(w, h);
+    }
+
+    // No clock here: a timer fires once, as soon as the queue reaches it
+    // (repeating ones too, so headless runs terminate).
+    Subscription timer(int, bool, std::function<void()> fn) override
+    {
+        auto alive = std::make_shared<bool>(true);
+        post(
+            [alive, fn = std::move(fn)]
+            {
+                if (*alive) fn();
+            });
+        return Subscription([alive] { *alive = false; });
+    }
 
 private:
     std::mutex mutex_;

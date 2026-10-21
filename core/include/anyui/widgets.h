@@ -13,6 +13,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -128,10 +129,80 @@ struct MenuItem
 };
 using Menu = std::vector<MenuItem>;
 
+// ---------------------------------------------------------------- subscriptions
+
+// Keeps a callback registered (a timer, a per-frame callback) for as long as
+// it lives; destroying or reset()ting it cancels. Move-only.
+class Subscription
+{
+public:
+    Subscription() = default;
+    explicit Subscription(std::function<void()> cancel)
+        : cancel_(std::move(cancel))
+    {
+    }
+    Subscription(Subscription&& o) noexcept
+        : cancel_(std::exchange(o.cancel_, nullptr))
+    {
+    }
+    Subscription& operator=(Subscription&& o) noexcept
+    {
+        if (this != &o)
+        {
+            reset();
+            cancel_ = std::exchange(o.cancel_, nullptr);
+        }
+        return *this;
+    }
+    Subscription(const Subscription&) = delete;
+    Subscription& operator=(const Subscription&) = delete;
+    ~Subscription() { reset(); }
+
+    void reset()
+    {
+        if (auto c = std::exchange(cancel_, nullptr)) c();
+    }
+    explicit operator bool() const { return bool(cancel_); }
+
+private:
+    std::function<void()> cancel_;
+};
+
+// ---------------------------------------------------------------- images
+
+// Pixel layouts an Image can be created from. Bgra8Premultiplied (bytes
+// B,G,R,A; colour premultiplied by alpha) is what Cairo, Direct2D, GDK and
+// Qt (ARGB32_Premultiplied) draw natively, so it uploads without conversion.
+enum class PixelFormat
+{
+    Bgra8Premultiplied,
+    Rgba8,  // straight alpha; converted on upload
+};
+
+enum class Filter
+{
+    Nearest,  // hard pixel edges (zoomed-in inspection)
+    Linear,   // smooth
+};
+
+// Pixels uploaded to the backend once and drawn many times with
+// Painter::image (a cairo surface, GdkTexture, QImage, D2D bitmap).
+// Created by Ui::createImage; usable from the UI thread only.
+class Image
+{
+public:
+    virtual ~Image() = default;
+    virtual int width() const = 0;
+    virtual int height() const = 0;
+    // Replace all pixels (same size and format as created).
+    virtual void update(const uint8_t* pixels, size_t stride) = 0;
+};
+
 // ---------------------------------------------------------------- painting
 
-// Tiny vector API for custom-painted list cells (commit graph, ref pills).
-// Origin is the cell's top-left corner. Maps to QPainter / Cairo / GtkSnapshot.
+// Tiny drawing API for custom-painted list cells (commit graph, ref pills)
+// and Canvas widgets. Origin is the cell's / canvas's top-left corner, in
+// logical pixels. Maps to QPainter / Cairo / GtkSnapshot / Direct2D.
 class Painter
 {
 public:
@@ -146,6 +217,21 @@ public:
                         std::optional<Paint> stroke) = 0;
     virtual void rect(RectF, float cornerRadius, std::optional<Paint> fill,
                       std::optional<Paint> stroke) = 0;
+    // Closed polygon (a play triangle, an arrow head).
+    virtual void polygon(const std::vector<PointF>& points, std::optional<Paint> fill,
+                         std::optional<Paint> stroke, float width = 1) = 0;
+    // Circular arc, angles in radians clockwise from 3 o'clock.
+    virtual void arc(PointF centre, float radius, float start, float end, const Paint&,
+                     float width = 1) = 0;
+    // Draws `src` (in image pixels) into `dst` (logical pixels), scaled with
+    // `filter`. For 1:1 device pixels, make dst = src size / deviceScale().
+    virtual void image(const Image&, RectF src, RectF dst, Filter = Filter::Linear,
+                       float alpha = 1) = 0;
+    // Device pixels per logical pixel (2 on a 200% display).
+    virtual float deviceScale() const = 0;
+    // Restrict drawing to `r` until the matching pop (nestable).
+    virtual void pushClip(RectF r) = 0;
+    virtual void popClip() = 0;
     // Draws text with its top-left at `at`, clipped to the cell.
     virtual void text(PointF at, const std::string&, const TextStyle&) = 0;
     virtual SizeF measure(const std::string&, const TextStyle&) const = 0;
@@ -350,6 +436,124 @@ public:
     virtual int current() const = 0;
     virtual void setCurrent(int) = 0;
     virtual void onChanged(std::function<void(int)>) = 0;
+};
+
+// ---------------------------------------------------------------- canvas
+
+enum Modifier : unsigned
+{
+    ModShift = 1,
+    ModCtrl = 2,
+    ModAlt = 4,
+    ModMeta = 8,  // Super / Windows / Command
+};
+
+struct PointerEvent
+{
+    enum class Type
+    {
+        Press,
+        Release,
+        Move,
+        Enter,
+        Leave,
+    };
+    Type type = Type::Move;
+    PointF pos;      // logical pixels, canvas-relative
+    int button = 0;  // Press/Release: 1 left, 2 middle, 3 right, 4/5 back/forward
+    int clicks = 1;  // Press: 2 for the second press of a double click
+    unsigned modifiers = 0;
+};
+
+struct ScrollEvent
+{
+    PointF pos;
+    // Wheel notches (+1 = one notch down/right), or pixel-precise deltas
+    // from a touchpad when `precise` is set.
+    float dx = 0, dy = 0;
+    bool precise = false;
+    unsigned modifiers = 0;
+};
+
+// Keys that have no text. Others arrive as Key::Character with `codepoint`.
+enum class Key
+{
+    Character,
+    Escape,
+    Enter,
+    Tab,
+    Backspace,
+    Delete,
+    Insert,
+    Space,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Other,
+};
+
+struct KeyEvent
+{
+    bool press = true;  // false: release
+    Key key = Key::Other;
+    char32_t codepoint = 0;  // Key::Character: lowercase/unshifted where it has one
+    unsigned modifiers = 0;
+    bool repeat = false;
+};
+
+enum class Cursor
+{
+    Default,
+    Pointer,  // a link / clickable thing
+    Text,
+    Crosshair,
+    Grab,
+    Grabbing,
+    ZoomIn,
+    ZoomOut,
+    Move,
+    Wait,
+    Hidden,
+};
+
+// A surface the app draws itself (an image view, a chart). Everything else
+// in a window should stay a native widget.
+class Canvas : public Widget
+{
+public:
+    virtual void invalidate() = 0;  // repaint soon
+    virtual SizeF size() const = 0;
+    virtual float deviceScale() const = 0;
+    virtual void setCursor(Cursor) = 0;
+
+    // Paint handler: draws the whole canvas.
+    virtual void onPaint(std::function<void(Painter&, SizeF)>) = 0;
+    virtual void onResize(std::function<void(SizeF)>) = 0;
+    // Input handlers return true when they used the event.
+    virtual void onPointer(std::function<bool(const PointerEvent&)>) = 0;
+    virtual void onScroll(std::function<bool(const ScrollEvent&)>) = 0;
+    virtual void onKey(std::function<bool(const KeyEvent&)>) = 0;
+
+    // Called once per displayed frame (paced by the display) with the frame
+    // time in seconds, until the subscription is dropped. For animation.
+    [[nodiscard]] virtual Subscription onFrame(std::function<void(double)>) = 0;
 };
 
 // ---------------------------------------------------------------- windows
