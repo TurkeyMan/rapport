@@ -284,6 +284,11 @@ public:
         std::printf("%*s", depth * 2, "");
         if (!formLabel.empty()) std::printf("[%s] ", formLabel.c_str());
         std::visit([&](const auto& s) { visit(n, s, depth); }, n.spec);
+        const bool container = std::holds_alternative<spec::Box>(n.spec) ||
+                               std::holds_alternative<spec::Form>(n.spec) ||
+                               std::holds_alternative<spec::Group>(n.spec) ||
+                               std::holds_alternative<spec::Toolbar>(n.spec);
+        if (container && n.common.handle) make<Stub<anyui::Widget>>(n);
     }
 
 private:

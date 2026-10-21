@@ -138,6 +138,8 @@ int main(int argc, char** argv)
     anyui::Label* status = nullptr;
     anyui::Slider* zoomSlider = nullptr;
     anyui::ToolButton* playToggle = nullptr;
+    anyui::Widget* toolbar = nullptr;  // handles: hidden in fullscreen
+    anyui::Widget* bottomBar = nullptr;
     std::unique_ptr<anyui::Window> win;
 
     PointF pan{0, 0}, dragFrom{};
@@ -331,7 +333,8 @@ int main(int argc, char** argv)
                         std::printf("background %d,%d,%d\n", c.r, c.g, c.b);
                         canvas->invalidate();
                     }),
-            },
+            }
+                .handle(toolbar),
             layout::Canvas{}
                 .onPaint(paint)
                 .onPointer(onPointer)
@@ -353,7 +356,8 @@ int main(int argc, char** argv)
                     .icon(Icon::named("view-fullscreen"))
                     .iconOnly()
                     .onClick([&] { win->setFullscreen(!win->fullscreen()); }),
-            },
+            }
+                .handle(bottomBar),
         }}}.size(80_ch, 34_lines));
     win->onCloseRequest(
         [&]
@@ -362,7 +366,14 @@ int main(int argc, char** argv)
             return true;
         });
     win->onKey(onKey);
-    win->onFullscreenChanged([](bool fs) { std::printf("fullscreen %s\n", fs ? "on" : "off"); });
+    win->onFullscreenChanged(
+        [&](bool fs)
+        {
+            std::printf("fullscreen %s\n", fs ? "on" : "off");
+            toolbar->setVisible(!fs);
+            bottomBar->setVisible(!fs);
+        });
+    std::printf("handles %s\n", toolbar && bottomBar ? "filled" : "MISSING");
     win->setIcon(magnifier(true));
     playToggle->setChecked(true);
 

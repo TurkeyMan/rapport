@@ -53,6 +53,9 @@ struct Common
     Extent width, height;
     bool enabled = true;
     std::string tooltip;
+    // Filled with the node's widget, for hiding/disabling any node, boxes
+    // and toolbars included (they have no interface of their own).
+    Widget** handle = nullptr;
 };
 
 namespace spec
@@ -315,6 +318,12 @@ public:
     Self& tooltip(std::string t)
     {
         node_.common.tooltip = std::move(t);
+        return self();
+    }
+    // The node as a plain Widget (setVisible, setEnabled...), whatever it is.
+    Self& handle(Widget*& h)
+    {
+        node_.common.handle = &h;
         return self();
     }
 

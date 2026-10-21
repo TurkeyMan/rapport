@@ -251,6 +251,13 @@ namespace
 
 // ---------------------------------------------------------------- widgets
 
+// A container (box, form, group, toolbar) as a plain Widget, for handles.
+class WPlain : public W<anyui::Widget>
+{
+public:
+    using W::W;
+};
+
 class WLabel : public W<anyui::Label>
 {
 public:
@@ -2154,6 +2161,12 @@ public:
     GtkWidget* build(const Node& n, Orientation parentDir)
     {
         GtkWidget* w = std::visit([&](const auto& s) { return make(n, s, parentDir); }, n.spec);
+        // Containers have no interface; one with a handle gets a plain Widget.
+        const bool container = std::holds_alternative<spec::Box>(n.spec) ||
+                               std::holds_alternative<spec::Form>(n.spec) ||
+                               std::holds_alternative<spec::Group>(n.spec) ||
+                               std::holds_alternative<spec::Toolbar>(n.spec);
+        if (container && n.common.handle) add<WPlain>(n, w);
         int width = px(n.common.width), height = px(n.common.height);
         if (width > 0 || height > 0) gtk_widget_set_size_request(w, width, height);
         if (n.common.stretch > 0)

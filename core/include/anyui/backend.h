@@ -16,7 +16,7 @@
 namespace anyui
 {
 
-inline constexpr int kAbiVersion = 8;
+inline constexpr int kAbiVersion = 9;
 
 struct MessageSpec
 {
@@ -69,7 +69,9 @@ public:
 
     // Builds the whole tree, calling sink.created() for every Node that
     // maps to a widget (not Spacer/Separator/Form/Box) and every dialog
-    // button. The spec is only valid during the call.
+    // button. Containers (Box, Form, Group, Toolbar) with a common.handle
+    // also get created(), with a plain Widget for the container.
+    // The spec is only valid during the call.
     virtual std::unique_ptr<Window> createWindow(const WindowSpec&, Window* parent, BuildSink&) = 0;
 
     virtual int run() = 0;  // main loop; returns the quit() code

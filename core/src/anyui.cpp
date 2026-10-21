@@ -98,6 +98,7 @@ public:
     {
         if (!n.common.enabled) w.setEnabled(false);
         if (!n.common.tooltip.empty()) w.setTooltip(n.common.tooltip);
+        if (n.common.handle) *n.common.handle = &w;
         std::visit([&](const auto& s) { apply(s, w); }, n.spec);
     }
 
