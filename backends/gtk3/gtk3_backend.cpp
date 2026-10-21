@@ -346,19 +346,19 @@ GtkWidget* buildMenu(const Menu& items)
         }
         else if (!item.children.empty())
         {
-            mi = gtk_menu_item_new_with_label(item.label.c_str());
+            mi = gtk_menu_item_new_with_mnemonic(item.label.c_str());
             gtk_menu_item_set_submenu(GTK_MENU_ITEM(mi), buildMenu(item.children));
         }
         else
         {
             if (item.checked)
             {
-                mi = gtk_check_menu_item_new_with_label(item.label.c_str());
+                mi = gtk_check_menu_item_new_with_mnemonic(item.label.c_str());
                 gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(mi), *item.checked);
             }
             else
             {
-                mi = gtk_menu_item_new_with_label(item.label.c_str());
+                mi = gtk_menu_item_new_with_mnemonic(item.label.c_str());
             }
             gtk_widget_set_sensitive(mi, item.enabled && item.action);
             if (!item.shortcut.empty())

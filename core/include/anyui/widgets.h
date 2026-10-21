@@ -126,7 +126,10 @@ constexpr Extent operator""_px(unsigned long long v)
 
 struct MenuItem
 {
-    std::string label;  // empty label + no children = separator
+    // "_" marks the access key ("_Copy"); write "__" for a literal underscore
+    // (escape user text such as branch names). Empty label and no children
+    // = separator.
+    std::string label;
     std::function<void()> action;
     std::vector<MenuItem> children;  // non-empty = submenu
     std::string shortcut;            // display hint, e.g. "Ctrl+C"
