@@ -1371,6 +1371,7 @@ protected:
     void onDisconnect() override
     {
         alive_ = false;
+        if (active_ == this) active_ = nullptr;
         menu_.destroy();
     }
 
@@ -1628,6 +1629,24 @@ private:
         return dest;
     }
 
+public:
+    // Esc during a drag cancels it, ahead of any window key handling (which
+    // might close the dialog). Returns whether a drag was cancelled.
+    static bool cancelActiveDrag()
+    {
+        WList* list = active_;
+        if (!list) return false;
+        list->drag_ = {};
+        active_ = nullptr;
+        gtk_tree_view_set_drag_dest_row(GTK_TREE_VIEW(list->w_), nullptr,
+                                        GTK_TREE_VIEW_DROP_BEFORE);
+        list->setDragCursor(nullptr);
+        return true;
+    }
+
+private:
+    static inline WList* active_ = nullptr;
+
     bool isNoopDrop(size_t dest) const
     {
         auto sel = selection();
@@ -1680,6 +1699,7 @@ private:
             if (std::abs(e->x - drag_.x0) < threshold && std::abs(e->y - drag_.y0) < threshold)
                 return true;
             drag_.dragging = true;
+            active_ = this;
         }
         dropTarget(e->x, e->y);
 
@@ -1700,6 +1720,7 @@ private:
         if (!drag_.pressed || e->button != GDK_BUTTON_PRIMARY) return false;
         Drag d = drag_;
         drag_ = {};
+        if (active_ == this) active_ = nullptr;
         if (d.dragging)
         {
             size_t dest = dropTarget(e->x, e->y);
@@ -2140,6 +2161,10 @@ public:
         }
         gtk_window_set_default_size(win, px(spec.width), px(spec.height));
         if (parent) gtk_window_set_transient_for(win, GTK_WINDOW(parent->win_));
+        // First in line, so Esc ends a list drag rather than the dialog.
+        connect(
+            win_, "key-press-event", +[](GtkWidget*, GdkEventKey* e, gpointer) -> gboolean
+            { return e->keyval == GDK_KEY_Escape && WList::cancelActiveDrag(); }, this);
         if (dialog_)
         {
             gtk_window_set_modal(win, parent != nullptr);
