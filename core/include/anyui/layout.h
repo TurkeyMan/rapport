@@ -279,6 +279,9 @@ struct WindowSpec
     bool dialog = false;  // modal to its parent, has dialog buttons
     Node content;
     Extent width, height;
+    // The usual space between the window edge and its content; off for
+    // edge-to-edge content (an image viewer, a canvas-only window).
+    bool margins = true;
 };
 
 // ---------------------------------------------------------------- builders
@@ -957,6 +960,11 @@ public:
     {
         w_.width = w;
         w_.height = h;
+        return *this;
+    }
+    Window& margins(bool on)
+    {
+        w_.margins = on;
         return *this;
     }
     operator WindowSpec() const& { return w_; }

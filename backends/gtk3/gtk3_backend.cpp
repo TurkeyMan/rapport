@@ -2066,9 +2066,9 @@ public:
 
     void onKey(std::function<bool(const KeyEvent&)> f) override { onKey_ = std::move(f); }
 
-    void setContent(GtkWidget* content)
+    void setContent(GtkWidget* content, bool margins = true)
     {
-        int margin = dialog_ ? 12 : 6;
+        int margin = !margins ? 0 : dialog_ ? 12 : 6;
         gtk_widget_set_margin_start(content, margin);
         gtk_widget_set_margin_end(content, margin);
         gtk_widget_set_margin_top(content, margin);
@@ -2559,7 +2559,8 @@ public:
                                                 BuildSink& sink) override
     {
         auto win = std::make_unique<WWindow>(spec, static_cast<WWindow*>(parent));
-        win->setContent(Builder(*win, sink).build(spec.content, Orientation::Vertical));
+        win->setContent(Builder(*win, sink).build(spec.content, Orientation::Vertical),
+                        spec.margins);
         return win;
     }
 
