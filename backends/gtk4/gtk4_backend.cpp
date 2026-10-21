@@ -121,23 +121,166 @@ public:
     explicit WCheck(const spec::Check& s)
         : W(gtk_check_button_new_with_mnemonic(s.text.c_str()))
     {
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w_), s.checked);
+        setState(s.state);
         connect(
             w_, "toggled",
             +[](GtkCheckButton* b, gpointer p)
             {
                 auto* self = static_cast<WCheck*>(p);
+                if (self->updating_) return;
+                // A click on the mixed state lands on checked.
+                if (gtk_check_button_get_inconsistent(b))
+                {
+                    self->updating_ = true;
+                    gtk_check_button_set_inconsistent(b, false);
+                    gtk_check_button_set_active(b, true);
+                    self->updating_ = false;
+                }
                 if (self->toggled_) self->toggled_(gtk_check_button_get_active(b));
             },
             this);
     }
 
-    bool checked() const override { return gtk_check_button_get_active(GTK_CHECK_BUTTON(w_)); }
-    void setChecked(bool v) override { gtk_check_button_set_active(GTK_CHECK_BUTTON(w_), v); }
+    bool checked() const override { return state() == CheckState::Checked; }
+    void setChecked(bool v) override { setState(v ? CheckState::Checked : CheckState::Unchecked); }
+
+    CheckState state() const override
+    {
+        auto* b = GTK_CHECK_BUTTON(w_);
+        if (gtk_check_button_get_inconsistent(b)) return CheckState::Indeterminate;
+        return gtk_check_button_get_active(b) ? CheckState::Checked : CheckState::Unchecked;
+    }
+
+    void setState(CheckState s) override
+    {
+        auto* b = GTK_CHECK_BUTTON(w_);
+        updating_ = true;
+        gtk_check_button_set_inconsistent(b, s == CheckState::Indeterminate);
+        gtk_check_button_set_active(b, s == CheckState::Checked);
+        updating_ = false;
+    }
+
     void onToggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
 
 private:
     std::function<void(bool)> toggled_;
+    bool updating_ = false;
+};
+
+// TODO(pengit): build the menu as a GtkPopoverMenu (like WList's context
+// menu) and show the pushed state; untested without GTK 4 headers.
+class WMenuButton : public W<anyui::MenuButton>
+{
+public:
+    explicit WMenuButton(const spec::MenuButton& s)
+        : W(gtk_menu_button_new())
+    {
+        setText(s.text);
+    }
+
+    void setText(const std::string& t) override
+    {
+        gtk_menu_button_set_label(GTK_MENU_BUTTON(w_), t.c_str());
+    }
+    void setPushed(bool) override {}
+    void onMenu(std::function<Menu()> f) override { menuFn_ = std::move(f); }
+
+private:
+    std::function<Menu()> menuFn_;
+};
+
+class WProgressBar : public W<anyui::ProgressBar>
+{
+public:
+    WProgressBar()
+        : W(gtk_progress_bar_new())
+    {
+        gtk_widget_set_valign(w_, GTK_ALIGN_CENTER);
+    }
+
+    void setFraction(float f) override
+    {
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w_), std::clamp(f, 0.f, 1.f));
+    }
+    void pulse() override { gtk_progress_bar_pulse(GTK_PROGRESS_BAR(w_)); }
+};
+
+// A menu button showing the date, with a calendar in its popover.
+class WDatePicker : public W<anyui::DatePicker>
+{
+public:
+    explicit WDatePicker(const spec::DatePicker& s)
+        : W(gtk_menu_button_new())
+    {
+        calendar_ = gtk_calendar_new();
+        gtk_calendar_set_show_week_numbers(GTK_CALENDAR(calendar_), true);
+        GtkWidget* popover = gtk_popover_new();
+        gtk_popover_set_child(GTK_POPOVER(popover), calendar_);
+        gtk_menu_button_set_popover(GTK_MENU_BUTTON(w_), popover);
+        setDate(s.date);
+
+        connect(
+            calendar_, "day-selected",
+            +[](GtkCalendar* c, gpointer p)
+            {
+                auto* self = static_cast<WDatePicker*>(p);
+                if (self->updating_) return;
+                GDateTime* dt = gtk_calendar_get_date(c);
+                self->date_ = {g_date_time_get_year(dt), g_date_time_get_month(dt),
+                               g_date_time_get_day_of_month(dt)};
+                g_date_time_unref(dt);
+                self->updateLabel();
+            },
+            this);
+        connect(
+            popover, "show",
+            +[](GtkWidget*, gpointer p)
+            {
+                auto* self = static_cast<WDatePicker*>(p);
+                self->shown_ = self->date_;
+            },
+            this);
+        connect(
+            popover, "closed",
+            +[](GtkPopover*, gpointer p)
+            {
+                auto* self = static_cast<WDatePicker*>(p);
+                if (self->date_ != self->shown_ && self->changed_) self->changed_(self->date_);
+            },
+            this);
+    }
+
+    Date date() const override { return date_; }
+    void setDate(Date d) override
+    {
+        date_ = d;
+        updating_ = true;
+        GDateTime* dt = g_date_time_new_local(d.year, d.month, d.day, 0, 0, 0);
+        if (dt)
+        {
+            gtk_calendar_select_day(GTK_CALENDAR(calendar_), dt);
+            g_date_time_unref(dt);
+        }
+        updating_ = false;
+        updateLabel();
+    }
+    void onChanged(std::function<void(Date)> f) override { changed_ = std::move(f); }
+
+private:
+    void updateLabel()
+    {
+        GDate* d =
+            g_date_new_dmy(GDateDay(date_.day), GDateMonth(date_.month), GDateYear(date_.year));
+        char buf[64] = "";
+        if (g_date_valid(d)) g_date_strftime(buf, sizeof buf, "%x", d);
+        g_date_free(d);
+        gtk_menu_button_set_label(GTK_MENU_BUTTON(w_), buf);
+    }
+
+    GtkWidget* calendar_;
+    Date date_, shown_;
+    std::function<void(Date)> changed_;
+    bool updating_ = false;
 };
 
 class WEntry : public W<anyui::Entry>
@@ -532,6 +675,17 @@ public:
     {
         contextMenu_ = std::move(f);
     }
+    // TODO(pengit): header right-click menu (gesture on the header row).
+    void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
+
+    bool columnVisible(size_t column) const override
+    {
+        return column < cols_.size() && gtk_column_view_column_get_visible(cols_[column]);
+    }
+    void setColumnVisible(size_t column, bool v) override
+    {
+        if (column < cols_.size()) gtk_column_view_column_set_visible(cols_[column], v);
+    }
 
     // ListObserver
     void modelReset() override
@@ -605,6 +759,7 @@ private:
             gtk_column_view_column_set_sorter(col, GTK_SORTER(sorter));
             g_object_unref(sorter);
         }
+        gtk_column_view_column_set_visible(col, c.visible);
         gtk_column_view_append_column(GTK_COLUMN_VIEW(w_), col);
         cols_.push_back(col);
         g_object_unref(col);
@@ -797,6 +952,7 @@ private:
     std::function<void(size_t)> activate_;
     std::function<void(size_t, SortOrder)> sort_;
     std::function<Menu(std::optional<size_t>)> contextMenu_;
+    std::function<Menu(size_t)> headerMenu_;
 };
 
 // ---------------------------------------------------------------- window
@@ -1148,7 +1304,24 @@ private:
 
     GtkWidget* make(const Node& n, const spec::Button& s, Orientation)
     {
-        return add<WButton>(n, s.text).outer();
+        GtkWidget* b = add<WButton>(n, s.text).outer();
+        if (s.flat) gtk_button_set_has_frame(GTK_BUTTON(b), false);
+        return b;
+    }
+
+    GtkWidget* make(const Node& n, const spec::MenuButton& s, Orientation)
+    {
+        return add<WMenuButton>(n, s).outer();
+    }
+
+    GtkWidget* make(const Node& n, const spec::ProgressBar&, Orientation)
+    {
+        return add<WProgressBar>(n).outer();
+    }
+
+    GtkWidget* make(const Node& n, const spec::DatePicker& s, Orientation)
+    {
+        return add<WDatePicker>(n, s).outer();
     }
 
     GtkWidget* make(const Node& n, const spec::Check& s, Orientation)

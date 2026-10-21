@@ -40,10 +40,36 @@ public:
 class NCheck : public Stub<anyui::Check>
 {
 public:
-    bool checked() const override { return value; }
-    void setChecked(bool v) override { value = v; }
+    bool checked() const override { return value == CheckState::Checked; }
+    void setChecked(bool v) override { value = v ? CheckState::Checked : CheckState::Unchecked; }
+    CheckState state() const override { return value; }
+    void setState(CheckState s) override { value = s; }
     void onToggled(std::function<void(bool)>) override {}
-    bool value = false;
+    CheckState value = CheckState::Unchecked;
+};
+
+class NMenuButton : public Stub<anyui::MenuButton>
+{
+public:
+    void setText(const std::string&) override {}
+    void setPushed(bool) override {}
+    void onMenu(std::function<Menu()>) override {}
+};
+
+class NProgressBar : public Stub<anyui::ProgressBar>
+{
+public:
+    void setFraction(float) override {}
+    void pulse() override {}
+};
+
+class NDatePicker : public Stub<anyui::DatePicker>
+{
+public:
+    Date date() const override { return value; }
+    void setDate(Date d) override { value = d; }
+    void onChanged(std::function<void(Date)>) override {}
+    Date value;
 };
 
 class NEntry : public Stub<anyui::Entry>
@@ -101,10 +127,13 @@ public:
     void setSortIndicator(std::optional<size_t>, SortOrder) override {}
     std::vector<float> columnWidths() const override { return {}; }
     void setColumnWidths(const std::vector<float>&) override {}
+    bool columnVisible(size_t) const override { return true; }
+    void setColumnVisible(size_t, bool) override {}
     void onSelectionChanged(std::function<void()>) override {}
     void onActivate(std::function<void(size_t)>) override {}
     void onSortRequested(std::function<void(size_t, SortOrder)>) override {}
     void onContextMenu(std::function<Menu(std::optional<size_t>)>) override {}
+    void onHeaderMenu(std::function<Menu(size_t)>) override {}
     ListModel* model = nullptr;
 };
 
@@ -277,7 +306,10 @@ private:
     }
     void visit(const Node& n, const spec::Check& s, int)
     {
-        std::printf("Check \"%s\" %s", s.text.c_str(), s.checked ? "on" : "off");
+        std::printf("Check \"%s\" %s", s.text.c_str(),
+                    s.state == CheckState::Checked         ? "on"
+                    : s.state == CheckState::Indeterminate ? "mixed"
+                                                           : "off");
         suffix(n);
         make<NCheck>(n);
     }
@@ -320,6 +352,24 @@ private:
         std::printf("Canvas%s", s.focusable ? " focusable" : "");
         suffix(n);
         make<NCanvas>(n);
+    }
+    void visit(const Node& n, const spec::MenuButton& s, int)
+    {
+        std::printf("MenuButton \"%s\"", s.text.c_str());
+        suffix(n);
+        make<NMenuButton>(n);
+    }
+    void visit(const Node& n, const spec::ProgressBar&, int)
+    {
+        std::printf("ProgressBar");
+        suffix(n);
+        make<NProgressBar>(n);
+    }
+    void visit(const Node& n, const spec::DatePicker& s, int)
+    {
+        std::printf("DatePicker %04d-%02d-%02d", s.date.year, s.date.month, s.date.day);
+        suffix(n);
+        make<NDatePicker>(n);
     }
     void visit(const Node& n, const spec::Buttons& s, int)
     {

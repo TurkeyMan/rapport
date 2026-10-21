@@ -104,13 +104,14 @@ struct Label
 struct Button
 {
     std::string text;
+    bool flat = false;  // no border until hovered (a link-like button)
     std::function<void()> onClick;
     anyui::Button** bind = nullptr;
 };
 struct Check
 {
     std::string text;
-    bool checked = false;
+    CheckState state = CheckState::Unchecked;
     std::function<void(bool)> onToggled;
     anyui::Check** bind = nullptr;
 };
@@ -155,7 +156,25 @@ struct List
     std::function<void(size_t)> onActivate;
     std::function<void(size_t, SortOrder)> onSortRequested;
     std::function<Menu(std::optional<size_t>)> onContextMenu;
+    std::function<Menu(size_t)> onHeaderMenu;
     anyui::List** bind = nullptr;
+};
+struct MenuButton
+{
+    std::string text;
+    bool pushed = false;
+    std::function<Menu()> onMenu;
+    anyui::MenuButton** bind = nullptr;
+};
+struct ProgressBar
+{
+    anyui::ProgressBar** bind = nullptr;
+};
+struct DatePicker
+{
+    Date date;
+    std::function<void(Date)> onChanged;
+    anyui::DatePicker** bind = nullptr;
 };
 
 // App-drawn surface; see anyui::Canvas.
@@ -189,7 +208,8 @@ struct Buttons
 using Spec =
     std::variant<spec::Box, spec::Form, spec::Splitter, spec::Group, spec::Tabs, spec::Spacer,
                  spec::Separator, spec::Label, spec::Button, spec::Check, spec::Entry, spec::Select,
-                 spec::Combo, spec::TextView, spec::List, spec::Canvas, spec::Buttons>;
+                 spec::Combo, spec::TextView, spec::List, spec::Canvas, spec::MenuButton,
+                 spec::ProgressBar, spec::DatePicker, spec::Buttons>;
 
 struct Node
 {
@@ -378,6 +398,11 @@ class Button : public Builder<Button, spec::Button>
 {
 public:
     explicit Button(std::string text) { s().text = std::move(text); }
+    Button& flat(bool v = true)
+    {
+        s().flat = v;
+        return *this;
+    }
     Button& onClick(std::function<void()> f)
     {
         s().onClick = std::move(f);
@@ -396,7 +421,12 @@ public:
     explicit Check(std::string text, bool checked = false)
     {
         s().text = std::move(text);
-        s().checked = checked;
+        s().state = checked ? CheckState::Checked : CheckState::Unchecked;
+    }
+    Check(std::string text, CheckState state)
+    {
+        s().text = std::move(text);
+        s().state = state;
     }
     Check& onToggled(std::function<void(bool)> f)
     {
@@ -550,7 +580,60 @@ public:
         s().onContextMenu = std::move(f);
         return *this;
     }
+    List& onHeaderMenu(std::function<Menu(size_t)> f)
+    {
+        s().onHeaderMenu = std::move(f);
+        return *this;
+    }
     List& bind(anyui::List*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class MenuButton : public Builder<MenuButton, spec::MenuButton>
+{
+public:
+    explicit MenuButton(std::string text) { s().text = std::move(text); }
+    MenuButton& pushed(bool v = true)
+    {
+        s().pushed = v;
+        return *this;
+    }
+    MenuButton& onMenu(std::function<Menu()> f)
+    {
+        s().onMenu = std::move(f);
+        return *this;
+    }
+    MenuButton& bind(anyui::MenuButton*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class ProgressBar : public Builder<ProgressBar, spec::ProgressBar>
+{
+public:
+    ProgressBar() = default;
+    ProgressBar& bind(anyui::ProgressBar*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class DatePicker : public Builder<DatePicker, spec::DatePicker>
+{
+public:
+    explicit DatePicker(Date date = {}) { s().date = date; }
+    DatePicker& onChanged(std::function<void(Date)> f)
+    {
+        s().onChanged = std::move(f);
+        return *this;
+    }
+    DatePicker& bind(anyui::DatePicker*& h)
     {
         s().bind = &h;
         return *this;

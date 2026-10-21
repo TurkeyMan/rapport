@@ -168,6 +168,20 @@ private:
         if (s.onActivate) l.onActivate(s.onActivate);
         if (s.onSortRequested) l.onSortRequested(s.onSortRequested);
         if (s.onContextMenu) l.onContextMenu(s.onContextMenu);
+        if (s.onHeaderMenu) l.onHeaderMenu(s.onHeaderMenu);
+        bind(s.bind, w);
+    }
+    static void apply(const spec::MenuButton& s, Widget& w)
+    {
+        auto& b = static_cast<MenuButton&>(w);
+        if (s.onMenu) b.onMenu(s.onMenu);
+        bind(s.bind, w);
+    }
+    static void apply(const spec::ProgressBar& s, Widget& w) { bind(s.bind, w); }
+    static void apply(const spec::DatePicker& s, Widget& w)
+    {
+        auto& d = static_cast<DatePicker&>(w);
+        if (s.onChanged) d.onChanged(s.onChanged);
         bind(s.bind, w);
     }
     static void apply(const spec::Canvas& s, Widget& w)

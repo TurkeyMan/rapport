@@ -302,6 +302,7 @@ struct Column
     bool stretch = false;  // takes spare width
     bool painted = false;  // drawn through ListModel::paint
     bool sortable = false;
+    bool visible = true;  // hidden columns can be shown from a header menu
     Align align = Align::Start;
 };
 
@@ -342,12 +343,54 @@ public:
     virtual void onClick(std::function<void()>) = 0;
 };
 
+enum class CheckState
+{
+    Unchecked,
+    Checked,
+    Indeterminate,  // the "mixed" mark; set by the app, clicks only toggle on/off
+};
+
 class Check : public Widget
 {
 public:
-    virtual bool checked() const = 0;
+    virtual bool checked() const = 0;  // false while Indeterminate
     virtual void setChecked(bool) = 0;
-    virtual void onToggled(std::function<void(bool)>) = 0;
+    virtual CheckState state() const = 0;
+    virtual void setState(CheckState) = 0;
+    virtual void onToggled(std::function<void(bool)>) = 0;  // user clicks only
+};
+
+// Button that drops down a menu below itself (TortoiseGit's "Walk
+// Behavior" and "View"), with a drop-down arrow.
+class MenuButton : public Widget
+{
+public:
+    virtual void setText(const std::string&) = 0;
+    // Drawn pressed while true, e.g. while any of its options is active.
+    virtual void setPushed(bool) = 0;
+    // Called each time the menu opens, so check marks are current.
+    virtual void onMenu(std::function<Menu()>) = 0;
+};
+
+class ProgressBar : public Widget
+{
+public:
+    virtual void setFraction(float) = 0;  // 0..1
+    virtual void pulse() = 0;             // activity of unknown length
+};
+
+struct Date
+{
+    int year = 1970, month = 1, day = 1;  // month and day are 1-based
+    auto operator<=>(const Date&) const = default;
+};
+
+class DatePicker : public Widget
+{
+public:
+    virtual Date date() const = 0;
+    virtual void setDate(Date) = 0;
+    virtual void onChanged(std::function<void(Date)>) = 0;  // user changes only
 };
 
 // Single-line text entry.
@@ -414,12 +457,16 @@ public:
 
     virtual std::vector<float> columnWidths() const = 0;  // for saving state
     virtual void setColumnWidths(const std::vector<float>&) = 0;
+    virtual bool columnVisible(size_t column) const = 0;
+    virtual void setColumnVisible(size_t column, bool) = 0;
 
     virtual void onSelectionChanged(std::function<void()>) = 0;
     virtual void onActivate(std::function<void(size_t row)>) = 0;  // double-click / Enter
     virtual void onSortRequested(std::function<void(size_t column, SortOrder)>) = 0;
     // Right-click / menu key; return an empty menu for none.
     virtual void onContextMenu(std::function<Menu(std::optional<size_t> row)>) = 0;
+    // Right-click on a column header (e.g. a menu of columns to show).
+    virtual void onHeaderMenu(std::function<Menu(size_t column)>) = 0;
 };
 
 // Draggable divider between panes.

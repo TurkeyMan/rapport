@@ -287,29 +287,326 @@ private:
     std::function<void()> click_;
 };
 
+GtkWidget* buildMenu(const Menu& items)
+{
+    GtkWidget* menu = gtk_menu_new();
+    for (const MenuItem& item : items)
+    {
+        GtkWidget* mi;
+        if (item.isSeparator())
+        {
+            mi = gtk_separator_menu_item_new();
+        }
+        else if (!item.children.empty())
+        {
+            mi = gtk_menu_item_new_with_label(item.label.c_str());
+            gtk_menu_item_set_submenu(GTK_MENU_ITEM(mi), buildMenu(item.children));
+        }
+        else
+        {
+            if (item.checked)
+            {
+                mi = gtk_check_menu_item_new_with_label(item.label.c_str());
+                gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(mi), *item.checked);
+            }
+            else
+            {
+                mi = gtk_menu_item_new_with_label(item.label.c_str());
+            }
+            gtk_widget_set_sensitive(mi, item.enabled && item.action);
+            if (!item.shortcut.empty())
+            {
+                guint key;
+                GdkModifierType mods;
+                gtk_accelerator_parse(gtkAccel(item.shortcut).c_str(), &key, &mods);
+                GtkWidget* label = gtk_bin_get_child(GTK_BIN(mi));
+                if (key && GTK_IS_ACCEL_LABEL(label))
+                    gtk_accel_label_set_accel(GTK_ACCEL_LABEL(label), key, mods);
+            }
+            // The menu lives no longer than menuItems_, which owns `item`.
+            g_signal_connect(mi, "activate",
+                             G_CALLBACK(+[](GtkMenuItem*, gpointer p)
+                                        {
+                                            auto* item = static_cast<const MenuItem*>(p);
+                                            if (item->action) item->action();
+                                        }),
+                             const_cast<MenuItem*>(&item));
+        }
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
+    }
+    return menu;
+}
+
+// A popup menu built from an anyui::Menu. Its GTK items point into the
+// Menu it holds, so the two are replaced together.
+class PopupMenu
+{
+public:
+    // Shows below `attach` when `event` is null (keyboard / menu buttons),
+    // else at the pointer.
+    void show(Menu items, GtkWidget* attach, GdkEvent* event, bool below = false)
+    {
+        destroy();
+        items_ = std::move(items);
+        menu_ = buildMenu(items_);
+        gtk_menu_attach_to_widget(GTK_MENU(menu_), attach, nullptr);
+        if (onHide_)
+            g_signal_connect(menu_, "deactivate",
+                             G_CALLBACK(+[](GtkMenuShell*, gpointer p)
+                                        { (*static_cast<std::function<void()>*>(p))(); }),
+                             &onHide_);
+        gtk_widget_show_all(menu_);
+        if (below)
+            gtk_menu_popup_at_widget(GTK_MENU(menu_), attach, GDK_GRAVITY_SOUTH_WEST,
+                                     GDK_GRAVITY_NORTH_WEST, event);
+        else if (event)
+            gtk_menu_popup_at_pointer(GTK_MENU(menu_), event);
+        else
+            gtk_menu_popup_at_widget(GTK_MENU(menu_), attach, GDK_GRAVITY_CENTER,
+                                     GDK_GRAVITY_NORTH_WEST, nullptr);
+    }
+
+    void onHide(std::function<void()> f) { onHide_ = std::move(f); }
+
+    // Call before the attach widget goes away.
+    void destroy()
+    {
+        if (menu_) gtk_widget_destroy(menu_);
+        menu_ = nullptr;
+    }
+
+private:
+    Menu items_;
+    GtkWidget* menu_ = nullptr;
+    std::function<void()> onHide_;
+};
+
 class WCheck : public W<anyui::Check>
 {
 public:
     explicit WCheck(const spec::Check& s)
         : W(gtk_check_button_new_with_mnemonic(s.text.c_str()))
     {
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w_), s.checked);
+        setState(s.state);
         connect(
             w_, "toggled",
             +[](GtkToggleButton* b, gpointer p)
             {
                 auto* self = static_cast<WCheck*>(p);
+                if (self->updating_) return;
+                // A click on the mixed state lands on checked (TortoiseGit's
+                // tri-state All Branches toggles between on and off).
+                if (gtk_toggle_button_get_inconsistent(b))
+                {
+                    gtk_toggle_button_set_inconsistent(b, false);
+                    self->updating_ = true;
+                    gtk_toggle_button_set_active(b, true);
+                    self->updating_ = false;
+                }
                 if (self->toggled_) self->toggled_(gtk_toggle_button_get_active(b));
             },
             this);
     }
 
-    bool checked() const override { return gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w_)); }
-    void setChecked(bool v) override { gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w_), v); }
+    bool checked() const override { return state() == CheckState::Checked; }
+    void setChecked(bool v) override { setState(v ? CheckState::Checked : CheckState::Unchecked); }
+
+    CheckState state() const override
+    {
+        auto* b = GTK_TOGGLE_BUTTON(w_);
+        if (gtk_toggle_button_get_inconsistent(b)) return CheckState::Indeterminate;
+        return gtk_toggle_button_get_active(b) ? CheckState::Checked : CheckState::Unchecked;
+    }
+
+    void setState(CheckState s) override
+    {
+        auto* b = GTK_TOGGLE_BUTTON(w_);
+        updating_ = true;
+        gtk_toggle_button_set_inconsistent(b, s == CheckState::Indeterminate);
+        gtk_toggle_button_set_active(b, s == CheckState::Checked);
+        updating_ = false;
+    }
+
     void onToggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
 
 private:
     std::function<void(bool)> toggled_;
+    bool updating_ = false;
+};
+
+class WMenuButton : public W<anyui::MenuButton>
+{
+public:
+    explicit WMenuButton(const spec::MenuButton& s)
+        : W(gtk_toggle_button_new())
+    {
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+        label_ = gtk_label_new_with_mnemonic(s.text.c_str());
+        gtk_label_set_mnemonic_widget(GTK_LABEL(label_), w_);
+        gtk_container_add(GTK_CONTAINER(box), label_);
+        gtk_container_add(GTK_CONTAINER(box),
+                          gtk_image_new_from_icon_name("pan-down-symbolic", GTK_ICON_SIZE_BUTTON));
+        gtk_container_add(GTK_CONTAINER(w_), box);
+        pushed_ = s.pushed;
+        sync();
+
+        menu_.onHide([this] { sync(); });
+        connect(
+            w_, "toggled",
+            +[](GtkToggleButton*, gpointer p) { static_cast<WMenuButton*>(p)->clicked(); }, this);
+    }
+
+    void setText(const std::string& t) override
+    {
+        gtk_label_set_text_with_mnemonic(GTK_LABEL(label_), t.c_str());
+    }
+    void setPushed(bool v) override
+    {
+        pushed_ = v;
+        sync();
+    }
+    void onMenu(std::function<Menu()> f) override { menuFn_ = std::move(f); }
+
+protected:
+    void onDisconnect() override { menu_.destroy(); }
+
+private:
+    void sync()
+    {
+        updating_ = true;
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w_), pushed_);
+        updating_ = false;
+    }
+
+    void clicked()
+    {
+        if (updating_) return;
+        Menu items = menuFn_ ? menuFn_() : Menu{};
+        if (items.empty())
+        {
+            sync();
+            return;
+        }
+        // Held down while the menu is open.
+        updating_ = true;
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w_), true);
+        updating_ = false;
+        GdkEvent* event = gtk_get_current_event();
+        menu_.show(std::move(items), w_, event, true);
+        if (event) gdk_event_free(event);
+    }
+
+    GtkWidget* label_;
+    PopupMenu menu_;
+    std::function<Menu()> menuFn_;
+    bool pushed_ = false;
+    bool updating_ = false;
+};
+
+class WProgressBar : public W<anyui::ProgressBar>
+{
+public:
+    WProgressBar()
+        : W(gtk_progress_bar_new())
+    {
+        gtk_widget_set_valign(w_, GTK_ALIGN_CENTER);
+    }
+
+    void setFraction(float f) override
+    {
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w_), std::clamp(f, 0.f, 1.f));
+    }
+    void pulse() override { gtk_progress_bar_pulse(GTK_PROGRESS_BAR(w_)); }
+};
+
+// GTK 3 has no date picker: a button showing the date, with a calendar in
+// a popover. onChanged fires when the popover closes on a new date.
+class WDatePicker : public W<anyui::DatePicker>
+{
+public:
+    explicit WDatePicker(const spec::DatePicker& s)
+        : W(gtk_button_new_with_label(""))
+    {
+        calendar_ = gtk_calendar_new();
+        gtk_calendar_set_display_options(GTK_CALENDAR(calendar_),
+                                         GtkCalendarDisplayOptions(GTK_CALENDAR_SHOW_HEADING |
+                                                                   GTK_CALENDAR_SHOW_DAY_NAMES |
+                                                                   GTK_CALENDAR_SHOW_WEEK_NUMBERS));
+        popover_ = gtk_popover_new(w_);
+        gtk_container_add(GTK_CONTAINER(popover_), calendar_);
+        gtk_widget_show(calendar_);
+        setDate(s.date);
+
+        connect(
+            w_, "clicked",
+            +[](GtkButton*, gpointer p)
+            {
+                auto* self = static_cast<WDatePicker*>(p);
+                self->showCalendar();
+            },
+            this);
+        connect(
+            calendar_, "day-selected",
+            +[](GtkCalendar* c, gpointer p)
+            {
+                auto* self = static_cast<WDatePicker*>(p);
+                if (self->updating_) return;
+                guint y, m, d;
+                gtk_calendar_get_date(c, &y, &m, &d);
+                self->date_ = {int(y), int(m) + 1, int(d)};
+                self->updateLabel();
+            },
+            this);
+        connect(
+            calendar_, "day-selected-double-click",
+            +[](GtkCalendar*, gpointer p)
+            { gtk_popover_popdown(GTK_POPOVER(static_cast<WDatePicker*>(p)->popover_)); },
+            this);
+        connect(
+            popover_, "closed",
+            +[](GtkPopover*, gpointer p)
+            {
+                auto* self = static_cast<WDatePicker*>(p);
+                if (self->date_ != self->shown_ && self->changed_) self->changed_(self->date_);
+            },
+            this);
+    }
+
+    Date date() const override { return date_; }
+    void setDate(Date d) override
+    {
+        date_ = d;
+        updateLabel();
+    }
+    void onChanged(std::function<void(Date)> f) override { changed_ = std::move(f); }
+
+private:
+    void showCalendar()
+    {
+        shown_ = date_;
+        updating_ = true;
+        auto* c = GTK_CALENDAR(calendar_);
+        gtk_calendar_select_month(c, guint(date_.month - 1), guint(date_.year));
+        gtk_calendar_select_day(c, guint(date_.day));
+        updating_ = false;
+        gtk_popover_popup(GTK_POPOVER(popover_));
+    }
+
+    void updateLabel()
+    {
+        GDate* d =
+            g_date_new_dmy(GDateDay(date_.day), GDateMonth(date_.month), GDateYear(date_.year));
+        char buf[64] = "";
+        if (g_date_valid(d)) g_date_strftime(buf, sizeof buf, "%x", d);
+        g_date_free(d);
+        gtk_button_set_label(GTK_BUTTON(w_), buf);
+    }
+
+    GtkWidget* calendar_;
+    GtkWidget* popover_;
+    Date date_, shown_;
+    std::function<void(Date)> changed_;
+    bool updating_ = false;
 };
 
 class WEntry : public W<anyui::Entry>
@@ -696,6 +993,16 @@ public:
     {
         contextMenu_ = std::move(f);
     }
+    void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
+
+    bool columnVisible(size_t column) const override
+    {
+        return column < cols_.size() && gtk_tree_view_column_get_visible(cols_[column]);
+    }
+    void setColumnVisible(size_t column, bool v) override
+    {
+        if (column < cols_.size()) gtk_tree_view_column_set_visible(cols_[column], v);
+    }
 
     // ListObserver. Big changes detach the model: re-attaching is O(visible)
     // while per-row signals are O(rows).
@@ -738,8 +1045,7 @@ protected:
     void onDisconnect() override
     {
         alive_ = false;
-        if (menu_) gtk_widget_destroy(menu_);
-        menu_ = nullptr;
+        menu_.destroy();
     }
 
 private:
@@ -837,8 +1143,27 @@ private:
                 },
                 ctx.get());
         }
+        gtk_tree_view_column_set_visible(col, c.visible);
         gtk_tree_view_append_column(GTK_TREE_VIEW(w_), col);
         cols_.push_back(col);
+
+        // The header button exists once the column is in the view.
+        if (GtkWidget* header = gtk_tree_view_column_get_button(col))
+            connect(
+                header, "button-press-event",
+                +[](GtkWidget* header, GdkEventButton* e, gpointer p) -> gboolean
+                {
+                    auto* ctx = static_cast<ColumnCtx*>(p);
+                    if (e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_SECONDARY)
+                        return false;
+                    auto* list = ctx->list;
+                    if (!list->alive_ || !list->headerMenu_) return false;
+                    Menu items = list->headerMenu_(ctx->column);
+                    if (items.empty()) return false;
+                    list->menu_.show(std::move(items), header, reinterpret_cast<GdkEvent*>(e));
+                    return true;
+                },
+                ctx.get());
     }
 
     static void textCell(GtkTreeViewColumn*, GtkCellRenderer* r, GtkTreeModel*, GtkTreeIter* iter,
@@ -921,82 +1246,23 @@ private:
         Menu items = contextMenu_(row);
         if (items.empty()) return false;
 
-        if (menu_) gtk_widget_destroy(menu_);
-        menuItems_ = std::move(items);
-        menu_ = buildMenu(menuItems_);
-        gtk_menu_attach_to_widget(GTK_MENU(menu_), w_, nullptr);
-        gtk_widget_show_all(menu_);
-        if (event)
-            gtk_menu_popup_at_pointer(GTK_MENU(menu_), event);
-        else
-            gtk_menu_popup_at_widget(GTK_MENU(menu_), w_, GDK_GRAVITY_CENTER,
-                                     GDK_GRAVITY_NORTH_WEST, nullptr);
+        menu_.show(std::move(items), w_, event);
         return true;
-    }
-
-    static GtkWidget* buildMenu(const Menu& items)
-    {
-        GtkWidget* menu = gtk_menu_new();
-        for (const MenuItem& item : items)
-        {
-            GtkWidget* mi;
-            if (item.isSeparator())
-            {
-                mi = gtk_separator_menu_item_new();
-            }
-            else if (!item.children.empty())
-            {
-                mi = gtk_menu_item_new_with_label(item.label.c_str());
-                gtk_menu_item_set_submenu(GTK_MENU_ITEM(mi), buildMenu(item.children));
-            }
-            else
-            {
-                if (item.checked)
-                {
-                    mi = gtk_check_menu_item_new_with_label(item.label.c_str());
-                    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(mi), *item.checked);
-                }
-                else
-                {
-                    mi = gtk_menu_item_new_with_label(item.label.c_str());
-                }
-                gtk_widget_set_sensitive(mi, item.enabled && item.action);
-                if (!item.shortcut.empty())
-                {
-                    guint key;
-                    GdkModifierType mods;
-                    gtk_accelerator_parse(gtkAccel(item.shortcut).c_str(), &key, &mods);
-                    GtkWidget* label = gtk_bin_get_child(GTK_BIN(mi));
-                    if (key && GTK_IS_ACCEL_LABEL(label))
-                        gtk_accel_label_set_accel(GTK_ACCEL_LABEL(label), key, mods);
-                }
-                // The menu lives no longer than menuItems_, which owns `item`.
-                g_signal_connect(mi, "activate",
-                                 G_CALLBACK(+[](GtkMenuItem*, gpointer p)
-                                            {
-                                                auto* item = static_cast<const MenuItem*>(p);
-                                                if (item->action) item->action();
-                                            }),
-                                 const_cast<MenuItem*>(&item));
-            }
-            gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
-        }
-        return menu;
     }
 
     AnyuiTreeRows* rows_ = nullptr;
     GtkTreeSelection* sel_ = nullptr;
-    GtkWidget* menu_ = nullptr;
+    PopupMenu menu_;
     ListModel* model_ = nullptr;
     std::vector<GtkTreeViewColumn*> cols_;
     std::vector<std::unique_ptr<ColumnCtx>> ctxs_;
-    Menu menuItems_;
     bool alive_ = true;
 
     std::function<void()> selChanged_;
     std::function<void(size_t)> activate_;
     std::function<void(size_t, SortOrder)> sort_;
     std::function<Menu(std::optional<size_t>)> contextMenu_;
+    std::function<Menu(size_t)> headerMenu_;
 };
 
 // ---------------------------------------------------------------- window
@@ -1591,9 +1857,26 @@ private:
         return add<WLabel>(n, s).outer();
     }
 
+    GtkWidget* make(const Node& n, const spec::MenuButton& s, Orientation)
+    {
+        return add<WMenuButton>(n, s).outer();
+    }
+
+    GtkWidget* make(const Node& n, const spec::ProgressBar&, Orientation)
+    {
+        return add<WProgressBar>(n).outer();
+    }
+
+    GtkWidget* make(const Node& n, const spec::DatePicker& s, Orientation)
+    {
+        return add<WDatePicker>(n, s).outer();
+    }
+
     GtkWidget* make(const Node& n, const spec::Button& s, Orientation)
     {
-        return add<WButton>(n, s.text).outer();
+        GtkWidget* b = add<WButton>(n, s.text).outer();
+        if (s.flat) gtk_button_set_relief(GTK_BUTTON(b), GTK_RELIEF_NONE);
+        return b;
     }
 
     GtkWidget* make(const Node& n, const spec::Check& s, Orientation)
