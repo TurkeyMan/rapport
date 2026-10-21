@@ -128,6 +128,31 @@ private:
         if (s.onClick) b.onClick(s.onClick);
         bind(s.bind, w);
     }
+    static void apply(const spec::ToolButton& s, Widget& w)
+    {
+        auto& b = static_cast<ToolButton&>(w);
+        if (s.onClick) b.onClick(s.onClick);
+        if (s.onToggled) b.onToggled(s.onToggled);
+        bind(s.bind, w);
+    }
+    static void apply(const spec::Slider& s, Widget& w)
+    {
+        auto& c = static_cast<Slider&>(w);
+        if (s.onChanged) c.onChanged(s.onChanged);
+        bind(s.bind, w);
+    }
+    static void apply(const spec::Spin& s, Widget& w)
+    {
+        auto& c = static_cast<Spin&>(w);
+        if (s.onChanged) c.onChanged(s.onChanged);
+        bind(s.bind, w);
+    }
+    static void apply(const spec::ColorButton& s, Widget& w)
+    {
+        auto& c = static_cast<ColorButton&>(w);
+        if (s.onChanged) c.onChanged(s.onChanged);
+        bind(s.bind, w);
+    }
     static void apply(const spec::Check& s, Widget& w)
     {
         auto& c = static_cast<Check&>(w);

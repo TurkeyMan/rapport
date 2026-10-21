@@ -109,10 +109,147 @@ public:
     }
 
     void setText(const std::string& t) override { gtk_button_set_label(GTK_BUTTON(w_), t.c_str()); }
+    // TODO(pengit): drawn icons (Icon::draw); named ones only for now.
+    void setIcon(const Icon& icon) override
+    {
+        if (!icon.name.empty()) gtk_button_set_icon_name(GTK_BUTTON(w_), icon.name.c_str());
+    }
     void onClick(std::function<void()> f) override { click_ = std::move(f); }
 
 private:
     std::function<void()> click_;
+};
+
+// GTK 4 has no GtkToolbar: a flat button in a box. Written without a GTK 4
+// build. TODO(pengit): toggles' pressed look, drawn icons.
+class WToolButton : public W<anyui::ToolButton>
+{
+public:
+    explicit WToolButton(const spec::ToolButton& s)
+        : W(s.toggle ? gtk_toggle_button_new() : gtk_button_new())
+        , toggle_(s.toggle)
+    {
+        gtk_button_set_has_frame(GTK_BUTTON(w_), false);
+        gtk_widget_set_tooltip_text(w_, s.label.c_str());
+        setIcon(s.icon);
+        if (toggle_) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w_), s.checked);
+        connect(
+            w_, "clicked",
+            +[](GtkButton*, gpointer p)
+            {
+                auto* self = static_cast<WToolButton*>(p);
+                if (self->quiet_) return;
+                if (self->click_) self->click_();
+                if (self->toggle_ && self->toggled_) self->toggled_(self->checked());
+            },
+            this);
+    }
+    void setIcon(const Icon& icon) override
+    {
+        if (!icon.name.empty()) gtk_button_set_icon_name(GTK_BUTTON(w_), icon.name.c_str());
+    }
+    bool checked() const override
+    {
+        return toggle_ && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w_));
+    }
+    void setChecked(bool c) override
+    {
+        if (!toggle_) return;
+        quiet_ = true;
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w_), c);
+        quiet_ = false;
+    }
+    void onClick(std::function<void()> f) override { click_ = std::move(f); }
+    void onToggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
+
+private:
+    bool toggle_;
+    bool quiet_ = false;
+    std::function<void()> click_;
+    std::function<void(bool)> toggled_;
+};
+
+// GtkScale and GtkSpinButton keep their GTK 3 API in GTK 4.
+template <class Base>
+class WValue : public W<Base>
+{
+public:
+    explicit WValue(GtkWidget* w)
+        : W<Base>(w)
+    {
+        this->connect(
+            w, "value-changed",
+            +[](GtkWidget*, gpointer p)
+            {
+                auto* self = static_cast<WValue*>(p);
+                if (!self->quiet_ && self->changed_) self->changed_(self->value());
+            },
+            this);
+    }
+    double value() const override { return gtk_range_or_spin_value(this->w_); }
+    void setValue(double v) override
+    {
+        quiet_ = true;
+        if (GTK_IS_SPIN_BUTTON(this->w_))
+            gtk_spin_button_set_value(GTK_SPIN_BUTTON(this->w_), v);
+        else
+            gtk_range_set_value(GTK_RANGE(this->w_), v);
+        quiet_ = false;
+    }
+    void setRange(double min, double max) override
+    {
+        quiet_ = true;
+        if (GTK_IS_SPIN_BUTTON(this->w_))
+            gtk_spin_button_set_range(GTK_SPIN_BUTTON(this->w_), min, max);
+        else
+            gtk_range_set_range(GTK_RANGE(this->w_), min, max);
+        quiet_ = false;
+    }
+    void onChanged(std::function<void(double)> f) override { changed_ = std::move(f); }
+
+private:
+    static double gtk_range_or_spin_value(GtkWidget* w)
+    {
+        return GTK_IS_SPIN_BUTTON(w) ? gtk_spin_button_get_value(GTK_SPIN_BUTTON(w))
+                                     : gtk_range_get_value(GTK_RANGE(w));
+    }
+    bool quiet_ = false;
+    std::function<void(double)> changed_;
+};
+
+// TODO(pengit): GtkColorButton is deprecated since GTK 4.10 (GtkColorDialogButton).
+class WColorButton : public W<anyui::ColorButton>
+{
+public:
+    explicit WColorButton(const spec::ColorButton& s)
+        : W(gtk_color_button_new())
+    {
+        setColor(s.color);
+        gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(w_), s.alpha);
+        connect(
+            w_, "color-set",
+            +[](GtkColorButton*, gpointer p)
+            {
+                auto* self = static_cast<WColorButton*>(p);
+                if (self->changed_) self->changed_(self->color());
+            },
+            this);
+    }
+    Color color() const override
+    {
+        GdkRGBA c;
+        gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(w_), &c);
+        return toColor(c);
+    }
+    void setColor(Color c) override
+    {
+        const GdkRGBA rgba{c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
+        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(w_), &rgba);
+    }
+    void onChanged(std::function<void(Color)> f) override { changed_ = std::move(f); }
+
+private:
+    std::function<void(Color)> changed_;
 };
 
 class WCheck : public W<anyui::Check>
@@ -182,6 +319,7 @@ public:
     {
         gtk_menu_button_set_label(GTK_MENU_BUTTON(w_), t.c_str());
     }
+    void setIcon(const Icon&) override {}  // TODO(pengit)
     void setPushed(bool) override {}
     void onMenu(std::function<Menu()> f) override { menuFn_ = std::move(f); }
 
@@ -1102,6 +1240,46 @@ public:
     void onFinished(std::function<void(DialogRole)> f) override { onFinished_ = std::move(f); }
     void onCloseRequest(std::function<bool()> f) override { onCloseRequest_ = std::move(f); }
 
+    // Written without a GTK 4 build. TODO(pengit): onFullscreenChanged
+    // (notify::fullscreened), window keys (a capture-phase
+    // GtkEventControllerKey), drawn window icons.
+    SizeF size() const override
+    {
+        return {float(gtk_widget_get_width(win_)), float(gtk_widget_get_height(win_))};
+    }
+    void resize(SizeF s) override
+    {
+        gtk_window_set_default_size(GTK_WINDOW(win_), int(s.w), int(s.h));
+    }
+    void setMinSize(SizeF s) override { gtk_widget_set_size_request(win_, int(s.w), int(s.h)); }
+    std::optional<PointF> position() const override { return std::nullopt; }  // GTK 4: never
+    void move(PointF) override {}
+    RectF workArea() const override
+    {
+        GdkDisplay* d = gtk_widget_get_display(win_);
+        GListModel* monitors = gdk_display_get_monitors(d);
+        auto* m = GDK_MONITOR(g_list_model_get_item(monitors, 0));
+        if (!m) return {};
+        GdkRectangle r;
+        gdk_monitor_get_geometry(m, &r);
+        g_object_unref(m);
+        return {float(r.x), float(r.y), float(r.width), float(r.height)};
+    }
+    bool fullscreen() const override { return gtk_window_is_fullscreen(GTK_WINDOW(win_)); }
+    void setFullscreen(bool on) override
+    {
+        if (on)
+            gtk_window_fullscreen(GTK_WINDOW(win_));
+        else
+            gtk_window_unfullscreen(GTK_WINDOW(win_));
+    }
+    void onFullscreenChanged(std::function<void(bool)>) override {}
+    void setIcon(const Icon& icon) override
+    {
+        if (!icon.name.empty()) gtk_window_set_icon_name(GTK_WINDOW(win_), icon.name.c_str());
+    }
+    void onKey(std::function<bool(const KeyEvent&)>) override {}
+
     void setContent(GtkWidget* content)
     {
         int margin = dialog_ ? 12 : 6;
@@ -1304,9 +1482,57 @@ private:
 
     GtkWidget* make(const Node& n, const spec::Button& s, Orientation)
     {
-        GtkWidget* b = add<WButton>(n, s.text).outer();
+        auto& w = add<WButton>(n, s.iconOnly ? std::string() : s.text);
+        if (s.icon) w.setIcon(s.icon);
+        if (s.iconOnly && n.common.tooltip.empty()) w.setTooltip(s.text);
+        GtkWidget* b = w.outer();
         if (s.flat) gtk_button_set_has_frame(GTK_BUTTON(b), false);
         return b;
+    }
+
+    GtkWidget* make(const Node& n, const spec::ToolButton& s, Orientation)
+    {
+        return add<WToolButton>(n, s).outer();
+    }
+
+    // No GtkToolbar in GTK 4: a box styled as a toolbar.
+    GtkWidget* make(const Node&, const spec::Toolbar& s, Orientation)
+    {
+        GtkWidget* bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+        gtk_widget_add_css_class(bar, "toolbar");
+        for (const Node& item : s.items)
+        {
+            GtkWidget* w = build(item, Orientation::Horizontal);
+            if (std::holds_alternative<spec::Spacer>(item.spec)) gtk_widget_set_hexpand(w, true);
+            gtk_box_append(GTK_BOX(bar), w);
+        }
+        return bar;
+    }
+
+    GtkWidget* make(const Node& n, const spec::Slider& s, Orientation)
+    {
+        GtkWidget* scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, s.min, s.max,
+                                                    s.step > 0 ? s.step : 0.01);
+        gtk_scale_set_digits(GTK_SCALE(scale), s.digits);
+        gtk_scale_set_draw_value(GTK_SCALE(scale), s.showValue);
+        gtk_range_set_value(GTK_RANGE(scale), s.value);
+        for (auto& [at, label] : s.marks)
+            gtk_scale_add_mark(GTK_SCALE(scale), at, GTK_POS_BOTTOM,
+                               label.empty() ? nullptr : label.c_str());
+        return add<WValue<anyui::Slider>>(n, scale).outer();
+    }
+
+    GtkWidget* make(const Node& n, const spec::Spin& s, Orientation)
+    {
+        GtkWidget* spin = gtk_spin_button_new_with_range(s.min, s.max, s.step > 0 ? s.step : 1);
+        gtk_spin_button_set_digits(GTK_SPIN_BUTTON(spin), guint(std::max(s.digits, 0)));
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin), s.value);
+        return add<WValue<anyui::Spin>>(n, spin).outer();
+    }
+
+    GtkWidget* make(const Node& n, const spec::ColorButton& s, Orientation)
+    {
+        return add<WColorButton>(n, s).outer();
     }
 
     GtkWidget* make(const Node& n, const spec::MenuButton& s, Orientation)
@@ -1597,6 +1823,9 @@ public:
         }
         g_object_unref(dlg);
     }
+
+    // TODO(pengit): a GdkTexture on the clipboard.
+    void setClipboardImage(int, int, PixelFormat, const uint8_t*, size_t) override {}
 
     void setClipboard(const std::string& s) override
     {

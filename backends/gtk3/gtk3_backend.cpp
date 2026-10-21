@@ -264,6 +264,38 @@ public:
     void setText(const std::string& t) override { gtk_label_set_text(GTK_LABEL(w_), t.c_str()); }
 };
 
+// A GtkImage for a named icon the theme has; otherwise a drawing area that
+// runs Icon::draw whenever it paints, so drawn icons follow scale and theme
+// (the area inherits its parent's CSS colour, e.g. greyed when insensitive).
+GtkWidget* iconWidget(const Icon& icon, int size)
+{
+    if (!icon.name.empty() &&
+        gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), icon.name.c_str()))
+    {
+        GtkWidget* img = gtk_image_new_from_icon_name(icon.name.c_str(), GTK_ICON_SIZE_BUTTON);
+        gtk_image_set_pixel_size(GTK_IMAGE(img), size);
+        return img;
+    }
+    if (!icon.draw) return nullptr;
+    GtkWidget* area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(area, size, size);
+    g_signal_connect_data(
+        area, "draw",
+        G_CALLBACK(+[](GtkWidget* w, cairo_t* cr, gpointer p) -> gboolean
+                   {
+                       CairoPainter painter(cr, w);
+                       (*static_cast<std::function<void(Painter&, SizeF)>*>(p))(
+                           painter, {float(gtk_widget_get_allocated_width(w)),
+                                     float(gtk_widget_get_allocated_height(w))});
+                       return true;
+                   }),
+        new std::function<void(Painter&, SizeF)>(icon.draw),
+        +[](gpointer p, GClosure*)
+        { delete static_cast<std::function<void(Painter&, SizeF)>*>(p); },
+        GConnectFlags(0));
+    return area;
+}
+
 class WButton : public W<anyui::Button>
 {
 public:
@@ -281,6 +313,13 @@ public:
     }
 
     void setText(const std::string& t) override { gtk_button_set_label(GTK_BUTTON(w_), t.c_str()); }
+    void setIcon(const Icon& icon) override
+    {
+        GtkWidget* img = iconWidget(icon, 16);
+        gtk_button_set_image(GTK_BUTTON(w_), img);
+        gtk_button_set_always_show_image(GTK_BUTTON(w_), img != nullptr);
+        if (img) gtk_widget_show(img);
+    }
     void onClick(std::function<void()> f) override { click_ = std::move(f); }
 
 private:
@@ -381,6 +420,191 @@ private:
     std::function<void()> onHide_;
 };
 
+class WToolButton : public W<anyui::ToolButton>
+{
+public:
+    explicit WToolButton(const spec::ToolButton& s)
+        : W(GTK_WIDGET(s.toggle ? gtk_toggle_tool_button_new()
+                                : gtk_tool_button_new(nullptr, s.label.c_str())))
+        , toggle_(s.toggle)
+    {
+        gtk_tool_button_set_label(GTK_TOOL_BUTTON(w_), s.label.c_str());
+        gtk_widget_set_tooltip_text(w_, s.label.c_str());
+        setIcon(s.icon);
+        if (toggle_)
+        {
+            gtk_toggle_tool_button_set_active(GTK_TOGGLE_TOOL_BUTTON(w_), s.checked);
+            connect(
+                w_, "toggled",
+                +[](GtkToggleToolButton* b, gpointer p)
+                {
+                    auto* self = static_cast<WToolButton*>(p);
+                    if (!self->quiet_ && self->toggled_)
+                        self->toggled_(gtk_toggle_tool_button_get_active(b));
+                },
+                this);
+        }
+        connect(
+            w_, "clicked",
+            +[](GtkToolButton*, gpointer p)
+            {
+                auto* self = static_cast<WToolButton*>(p);
+                if (!self->quiet_ && self->click_) self->click_();
+            },
+            this);
+    }
+
+    void setIcon(const Icon& icon) override
+    {
+        GtkWidget* img = iconWidget(icon, 16);
+        gtk_tool_button_set_icon_widget(GTK_TOOL_BUTTON(w_), img);
+        if (img) gtk_widget_show(img);
+    }
+    bool checked() const override
+    {
+        return toggle_ && gtk_toggle_tool_button_get_active(GTK_TOGGLE_TOOL_BUTTON(w_));
+    }
+    void setChecked(bool c) override
+    {
+        if (!toggle_) return;
+        quiet_ = true;
+        gtk_toggle_tool_button_set_active(GTK_TOGGLE_TOOL_BUTTON(w_), c);
+        quiet_ = false;
+    }
+    void onClick(std::function<void()> f) override { click_ = std::move(f); }
+    void onToggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
+
+private:
+    bool toggle_;
+    bool quiet_ = false;
+    std::function<void()> click_;
+    std::function<void(bool)> toggled_;
+};
+
+class WSlider : public W<anyui::Slider>
+{
+public:
+    explicit WSlider(const spec::Slider& s)
+        : W(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, s.min, s.max,
+                                     s.step > 0 ? s.step : 0.01))
+    {
+        gtk_range_set_increments(GTK_RANGE(w_), s.step, s.page);
+        gtk_scale_set_digits(GTK_SCALE(w_), s.digits);
+        gtk_scale_set_draw_value(GTK_SCALE(w_), s.showValue);
+        gtk_range_set_value(GTK_RANGE(w_), s.value);
+        for (auto& [at, label] : s.marks)
+            gtk_scale_add_mark(GTK_SCALE(w_), at, GTK_POS_BOTTOM,
+                               label.empty() ? nullptr : label.c_str());
+        connect(
+            w_, "value-changed",
+            +[](GtkRange* r, gpointer p)
+            {
+                auto* self = static_cast<WSlider*>(p);
+                if (!self->quiet_ && self->changed_) self->changed_(gtk_range_get_value(r));
+            },
+            this);
+    }
+
+    double value() const override { return gtk_range_get_value(GTK_RANGE(w_)); }
+    void setValue(double v) override
+    {
+        quiet_ = true;
+        gtk_range_set_value(GTK_RANGE(w_), v);
+        quiet_ = false;
+    }
+    void setRange(double min, double max) override
+    {
+        quiet_ = true;
+        gtk_range_set_range(GTK_RANGE(w_), min, max);
+        quiet_ = false;
+    }
+    void onChanged(std::function<void(double)> f) override { changed_ = std::move(f); }
+
+private:
+    bool quiet_ = false;
+    std::function<void(double)> changed_;
+};
+
+class WSpin : public W<anyui::Spin>
+{
+public:
+    explicit WSpin(const spec::Spin& s)
+        : W(gtk_spin_button_new_with_range(s.min, s.max, s.step > 0 ? s.step : 1))
+    {
+        gtk_spin_button_set_digits(GTK_SPIN_BUTTON(w_), guint(std::max(s.digits, 0)));
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(w_), s.value);
+        connect(
+            w_, "value-changed",
+            +[](GtkSpinButton* b, gpointer p)
+            {
+                auto* self = static_cast<WSpin*>(p);
+                if (!self->quiet_ && self->changed_) self->changed_(gtk_spin_button_get_value(b));
+            },
+            this);
+    }
+
+    double value() const override { return gtk_spin_button_get_value(GTK_SPIN_BUTTON(w_)); }
+    void setValue(double v) override
+    {
+        quiet_ = true;
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(w_), v);
+        quiet_ = false;
+    }
+    void setRange(double min, double max) override
+    {
+        quiet_ = true;
+        gtk_spin_button_set_range(GTK_SPIN_BUTTON(w_), min, max);
+        quiet_ = false;
+    }
+    void onChanged(std::function<void(double)> f) override { changed_ = std::move(f); }
+
+private:
+    bool quiet_ = false;
+    std::function<void(double)> changed_;
+};
+
+GdkRGBA toRgba(Color c)
+{
+    return {c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0};
+}
+
+class WColorButton : public W<anyui::ColorButton>
+{
+public:
+    explicit WColorButton(const spec::ColorButton& s)
+        : W(gtk_color_button_new())
+    {
+        const GdkRGBA rgba = toRgba(s.color);
+        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(w_), &rgba);
+        gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(w_), s.alpha);
+        if (!s.title.empty()) g_object_set(w_, "title", s.title.c_str(), nullptr);
+        connect(
+            w_, "color-set",  // the user chose; not emitted by setColor
+            +[](GtkColorButton*, gpointer p)
+            {
+                auto* self = static_cast<WColorButton*>(p);
+                if (self->changed_) self->changed_(self->color());
+            },
+            this);
+    }
+
+    Color color() const override
+    {
+        GdkRGBA c;
+        gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(w_), &c);
+        return toColor(c);
+    }
+    void setColor(Color c) override
+    {
+        const GdkRGBA rgba = toRgba(c);
+        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(w_), &rgba);
+    }
+    void onChanged(std::function<void(Color)> f) override { changed_ = std::move(f); }
+
+private:
+    std::function<void(Color)> changed_;
+};
+
 class WCheck : public W<anyui::Check>
 {
 public:
@@ -441,6 +665,7 @@ public:
         : W(gtk_toggle_button_new())
     {
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+        box_ = box;
         label_ = gtk_label_new_with_mnemonic(s.text.c_str());
         gtk_label_set_mnemonic_widget(GTK_LABEL(label_), w_);
         gtk_container_add(GTK_CONTAINER(box), label_);
@@ -449,6 +674,7 @@ public:
         gtk_container_add(GTK_CONTAINER(w_), box);
         pushed_ = s.pushed;
         sync();
+        if (s.icon) setIcon(s.icon);
 
         menu_.onHide([this] { sync(); });
         connect(
@@ -459,6 +685,15 @@ public:
     void setText(const std::string& t) override
     {
         gtk_label_set_text_with_mnemonic(GTK_LABEL(label_), t.c_str());
+    }
+    void setIcon(const Icon& icon) override
+    {
+        if (icon_) gtk_widget_destroy(icon_);
+        icon_ = iconWidget(icon, 16);
+        if (!icon_) return;
+        gtk_box_pack_start(GTK_BOX(box_), icon_, false, false, 0);
+        gtk_box_reorder_child(GTK_BOX(box_), icon_, 0);
+        gtk_widget_show(icon_);
     }
     void setPushed(bool v) override
     {
@@ -497,6 +732,8 @@ private:
     }
 
     GtkWidget* label_;
+    GtkWidget* box_ = nullptr;
+    GtkWidget* icon_ = nullptr;
     PopupMenu menu_;
     std::function<Menu()> menuFn_;
     bool pushed_ = false;
@@ -1608,6 +1845,12 @@ public:
     {
         auto* win = GTK_WINDOW(win_);
         gtk_window_set_title(win, spec.title.c_str());
+        // Snapshot runs are automated: never take the user's keyboard focus.
+        if (const char* snap = std::getenv("ANYUI_SNAPSHOT"); snap && *snap)
+        {
+            gtk_window_set_accept_focus(win, false);
+            gtk_window_set_focus_on_map(win, false);
+        }
         gtk_window_set_default_size(win, px(spec.width), px(spec.height));
         if (parent) gtk_window_set_transient_for(win, GTK_WINDOW(parent->win_));
         if (dialog_)
@@ -1632,6 +1875,38 @@ public:
                 return true;  // we own the window; never let GTK destroy it
             },
             this);
+        connect(
+            win_, "window-state-event",
+            +[](GtkWidget*, GdkEventWindowState* e, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<WWindow*>(p);
+                const bool fs = e->new_window_state & GDK_WINDOW_STATE_FULLSCREEN;
+                if (fs != self->fullscreen_)
+                {
+                    self->fullscreen_ = fs;
+                    if (self->onFullscreen_) self->onFullscreen_(fs);
+                }
+                return false;
+            },
+            this);
+        // Runs before GTK hands the key to the focused widget (key-press-event
+        // is RUN_LAST, so this handler precedes the window's default one).
+        auto key = +[](GtkWidget* w, GdkEventKey* e, gpointer p) -> gboolean
+        {
+            auto* self = static_cast<WWindow*>(p);
+            if (!self->onKey_) return false;
+            GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(w));
+            if (focus && (GTK_IS_EDITABLE(focus) || GTK_IS_TEXT_VIEW(focus))) return false;
+            KeyEvent ev;
+            ev.press = e->type == GDK_KEY_PRESS;
+            ev.key = keyFor(e->keyval);
+            if (ev.key == Key::Character)
+                ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(e->keyval));
+            ev.modifiers = modifiers(e->state);
+            return self->onKey_(ev);
+        };
+        connect(win_, "key-press-event", key, this);
+        connect(win_, "key-release-event", key, this);
     }
 
     ~WWindow() override
@@ -1654,6 +1929,84 @@ public:
     void close() override { gtk_widget_hide(win_); }
     void onFinished(std::function<void(DialogRole)> f) override { onFinished_ = std::move(f); }
     void onCloseRequest(std::function<bool()> f) override { onCloseRequest_ = std::move(f); }
+
+    SizeF size() const override
+    {
+        int w = 0, h = 0;
+        gtk_window_get_size(GTK_WINDOW(win_), &w, &h);
+        return {float(w), float(h)};
+    }
+    void resize(SizeF s) override
+    {
+        gtk_window_resize(GTK_WINDOW(win_), std::max(1, int(s.w)), std::max(1, int(s.h)));
+    }
+    void setMinSize(SizeF s) override
+    {
+        GdkGeometry g{};
+        g.min_width = int(s.w);
+        g.min_height = int(s.h);
+        gtk_window_set_geometry_hints(GTK_WINDOW(win_), nullptr, &g, GDK_HINT_MIN_SIZE);
+    }
+    std::optional<PointF> position() const override
+    {
+        if (!placeable()) return std::nullopt;
+        int x = 0, y = 0;
+        gtk_window_get_position(GTK_WINDOW(win_), &x, &y);
+        return PointF{float(x), float(y)};
+    }
+    void move(PointF p) override
+    {
+        if (placeable()) gtk_window_move(GTK_WINDOW(win_), int(p.x), int(p.y));
+    }
+    RectF workArea() const override
+    {
+        GdkDisplay* d = gtk_widget_get_display(win_);
+        GdkWindow* gw = gtk_widget_get_window(win_);
+        GdkMonitor* m = gw ? gdk_display_get_monitor_at_window(d, gw) : nullptr;
+        if (!m) m = gdk_display_get_primary_monitor(d);
+        if (!m) m = gdk_display_get_monitor(d, 0);
+        if (!m) return {};
+        GdkRectangle r;
+        gdk_monitor_get_workarea(m, &r);
+        return {float(r.x), float(r.y), float(r.width), float(r.height)};
+    }
+
+    bool fullscreen() const override { return fullscreen_; }
+    void setFullscreen(bool on) override
+    {
+        if (on)
+            gtk_window_fullscreen(GTK_WINDOW(win_));
+        else
+            gtk_window_unfullscreen(GTK_WINDOW(win_));
+    }
+    void onFullscreenChanged(std::function<void(bool)> f) override { onFullscreen_ = std::move(f); }
+
+    void setIcon(const Icon& icon) override
+    {
+        if (!icon.name.empty() &&
+            gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), icon.name.c_str()))
+        {
+            gtk_window_set_icon_name(GTK_WINDOW(win_), icon.name.c_str());
+            return;
+        }
+        if (!icon.draw) return;
+        constexpr int n = 256;
+        cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, n, n);
+        cairo_t* cr = cairo_create(surface);
+        {
+            CairoPainter painter(cr, win_);
+            icon.draw(painter, {float(n), float(n)});
+        }
+        cairo_destroy(cr);
+        if (GdkPixbuf* pb = gdk_pixbuf_get_from_surface(surface, 0, 0, n, n))
+        {
+            gtk_window_set_icon(GTK_WINDOW(win_), pb);
+            g_object_unref(pb);
+        }
+        cairo_surface_destroy(surface);
+    }
+
+    void onKey(std::function<bool(const KeyEvent&)> f) override { onKey_ = std::move(f); }
 
     void setContent(GtkWidget* content)
     {
@@ -1692,6 +2045,14 @@ public:
     std::vector<std::unique_ptr<Part>> parts;
 
 private:
+    // Only X11 lets clients place their windows; Wayland's compositor does.
+    // (By type name: <gdk/gdkx.h> would bring Xlib's macros, e.g. None.)
+    bool placeable() const
+    {
+        GdkDisplay* d = gtk_widget_get_display(win_);
+        return std::strcmp(G_OBJECT_TYPE_NAME(d), "GdkX11Display") == 0;
+    }
+
     void closeRequested()
     {
         if (onCloseRequest_ && !onCloseRequest_()) return;
@@ -1715,6 +2076,9 @@ private:
     bool finished_ = false;
     std::function<void(DialogRole)> onFinished_;
     std::function<bool()> onCloseRequest_;
+    std::function<void(bool)> onFullscreen_;
+    std::function<bool(const KeyEvent&)> onKey_;
+    bool fullscreen_ = false;
 };
 
 // ---------------------------------------------------------------- builder
@@ -1892,9 +2256,67 @@ private:
 
     GtkWidget* make(const Node& n, const spec::Button& s, Orientation)
     {
-        GtkWidget* b = add<WButton>(n, s.text).outer();
-        if (s.flat) gtk_button_set_relief(GTK_BUTTON(b), GTK_RELIEF_NONE);
-        return b;
+        auto& b = add<WButton>(n, s.iconOnly ? std::string() : s.text);
+        if (s.icon) b.setIcon(s.icon);
+        if (s.iconOnly && n.common.tooltip.empty()) b.setTooltip(s.text);
+        if (s.flat) gtk_button_set_relief(GTK_BUTTON(b.outer()), GTK_RELIEF_NONE);
+        return b.outer();
+    }
+
+    GtkWidget* make(const Node& n, const spec::ToolButton& s, Orientation)
+    {
+        return add<WToolButton>(n, s).outer();
+    }
+
+    // Items: ToolButtons, Separator, Spacer (pushes later items to the end),
+    // or any other widget, held in a GtkToolItem.
+    GtkWidget* make(const Node&, const spec::Toolbar& s, Orientation)
+    {
+        GtkWidget* bar = gtk_toolbar_new();
+        gtk_toolbar_set_style(GTK_TOOLBAR(bar), GTK_TOOLBAR_ICONS);
+        for (const Node& item : s.items)
+        {
+            GtkToolItem* ti = nullptr;
+            if (std::holds_alternative<spec::Separator>(item.spec))
+            {
+                ti = gtk_separator_tool_item_new();
+            }
+            else if (std::holds_alternative<spec::Spacer>(item.spec))
+            {
+                ti = gtk_separator_tool_item_new();
+                gtk_separator_tool_item_set_draw(GTK_SEPARATOR_TOOL_ITEM(ti), false);
+                gtk_tool_item_set_expand(ti, true);
+            }
+            else if (std::holds_alternative<spec::ToolButton>(item.spec))
+            {
+                ti = GTK_TOOL_ITEM(build(item, Orientation::Horizontal));
+            }
+            else
+            {
+                ti = gtk_tool_item_new();
+                GtkWidget* w = build(item, Orientation::Horizontal);
+                gtk_widget_set_valign(w, GTK_ALIGN_CENTER);
+                gtk_container_add(GTK_CONTAINER(ti), w);
+                if (item.common.stretch > 0) gtk_tool_item_set_expand(ti, true);
+            }
+            gtk_toolbar_insert(GTK_TOOLBAR(bar), ti, -1);
+        }
+        return bar;
+    }
+
+    GtkWidget* make(const Node& n, const spec::Slider& s, Orientation)
+    {
+        return add<WSlider>(n, s).outer();
+    }
+
+    GtkWidget* make(const Node& n, const spec::Spin& s, Orientation)
+    {
+        return add<WSpin>(n, s).outer();
+    }
+
+    GtkWidget* make(const Node& n, const spec::ColorButton& s, Orientation)
+    {
+        return add<WColorButton>(n, s).outer();
     }
 
     GtkWidget* make(const Node& n, const spec::Check& s, Orientation)
@@ -2153,6 +2575,37 @@ public:
     {
         gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), s.c_str(),
                                int(s.size()));
+    }
+
+    void setClipboardImage(int w, int h, PixelFormat format, const uint8_t* pixels,
+                           size_t stride) override
+    {
+        GdkPixbuf* pb = gdk_pixbuf_new(GDK_COLORSPACE_RGB, true, 8, w, h);
+        if (!pb) return;
+        uint8_t* dst = gdk_pixbuf_get_pixels(pb);
+        const int dstStride = gdk_pixbuf_get_rowstride(pb);
+        for (int y = 0; y < h; ++y)
+        {
+            const uint8_t* src = pixels + size_t(y) * stride;
+            uint8_t* row = dst + size_t(y) * dstStride;
+            if (format == PixelFormat::Rgba8)
+            {
+                std::memcpy(row, src, size_t(w) * 4);
+                continue;
+            }
+            for (int x = 0; x < w; ++x)  // premultiplied BGRA -> straight RGBA
+            {
+                const unsigned a = src[x * 4 + 3];
+                auto un = [a](unsigned c)
+                { return uint8_t(a ? std::min(255u, (c * 255 + a / 2) / a) : 0); };
+                row[x * 4 + 0] = un(src[x * 4 + 2]);
+                row[x * 4 + 1] = un(src[x * 4 + 1]);
+                row[x * 4 + 2] = un(src[x * 4 + 0]);
+                row[x * 4 + 3] = uint8_t(a);
+            }
+        }
+        gtk_clipboard_set_image(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), pb);
+        g_object_unref(pb);
     }
 
 private:

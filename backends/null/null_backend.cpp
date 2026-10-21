@@ -33,6 +33,7 @@ class NButton : public Stub<anyui::Button>
 {
 public:
     void setText(const std::string&) override {}
+    void setIcon(const Icon&) override {}
     void onClick(std::function<void()> f) override { click = std::move(f); }
     std::function<void()> click;
 };
@@ -52,6 +53,7 @@ class NMenuButton : public Stub<anyui::MenuButton>
 {
 public:
     void setText(const std::string&) override {}
+    void setIcon(const Icon&) override {}
     void setPushed(bool) override {}
     void onMenu(std::function<Menu()>) override {}
 };
@@ -152,6 +154,44 @@ public:
     void onChanged(std::function<void(int)>) override {}
 };
 
+class NToolButton : public Stub<anyui::ToolButton>
+{
+public:
+    void setIcon(const Icon&) override {}
+    bool checked() const override { return checked_; }
+    void setChecked(bool c) override { checked_ = c; }
+    void onClick(std::function<void()>) override {}
+    void onToggled(std::function<void(bool)>) override {}
+
+private:
+    bool checked_ = false;
+};
+
+// Slider and Spin: hold the value.
+template <class Base>
+class NValue : public Stub<Base>
+{
+public:
+    double value() const override { return value_; }
+    void setValue(double v) override { value_ = v; }
+    void setRange(double, double) override {}
+    void onChanged(std::function<void(double)>) override {}
+
+private:
+    double value_ = 0;
+};
+
+class NColorButton : public Stub<anyui::ColorButton>
+{
+public:
+    Color color() const override { return color_; }
+    void setColor(Color c) override { color_ = c; }
+    void onChanged(std::function<void(Color)>) override {}
+
+private:
+    Color color_;
+};
+
 class NCanvas : public Stub<anyui::Canvas>
 {
 public:
@@ -193,7 +233,23 @@ public:
     void onFinished(std::function<void(DialogRole)>) override {}
     void onCloseRequest(std::function<bool()>) override {}
 
+    SizeF size() const override { return size_; }
+    void resize(SizeF s) override { size_ = s; }
+    void setMinSize(SizeF) override {}
+    std::optional<PointF> position() const override { return std::nullopt; }
+    void move(PointF) override {}
+    RectF workArea() const override { return {0, 0, 1920, 1080}; }
+    bool fullscreen() const override { return fullscreen_; }
+    void setFullscreen(bool on) override { fullscreen_ = on; }
+    void onFullscreenChanged(std::function<void(bool)>) override {}
+    void setIcon(const Icon&) override {}
+    void onKey(std::function<bool(const KeyEvent&)>) override {}
+
     std::vector<std::unique_ptr<Widget>> widgets;
+
+private:
+    SizeF size_{640, 480};
+    bool fullscreen_ = false;
 };
 
 const char* roleName(DialogRole r)
@@ -347,6 +403,36 @@ private:
         suffix(n);
         make<NList>(n);
     }
+    void visit(const Node& n, const spec::Toolbar& s, int d)
+    {
+        std::printf("Toolbar");
+        suffix(n);
+        children(s.items, d);
+    }
+    void visit(const Node& n, const spec::ToolButton& s, int)
+    {
+        std::printf("ToolButton \"%s\"%s", s.label.c_str(), s.toggle ? " toggle" : "");
+        suffix(n);
+        make<NToolButton>(n);
+    }
+    void visit(const Node& n, const spec::Slider& s, int)
+    {
+        std::printf("Slider %g..%g = %g", s.min, s.max, s.value);
+        suffix(n);
+        make<NValue<anyui::Slider>>(n);
+    }
+    void visit(const Node& n, const spec::Spin& s, int)
+    {
+        std::printf("Spin %g..%g = %g", s.min, s.max, s.value);
+        suffix(n);
+        make<NValue<anyui::Spin>>(n);
+    }
+    void visit(const Node& n, const spec::ColorButton&, int)
+    {
+        std::printf("ColorButton");
+        suffix(n);
+        make<NColorButton>(n);
+    }
     void visit(const Node& n, const spec::Canvas& s, int)
     {
         std::printf("Canvas%s", s.focusable ? " focusable" : "");
@@ -449,6 +535,7 @@ public:
     }
 
     void setClipboard(const std::string&) override {}
+    void setClipboardImage(int, int, PixelFormat, const uint8_t*, size_t) override {}
 
     std::unique_ptr<anyui::Image> createImage(int w, int h, PixelFormat, const uint8_t*,
                                               size_t) override

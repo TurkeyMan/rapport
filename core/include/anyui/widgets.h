@@ -244,6 +244,25 @@ struct CellInfo
     bool focused = false;
 };
 
+// ---------------------------------------------------------------- icons
+
+// An icon for a button or toolbar item: a named theme icon, an app-drawn
+// one, or both (the drawing is the fallback where the name isn't found,
+// and is always used where there is no icon theme, e.g. Win32).
+struct Icon
+{
+    // freedesktop icon name, e.g. "go-up", "document-save".
+    std::string name;
+    // Draws the icon into `size` (logical px) on a Painter with the right
+    // deviceScale. Draw with theme colours (ThemeColor::WindowText) so it
+    // follows dark mode; backends redraw it when the theme or scale changes.
+    std::function<void(Painter&, SizeF)> draw;
+
+    static Icon named(std::string n) { return {std::move(n), {}}; }
+    static Icon drawn(std::function<void(Painter&, SizeF)> f) { return {{}, std::move(f)}; }
+    explicit operator bool() const { return !name.empty() || bool(draw); }
+};
+
 // ---------------------------------------------------------------- list model
 
 class ListObserver
@@ -340,7 +359,48 @@ class Button : public Widget
 {
 public:
     virtual void setText(const std::string&) = 0;
+    virtual void setIcon(const Icon&) = 0;
     virtual void onClick(std::function<void()>) = 0;
+};
+
+// Toolbar item: icon (and/or label) button, optionally a toggle.
+class ToolButton : public Widget
+{
+public:
+    virtual void setIcon(const Icon&) = 0;
+    virtual bool checked() const = 0;   // toggles only
+    virtual void setChecked(bool) = 0;  // doesn't fire onToggled
+    virtual void onClick(std::function<void()>) = 0;
+    virtual void onToggled(std::function<void(bool)>) = 0;
+};
+
+// A value on a continuous range: horizontal track with a knob.
+class Slider : public Widget
+{
+public:
+    virtual double value() const = 0;
+    virtual void setValue(double) = 0;  // doesn't fire onChanged
+    virtual void setRange(double min, double max) = 0;
+    virtual void onChanged(std::function<void(double)>) = 0;
+};
+
+// A number with up/down steppers.
+class Spin : public Widget
+{
+public:
+    virtual double value() const = 0;
+    virtual void setValue(double) = 0;  // doesn't fire onChanged
+    virtual void setRange(double min, double max) = 0;
+    virtual void onChanged(std::function<void(double)>) = 0;
+};
+
+// Shows a colour; clicking opens the platform's colour chooser.
+class ColorButton : public Widget
+{
+public:
+    virtual Color color() const = 0;
+    virtual void setColor(Color) = 0;  // doesn't fire onChanged
+    virtual void onChanged(std::function<void(Color)>) = 0;
 };
 
 enum class CheckState
@@ -366,6 +426,7 @@ class MenuButton : public Widget
 {
 public:
     virtual void setText(const std::string&) = 0;
+    virtual void setIcon(const Icon&) = 0;  // before the text (a magnifier, an arrow)
     // Drawn pressed while true, e.g. while any of its options is active.
     virtual void setPushed(bool) = 0;
     // Called each time the menu opens, so check marks are current.
@@ -625,6 +686,28 @@ public:
     virtual void setTitle(const std::string&) = 0;
     virtual void show() = 0;
     virtual void close() = 0;
+
+    // Size of the window's content in logical px, and resizing it.
+    virtual SizeF size() const = 0;
+    virtual void resize(SizeF) = 0;
+    virtual void setMinSize(SizeF) = 0;
+    // Position in logical px of the frame's top-left. Where the platform
+    // doesn't let apps place windows (Wayland), move() does nothing and
+    // position() is unknown (nullopt).
+    virtual std::optional<PointF> position() const = 0;
+    virtual void move(PointF) = 0;
+    // Usable area of the monitor the window is on (minus panels/taskbar).
+    virtual RectF workArea() const = 0;
+
+    virtual bool fullscreen() const = 0;
+    virtual void setFullscreen(bool) = 0;
+    virtual void onFullscreenChanged(std::function<void(bool)>) = 0;
+    virtual void setIcon(const Icon&) = 0;
+
+    // Keys reach this before the focused widget (except text entry while it
+    // has focus); return true to consume. For app-wide keys (navigation,
+    // fullscreen) that must work whatever has focus.
+    virtual void onKey(std::function<bool(const KeyEvent&)>) = 0;
     // Dialogs: fired once with the role of the button that ended it
     // (Cancel for Esc / close box). There is no blocking exec(): GTK4
     // has no nested main loops, so everything is callback-driven.

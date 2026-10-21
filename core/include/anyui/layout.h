@@ -105,8 +105,51 @@ struct Button
 {
     std::string text;
     bool flat = false;  // no border until hovered (a link-like button)
+    Icon icon;
+    bool iconOnly = false;  // show the icon; the text becomes the tooltip/accessible name
     std::function<void()> onClick;
     anyui::Button** bind = nullptr;
+};
+// Row of tool items: ToolButton nodes, Separator and Spacer.
+struct Toolbar
+{
+    Nodes items;
+};
+struct ToolButton
+{
+    Icon icon;
+    std::string
+        label;  // shown beside/under the icon only if the toolkit does; always the accessible name
+    bool toggle = false;
+    bool checked = false;
+    std::function<void()> onClick;
+    std::function<void(bool)> onToggled;
+    anyui::ToolButton** bind = nullptr;
+};
+struct Slider
+{
+    double min = 0, max = 1, value = 0;
+    double step = 0.01, page = 0.1;  // arrow keys / page keys and wheel
+    int digits = 2;                  // shown value's decimals (if shown)
+    bool showValue = false;
+    std::vector<std::pair<double, std::string>> marks;  // ticks, optional labels
+    std::function<void(double)> onChanged;
+    anyui::Slider** bind = nullptr;
+};
+struct Spin
+{
+    double min = 0, max = 100, value = 0, step = 1;
+    int digits = 0;
+    std::function<void(double)> onChanged;
+    anyui::Spin** bind = nullptr;
+};
+struct ColorButton
+{
+    Color color;
+    bool alpha = false;  // let the chooser edit alpha
+    std::string title;   // chooser dialog title
+    std::function<void(Color)> onChanged;
+    anyui::ColorButton** bind = nullptr;
 };
 struct Check
 {
@@ -162,6 +205,7 @@ struct List
 struct MenuButton
 {
     std::string text;
+    Icon icon;
     bool pushed = false;
     std::function<Menu()> onMenu;
     anyui::MenuButton** bind = nullptr;
@@ -209,7 +253,8 @@ using Spec =
     std::variant<spec::Box, spec::Form, spec::Splitter, spec::Group, spec::Tabs, spec::Spacer,
                  spec::Separator, spec::Label, spec::Button, spec::Check, spec::Entry, spec::Select,
                  spec::Combo, spec::TextView, spec::List, spec::Canvas, spec::MenuButton,
-                 spec::ProgressBar, spec::DatePicker, spec::Buttons>;
+                 spec::ProgressBar, spec::DatePicker, spec::Toolbar, spec::ToolButton, spec::Slider,
+                 spec::Spin, spec::ColorButton, spec::Buttons>;
 
 struct Node
 {
@@ -401,6 +446,17 @@ public:
     Button& flat(bool v = true)
     {
         s().flat = v;
+        return *this;
+    }
+    Button& icon(Icon i)
+    {
+        s().icon = std::move(i);
+        return *this;
+    }
+    // Icon only; the text stays as tooltip and accessible name.
+    Button& iconOnly(bool v = true)
+    {
+        s().iconOnly = v;
         return *this;
     }
     Button& onClick(std::function<void()> f)
@@ -596,6 +652,11 @@ class MenuButton : public Builder<MenuButton, spec::MenuButton>
 {
 public:
     explicit MenuButton(std::string text) { s().text = std::move(text); }
+    MenuButton& icon(Icon i)
+    {
+        s().icon = std::move(i);
+        return *this;
+    }
     MenuButton& pushed(bool v = true)
     {
         s().pushed = v;
@@ -675,6 +736,130 @@ public:
         return *this;
     }
     Canvas& bind(anyui::Canvas*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class Toolbar : public Builder<Toolbar, spec::Toolbar>
+{
+public:
+    Toolbar(std::initializer_list<Node> items) { s().items = items; }
+};
+
+class ToolButton : public Builder<ToolButton, spec::ToolButton>
+{
+public:
+    ToolButton(Icon icon, std::string label)
+    {
+        s().icon = std::move(icon);
+        s().label = std::move(label);
+    }
+    // A toggle: stays pressed while checked.
+    ToolButton& toggle(bool checked = false)
+    {
+        s().toggle = true;
+        s().checked = checked;
+        return *this;
+    }
+    ToolButton& onClick(std::function<void()> f)
+    {
+        s().onClick = std::move(f);
+        return *this;
+    }
+    ToolButton& onToggled(std::function<void(bool)> f)
+    {
+        s().onToggled = std::move(f);
+        return *this;
+    }
+    ToolButton& bind(anyui::ToolButton*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class Slider : public Builder<Slider, spec::Slider>
+{
+public:
+    Slider(double min, double max, double value)
+    {
+        s().min = min;
+        s().max = max;
+        s().value = value;
+    }
+    Slider& step(double step, double page)
+    {
+        s().step = step;
+        s().page = page;
+        return *this;
+    }
+    Slider& showValue(int digits)
+    {
+        s().showValue = true;
+        s().digits = digits;
+        return *this;
+    }
+    Slider& mark(double at, std::string label = {})
+    {
+        s().marks.emplace_back(at, std::move(label));
+        return *this;
+    }
+    Slider& onChanged(std::function<void(double)> f)
+    {
+        s().onChanged = std::move(f);
+        return *this;
+    }
+    Slider& bind(anyui::Slider*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class Spin : public Builder<Spin, spec::Spin>
+{
+public:
+    Spin(double min, double max, double value, double step = 1, int digits = 0)
+    {
+        s().min = min;
+        s().max = max;
+        s().value = value;
+        s().step = step;
+        s().digits = digits;
+    }
+    Spin& onChanged(std::function<void(double)> f)
+    {
+        s().onChanged = std::move(f);
+        return *this;
+    }
+    Spin& bind(anyui::Spin*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class ColorButton : public Builder<ColorButton, spec::ColorButton>
+{
+public:
+    explicit ColorButton(Color c, std::string title = {})
+    {
+        s().color = c;
+        s().title = std::move(title);
+    }
+    ColorButton& alpha(bool v = true)
+    {
+        s().alpha = v;
+        return *this;
+    }
+    ColorButton& onChanged(std::function<void(Color)> f)
+    {
+        s().onChanged = std::move(f);
+        return *this;
+    }
+    ColorButton& bind(anyui::ColorButton*& h)
     {
         s().bind = &h;
         return *this;

@@ -16,7 +16,7 @@
 namespace anyui
 {
 
-inline constexpr int kAbiVersion = 4;
+inline constexpr int kAbiVersion = 5;
 
 struct MessageSpec
 {
@@ -81,6 +81,9 @@ public:
     virtual void chooseFiles(Window* parent, const FileDialogSpec&,
                              std::function<void(std::vector<std::string>)>) = 0;
     virtual void setClipboard(const std::string&) = 0;
+    // An image on the clipboard (copied now; the caller keeps its pixels).
+    virtual void setClipboardImage(int width, int height, PixelFormat, const uint8_t* pixels,
+                                   size_t stride) = 0;
 
     // Pixels for Painter::image; `pixels` is copied (or uploaded).
     virtual std::unique_ptr<Image> createImage(int width, int height, PixelFormat,

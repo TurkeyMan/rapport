@@ -73,6 +73,11 @@ public:
         backend_->chooseFiles(parent, f, std::move(done));
     }
     void setClipboard(const std::string& s) { backend_->setClipboard(s); }
+    void setClipboardImage(int width, int height, PixelFormat format, const uint8_t* pixels,
+                           size_t stride)
+    {
+        backend_->setClipboardImage(width, height, format, pixels, stride);
+    }
 
     std::unique_ptr<Image> createImage(int width, int height, PixelFormat format,
                                        const uint8_t* pixels, size_t stride)
