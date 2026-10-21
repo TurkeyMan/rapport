@@ -96,6 +96,22 @@ inline Color fallbackColor(ThemeColor role, Color text, bool dark)
     return text;
 }
 
+inline Color mixColors(Color a, Color b, float t)
+{
+    auto f = [&](uint8_t x, uint8_t y) { return uint8_t(x + (y - x) * t + 0.5f); };
+    return {f(a.r, b.r), f(a.g, b.g), f(a.b, b.b), 255};
+}
+
+// Soft selection colours: a tint of the accent over the base colour, with
+// the normal text colour on top.
+inline std::pair<Color, Color> softSelectionColors(GtkWidget* w)
+{
+    Color base = themeColor(w, ThemeColor::Base), accent = themeColor(w, ThemeColor::Accent);
+    Color text = themeColor(w, ThemeColor::Text);
+    bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
+    return {mixColors(base, accent, dark ? 0.38f : 0.24f), text};
+}
+
 inline bool isDarkText(const GdkRGBA& fg)
 {
     return 0.299 * fg.red + 0.587 * fg.green + 0.114 * fg.blue > 0.5;
@@ -243,7 +259,16 @@ public:
     {
     }
 
-    Color resolve(const Paint& p) const override { return gtkcommon::resolve(w_, p); }
+    Color resolve(const Paint& p) const override
+    {
+        if (auto* role = std::get_if<ThemeColor>(&p))
+            for (auto& [r, c] : overrides_)
+                if (r == *role) return c;
+        return gtkcommon::resolve(w_, p);
+    }
+
+    // Replaces a theme colour for this painter (a list's soft selection).
+    void overrideColor(ThemeColor role, Color c) { overrides_.push_back({role, c}); }
 
     void line(PointF a, PointF b, const Paint& p, float width, LineCap cap) override
     {
@@ -411,6 +436,7 @@ private:
         }
     }
 
+    std::vector<std::pair<ThemeColor, Color>> overrides_;
     cairo_t* cr_;
     GtkWidget* w_;
     Paint defaultText_;

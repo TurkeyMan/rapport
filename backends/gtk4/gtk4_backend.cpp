@@ -715,6 +715,25 @@ public:
             }
             gtk_widget_add_css_class(w_, "anyui-compact");
         }
+        if (s.softSelection)
+        {
+            // TODO(pengit): untested without GTK 4 headers; painted cells
+            // still see the solid highlight colours.
+            static bool installed = false;
+            if (!installed)
+            {
+                GtkCssProvider* css = gtk_css_provider_new();
+                gtk_css_provider_load_from_string(
+                    css, "columnview.anyui-soft row:selected { "
+                         "background-color: alpha(@accent_bg_color, 0.25); color: inherit; }");
+                gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
+                                                           GTK_STYLE_PROVIDER(css),
+                                                           GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+                g_object_unref(css);
+                installed = true;
+            }
+            gtk_widget_add_css_class(w_, "anyui-soft");
+        }
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
         gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
 

@@ -198,6 +198,11 @@ struct List
     // Denser rows: a slightly smaller font and less cell padding, closer
     // to Windows list views than the toolkit default.
     bool compact = false;
+    // Selected rows in a light tint of the accent colour with normal text
+    // (as Windows list views do) instead of the toolkit's solid highlight.
+    // Painted cells see the same colours through ThemeColor::Highlight and
+    // ThemeColor::HighlightText.
+    bool softSelection = false;
     std::function<void()> onSelectionChanged;
     std::function<void(size_t)> onActivate;
     std::function<void(size_t, SortOrder)> onSortRequested;
@@ -612,6 +617,11 @@ public:
     List& selection(SelectionMode m)
     {
         s().selection = m;
+        return *this;
+    }
+    List& softSelection(bool v = true)
+    {
+        s().softSelection = v;
         return *this;
     }
     List& compact(bool v = true)

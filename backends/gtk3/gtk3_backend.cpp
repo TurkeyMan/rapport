@@ -1093,6 +1093,24 @@ public:
         gtk_tree_view_set_fixed_height_mode(view, true);
         gtk_tree_view_set_rubber_banding(view, s.selection == SelectionMode::Multi);
         compact_ = s.compact;
+        if (s.softSelection)
+        {
+            soft_ = softSelectionColors(w_);
+            auto rgb = [](Color c)
+            {
+                return "rgb(" + std::to_string(c.r) + "," + std::to_string(c.g) + "," +
+                       std::to_string(c.b) + ")";
+            };
+            std::string rule = "treeview.view:selected, treeview.view:selected:focus, "
+                               "treeview.view:selected:backdrop { background-color: " +
+                               rgb(soft_->first) + "; color: " + rgb(soft_->second) + "; }";
+            GtkCssProvider* css = gtk_css_provider_new();
+            gtk_css_provider_load_from_data(css, rule.c_str(), -1, nullptr);
+            gtk_style_context_add_provider(gtk_widget_get_style_context(w_),
+                                           GTK_STYLE_PROVIDER(css),
+                                           GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+            g_object_unref(css);
+        }
         if (compact_)
         {
             // Font size is inherited by the header and the cells, and by the
@@ -1443,8 +1461,15 @@ private:
         cairo_rectangle(cr, area->x, area->y, area->width, area->height);
         cairo_clip(cr);
         cairo_translate(cr, area->x, area->y);
-        CairoPainter painter(
-            cr, widget, selected ? std::optional<Paint>{ThemeColor::HighlightText} : std::nullopt);
+        auto& soft = ctx->list->soft_;
+        CairoPainter painter(cr, widget,
+                             selected && !soft ? std::optional<Paint>{ThemeColor::HighlightText}
+                                               : std::nullopt);
+        if (soft)
+        {
+            painter.overrideColor(ThemeColor::Highlight, soft->first);
+            painter.overrideColor(ThemeColor::HighlightText, soft->second);
+        }
         CellInfo info{{float(area->width), float(area->height)},
                       selected,
                       bool(flags & GTK_CELL_RENDERER_FOCUSED)};
@@ -1510,6 +1535,7 @@ private:
     std::vector<std::unique_ptr<ColumnCtx>> ctxs_;
     bool alive_ = true;
     bool compact_ = false;
+    std::optional<std::pair<Color, Color>> soft_;  // selection background, text
     static constexpr float kCompactScale = 0.92f;
 
     std::function<void()> selChanged_;
