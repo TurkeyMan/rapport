@@ -44,14 +44,12 @@ public:
         auto x = [&](int l) { return 8 + l * w; };
 
         int here = lane(row);
-        bool branchOpen = row % 12 >= 2 && row % 12 <= 9;  // lane 1 alive through these rows
+        // Lane 1 runs straight through the branch's rows; the merge (row 2)
+        // and fork (row 9) rows only draw the curve, which meets it.
+        bool branchRow = row % 12 >= 3 && row % 12 <= 8;
 
         p.line({x(0), 0}, {x(0), cell.size.h}, lanes[0], 2);
-        if (branchOpen)
-        {
-            if (row % 12 != 2) p.line({x(1), 0}, {x(1), mid}, lanes[1], 2);
-            if (row % 12 != 9) p.line({x(1), mid}, {x(1), cell.size.h}, lanes[1], 2);
-        }
+        if (branchRow) p.line({x(1), 0}, {x(1), cell.size.h}, lanes[1], 2);
         if (row % 12 == 2)  // merge commit on main pulls lane 1 in
             p.curve({x(0), mid}, {x(1), mid}, {x(1), mid}, {x(1), cell.size.h}, lanes[1], 2);
         if (row % 12 == 9)  // fork point
