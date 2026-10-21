@@ -1,0 +1,23 @@
+# Package: libanyui-win32 (Windows only). Native controls, Direct2D canvases.
+cmake_minimum_required(VERSION 3.25)
+project(anyui-win32 LANGUAGES CXX)
+
+if(NOT WIN32)
+    message(STATUS "anyui: skipping win32 backend (not a Windows build)")
+    return()
+endif()
+if(NOT TARGET anyui::headers)
+    find_package(anyui REQUIRED)
+endif()
+
+set(sources win32_backend.cpp win32_painter.cpp)
+if(ANYUI_STATIC)
+    add_library(anyui_win32 STATIC ${sources})
+else()
+    add_library(anyui_win32 MODULE ${sources})
+endif()
+add_library(anyui::backend_win32 ALIAS anyui_win32)
+target_link_libraries(anyui_win32 PRIVATE anyui::headers)
+target_link_libraries(anyui_win32 PUBLIC user32 gdi32 comctl32 comdlg32 d2d1 dwrite windowscodecs ole32 uuid dwmapi shell32 uxtheme)
+target_compile_definitions(anyui_win32 PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+set_target_properties(anyui_win32 PROPERTIES PREFIX "" CXX_VISIBILITY_PRESET hidden)

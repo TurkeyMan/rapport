@@ -30,7 +30,7 @@ add_subdirectory(core)
 
 # Backends skip themselves (with a status message) when their toolkit is
 # missing; set ANYUI_REQUIRE_BACKENDS to make that an error instead.
-foreach(backend null gtk3 gtk4)
+foreach(backend null gtk3 gtk4 win32)
     string(TOUPPER ${backend} upper)
     option(ANYUI_BACKEND_${upper} "Build the ${backend} backend" ON)
     if(ANYUI_BACKEND_${upper})
