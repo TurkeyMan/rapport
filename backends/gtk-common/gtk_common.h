@@ -1,0 +1,428 @@
+// Code shared by the GTK 3 and GTK 4 backends: font metrics, Pango styling,
+// the cairo cell painter, dialog button conventions and signal bookkeeping.
+// Each backend includes this after its own <gtk/gtk.h> and defines
+// themeColor().
+#pragma once
+
+#include "anyui/backend.h"
+
+#include <gtk/gtk.h>
+
+#include <algorithm>
+#include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace anyui::gtkcommon
+{
+
+struct Metrics
+{
+    float charWidth = 8;
+    float lineHeight = 17;
+};
+inline Metrics g_metrics;
+
+inline void initMetrics()
+{
+    GtkWidget* probe = gtk_label_new("");
+    g_object_ref_sink(probe);
+    PangoContext* pc = gtk_widget_get_pango_context(probe);
+    PangoFontMetrics* m = pango_context_get_metrics(pc, nullptr, nullptr);
+    g_metrics.charWidth = float(pango_font_metrics_get_approximate_char_width(m)) / PANGO_SCALE;
+    g_metrics.lineHeight = float(pango_font_metrics_get_height(m)) / PANGO_SCALE;
+    pango_font_metrics_unref(m);
+    g_object_unref(probe);
+}
+
+inline int px(Extent e)
+{
+    switch (e.unit)
+    {
+    case Extent::Unit::Chars: return int(e.value * g_metrics.charWidth + 0.5f);
+    case Extent::Unit::Lines: return int(e.value * g_metrics.lineHeight + 0.5f);
+    case Extent::Unit::Px: return int(e.value);
+    case Extent::Unit::Auto: break;
+    }
+    return -1;
+}
+
+inline GtkOrientation gtkOrientation(Orientation o)
+{
+    return o == Orientation::Vertical ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL;
+}
+
+inline uint8_t u8(double v)
+{
+    return uint8_t(std::clamp(v, 0.0, 1.0) * 255 + 0.5);
+}
+inline guint16 u16(uint8_t v)
+{
+    return guint16(v * 257);
+}
+
+// Defined by each backend: theme lookup differs between GTK 3 and 4.
+Color themeColor(GtkWidget*, ThemeColor);
+
+inline Color resolve(GtkWidget* w, const Paint& p)
+{
+    if (auto* c = std::get_if<Color>(&p)) return *c;
+    return themeColor(w, std::get<ThemeColor>(p));
+}
+
+// Fallbacks when the theme doesn't name a colour; `dark` is guessed from
+// the text colour.
+inline Color fallbackColor(ThemeColor role, Color text, bool dark)
+{
+    auto alpha = [&](double a) { return Color{text.r, text.g, text.b, u8(a)}; };
+    switch (role)
+    {
+    case ThemeColor::Text:
+    case ThemeColor::WindowText: return text;
+    case ThemeColor::PlaceholderText: return alpha(0.5);
+    case ThemeColor::Mid: return alpha(0.35);
+    case ThemeColor::Neutral: return alpha(0.6);
+    case ThemeColor::Window: return dark ? Color{0x24, 0x24, 0x24} : Color{0xfa, 0xfa, 0xfa};
+    case ThemeColor::Base: return dark ? Color{0x1e, 0x1e, 0x1e} : Color{0xff, 0xff, 0xff};
+    case ThemeColor::AlternateBase: return dark ? Color{0x2a, 0x2a, 0x2a} : Color{0xf4, 0xf4, 0xf4};
+    case ThemeColor::Highlight:
+    case ThemeColor::Accent: return Color{0x35, 0x84, 0xe4};
+    case ThemeColor::HighlightText: return Color{0xff, 0xff, 0xff};
+    case ThemeColor::Link: return dark ? Color{0x78, 0xae, 0xed} : Color{0x1c, 0x71, 0xd8};
+    case ThemeColor::Positive: return dark ? Color{0x8f, 0xf0, 0xa4} : Color{0x26, 0xa2, 0x69};
+    case ThemeColor::Negative: return dark ? Color{0xf6, 0x61, 0x51} : Color{0xc0, 0x1c, 0x28};
+    }
+    return text;
+}
+
+inline bool isDarkText(const GdkRGBA& fg)
+{
+    return 0.299 * fg.red + 0.587 * fg.green + 0.114 * fg.blue > 0.5;
+}
+
+inline Color toColor(const GdkRGBA& c)
+{
+    return Color{u8(c.red), u8(c.green), u8(c.blue), u8(c.alpha)};
+}
+
+// Null when the style is plain.
+inline PangoAttrList* pangoAttrs(GtkWidget* w, const TextStyle& s)
+{
+    if (!s.fg && !s.bg && !s.bold && !s.italic && !s.monospace) return nullptr;
+    PangoAttrList* list = pango_attr_list_new();
+    if (s.bold) pango_attr_list_insert(list, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    if (s.italic) pango_attr_list_insert(list, pango_attr_style_new(PANGO_STYLE_ITALIC));
+    if (s.monospace) pango_attr_list_insert(list, pango_attr_family_new("monospace"));
+    if (s.fg)
+    {
+        Color c = resolve(w, *s.fg);
+        pango_attr_list_insert(list, pango_attr_foreground_new(u16(c.r), u16(c.g), u16(c.b)));
+    }
+    if (s.bg)
+    {
+        Color c = resolve(w, *s.bg);
+        pango_attr_list_insert(list, pango_attr_background_new(u16(c.r), u16(c.g), u16(c.b)));
+    }
+    return list;
+}
+
+inline const char* stockLabel(DialogRole r)
+{
+    switch (r)
+    {
+    case DialogRole::Ok: return "_OK";
+    case DialogRole::Cancel: return "_Cancel";
+    case DialogRole::Apply: return "_Apply";
+    case DialogRole::Close: return "_Close";
+    case DialogRole::Yes: return "_Yes";
+    case DialogRole::No: return "_No";
+    case DialogRole::Help: return "_Help";
+    case DialogRole::Reset: return "_Reset";
+    case DialogRole::None: break;
+    }
+    return "";
+}
+
+// GNOME order: help at the start, affirmative action last.
+inline int gnomeOrder(DialogRole r)
+{
+    switch (r)
+    {
+    case DialogRole::Help: return 0;
+    case DialogRole::Reset: return 1;
+    case DialogRole::None: return 2;
+    case DialogRole::Cancel:
+    case DialogRole::No:
+    case DialogRole::Close: return 3;
+    case DialogRole::Apply: return 4;
+    case DialogRole::Ok:
+    case DialogRole::Yes: return 5;
+    }
+    return 2;
+}
+
+// "Ctrl+Shift+C" -> "<Control><Shift>c"
+inline std::string gtkAccel(std::string s)
+{
+    std::string out;
+    for (auto [from, to] : {std::pair{"Ctrl+", "<Control>"},
+                            {"Shift+", "<Shift>"},
+                            {"Alt+", "<Alt>"},
+                            {"Meta+", "<Super>"}})
+    {
+        for (size_t at; (at = s.find(from)) != std::string::npos;)
+        {
+            out += to;
+            s.erase(at, std::strlen(from));
+        }
+    }
+    if (s.size() == 1) s[0] = char(g_ascii_tolower(s[0]));
+    return out + s;
+}
+
+class CairoPainter : public Painter
+{
+public:
+    CairoPainter(cairo_t* cr, GtkWidget* w, std::optional<Paint> defaultText = {})
+        : cr_(cr)
+        , w_(w)
+        , defaultText_(defaultText ? *defaultText : Paint{ThemeColor::Text})
+    {
+    }
+
+    Color resolve(const Paint& p) const override { return gtkcommon::resolve(w_, p); }
+
+    void line(PointF a, PointF b, const Paint& p, float width) override
+    {
+        source(p);
+        cairo_set_line_width(cr_, width);
+        cairo_move_to(cr_, a.x, a.y);
+        cairo_line_to(cr_, b.x, b.y);
+        cairo_stroke(cr_);
+    }
+
+    void curve(PointF a, PointF c1, PointF c2, PointF b, const Paint& p, float width) override
+    {
+        source(p);
+        cairo_set_line_width(cr_, width);
+        cairo_move_to(cr_, a.x, a.y);
+        cairo_curve_to(cr_, c1.x, c1.y, c2.x, c2.y, b.x, b.y);
+        cairo_stroke(cr_);
+    }
+
+    void circle(PointF c, float r, std::optional<Paint> fill, std::optional<Paint> stroke) override
+    {
+        cairo_new_path(cr_);
+        cairo_arc(cr_, c.x, c.y, r, 0, 2 * G_PI);
+        finish(fill, stroke);
+    }
+
+    void rect(RectF r, float radius, std::optional<Paint> fill,
+              std::optional<Paint> stroke) override
+    {
+        cairo_new_path(cr_);
+        if (radius <= 0)
+        {
+            cairo_rectangle(cr_, r.x, r.y, r.w, r.h);
+        }
+        else
+        {
+            double x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
+            cairo_arc(cr_, x1 - radius, y0 + radius, radius, -G_PI / 2, 0);
+            cairo_arc(cr_, x1 - radius, y1 - radius, radius, 0, G_PI / 2);
+            cairo_arc(cr_, x0 + radius, y1 - radius, radius, G_PI / 2, G_PI);
+            cairo_arc(cr_, x0 + radius, y0 + radius, radius, G_PI, 3 * G_PI / 2);
+            cairo_close_path(cr_);
+        }
+        finish(fill, stroke);
+    }
+
+    void text(PointF at, const std::string& s, const TextStyle& style) override
+    {
+        PangoLayout* layout = makeLayout(s, style);
+        if (style.bg)
+        {
+            int w, h;
+            pango_layout_get_pixel_size(layout, &w, &h);
+            source(*style.bg);
+            cairo_rectangle(cr_, at.x, at.y, w, h);
+            cairo_fill(cr_);
+        }
+        source(style.fg ? *style.fg : defaultText_);
+        cairo_move_to(cr_, at.x, at.y);
+        pango_cairo_show_layout(cr_, layout);
+        g_object_unref(layout);
+    }
+
+    SizeF measure(const std::string& s, const TextStyle& style) const override
+    {
+        PangoLayout* layout = makeLayout(s, style);
+        int w, h;
+        pango_layout_get_pixel_size(layout, &w, &h);
+        g_object_unref(layout);
+        return {float(w), float(h)};
+    }
+
+private:
+    PangoLayout* makeLayout(const std::string& s, TextStyle style) const
+    {
+        PangoLayout* layout = gtk_widget_create_pango_layout(w_, s.c_str());
+        style.fg.reset();  // colours are drawn with cairo
+        style.bg.reset();
+        if (PangoAttrList* attrs = pangoAttrs(w_, style))
+        {
+            pango_layout_set_attributes(layout, attrs);
+            pango_attr_list_unref(attrs);
+        }
+        return layout;
+    }
+
+    void source(const Paint& p)
+    {
+        Color c = resolve(p);
+        cairo_set_source_rgba(cr_, c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0);
+    }
+
+    void finish(const std::optional<Paint>& fill, const std::optional<Paint>& stroke)
+    {
+        if (fill)
+        {
+            source(*fill);
+            if (stroke)
+                cairo_fill_preserve(cr_);
+            else
+                cairo_fill(cr_);
+        }
+        if (stroke)
+        {
+            source(*stroke);
+            cairo_set_line_width(cr_, 1);
+            cairo_stroke(cr_);
+        }
+    }
+
+    cairo_t* cr_;
+    GtkWidget* w_;
+    Paint defaultText_;
+};
+
+// Tracks signal connections so a window can cut them all before it
+// destroys its GTK widgets; app callbacks must not fire during teardown.
+class Part
+{
+public:
+    virtual ~Part() = default;
+
+    void disconnect()
+    {
+        for (auto [obj, data] : conns_) g_signal_handlers_disconnect_by_data(obj, data);
+        conns_.clear();
+        onDisconnect();
+    }
+
+protected:
+    template <class F>
+    void connect(gpointer obj, const char* signal, F* callback, gpointer data)
+    {
+        g_signal_connect(obj, signal, G_CALLBACK(callback), data);
+        conns_.push_back({obj, data});
+    }
+
+    virtual void onDisconnect() {}
+
+private:
+    std::vector<std::pair<gpointer, gpointer>> conns_;
+};
+
+template <class Base>
+class W : public Base, public Part
+{
+public:
+    explicit W(GtkWidget* w, GtkWidget* outer = nullptr)
+        : w_(w)
+        , outer_(outer ? outer : w)
+    {
+    }
+
+    void setEnabled(bool e) override { gtk_widget_set_sensitive(outer_, e); }
+    void setVisible(bool v) override { gtk_widget_set_visible(outer_, v); }
+    void setTooltip(const std::string& t) override { gtk_widget_set_tooltip_text(w_, t.c_str()); }
+    void focus() override { gtk_widget_grab_focus(w_); }
+
+    GtkWidget* outer() const { return outer_; }
+
+protected:
+    GtkWidget* w_;
+    GtkWidget* outer_;
+};
+
+// Text tags cached per style; diffs reuse a handful of styles many times.
+// Shared by both TextView implementations (GtkTextBuffer is the same API).
+class TagCache
+{
+public:
+    GtkTextTag* get(GtkTextBuffer* buffer, GtkWidget* w, const TextStyle& s)
+    {
+        auto rgba = [&](const std::optional<Paint>& p) -> std::optional<GdkRGBA>
+        {
+            if (!p) return std::nullopt;
+            Color c = resolve(w, *p);
+            return GdkRGBA{c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
+        };
+        auto fg = rgba(s.fg), bg = rgba(s.bg);
+
+        std::string key =
+            std::to_string(s.bold) + std::to_string(s.italic) + std::to_string(s.monospace);
+        for (auto& c : {fg, bg})
+        {
+            key += '|';
+            if (c)
+            {
+                char* str = gdk_rgba_to_string(&*c);
+                key += str;
+                g_free(str);
+            }
+        }
+        for (auto& [k, t] : tags_)
+            if (k == key) return t;
+
+        GtkTextTag* t = gtk_text_buffer_create_tag(buffer, nullptr, nullptr);
+        if (s.bold) g_object_set(t, "weight", PANGO_WEIGHT_BOLD, nullptr);
+        if (s.italic) g_object_set(t, "style", PANGO_STYLE_ITALIC, nullptr);
+        if (s.monospace) g_object_set(t, "family", "monospace", nullptr);
+        if (fg) g_object_set(t, "foreground-rgba", &*fg, nullptr);
+        if (bg) g_object_set(t, "background-rgba", &*bg, nullptr);
+        tags_.emplace_back(std::move(key), t);
+        return t;
+    }
+
+    // Applies byte-offset spans to text just loaded into the buffer.
+    void apply(GtkTextBuffer* buffer, GtkWidget* w, const std::string& text,
+               std::vector<TextView::Span> spans)
+    {
+        std::ranges::sort(spans, {}, &TextView::Span::begin);
+        size_t byte = 0;
+        long chars = 0;
+        auto toChars = [&](size_t target)
+        {
+            target = std::min(target, text.size());
+            chars += g_utf8_pointer_to_offset(text.c_str() + byte, text.c_str() + target);
+            byte = target;
+            return int(chars);
+        };
+        for (auto& s : spans)
+        {
+            if (s.end <= s.begin || s.begin < byte) continue;
+            GtkTextIter a, b;
+            gtk_text_buffer_get_iter_at_offset(buffer, &a, toChars(s.begin));
+            gtk_text_buffer_get_iter_at_offset(buffer, &b, toChars(s.end));
+            gtk_text_buffer_apply_tag(buffer, get(buffer, w, s.style), &a, &b);
+        }
+    }
+
+private:
+    std::vector<std::pair<std::string, GtkTextTag*>> tags_;
+};
+
+}  // namespace anyui::gtkcommon
