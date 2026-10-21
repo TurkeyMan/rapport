@@ -84,6 +84,12 @@ struct Group
     std::string title;
     Nodes content;  // exactly one
 };
+// Scrolls its content when it doesn't fit (a long settings page).
+struct Scroll
+{
+    Nodes content;            // exactly one
+    bool horizontal = false;  // also scroll sideways; otherwise the content's width is kept
+};
 struct Tabs
 {
     std::vector<std::string> titles;
@@ -262,11 +268,11 @@ struct Buttons
 }  // namespace spec
 
 using Spec =
-    std::variant<spec::Box, spec::Form, spec::Splitter, spec::Group, spec::Tabs, spec::Spacer,
-                 spec::Separator, spec::Label, spec::Button, spec::Check, spec::Entry, spec::Select,
-                 spec::Combo, spec::TextView, spec::List, spec::Canvas, spec::MenuButton,
-                 spec::ProgressBar, spec::DatePicker, spec::Toolbar, spec::ToolButton, spec::Slider,
-                 spec::Spin, spec::ColorButton, spec::Buttons>;
+    std::variant<spec::Box, spec::Form, spec::Splitter, spec::Group, spec::Scroll, spec::Tabs,
+                 spec::Spacer, spec::Separator, spec::Label, spec::Button, spec::Check, spec::Entry,
+                 spec::Select, spec::Combo, spec::TextView, spec::List, spec::Canvas,
+                 spec::MenuButton, spec::ProgressBar, spec::DatePicker, spec::Toolbar,
+                 spec::ToolButton, spec::Slider, spec::Spin, spec::ColorButton, spec::Buttons>;
 
 struct Node
 {
@@ -400,6 +406,17 @@ public:
     {
         s().title = std::move(title);
         s().content.push_back(std::move(content));
+    }
+};
+
+class Scroll : public Builder<Scroll, spec::Scroll>
+{
+public:
+    explicit Scroll(Node content) { s().content.push_back(std::move(content)); }
+    Scroll& horizontal(bool v = true)
+    {
+        s().horizontal = v;
+        return *this;
     }
 };
 

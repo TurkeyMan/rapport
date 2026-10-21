@@ -1878,12 +1878,21 @@ private:
 
 class WWindow : public anyui::Window, public Part
 {
-    // Development aid: ANYUI_SNAPSHOT=file.png saves the first window shown,
+    // Development aid: ANYUI_SNAPSHOT=file.png saves the window shown last,
     // ANYUI_SNAPSHOT_DELAY ms (default 500) after it appears, then quits
     // the main loop. For checking layouts and canvases without a screen
     // grabber.
+    // The most recently shown window is the one a snapshot captures (a
+    // dialog over the main window, say).
+    static GtkWidget*& lastShown()
+    {
+        static GtkWidget* w = nullptr;
+        return w;
+    }
+
     void snapshotIfAsked()
     {
+        lastShown() = win_;
         static bool taken = false;
         const char* path = std::getenv("ANYUI_SNAPSHOT");
         if (taken || !path || !*path) return;
@@ -1891,9 +1900,10 @@ class WWindow : public anyui::Window, public Part
         const char* delay = std::getenv("ANYUI_SNAPSHOT_DELAY");
         g_timeout_add(
             delay ? guint(std::atoi(delay)) : 500u,
-            +[](gpointer p) -> gboolean
+            +[](gpointer) -> gboolean
             {
-                GtkWidget* win = static_cast<GtkWidget*>(p);
+                GtkWidget* win = lastShown();
+                if (!win) return G_SOURCE_REMOVE;
                 const int scale = gtk_widget_get_scale_factor(win);
                 const int w = gtk_widget_get_allocated_width(win);
                 const int h = gtk_widget_get_allocated_height(win);
@@ -1908,7 +1918,7 @@ class WWindow : public anyui::Window, public Part
                 gtk_main_quit();
                 return G_SOURCE_REMOVE;
             },
-            win_);
+            nullptr);
     }
 
 public:
@@ -1984,6 +1994,7 @@ public:
 
     ~WWindow() override
     {
+        if (lastShown() == win_) lastShown() = nullptr;
         for (auto& part : parts) part->disconnect();
         disconnect();
         gtk_widget_destroy(win_);
@@ -2180,6 +2191,7 @@ public:
         const bool container = std::holds_alternative<spec::Box>(n.spec) ||
                                std::holds_alternative<spec::Form>(n.spec) ||
                                std::holds_alternative<spec::Group>(n.spec) ||
+                               std::holds_alternative<spec::Scroll>(n.spec) ||
                                std::holds_alternative<spec::Toolbar>(n.spec);
         if (container && n.common.handle) add<WPlain>(n, w);
         int width = px(n.common.width), height = px(n.common.height);
@@ -2367,6 +2379,20 @@ private:
         gtk_paned_pack1(p, first, !anyStretch || s.panes[from].common.stretch > 0, false);
         gtk_paned_pack2(p, panes(s, from + 1), true, false);
         return paned;
+    }
+
+    GtkWidget* make(const Node&, const spec::Scroll& s, Orientation)
+    {
+        GtkWidget* scroller = gtk_scrolled_window_new(nullptr, nullptr);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
+                                       s.horizontal ? GTK_POLICY_AUTOMATIC : GTK_POLICY_NEVER,
+                                       GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_propagate_natural_width(GTK_SCROLLED_WINDOW(scroller), true);
+        gtk_widget_set_vexpand(scroller, true);
+        if (!s.content.empty())
+            gtk_container_add(GTK_CONTAINER(scroller),
+                              build(s.content.front(), Orientation::Vertical));
+        return scroller;
     }
 
     GtkWidget* make(const Node&, const spec::Group& s, Orientation)

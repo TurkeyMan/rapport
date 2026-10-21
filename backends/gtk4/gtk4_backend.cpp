@@ -1408,6 +1408,7 @@ public:
         const bool container = std::holds_alternative<spec::Box>(n.spec) ||
                                std::holds_alternative<spec::Form>(n.spec) ||
                                std::holds_alternative<spec::Group>(n.spec) ||
+                               std::holds_alternative<spec::Scroll>(n.spec) ||
                                std::holds_alternative<spec::Toolbar>(n.spec);
         if (container && n.common.handle) add<WPlain>(n, w);
         int width = px(n.common.width), height = px(n.common.height);
@@ -1487,6 +1488,20 @@ private:
         gtk_paned_set_shrink_start_child(p, false);
         gtk_paned_set_shrink_end_child(p, false);
         return paned;
+    }
+
+    GtkWidget* make(const Node&, const spec::Scroll& s, Orientation)
+    {
+        GtkWidget* scroller = gtk_scrolled_window_new();
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
+                                       s.horizontal ? GTK_POLICY_AUTOMATIC : GTK_POLICY_NEVER,
+                                       GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_propagate_natural_width(GTK_SCROLLED_WINDOW(scroller), true);
+        gtk_widget_set_vexpand(scroller, true);
+        if (!s.content.empty())
+            gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller),
+                                          build(s.content.front(), Orientation::Vertical));
+        return scroller;
     }
 
     GtkWidget* make(const Node&, const spec::Group& s, Orientation)

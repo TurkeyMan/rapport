@@ -287,6 +287,7 @@ public:
         const bool container = std::holds_alternative<spec::Box>(n.spec) ||
                                std::holds_alternative<spec::Form>(n.spec) ||
                                std::holds_alternative<spec::Group>(n.spec) ||
+                               std::holds_alternative<spec::Scroll>(n.spec) ||
                                std::holds_alternative<spec::Toolbar>(n.spec);
         if (container && n.common.handle) make<Stub<anyui::Widget>>(n);
     }
@@ -329,6 +330,12 @@ private:
         suffix(n);
         make<NSplitter>(n);
         children(s.panes, d);
+    }
+    void visit(const Node& n, const spec::Scroll& s, int d)
+    {
+        std::printf("Scroll%s", s.horizontal ? " both" : "");
+        suffix(n);
+        children(s.content, d);
     }
     void visit(const Node& n, const spec::Group& s, int d)
     {
