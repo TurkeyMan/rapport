@@ -2504,6 +2504,13 @@ private:
                 gtk_widget_set_valign(w, GTK_ALIGN_CENTER);
             gtk_container_add(GTK_CONTAINER(box), w);
         }
+        if (s.margins)
+        {
+            gtk_widget_set_margin_start(box, 6);
+            gtk_widget_set_margin_end(box, 6);
+            gtk_widget_set_margin_top(box, 6);
+            gtk_widget_set_margin_bottom(box, 6);
+        }
         return box;
     }
 

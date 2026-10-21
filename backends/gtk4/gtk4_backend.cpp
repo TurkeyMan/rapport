@@ -1472,6 +1472,13 @@ private:
     {
         GtkWidget* box = gtk_box_new(gtkOrientation(s.dir), 6);
         for (auto& c : s.items) gtk_box_append(GTK_BOX(box), build(c, s.dir));
+        if (s.margins)
+        {
+            gtk_widget_set_margin_start(box, 6);
+            gtk_widget_set_margin_end(box, 6);
+            gtk_widget_set_margin_top(box, 6);
+            gtk_widget_set_margin_bottom(box, 6);
+        }
         return box;
     }
 

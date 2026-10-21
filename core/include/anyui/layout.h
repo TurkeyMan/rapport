@@ -65,6 +65,9 @@ struct Box
 {
     Orientation dir;
     Nodes items;
+    // The usual window margin around the items: for a bar along the edge of
+    // a window that has margins off.
+    bool margins = false;
 };
 // Label/field pairs; the backend applies its own label alignment rules.
 // An empty label makes the field span both columns.
@@ -360,12 +363,22 @@ class VBox : public Builder<VBox, spec::Box>
 {
 public:
     VBox(std::initializer_list<Node> items) { s() = {Vertical, items}; }
+    VBox& margins(bool on = true)
+    {
+        s().margins = on;
+        return *this;
+    }
 };
 
 class HBox : public Builder<HBox, spec::Box>
 {
 public:
     HBox(std::initializer_list<Node> items) { s() = {Horizontal, items}; }
+    HBox& margins(bool on = true)
+    {
+        s().margins = on;
+        return *this;
+    }
 };
 
 struct FormRow
