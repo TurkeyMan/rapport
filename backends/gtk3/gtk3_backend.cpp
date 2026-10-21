@@ -1590,24 +1590,27 @@ private:
 
     // The row the dragged rows would go in front of, and where to draw the
     // native drop line for it.
+    // Works in bin-window coordinates, clamped to the visible rows, so a
+    // pointer over the header (above the rows) targets the first visible row
+    // rather than counting as "past the end".
     size_t dropTarget(double bx, double by)
     {
         auto* view = GTK_TREE_VIEW(w_);
-        int wx, wy;
-        gtk_tree_view_convert_bin_window_to_widget_coords(view, int(bx), int(by), &wx, &wy);
-        GtkTreePath* path = nullptr;
-        GtkTreeViewDropPosition pos;
         size_t count = rows_->count, dest = count;
-        if (gtk_tree_view_get_dest_row_at_pos(view, wx, wy, &path, &pos))
+        int height = gdk_window_get_height(gtk_tree_view_get_bin_window(view));
+        int x = std::max(0, int(bx)), y = std::clamp(int(by), 0, std::max(0, height - 1));
+        GtkTreePath* path = nullptr;
+        if (gtk_tree_view_get_path_at_pos(view, x, y, &path, nullptr, nullptr, nullptr))
         {
             size_t row = size_t(gtk_tree_path_get_indices(path)[0]);
-            bool before =
-                pos == GTK_TREE_VIEW_DROP_BEFORE || pos == GTK_TREE_VIEW_DROP_INTO_OR_BEFORE;
+            GdkRectangle area;
+            gtk_tree_view_get_background_area(view, path, nullptr, &area);
+            bool before = by < area.y + area.height / 2.0;
             dest = before ? row : row + 1;
             gtk_tree_path_free(path);
         }
-        else if (wy < 0)
-            dest = 0;
+        // else: empty space below the last row, so the end.
+
         if (count)
         {
             bool atEnd = dest >= count;
