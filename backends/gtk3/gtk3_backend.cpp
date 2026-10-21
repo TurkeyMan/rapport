@@ -266,6 +266,7 @@ public:
     {
         gtk_label_set_xalign(GTK_LABEL(w_), 0);
         gtk_label_set_selectable(GTK_LABEL(w_), s.selectable);
+        if (s.ellipsize) gtk_label_set_ellipsize(GTK_LABEL(w_), PANGO_ELLIPSIZE_END);
     }
 
     void setText(const std::string& t) override { gtk_label_set_text(GTK_LABEL(w_), t.c_str()); }

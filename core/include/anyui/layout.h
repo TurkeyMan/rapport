@@ -108,6 +108,9 @@ struct Label
 {
     std::string text;
     bool selectable = false;
+    // Cut long text with "..." instead of widening the window to fit it
+    // (status lines).
+    bool ellipsize = false;
     anyui::Label** bind = nullptr;
 };
 struct Button
@@ -468,6 +471,11 @@ public:
     Label& selectable(bool v = true)
     {
         s().selectable = v;
+        return *this;
+    }
+    Label& ellipsize(bool v = true)
+    {
+        s().ellipsize = v;
         return *this;
     }
     Label& bind(anyui::Label*& h)
