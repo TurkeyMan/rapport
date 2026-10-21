@@ -1625,6 +1625,14 @@ public:
         connect(
             w_, "realize", +[](GtkWidget*, gpointer p) { static_cast<WCanvas*>(p)->applyCursor(); },
             this);
+        connect(
+            w_, "notify::scale-factor",
+            +[](GObject*, GParamSpec*, gpointer p)
+            {
+                auto* self = static_cast<WCanvas*>(p);
+                if (self->resize_) self->resize_(self->size());
+            },
+            this);
         connect(w_, "button-press-event", &WCanvas::button, this);
         connect(w_, "button-release-event", &WCanvas::button, this);
         connect(

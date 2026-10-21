@@ -81,6 +81,13 @@ struct TextStyle
     bool bold = false;
     bool italic = false;
     bool monospace = false;
+    float size = 0;  // points; 0 = the toolkit's normal size
+};
+
+enum class LineCap
+{
+    Butt,   // ends exactly at the end points
+    Round,  // a half-disc past each end
 };
 
 // Semantic size: converted by the backend with real font metrics.
@@ -210,7 +217,8 @@ public:
 
     virtual Color resolve(const Paint&) const = 0;
 
-    virtual void line(PointF a, PointF b, const Paint&, float width = 1) = 0;
+    virtual void line(PointF a, PointF b, const Paint&, float width = 1,
+                      LineCap cap = LineCap::Butt) = 0;
     virtual void curve(PointF a, PointF c1, PointF c2, PointF b, const Paint&,
                        float width = 1) = 0;  // cubic bezier
     virtual void circle(PointF centre, float radius, std::optional<Paint> fill,
@@ -222,7 +230,7 @@ public:
                          std::optional<Paint> stroke, float width = 1) = 0;
     // Circular arc, angles in radians clockwise from 3 o'clock.
     virtual void arc(PointF centre, float radius, float start, float end, const Paint&,
-                     float width = 1) = 0;
+                     float width = 1, LineCap cap = LineCap::Butt) = 0;
     // Draws `src` (in image pixels) into `dst` (logical pixels), scaled with
     // `filter`. For 1:1 device pixels, make dst = src size / deviceScale().
     virtual void image(const Image&, RectF src, RectF dst, Filter = Filter::Linear,
@@ -653,6 +661,7 @@ public:
 
     // Paint handler: draws the whole canvas.
     virtual void onPaint(std::function<void(Painter&, SizeF)>) = 0;
+    // Size changed, or the device scale did (moved to another monitor).
     virtual void onResize(std::function<void(SizeF)>) = 0;
     // Input handlers return true when they used the event.
     virtual void onPointer(std::function<bool(const PointerEvent&)>) = 0;

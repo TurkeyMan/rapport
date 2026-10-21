@@ -109,8 +109,9 @@ inline Color toColor(const GdkRGBA& c)
 // Null when the style is plain.
 inline PangoAttrList* pangoAttrs(GtkWidget* w, const TextStyle& s)
 {
-    if (!s.fg && !s.bg && !s.bold && !s.italic && !s.monospace) return nullptr;
+    if (!s.fg && !s.bg && !s.bold && !s.italic && !s.monospace && s.size <= 0) return nullptr;
     PangoAttrList* list = pango_attr_list_new();
+    if (s.size > 0) pango_attr_list_insert(list, pango_attr_size_new(int(s.size * PANGO_SCALE)));
     if (s.bold) pango_attr_list_insert(list, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
     if (s.italic) pango_attr_list_insert(list, pango_attr_style_new(PANGO_STYLE_ITALIC));
     if (s.monospace) pango_attr_list_insert(list, pango_attr_family_new("monospace"));
@@ -244,13 +245,15 @@ public:
 
     Color resolve(const Paint& p) const override { return gtkcommon::resolve(w_, p); }
 
-    void line(PointF a, PointF b, const Paint& p, float width) override
+    void line(PointF a, PointF b, const Paint& p, float width, LineCap cap) override
     {
         source(p);
         cairo_set_line_width(cr_, width);
+        cairo_set_line_cap(cr_, cap == LineCap::Round ? CAIRO_LINE_CAP_ROUND : CAIRO_LINE_CAP_BUTT);
         cairo_move_to(cr_, a.x, a.y);
         cairo_line_to(cr_, b.x, b.y);
         cairo_stroke(cr_);
+        cairo_set_line_cap(cr_, CAIRO_LINE_CAP_BUTT);
     }
 
     void curve(PointF a, PointF c1, PointF c2, PointF b, const Paint& p, float width) override
@@ -300,13 +303,16 @@ public:
         finish(fill, stroke, width);
     }
 
-    void arc(PointF c, float r, float start, float end, const Paint& p, float width) override
+    void arc(PointF c, float r, float start, float end, const Paint& p, float width,
+             LineCap cap) override
     {
         source(p);
         cairo_set_line_width(cr_, width);
+        cairo_set_line_cap(cr_, cap == LineCap::Round ? CAIRO_LINE_CAP_ROUND : CAIRO_LINE_CAP_BUTT);
         cairo_new_path(cr_);
         cairo_arc(cr_, c.x, c.y, r, start, end);
         cairo_stroke(cr_);
+        cairo_set_line_cap(cr_, CAIRO_LINE_CAP_BUTT);
     }
 
     void image(const Image& img, RectF src, RectF dst, Filter filter, float alpha) override
