@@ -1424,6 +1424,16 @@ public:
     }
 
 private:
+    static bool fillsFormRow(const Spec& s)
+    {
+        return std::holds_alternative<spec::Entry>(s) || std::holds_alternative<spec::Combo>(s) ||
+               std::holds_alternative<spec::TextView>(s) || std::holds_alternative<spec::List>(s) ||
+               std::holds_alternative<spec::Canvas>(s) || std::holds_alternative<spec::Box>(s) ||
+               std::holds_alternative<spec::Form>(s) || std::holds_alternative<spec::Splitter>(s) ||
+               std::holds_alternative<spec::Group>(s) || std::holds_alternative<spec::Scroll>(s) ||
+               std::holds_alternative<spec::Tabs>(s);
+    }
+
     template <class T, class... Args>
     T& add(const Node& n, Args&&... args)
     {
@@ -1448,7 +1458,13 @@ private:
         for (size_t i = 0; i < s.fields.size(); ++i)
         {
             GtkWidget* field = build(s.fields[i], Orientation::Horizontal);
-            gtk_widget_set_hexpand(field, true);
+            // Text fields and containers fill the row; spins, selects, colour
+            // buttons and the like keep their natural width (as in Windows
+            // dialogs) unless the node asks to stretch.
+            if (fillsFormRow(s.fields[i].spec))
+                gtk_widget_set_hexpand(field, true);
+            else if (!gtk_widget_get_hexpand(field))
+                gtk_widget_set_halign(field, GTK_ALIGN_START);
             if (s.labels[i].empty())
             {
                 gtk_grid_attach(GTK_GRID(grid), field, 0, int(i), 2, 1);
