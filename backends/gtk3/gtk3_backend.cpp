@@ -1752,6 +1752,16 @@ public:
     }
 
 private:
+    static bool isLineControl(const Spec& s)
+    {
+        return std::holds_alternative<spec::Label>(s) || std::holds_alternative<spec::Button>(s) ||
+               std::holds_alternative<spec::Check>(s) || std::holds_alternative<spec::Entry>(s) ||
+               std::holds_alternative<spec::Select>(s) || std::holds_alternative<spec::Combo>(s) ||
+               std::holds_alternative<spec::MenuButton>(s) ||
+               std::holds_alternative<spec::ProgressBar>(s) ||
+               std::holds_alternative<spec::DatePicker>(s);
+    }
+
     template <class T, class... Args>
     T& add(const Node& n, Args&&... args)
     {
@@ -1764,7 +1774,15 @@ private:
     GtkWidget* make(const Node&, const spec::Box& s, Orientation)
     {
         GtkWidget* box = gtk_box_new(gtkOrientation(s.dir), 6);
-        for (auto& c : s.items) gtk_container_add(GTK_CONTAINER(box), build(c, s.dir));
+        for (auto& c : s.items)
+        {
+            GtkWidget* w = build(c, s.dir);
+            // Single-line controls keep their natural height when a taller
+            // sibling (a stack of checkboxes) sets the row height.
+            if (s.dir == Orientation::Horizontal && isLineControl(c.spec))
+                gtk_widget_set_valign(w, GTK_ALIGN_CENTER);
+            gtk_container_add(GTK_CONTAINER(box), w);
+        }
         return box;
     }
 
