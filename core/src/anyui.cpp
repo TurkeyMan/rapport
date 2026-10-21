@@ -195,6 +195,7 @@ private:
         if (s.onSortRequested) l.onSortRequested(s.onSortRequested);
         if (s.onContextMenu) l.onContextMenu(s.onContextMenu);
         if (s.onHeaderMenu) l.onHeaderMenu(s.onHeaderMenu);
+        if (s.onReorder) l.onReorder(s.onReorder);
         bind(s.bind, w);
     }
     static void apply(const spec::MenuButton& s, Widget& w)

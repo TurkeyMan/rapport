@@ -1210,6 +1210,12 @@ public:
             w_, "button-press-event", +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
             { return static_cast<WList*>(p)->buttonPressed(e); }, this);
         connect(
+            w_, "motion-notify-event", +[](GtkWidget*, GdkEventMotion* e, gpointer p) -> gboolean
+            { return static_cast<WList*>(p)->dragMotion(e); }, this);
+        connect(
+            w_, "button-release-event", +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
+            { return static_cast<WList*>(p)->dragReleased(e); }, this);
+        connect(
             w_, "popup-menu",
             +[](GtkWidget*, gpointer p) -> gboolean
             {
@@ -1312,6 +1318,8 @@ public:
         contextMenu_ = std::move(f);
     }
     void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
+    void onReorder(ReorderFn f) override { reorder_ = std::move(f); }
+    void setReorderable(bool v) override { reorderable_ = v; }
 
     bool columnVisible(size_t column) const override
     {
@@ -1563,8 +1571,139 @@ private:
         return row;
     }
 
+    // Drag-reordering is done by hand rather than with GTK's DnD (which
+    // needs a GtkTreeDragSource model): press on a row, move past a small
+    // threshold, and the native drop line follows the pointer until release.
+    struct Drag
+    {
+        bool pressed = false;
+        bool dragging = false;
+        bool deferSelect = false;  // pressed inside a multi-selection
+        double x0 = 0, y0 = 0;
+        size_t row = 0;
+    };
+
+    bool onBinWindow(GdkEvent* e) const
+    {
+        return e->any.window == gtk_tree_view_get_bin_window(GTK_TREE_VIEW(w_));
+    }
+
+    // The row the dragged rows would go in front of, and where to draw the
+    // native drop line for it.
+    size_t dropTarget(double bx, double by)
+    {
+        auto* view = GTK_TREE_VIEW(w_);
+        int wx, wy;
+        gtk_tree_view_convert_bin_window_to_widget_coords(view, int(bx), int(by), &wx, &wy);
+        GtkTreePath* path = nullptr;
+        GtkTreeViewDropPosition pos;
+        size_t count = rows_->count, dest = count;
+        if (gtk_tree_view_get_dest_row_at_pos(view, wx, wy, &path, &pos))
+        {
+            size_t row = size_t(gtk_tree_path_get_indices(path)[0]);
+            bool before =
+                pos == GTK_TREE_VIEW_DROP_BEFORE || pos == GTK_TREE_VIEW_DROP_INTO_OR_BEFORE;
+            dest = before ? row : row + 1;
+            gtk_tree_path_free(path);
+        }
+        else if (wy < 0)
+            dest = 0;
+        if (count)
+        {
+            bool atEnd = dest >= count;
+            GtkTreePath* line = gtk_tree_path_new_from_indices(int(atEnd ? count - 1 : dest), -1);
+            gtk_tree_view_set_drag_dest_row(
+                view, line, atEnd ? GTK_TREE_VIEW_DROP_AFTER : GTK_TREE_VIEW_DROP_BEFORE);
+            gtk_tree_path_free(line);
+        }
+        return dest;
+    }
+
+    void setDragCursor(const char* name)
+    {
+        GdkWindow* bin = gtk_tree_view_get_bin_window(GTK_TREE_VIEW(w_));
+        GdkCursor* c = name ? gdk_cursor_new_from_name(gdk_window_get_display(bin), name) : nullptr;
+        gdk_window_set_cursor(bin, c);
+        if (c) g_object_unref(c);
+    }
+
+    gboolean dragPressed(GdkEventButton* e)
+    {
+        drag_ = {};
+        if (!reorder_ || !reorderable_ || e->type != GDK_BUTTON_PRESS ||
+            e->button != GDK_BUTTON_PRIMARY || !onBinWindow(reinterpret_cast<GdkEvent*>(e)) ||
+            (e->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK)))
+            return false;
+        GtkTreePath* path = nullptr;
+        if (!gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(w_), int(e->x), int(e->y), &path, nullptr,
+                                           nullptr, nullptr))
+            return false;
+        bool selected = gtk_tree_selection_path_is_selected(sel_, path);
+        drag_ = {true, false, selected && gtk_tree_selection_count_selected_rows(sel_) > 1,
+                 e->x, e->y,  size_t(gtk_tree_path_get_indices(path)[0])};
+        gtk_tree_path_free(path);
+        // Keep a multi-selection so it can be dragged; a plain click inside
+        // it selects just that row on release instead.
+        if (drag_.deferSelect)
+        {
+            gtk_widget_grab_focus(w_);
+            return true;
+        }
+        return false;
+    }
+
+    gboolean dragMotion(GdkEventMotion* e)
+    {
+        if (!drag_.pressed || !(e->state & GDK_BUTTON1_MASK)) return false;
+        if (!drag_.dragging)
+        {
+            int threshold = 8;
+            g_object_get(gtk_widget_get_settings(w_), "gtk-dnd-drag-threshold", &threshold,
+                         nullptr);
+            if (std::abs(e->x - drag_.x0) < threshold && std::abs(e->y - drag_.y0) < threshold)
+                return true;
+            drag_.dragging = true;
+            setDragCursor("grabbing");
+        }
+        dropTarget(e->x, e->y);
+
+        // Scroll when the pointer nears the top or bottom edge.
+        int wx, wy;
+        gtk_tree_view_convert_bin_window_to_widget_coords(GTK_TREE_VIEW(w_), int(e->x), int(e->y),
+                                                          &wx, &wy);
+        int height = gtk_widget_get_allocated_height(w_), edge = 24;
+        if (wy < edge || wy > height - edge)
+            if (GtkAdjustment* adj = gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(w_)))
+                gtk_adjustment_set_value(adj, gtk_adjustment_get_value(adj) +
+                                                  (wy < edge ? -1 : 1) * g_metrics.lineHeight);
+        return true;
+    }
+
+    gboolean dragReleased(GdkEventButton* e)
+    {
+        if (!drag_.pressed || e->button != GDK_BUTTON_PRIMARY) return false;
+        Drag d = drag_;
+        drag_ = {};
+        if (d.dragging)
+        {
+            size_t dest = dropTarget(e->x, e->y);
+            gtk_tree_view_set_drag_dest_row(GTK_TREE_VIEW(w_), nullptr, GTK_TREE_VIEW_DROP_BEFORE);
+            setDragCursor(nullptr);
+            if (reorder_) reorder_(selection(), dest);
+            return true;
+        }
+        if (d.deferSelect)
+        {
+            select({d.row});
+            setCurrent(d.row);
+            return true;
+        }
+        return false;
+    }
+
     gboolean buttonPressed(GdkEventButton* e)
     {
+        if (dragPressed(e)) return true;
         if (e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_SECONDARY) return false;
         std::optional<size_t> row;
         GtkTreePath* path = nullptr;
@@ -1611,6 +1750,9 @@ private:
     std::function<void(size_t, SortOrder)> sort_;
     std::function<Menu(std::optional<size_t>)> contextMenu_;
     std::function<Menu(size_t)> headerMenu_;
+    ReorderFn reorder_;
+    bool reorderable_ = true;
+    Drag drag_;
 };
 
 // ---------------------------------------------------------------- window

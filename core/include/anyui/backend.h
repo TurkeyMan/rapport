@@ -16,7 +16,7 @@
 namespace anyui
 {
 
-inline constexpr int kAbiVersion = 13;
+inline constexpr int kAbiVersion = 14;
 
 struct MessageSpec
 {

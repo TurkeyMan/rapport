@@ -888,6 +888,9 @@ public:
     }
     // TODO(pengit): header right-click menu (gesture on the header row).
     void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
+    // TODO(pengit): drag-reordering (GtkDragSource on the rows).
+    void onReorder(ReorderFn) override {}
+    void setReorderable(bool) override {}
 
     bool columnVisible(size_t column) const override
     {

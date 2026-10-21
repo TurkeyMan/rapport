@@ -136,6 +136,8 @@ public:
     void onSortRequested(std::function<void(size_t, SortOrder)>) override {}
     void onContextMenu(std::function<Menu(std::optional<size_t>)>) override {}
     void onHeaderMenu(std::function<Menu(size_t)>) override {}
+    void onReorder(ReorderFn) override {}
+    void setReorderable(bool) override {}
     ListModel* model = nullptr;
 };
 

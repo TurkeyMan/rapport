@@ -221,6 +221,7 @@ struct List
     std::function<void(size_t, SortOrder)> onSortRequested;
     std::function<Menu(std::optional<size_t>)> onContextMenu;
     std::function<Menu(size_t)> onHeaderMenu;
+    anyui::List::ReorderFn onReorder;
     anyui::List** bind = nullptr;
 };
 struct MenuButton
@@ -695,6 +696,11 @@ public:
     List& onContextMenu(std::function<Menu(std::optional<size_t>)> f)
     {
         s().onContextMenu = std::move(f);
+        return *this;
+    }
+    List& onReorder(anyui::List::ReorderFn f)
+    {
+        s().onReorder = std::move(f);
         return *this;
     }
     List& onHeaderMenu(std::function<Menu(size_t)> f)

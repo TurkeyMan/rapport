@@ -567,6 +567,14 @@ public:
     virtual void onContextMenu(std::function<Menu(std::optional<size_t> row)>) = 0;
     // Right-click on a column header (e.g. a menu of columns to show).
     virtual void onHeaderMenu(std::function<Menu(size_t column)>) = 0;
+
+    // Drag-reordering. With a handler set, the user can drag the selected
+    // rows to a new place. `destination` is the row they go in front of, in
+    // the order before the move (rowCount() = the end). The app moves its
+    // data and sets the new selection; return false to refuse the drop.
+    using ReorderFn = std::function<bool(const std::vector<size_t>& rows, size_t destination)>;
+    virtual void onReorder(ReorderFn) = 0;
+    virtual void setReorderable(bool) = 0;  // on once onReorder is set
 };
 
 // Draggable divider between panes.
