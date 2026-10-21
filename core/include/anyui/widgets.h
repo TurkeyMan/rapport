@@ -572,7 +572,10 @@ public:
 class Splitter : public Widget
 {
 public:
-    virtual std::vector<float> sizes() const = 0;  // for saving state
+    // One size per pane along the split, in logical pixels, for saving
+    // layout. setSizes() restores them (sizes of 0 are left alone); called
+    // before the window first shows, it replaces the stretch-based layout.
+    virtual std::vector<float> sizes() const = 0;
     virtual void setSizes(const std::vector<float>&) = 0;
 };
 

@@ -630,6 +630,8 @@ private:
     std::function<void()> changed_;
 };
 
+// A splitter of n panes is a chain of n-1 nested GtkPaneds (each marked
+// "anyui-split-chain"); sizes are one per pane, along the split.
 class WSplitter : public W<anyui::Splitter>
 {
 public:
@@ -640,17 +642,36 @@ public:
 
     std::vector<float> sizes() const override
     {
-        auto* p = GTK_PANED(w_);
         bool vertical =
             gtk_orientable_get_orientation(GTK_ORIENTABLE(w_)) == GTK_ORIENTATION_VERTICAL;
-        float total = float(vertical ? gtk_widget_get_height(w_) : gtk_widget_get_width(w_));
-        float pos = float(gtk_paned_get_position(p));
-        return {pos, total - pos};
+        std::vector<float> out;
+        GtkWidget* w = w_;
+        for (;;)
+        {
+            auto* p = GTK_PANED(w);
+            out.push_back(float(gtk_paned_get_position(p)));
+            GtkWidget* next = gtk_paned_get_end_child(p);
+            if (!next || !g_object_get_data(G_OBJECT(next), "anyui-split-chain"))
+            {
+                out.push_back(next ? float(vertical ? gtk_widget_get_height(next)
+                                                    : gtk_widget_get_width(next))
+                                   : 0);
+                return out;
+            }
+            w = next;
+        }
     }
 
     void setSizes(const std::vector<float>& s) override
     {
-        if (!s.empty()) gtk_paned_set_position(GTK_PANED(w_), int(s[0]));
+        GtkWidget* w = w_;
+        for (size_t i = 0; i + 1 < s.size() && w; ++i)
+        {
+            auto* p = GTK_PANED(w);
+            if (s[i] > 0) gtk_paned_set_position(p, int(s[i]));
+            GtkWidget* next = gtk_paned_get_end_child(p);
+            w = next && g_object_get_data(G_OBJECT(next), "anyui-split-chain") ? next : nullptr;
+        }
     }
 };
 
@@ -1498,6 +1519,7 @@ private:
         GtkWidget* paned = gtk_paned_new(gtkOrientation(s.dir));
         auto* p = GTK_PANED(paned);
         gtk_paned_set_wide_handle(p, true);
+        g_object_set_data(G_OBJECT(paned), "anyui-split-chain", GINT_TO_POINTER(1));
         gtk_paned_set_start_child(p, first);
         gtk_paned_set_end_child(p, panes(s, from + 1));
         gtk_paned_set_resize_start_child(p, !anyStretch || s.panes[from].common.stretch > 0);

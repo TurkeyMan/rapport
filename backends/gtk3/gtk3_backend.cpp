@@ -1047,6 +1047,8 @@ private:
     std::function<void()> changed_;
 };
 
+// A splitter of n panes is a chain of n-1 nested GtkPaneds (each marked
+// "anyui-split-chain"); sizes are one per pane, along the split.
 class WSplitter : public W<anyui::Splitter>
 {
 public:
@@ -1059,15 +1061,39 @@ public:
     {
         bool vertical =
             gtk_orientable_get_orientation(GTK_ORIENTABLE(w_)) == GTK_ORIENTATION_VERTICAL;
-        float total = float(vertical ? gtk_widget_get_allocated_height(w_)
-                                     : gtk_widget_get_allocated_width(w_));
-        float pos = float(gtk_paned_get_position(GTK_PANED(w_)));
-        return {pos, total - pos};
+        auto length = [&](GtkWidget* w)
+        {
+            return float(vertical ? gtk_widget_get_allocated_height(w)
+                                  : gtk_widget_get_allocated_width(w));
+        };
+        std::vector<float> out;
+        GtkWidget* w = w_;
+        for (;;)
+        {
+            auto* p = GTK_PANED(w);
+            out.push_back(float(gtk_paned_get_position(p)));
+            GtkWidget* next = gtk_paned_get_child2(p);
+            if (!next || !g_object_get_data(G_OBJECT(next), "anyui-split-chain"))
+            {
+                out.push_back(next ? length(next) : 0);
+                return out;
+            }
+            w = next;
+        }
     }
 
+    // Overrides the first layout from stretch factors.
     void setSizes(const std::vector<float>& s) override
     {
-        if (!s.empty()) gtk_paned_set_position(GTK_PANED(w_), int(s[0]));
+        g_object_set_data(G_OBJECT(w_), "anyui-user-sized", GINT_TO_POINTER(1));
+        GtkWidget* w = w_;
+        for (size_t i = 0; i + 1 < s.size() && w; ++i)
+        {
+            auto* p = GTK_PANED(w);
+            if (s[i] > 0) gtk_paned_set_position(p, int(s[i]));
+            GtkWidget* next = gtk_paned_get_child2(p);
+            w = next && g_object_get_data(G_OBJECT(next), "anyui-split-chain") ? next : nullptr;
+        }
     }
 };
 
@@ -2338,7 +2364,9 @@ private:
                                                 auto* top = static_cast<GtkWidget*>(t);
                                                 auto* split = static_cast<Split*>(g_object_get_data(
                                                     G_OBJECT(top), "anyui-initial-split"));
-                                                if (split) apply(*split, top);
+                                                if (split && !g_object_get_data(G_OBJECT(top),
+                                                                                "anyui-user-sized"))
+                                                    apply(*split, top);
                                                 return G_SOURCE_REMOVE;
                                             },
                                             top, g_object_unref);
@@ -2392,6 +2420,7 @@ private:
         GtkWidget* paned = gtk_paned_new(gtkOrientation(s.dir));
         auto* p = GTK_PANED(paned);
         gtk_paned_set_wide_handle(p, true);
+        g_object_set_data(G_OBJECT(paned), "anyui-split-chain", GINT_TO_POINTER(1));
         gtk_paned_pack1(p, first, !anyStretch || s.panes[from].common.stretch > 0, false);
         gtk_paned_pack2(p, panes(s, from + 1), true, false);
         return paned;
