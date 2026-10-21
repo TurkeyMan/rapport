@@ -2241,8 +2241,101 @@ private:
     {
         if (s.panes.empty()) return gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
         GtkWidget* paned = panes(s, 0);
-        if (GTK_IS_PANED(paned)) add<WSplitter>(n, paned);
+        if (GTK_IS_PANED(paned))
+        {
+            add<WSplitter>(n, paned);
+            initialSplit(s, paned);
+        }
         return paned;
+    }
+
+    // GtkPaned's first split follows natural sizes, which mean little for
+    // lists and text views. On the first allocation, panes without stretch
+    // get their natural size and the rest is shared by stretch factor.
+    static void initialSplit(const spec::Splitter& s, GtkWidget* top)
+    {
+        struct Split
+        {
+            bool vertical;
+            std::vector<GtkPaned*> paneds;
+            std::vector<GtkWidget*> panes;
+            std::vector<int> stretch;
+            bool scheduled = false;
+        };
+        auto* split = new Split{s.dir == Orientation::Vertical, {}, {}, {}};
+        GtkWidget* w = top;
+        for (size_t i = 0; i + 1 < s.panes.size(); ++i)
+        {
+            auto* p = GTK_PANED(w);
+            split->paneds.push_back(p);
+            split->panes.push_back(gtk_paned_get_child1(p));
+            w = gtk_paned_get_child2(p);
+        }
+        split->panes.push_back(w);
+        for (auto& pane : s.panes) split->stretch.push_back(pane.common.stretch);
+        if (std::ranges::all_of(split->stretch, [](int f) { return f == 0; }))
+            std::ranges::fill(split->stretch, 1);
+        g_object_set_data_full(
+            G_OBJECT(top), "anyui-initial-split", split,
+            +[](gpointer p) { delete static_cast<Split*>(p); });
+
+        g_signal_connect(top, "size-allocate",
+                         G_CALLBACK(+[](GtkWidget* top, GdkRectangle* alloc, gpointer p)
+                                    {
+                                        auto* split = static_cast<Split*>(p);
+                                        int total = split->vertical ? alloc->height : alloc->width;
+                                        if (split->scheduled || total <= 1) return;
+                                        split->scheduled = true;
+                                        // Positions are set outside the allocation pass.
+                                        g_object_ref(top);
+                                        g_idle_add_full(
+                                            G_PRIORITY_HIGH_IDLE,
+                                            +[](gpointer t) -> gboolean
+                                            {
+                                                auto* top = static_cast<GtkWidget*>(t);
+                                                auto* split = static_cast<Split*>(g_object_get_data(
+                                                    G_OBJECT(top), "anyui-initial-split"));
+                                                if (split) apply(*split, top);
+                                                return G_SOURCE_REMOVE;
+                                            },
+                                            top, g_object_unref);
+                                    }),
+                         split);
+    }
+
+    template <class Split>
+    static void apply(const Split& split, GtkWidget* top)
+    {
+        int total = split.vertical ? gtk_widget_get_allocated_height(top)
+                                   : gtk_widget_get_allocated_width(top);
+        int handle = 0;
+        gtk_widget_style_get(top, "handle-size", &handle, nullptr);
+        handle = std::max(handle, 5);  // wide handles are drawn a little larger
+
+        int fixed = 0, stretchSum = 0;
+        std::vector<int> natural(split.panes.size());
+        for (size_t i = 0; i < split.panes.size(); ++i)
+        {
+            if (split.stretch[i] > 0)
+            {
+                stretchSum += split.stretch[i];
+                continue;
+            }
+            int min = 0, nat = 0;
+            if (split.vertical)
+                gtk_widget_get_preferred_height(split.panes[i], &min, &nat);
+            else
+                gtk_widget_get_preferred_width(split.panes[i], &min, &nat);
+            natural[i] = nat;
+            fixed += nat;
+        }
+        int avail = total - fixed - handle * int(split.paneds.size());
+        if (avail <= 0 || stretchSum == 0) return;
+        for (size_t i = 0; i < split.paneds.size(); ++i)
+        {
+            int size = split.stretch[i] > 0 ? avail * split.stretch[i] / stretchSum : natural[i];
+            gtk_paned_set_position(split.paneds[i], size);
+        }
     }
 
     // GtkPaned holds two children; more panes nest to the right/bottom.
