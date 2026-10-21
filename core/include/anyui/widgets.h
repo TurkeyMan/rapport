@@ -8,6 +8,8 @@
 // handle device scale.
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -243,6 +245,34 @@ public:
     // Draws text with its top-left at `at`, clipped to the cell.
     virtual void text(PointF at, const std::string&, const TextStyle&) = 0;
     virtual SizeF measure(const std::string&, const TextStyle&) const = 0;
+};
+
+// Device-pixel snapping for crisp painting at any scale: boxes and bars on
+// whole device pixels, thin strokes centred so their edges fall on pixels.
+// Everything stays in logical pixels; only the rounding uses the scale.
+//     PixelGrid g(painter);
+//     p.rect({g.snap(x), g.snap(y), g.size(w), g.size(h)}, ...);
+//     float y = g.stroke(lineY, 1); p.line({x0, y}, {x1, y}, c, g.strokeWidth(1));
+struct PixelGrid
+{
+    float k;  // device pixels per logical pixel
+
+    explicit PixelGrid(const Painter& p)
+        : k(std::max(1.f, p.deviceScale()))
+    {
+    }
+
+    float px() const { return 1 / k; }
+    float snap(float v) const { return std::round(v * k) / k; }
+    // A length of at least one device pixel.
+    float size(float v) const { return std::max(1.f, std::round(v * k)) / k; }
+    // Where to centre a stroke of `width` near `v` so its edges fall on pixels.
+    float stroke(float v, float width) const
+    {
+        int w = std::max(1, int(std::round(width * k)));
+        return (w % 2 ? std::floor(v * k) + 0.5f : std::round(v * k)) / k;
+    }
+    float strokeWidth(float width) const { return std::max(1.f, std::round(width * k)) / k; }
 };
 
 struct CellInfo

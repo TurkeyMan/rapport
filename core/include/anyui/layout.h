@@ -189,6 +189,7 @@ struct TextView
     bool readOnly = false;
     bool monospace = false;
     bool wrap = true;
+    bool compact = false;  // the same denser font as compact lists
     std::function<void()> onChanged;
     anyui::TextView** bind = nullptr;
 };
@@ -594,6 +595,11 @@ public:
     TextView& readOnly(bool v = true)
     {
         s().readOnly = v;
+        return *this;
+    }
+    TextView& compact(bool v = true)
+    {
+        s().compact = v;
         return *this;
     }
     TextView& monospace(bool v = true)

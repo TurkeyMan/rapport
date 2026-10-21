@@ -985,6 +985,17 @@ public:
         gtk_text_view_set_wrap_mode(tv, s.wrap ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
         gtk_text_view_set_left_margin(tv, 4);
         gtk_text_view_set_right_margin(tv, 4);
+        if (s.compact)
+        {
+            std::string rule =
+                "textview { font-size: " + std::to_string(compactFont(w_).px) + "px; }";
+            GtkCssProvider* css = gtk_css_provider_new();
+            gtk_css_provider_load_from_data(css, rule.c_str(), -1, nullptr);
+            gtk_style_context_add_provider(gtk_widget_get_style_context(w_),
+                                           GTK_STYLE_PROVIDER(css),
+                                           GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+            g_object_unref(css);
+        }
         setReadOnly(s.readOnly);
         buffer_ = gtk_text_view_get_buffer(tv);
         setText(s.text);
@@ -1122,10 +1133,12 @@ public:
         {
             // Font size is inherited by the header and the cells, and by the
             // Pango layouts painted columns draw with.
+            CompactFont font = compactFont(w_);
+            compactScale_ = font.scale();
+            std::string rule = "treeview { font-size: " + std::to_string(font.px) +
+                               "px; -GtkTreeView-vertical-separator: 0; }";
             GtkCssProvider* css = gtk_css_provider_new();
-            gtk_css_provider_load_from_data(
-                css, "treeview { font-size: 92%; -GtkTreeView-vertical-separator: 0; }", -1,
-                nullptr);
+            gtk_css_provider_load_from_data(css, rule.c_str(), -1, nullptr);
             gtk_style_context_add_provider(gtk_widget_get_style_context(w_),
                                            GTK_STYLE_PROVIDER(css),
                                            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -1387,7 +1400,7 @@ private:
             auto* pr = ANYUI_PAINT_RENDERER(r);
             pr->ctx = ctx.get();
             pr->draw = &WList::paintCell;
-            pr->height = int(g_metrics.lineHeight * (compact_ ? kCompactScale : 1.f) + 0.5f);
+            pr->height = int(g_metrics.lineHeight * (compact_ ? compactScale_ : 1.f) + 0.5f);
             gtk_tree_view_column_pack_start(col, r, true);
             gtk_tree_view_column_set_cell_data_func(
                 col, r,
@@ -1543,7 +1556,7 @@ private:
     bool alive_ = true;
     bool compact_ = false;
     std::optional<std::pair<Color, Color>> soft_;  // selection background, text
-    static constexpr float kCompactScale = 0.92f;
+    float compactScale_ = 1;
 
     std::function<void()> selChanged_;
     std::function<void(size_t)> activate_;

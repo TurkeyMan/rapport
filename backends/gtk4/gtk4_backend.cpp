@@ -575,6 +575,9 @@ public:
         gtk_text_view_set_monospace(tv, s.monospace);
         gtk_text_view_set_wrap_mode(tv, s.wrap ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
         gtk_text_view_set_left_margin(tv, 4);
+        // TODO(pengit): relies on a compact list having installed the
+        // display-wide anyui-compact rule; untested without GTK 4 headers.
+        if (s.compact) gtk_widget_add_css_class(w_, "anyui-compact");
         gtk_text_view_set_right_margin(tv, 4);
         setReadOnly(s.readOnly);
         buffer_ = gtk_text_view_get_buffer(tv);
@@ -709,11 +712,13 @@ public:
             static bool installed = false;
             if (!installed)
             {
+                std::string px = std::to_string(compactFont(w_).px) + "px";
+                std::string rule =
+                    "columnview.anyui-compact, textview.anyui-compact { font-size: " + px +
+                    "; } columnview.anyui-compact row cell { padding-top: 0; "
+                    "padding-bottom: 0; }";
                 GtkCssProvider* css = gtk_css_provider_new();
-                gtk_css_provider_load_from_string(
-                    css,
-                    "columnview.anyui-compact { font-size: 92%; } "
-                    "columnview.anyui-compact row cell { padding-top: 0; padding-bottom: 0; }");
+                gtk_css_provider_load_from_string(css, rule.c_str());
                 gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
                                                            GTK_STYLE_PROVIDER(css),
                                                            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);

@@ -112,6 +112,30 @@ inline std::pair<Color, Color> softSelectionColors(GtkWidget* w)
     return {mixColors(base, accent, dark ? 0.38f : 0.24f), text};
 }
 
+// The font size for compact lists and text views: 90% of the widget's
+// font, rounded to whole pixels so glyphs sit on the pixel grid.
+struct CompactFont
+{
+    double basePx;
+    int px;
+    float scale() const { return basePx > 0 ? float(px / basePx) : 1.f; }
+};
+
+inline CompactFont compactFont(GtkWidget* w)
+{
+    const PangoFontDescription* fd =
+        pango_context_get_font_description(gtk_widget_get_pango_context(w));
+    double size = pango_font_description_get_size(fd) / double(PANGO_SCALE);
+    if (!pango_font_description_get_size_is_absolute(fd))
+    {
+        int dpi = 0;
+        g_object_get(gtk_settings_get_default(), "gtk-xft-dpi", &dpi, nullptr);
+        size = size * (dpi > 0 ? dpi / 1024.0 : 96.0) / 72.0;
+    }
+    if (size <= 0) size = 14;
+    return {size, std::max(8, int(std::lround(size * 0.9)))};
+}
+
 inline bool isDarkText(const GdkRGBA& fg)
 {
     return 0.299 * fg.red + 0.587 * fg.green + 0.114 * fg.blue > 0.5;
