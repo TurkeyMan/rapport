@@ -1,7 +1,5 @@
 #include "anyui/anyui.h"
-
-#include <dlfcn.h>
-#include <unistd.h>
+#include "anyui/sys.h"
 
 #include <algorithm>
 #include <cctype>
@@ -22,9 +20,16 @@ namespace
 
 std::string env(const char* name)
 {
-    const char* v = std::getenv(name);
-    return v ? v : "";
+    return sys::env(name).value_or("");
 }
+
+#ifdef _WIN32
+constexpr char kPathSeparator = ';';
+constexpr const char* kPluginSuffix = ".dll";
+#else
+constexpr char kPathSeparator = ':';
+constexpr const char* kPluginSuffix = ".so";
+#endif
 
 std::string lower(std::string s)
 {
@@ -58,16 +63,15 @@ bool isGtkDesktop(const std::string& d)
 
 fs::path exeDir()
 {
-    std::error_code ec;
-    auto p = fs::read_symlink("/proc/self/exe", ec);
-    return ec ? fs::path{} : p.parent_path();
+    return sys::executablePath().parent_path();
 }
 
 std::vector<fs::path> pluginDirs(const LoadOptions& opts)
 {
     std::vector<fs::path> dirs;
-    for (auto& p : opts.searchPaths) dirs.emplace_back(p);
-    for (auto& p : split(env("ANYUI_PLUGIN_PATH"), ':')) dirs.emplace_back(p);
+    for (auto& p : opts.searchPaths) dirs.push_back(sys::pathFromUtf8(p));
+    for (auto& p : split(env("ANYUI_PLUGIN_PATH"), kPathSeparator))
+        dirs.push_back(sys::pathFromUtf8(p));
     if (auto d = exeDir(); !d.empty())
     {
         dirs.push_back(d);
@@ -224,27 +228,29 @@ std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
 
     for (auto& name : det.preference)
     {
-        std::string file = "anyui_" + name + ".so";
+        std::string file = "anyui_" + name + kPluginSuffix;
         bool found = false;
         for (auto& dir : dirs)
         {
             auto path = dir / file;
-            if (!fs::exists(path)) continue;
+            std::error_code ec;
+            if (!fs::exists(path, ec)) continue;
             found = true;
 
-            // Never dlclose: toolkits register atexit handlers and TLS.
-            void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-            if (!h)
+            auto lib = sys::Library::open(path);
+            if (!lib)
             {
-                errors += "  " + name + ": " + dlerror() + "\n";
+                errors += "  " + name + ": " + lib.error() + "\n";
                 break;
             }
-            auto* create = reinterpret_cast<CreateBackendFn*>(dlsym(h, kCreateBackendSymbol));
+            auto* create = lib->function<CreateBackendFn>(kCreateBackendSymbol);
             if (!create)
             {
-                errors += "  " + name + ": " + path.string() + " is not an anyui backend\n";
+                errors += "  " + name + ": " + sys::pathToUtf8(path) + " is not an anyui backend\n";
                 break;
             }
+            // Never unload: toolkits register atexit handlers and TLS.
+            lib->release();
             if (Backend* b = create(kAbiVersion, &argc, argv))
                 return std::unique_ptr<Ui>(new Ui(std::unique_ptr<Backend>(b)));
             errors += "  " + name + ": failed to start (ABI mismatch or no display)\n";

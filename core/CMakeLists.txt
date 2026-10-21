@@ -13,9 +13,12 @@ target_include_directories(anyui_headers INTERFACE
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_features(anyui_headers INTERFACE cxx_std_23)
 
-add_library(anyui SHARED src/anyui.cpp)
+add_library(anyui SHARED src/anyui.cpp src/sys.cpp)
 add_library(anyui::anyui ALIAS anyui)
 target_link_libraries(anyui PUBLIC anyui_headers PRIVATE ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_link_libraries(anyui PRIVATE shell32 ole32)
+endif()
 target_compile_definitions(anyui PRIVATE
     ANYUI_INSTALL_PLUGIN_DIR="${CMAKE_INSTALL_FULL_LIBDIR}/anyui")
 set_target_properties(anyui PROPERTIES
