@@ -2835,6 +2835,14 @@ private:
                 {
                     ListView_Scroll(h, 0, rows * rowPx);
                     a.pending -= rows * rowPx;
+                    // The scroll moved the painted anchor with the rows:
+                    // repaint where it was carried to and where it stays.
+                    const int r = int(std::ceil(13 * s));
+                    for (int dy : {0, -rows * rowPx})
+                    {
+                        RECT ring{a.anchor.x - r, a.anchor.y + dy - r, a.anchor.x + r, a.anchor.y + dy + r};
+                        InvalidateRect(h, &ring, FALSE);
+                    }
                 }
             }
             return 0;
