@@ -1954,6 +1954,35 @@ public:
     void close() override { gtk_widget_set_visible(win_, false); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
+    {
+        const bool first = !on_files_dropped_;
+        on_files_dropped_ = std::move(f);
+        if (!first || !on_files_dropped_) return;
+        GtkDropTarget* target = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
+        connect(
+            target, "drop",
+            +[](GtkDropTarget*, const GValue* value, double, double, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<window_impl*>(p);
+                if (!G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST)) return false;
+                std::vector<std::string> paths;
+                GSList* files =
+                    gdk_file_list_get_files(static_cast<GdkFileList*>(g_value_get_boxed(value)));
+                for (GSList* f = files; f; f = f->next)
+                    if (char* path = g_file_get_path(G_FILE(f->data)))
+                    {
+                        paths.emplace_back(path);
+                        g_free(path);
+                    }
+                g_slist_free(files);
+                if (paths.empty() || !self->on_files_dropped_) return false;
+                self->on_files_dropped_(paths);
+                return true;
+            },
+            this);
+        gtk_widget_add_controller(win_, GTK_EVENT_CONTROLLER(target));
+    }
 
     // TODO(tortilla): drawn window icons.
     size_f size() const override
@@ -2130,6 +2159,7 @@ private:
     bool finished_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void(const std::vector<std::string>&)> on_files_dropped_;
 };
 
 // ---------------------------------------------------------------- builder
@@ -2801,7 +2831,21 @@ public:
     }
 
     // TODO(tortilla): a GdkTexture on the clipboard.
-    void set_clipboard_image(int, int, pixel_format, const uint8_t*, size_t) override {}
+    void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels,
+                             size_t stride) override
+    {
+        GdkDisplay* d = gdk_display_get_default();
+        if (!d || w <= 0 || h <= 0) return;
+        // The pixels are the caller's: copied now.
+        GBytes* bytes = g_bytes_new(pixels, stride * size_t(h));
+        GdkTexture* texture = gdk_memory_texture_new(
+            w, h,
+            format == pixel_format::rgba8 ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_B8G8R8A8_PREMULTIPLIED,
+            bytes, stride);
+        gdk_clipboard_set_texture(gdk_display_get_clipboard(d), texture);
+        g_object_unref(texture);
+        g_bytes_unref(bytes);
+    }
 
     void set_clipboard(const std::string& s) override
     {

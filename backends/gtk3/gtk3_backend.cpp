@@ -2709,6 +2709,35 @@ public:
     void close() override { gtk_widget_hide(win_); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
+    {
+        const bool first = !on_files_dropped_;
+        on_files_dropped_ = std::move(f);
+        if (!first || !on_files_dropped_) return;
+        // A drop on any widget without a target of its own lands here.
+        static GtkTargetEntry uris{const_cast<gchar*>("text/uri-list"), 0, 0};
+        gtk_drag_dest_set(win_, GTK_DEST_DEFAULT_ALL, &uris, 1, GDK_ACTION_COPY);
+        connect(
+            win_, "drag-data-received",
+            +[](GtkWidget*, GdkDragContext*, gint, gint, GtkSelectionData* data, guint, guint,
+                gpointer p)
+            {
+                auto* self = static_cast<window_impl*>(p);
+                std::vector<std::string> paths;
+                if (gchar** list = gtk_selection_data_get_uris(data))
+                {
+                    for (gchar** u = list; *u; ++u)
+                        if (gchar* path = g_filename_from_uri(*u, nullptr, nullptr))
+                        {
+                            paths.emplace_back(path);
+                            g_free(path);
+                        }
+                    g_strfreev(list);
+                }
+                if (!paths.empty() && self->on_files_dropped_) self->on_files_dropped_(paths);
+            },
+            this);
+    }
 
     size_f size() const override
     {
@@ -2968,6 +2997,7 @@ private:
     bool finished_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     std::function<void(bool)> on_fullscreen_;
     std::function<bool(const key_event&)> on_key_;
     bool fullscreen_ = false;

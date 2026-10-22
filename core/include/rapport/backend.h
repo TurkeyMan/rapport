@@ -16,7 +16,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 25;
+inline constexpr int abi_version = 26;
 
 struct message_spec
 {

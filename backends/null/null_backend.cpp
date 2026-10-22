@@ -259,6 +259,7 @@ public:
     void close() override {}
     void on_finished(std::function<void(dialog_role)>) override {}
     void on_close_request(std::function<bool()>) override {}
+    void on_files_dropped(std::function<void(const std::vector<std::string>&)>) override {}
 
     size_f size() const override { return size_; }
     void resize(size_f s) override { size_ = s; }

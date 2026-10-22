@@ -819,6 +819,10 @@ public:
     virtual void on_finished(std::function<void(dialog_role)>) = 0;
     // Return false to veto closing (e.g. unsaved commit message).
     virtual void on_close_request(std::function<bool()>) = 0;
+    // Files dragged in (from a file manager) and dropped anywhere on the
+    // window, as local paths in UTF-8, in the order given. Setting it is
+    // what makes the window accept them; other drags are refused.
+    virtual void on_files_dropped(std::function<void(const std::vector<std::string>&)>) = 0;
 };
 
 }  // namespace rap

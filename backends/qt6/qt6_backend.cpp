@@ -37,6 +37,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QMimeDatabase>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -63,6 +64,8 @@
 #include <QPointingDevice>
 #include <QMouseEvent>
 #include <QDoubleSpinBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QColorDialog>
 
 #include <algorithm>
@@ -2697,6 +2700,8 @@ public:
 protected:
     void closeEvent(QCloseEvent* e) override;
     void changeEvent(QEvent* e) override;
+    void dragEnterEvent(QDragEnterEvent* e) override;
+    void dropEvent(QDropEvent* e) override;
 };
 
 // Keys reach the window's on_key before the focused widget: an application
@@ -2787,6 +2792,17 @@ public:
     void close() override { frame_->hide(); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    // Drops on any widget that doesn't take them itself reach the frame.
+    void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
+    {
+        on_files_dropped_ = std::move(f);
+        frame_->setAcceptDrops(bool(on_files_dropped_));
+    }
+    bool takes_files() const { return bool(on_files_dropped_); }
+    void files_dropped(const std::vector<std::string>& paths)
+    {
+        if (on_files_dropped_) on_files_dropped_(paths);
+    }
 
     size_f size() const override { return {float(frame_->width()), float(frame_->height())}; }
     void resize(size_f s) override
@@ -3008,6 +3024,7 @@ private:
     bool was_maximized_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     std::function<void(bool)> on_fullscreen_;
     std::function<bool(const key_event&)> on_key_;
 };
@@ -3021,6 +3038,30 @@ void frame_widget::closeEvent(QCloseEvent* e)
 {
     e->ignore();
     if (owner) owner->close_requested();
+}
+
+// The local files a drag carries (none for other drags).
+std::vector<std::string> local_files(const QMimeData* m)
+{
+    std::vector<std::string> paths;
+    if (m)
+        for (const QUrl& url : m->urls())
+            if (url.isLocalFile()) paths.push_back(url.toLocalFile().toStdString());
+    return paths;
+}
+
+void frame_widget::dragEnterEvent(QDragEnterEvent* e)
+{
+    if (owner && owner->takes_files() && !local_files(e->mimeData()).empty())
+        e->acceptProposedAction();
+}
+
+void frame_widget::dropEvent(QDropEvent* e)
+{
+    const std::vector<std::string> paths = local_files(e->mimeData());
+    if (!owner || paths.empty()) return;
+    e->acceptProposedAction();
+    owner->files_dropped(paths);
 }
 
 void frame_widget::changeEvent(QEvent* e)

@@ -4191,6 +4191,12 @@ public:
     void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    // Drops on any child control reach the top level as WM_DROPFILES.
+    void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
+    {
+        on_files_dropped_ = std::move(f);
+        DragAcceptFiles(hwnd_, bool(on_files_dropped_));
+    }
 
     // From the message loop, before the focused control sees the key.
     bool window_key(const MSG& m)
@@ -4333,6 +4339,21 @@ private:
                 return 0;
             }
             case WM_CLOSE: self->close_requested(); return 0;
+            case WM_DROPFILES:
+            {
+                auto* drop = reinterpret_cast<HDROP>(wp);
+                std::vector<std::string> paths;
+                const UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+                for (UINT i = 0; i < n; ++i)
+                {
+                    std::wstring path(DragQueryFileW(drop, i, nullptr, 0), L'\0');
+                    DragQueryFileW(drop, i, path.data(), UINT(path.size() + 1));
+                    paths.push_back(narrow(path));
+                }
+                DragFinish(drop);
+                if (!paths.empty() && self->on_files_dropped_) self->on_files_dropped_(paths);
+                return 0;
+            }
             // Keyboard focus belongs on a control: the one that had it when
             // the window was last left (or asked for before it showed), else
             // the first Tab stop (a dialog's first field).
@@ -4422,6 +4443,7 @@ private:
     std::function<bool(const key_event&)> on_key_;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void(const std::vector<std::string>&)> on_files_dropped_;
 };
 
 // ---------------------------------------------------------------- builder
