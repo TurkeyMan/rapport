@@ -314,13 +314,121 @@ private:
 
 // TODO(pengit): build the menu as a GtkPopoverMenu (like WList's context
 // menu) and show the pushed state; untested without GTK 4 headers.
+// An anyui::Menu as a GMenu model plus the actions its items name, for
+// popover menus. Built afresh each time a menu opens (so it shows the app's
+// state then); the actions call into the Menu kept here, which lives until
+// the next build. Separators become GMenu sections.
+class MenuActions
+{
+public:
+    MenuActions(GtkWidget* owner, std::string prefix)
+        : prefix_(std::move(prefix))
+        , group_(g_simple_action_group_new())
+    {
+        gtk_widget_insert_action_group(owner, prefix_.c_str(), G_ACTION_GROUP(group_));
+    }
+    ~MenuActions() { g_object_unref(group_); }
+    MenuActions(const MenuActions&) = delete;
+    MenuActions& operator=(const MenuActions&) = delete;
+
+    // A new model for `menu`; the caller owns the reference.
+    GMenu* build(Menu menu)
+    {
+        for (auto& name : names_) g_action_map_remove_action(G_ACTION_MAP(group_), name.c_str());
+        names_.clear();
+        menu_ = std::move(menu);
+        return model(menu_);
+    }
+
+private:
+    GMenu* model(const Menu& items)
+    {
+        GMenu* top = g_menu_new();
+        GMenu* section = g_menu_new();
+        auto flush = [&]
+        {
+            if (g_menu_model_get_n_items(G_MENU_MODEL(section)) > 0)
+                g_menu_append_section(top, nullptr, G_MENU_MODEL(section));
+            g_object_unref(section);
+            section = g_menu_new();
+        };
+        for (const MenuItem& item : items)
+        {
+            if (item.isSeparator())
+            {
+                flush();
+                continue;
+            }
+            if (!item.children.empty())
+            {
+                GMenu* sub = model(item.children);
+                g_menu_append_submenu(section, item.label.c_str(), G_MENU_MODEL(sub));
+                g_object_unref(sub);
+                continue;
+            }
+            std::string name = "i" + std::to_string(names_.size());
+            names_.push_back(name);
+            // Checkable items (radio ones too) show a check from a boolean
+            // state.
+            GSimpleAction* action =
+                item.checked ? g_simple_action_new_stateful(name.c_str(), nullptr, g_variant_new_boolean(*item.checked))
+                             : g_simple_action_new(name.c_str(), nullptr);
+            g_simple_action_set_enabled(action, item.enabled && item.action);
+            g_signal_connect(action, "activate",
+                             G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer p)
+                                        {
+                                            auto* mi = static_cast<const MenuItem*>(p);
+                                            if (mi->action) mi->action();
+                                        }),
+                             const_cast<MenuItem*>(&item));
+            g_action_map_add_action(G_ACTION_MAP(group_), G_ACTION(action));
+            g_object_unref(action);
+            GMenuItem* mi = g_menu_item_new(item.label.c_str(), (prefix_ + "." + name).c_str());
+            if (!item.shortcut.empty()) g_menu_item_set_attribute(mi, "accel", "s", gtkAccel(item.shortcut).c_str());
+            g_menu_append_item(section, mi);
+            g_object_unref(mi);
+        }
+        flush();
+        g_object_unref(section);
+        return top;
+    }
+
+    std::string prefix_;
+    GSimpleActionGroup* group_;
+    std::vector<std::string> names_;
+    Menu menu_;
+};
+
+// A GtkMenuButton whose menu is built by `fn` each time it opens.
+void attachMenu(GtkMenuButton* button, MenuActions* actions, std::function<Menu()>* fn)
+{
+    struct Ctx
+    {
+        MenuActions* actions;
+        std::function<Menu()>* fn;
+    };
+    gtk_menu_button_set_create_popup_func(
+        button,
+        +[](GtkMenuButton* b, gpointer p)
+        {
+            auto* c = static_cast<Ctx*>(p);
+            GMenu* model = c->actions->build(*c->fn ? (*c->fn)() : Menu{});
+            gtk_menu_button_set_menu_model(b, G_MENU_MODEL(model));
+            g_object_unref(model);
+        },
+        new Ctx{actions, fn}, +[](gpointer p) { delete static_cast<Ctx*>(p); });
+}
+
 class WMenuButton : public W<anyui::MenuButton>
 {
 public:
     explicit WMenuButton(const spec::MenuButton& s)
         : W(gtk_menu_button_new())
+        , actions_(w_, "mb")
     {
+        gtk_menu_button_set_use_underline(GTK_MENU_BUTTON(w_), true);  // "_View": V is the access key
         setText(s.text);
+        attachMenu(GTK_MENU_BUTTON(w_), &actions_, &menuFn_);
     }
 
     void setText(const std::string& t) override
@@ -333,6 +441,7 @@ public:
 
 private:
     std::function<Menu()> menuFn_;
+    MenuActions actions_;
 };
 
 class WProgressBar : public W<anyui::ProgressBar>
@@ -868,15 +977,22 @@ public:
         }
         if (s.softSelection)
         {
-            // TODO(pengit): untested without GTK 4 headers; painted cells
-            // still see the solid highlight colours.
+            // The colours computed as gtk3 does, written into the rule:
+            // @accent_bg_color isn't defined by every GTK 4 theme, and an
+            // unresolved colour left selected rows with no background.
+            soft_ = softSelectionColors(w_);
             static bool installed = false;
             if (!installed)
             {
+                auto rgb = [](Color c)
+                {
+                    return "rgb(" + std::to_string(c.r) + "," + std::to_string(c.g) + "," +
+                           std::to_string(c.b) + ")";
+                };
+                std::string rule = "columnview.anyui-soft row:selected, columnview.anyui-soft row:selected:focus { "
+                                   "background-color: " + rgb(soft_->first) + "; color: " + rgb(soft_->second) + "; }";
                 GtkCssProvider* css = gtk_css_provider_new();
-                gtk_css_provider_load_from_string(
-                    css, "columnview.anyui-soft row:selected { "
-                         "background-color: alpha(@accent_bg_color, 0.25); color: inherit; }");
+                gtk_css_provider_load_from_string(css, rule.c_str());
                 gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
                                                            GTK_STYLE_PROVIDER(css),
                                                            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -890,14 +1006,16 @@ public:
 
         for (size_t i = 0; i < s.columns.size(); ++i) addColumn(s.columns[i], i);
 
-        actions_ = g_simple_action_group_new();
-        gtk_widget_insert_action_group(w_, "ctx", G_ACTION_GROUP(actions_));
+        ctxMenu_ = std::make_unique<MenuActions>(w_, "ctx");
 
         connect(
             sel_, "selection-changed",
             +[](GtkSelectionModel*, guint, guint, gpointer p)
             {
                 auto* self = static_cast<WList*>(p);
+                // Painted cells draw with the selection's colours.
+                for (auto [li, ctx] : self->bound_)
+                    if (ctx->painted) gtk_widget_queue_draw(gtk_list_item_get_child(li));
                 if (self->selChanged_) self->selChanged_();
             },
             this);
@@ -920,7 +1038,6 @@ public:
     {
         if (model_) model_->removeObserver(this);
         g_object_unref(sel_);
-        g_object_unref(actions_);
     }
 
     void setModel(ListModel* m) override
@@ -1026,9 +1143,16 @@ public:
         rows_->count = model_ ? guint(model_->rowCount()) : 0;
         g_list_model_items_changed(G_LIST_MODEL(rows_), 0, old, rows_->count);
     }
+    // Changed rows are refreshed in the cells showing them. Reporting them
+    // to GTK as removed and re-added (items-changed) dropped their
+    // selection and rebuilt their widgets, on every label or icon update.
     void rowsChanged(size_t first, size_t n) override
     {
-        g_list_model_items_changed(G_LIST_MODEL(rows_), guint(first), guint(n), guint(n));
+        for (auto [li, ctx] : bound_)
+        {
+            const size_t row = rowOf(gtk_list_item_get_item(li));
+            if (row >= first && row < first + n) bindCell(li, *ctx);
+        }
     }
     void rowsInserted(size_t first, size_t n) override
     {
@@ -1075,6 +1199,11 @@ private:
             factory, "bind",
             +[](GtkSignalListItemFactory*, GtkListItem* li, gpointer p)
             { static_cast<ColumnCtx*>(p)->list->bindCell(li, *static_cast<ColumnCtx*>(p)); },
+            ctx.get());
+        connect(
+            factory, "unbind",
+            +[](GtkSignalListItemFactory*, GtkListItem* li, gpointer p)
+            { static_cast<ColumnCtx*>(p)->list->bound_.erase(li); },
             ctx.get());
 
         GtkColumnViewColumn* col = gtk_column_view_column_new(c.title.c_str(), factory);
@@ -1141,6 +1270,7 @@ private:
     void bindCell(GtkListItem* li, ColumnCtx& ctx)
     {
         if (!model_) return;
+        bound_[li] = &ctx;
         size_t row = rowOf(gtk_list_item_get_item(li));
         GtkWidget* child = gtk_list_item_get_child(li);
         // Stored +1 so 0 means "not bound".
@@ -1189,13 +1319,10 @@ private:
             gtk_selection_model_select_item(sel_, guint(*row), true);
         if (!contextMenu_) return;
 
-        menu_ = contextMenu_(row);
-        if (menu_.empty()) return;
+        Menu menu = contextMenu_(row);
+        if (menu.empty()) return;
 
-        for (auto& name : actionNames_)
-            g_action_map_remove_action(G_ACTION_MAP(actions_), name.c_str());
-        actionNames_.clear();
-        GMenu* model = buildMenu(menu_);
+        GMenu* model = ctxMenu_->build(std::move(menu));
 
         graphene_point_t in = GRAPHENE_POINT_INIT(float(x), float(y)), out;
         if (!gtk_widget_compute_point(cell, w_, &in, &out)) out = in;
@@ -1212,71 +1339,15 @@ private:
         gtk_popover_popup(GTK_POPOVER(popover_));
     }
 
-    // Separators become GMenu sections.
-    GMenu* buildMenu(const Menu& items)
-    {
-        GMenu* top = g_menu_new();
-        GMenu* section = g_menu_new();
-        auto flush = [&]
-        {
-            if (g_menu_model_get_n_items(G_MENU_MODEL(section)) > 0)
-                g_menu_append_section(top, nullptr, G_MENU_MODEL(section));
-            g_object_unref(section);
-            section = g_menu_new();
-        };
-
-        for (const MenuItem& item : items)
-        {
-            if (item.isSeparator())
-            {
-                flush();
-                continue;
-            }
-            if (!item.children.empty())
-            {
-                GMenu* sub = buildMenu(item.children);
-                g_menu_append_submenu(section, item.label.c_str(), G_MENU_MODEL(sub));
-                g_object_unref(sub);
-                continue;
-            }
-
-            std::string name = "i" + std::to_string(actionNames_.size());
-            actionNames_.push_back(name);
-            GSimpleAction* action =
-                item.checked ? g_simple_action_new_stateful(name.c_str(), nullptr,
-                                                            g_variant_new_boolean(*item.checked))
-                             : g_simple_action_new(name.c_str(), nullptr);
-            g_simple_action_set_enabled(action, item.enabled && item.action);
-            g_signal_connect(action, "activate",
-                             G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer p)
-                                        {
-                                            auto* mi = static_cast<const MenuItem*>(p);
-                                            if (mi->action) mi->action();
-                                        }),
-                             const_cast<MenuItem*>(&item));
-            g_action_map_add_action(G_ACTION_MAP(actions_), G_ACTION(action));
-            g_object_unref(action);
-
-            GMenuItem* mi = g_menu_item_new(item.label.c_str(), ("ctx." + name).c_str());
-            if (!item.shortcut.empty())
-                g_menu_item_set_attribute(mi, "accel", "s", gtkAccel(item.shortcut).c_str());
-            g_menu_append_item(section, mi);
-            g_object_unref(mi);
-        }
-        flush();
-        g_object_unref(section);
-        return top;
-    }
-
     AnyuiRows* rows_ = nullptr;  // owned by sel_
     GtkSelectionModel* sel_ = nullptr;
-    GSimpleActionGroup* actions_ = nullptr;
+    std::unordered_map<GtkListItem*, ColumnCtx*> bound_;  // cells showing a row now
+    std::optional<std::pair<Color, Color>> soft_;  // selection background, text
+    std::unique_ptr<MenuActions> ctxMenu_;
     GtkWidget* popover_ = nullptr;
     ListModel* model_ = nullptr;
     std::vector<GtkColumnViewColumn*> cols_;
     std::vector<std::unique_ptr<ColumnCtx>> ctxs_;
-    std::vector<std::string> actionNames_;
-    Menu menu_;  // owns the callbacks the popover's actions point at
     bool suppressSort_ = false;
     bool alive_ = true;
 
@@ -1524,19 +1595,60 @@ public:
         if (!icon.name.empty()) gtk_window_set_icon_name(GTK_WINDOW(win_), icon.name.c_str());
     }
     void onKey(std::function<bool(const KeyEvent&)>) override {}
-    void setMenuBarVisible(bool) override {}  // TODO(pengit): with the menu bar
+    void setMenuBarVisible(bool on) override
+    {
+        menuBarWanted_ = on;
+        if (menuBar_) gtk_widget_set_visible(menuBar_, on && !gtk_window_is_fullscreen(GTK_WINDOW(win_)));
+    }
 
-    // TODO(pengit): the menu bar (a row of flat GtkMenuButtons whose
-    // create-popup func builds the GMenu model each time one opens).
-    void setContent(GtkWidget* content, bool margins = true)
+    // The menu bar: a row of flat menu buttons, each building its menu when
+    // it opens. (GtkPopoverMenuBar wants its whole model up front.)
+    GtkWidget* buildMenuBar(const std::vector<MenuBarItem>& menus)
+    {
+        menuBar_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_add_css_class(menuBar_, "menubar");
+        for (const MenuBarItem& m : menus)
+        {
+            auto bar = std::make_unique<BarMenu>();
+            bar->fn = m.menu;
+            GtkWidget* button = gtk_menu_button_new();
+            gtk_menu_button_set_label(GTK_MENU_BUTTON(button), m.title.c_str());
+            gtk_menu_button_set_use_underline(GTK_MENU_BUTTON(button), true);
+            gtk_menu_button_set_has_frame(GTK_MENU_BUTTON(button), false);
+            gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(button), false);
+            bar->actions = std::make_unique<MenuActions>(button, "bar");
+            attachMenu(GTK_MENU_BUTTON(button), bar->actions.get(), &bar->fn);
+            gtk_box_append(GTK_BOX(menuBar_), button);
+            bars_.push_back(std::move(bar));
+        }
+        return menuBar_;
+    }
+
+    void setContent(GtkWidget* content, bool margins, const std::vector<MenuBarItem>& menus)
     {
         int margin = !margins ? 0 : dialog_ ? 12 : 6;
         gtk_widget_set_margin_start(content, margin);
         gtk_widget_set_margin_end(content, margin);
         gtk_widget_set_margin_top(content, margin);
         gtk_widget_set_margin_bottom(content, margin);
-        gtk_window_set_child(GTK_WINDOW(win_), content);
+        if (menus.empty()) return gtk_window_set_child(GTK_WINDOW(win_), content);
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        gtk_box_append(GTK_BOX(box), buildMenuBar(menus));
+        gtk_widget_set_vexpand(content, true);
+        gtk_box_append(GTK_BOX(box), content);
+        gtk_window_set_child(GTK_WINDOW(win_), box);
+        connect(win_, "notify::fullscreened", +[](GObject*, GParamSpec*, gpointer p)
+                { auto* w = static_cast<WWindow*>(p); w->setMenuBarVisible(w->menuBarWanted_); }, this);
     }
+
+    struct BarMenu
+    {
+        std::function<Menu()> fn;
+        std::unique_ptr<MenuActions> actions;
+    };
+    GtkWidget* menuBar_ = nullptr;
+    std::vector<std::unique_ptr<BarMenu>> bars_;
+    bool menuBarWanted_ = true;
 
     void addRoleButton(GtkWidget* button, DialogRole role)
     {
@@ -1981,7 +2093,7 @@ public:
     {
         auto win = std::make_unique<WWindow>(spec, static_cast<WWindow*>(parent));
         win->setContent(Builder(*win, sink).build(spec.content, Orientation::Vertical),
-                        spec.margins);
+                        spec.margins, spec.menuBar);
         return win;
     }
 
