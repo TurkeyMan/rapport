@@ -358,8 +358,9 @@ Process::start(std::string_view program, std::span<const std::string> args, cons
     HANDLE read = nullptr, write = nullptr;
     if (!CreatePipe(&read, &write, &inherit, 0)) return std::unexpected(lastError("pipe"));
     SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0);
-    HANDLE null = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit,
-                              OPEN_EXISTING, 0, nullptr);
+    HANDLE null =
+        CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    &inherit, OPEN_EXISTING, 0, nullptr);
 
     std::wstring cmd;
     appendArg(cmd, widen(program));
@@ -385,7 +386,7 @@ Process::start(std::string_view program, std::span<const std::string> args, cons
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     si.StartupInfo.hStdInput = null;
     si.StartupInfo.hStdOutput = write;
-    si.StartupInfo.hStdError = write;
+    si.StartupInfo.hStdError = opt.mergeStderr || null == INVALID_HANDLE_VALUE ? write : null;
     si.lpAttributeList = listed ? attrs : nullptr;
     PROCESS_INFORMATION pi{};
     // Suspended until it is in the job, so nothing it starts escapes. With
@@ -517,7 +518,10 @@ Process::start(std::string_view program, std::span<const std::string> args, cons
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
     posix_spawn_file_actions_adddup2(&fa, fds[1], 1);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], 2);
+    if (opt.mergeStderr)
+        posix_spawn_file_actions_adddup2(&fa, fds[1], 2);
+    else
+        posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
     if (!opt.dir.empty()) posix_spawn_file_actions_addchdir_np(&fa, opt.dir.c_str());
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);

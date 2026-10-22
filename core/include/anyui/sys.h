@@ -97,21 +97,28 @@ bool libraryInstalled(std::string_view name);
 
 // ---------------------------------------------------------------- processes
 
+// How Process starts a child.
+struct ProcessOptions
+{
+    std::filesystem::path dir;  // working directory; empty: the caller's
+    // Set in the child's environment, replacing any inherited value.
+    std::vector<std::pair<std::string, std::string>> env;
+    // false: stderr goes to the null device, so warnings can't mix into
+    // output that is parsed.
+    bool mergeStderr = true;
+};
+
 // A child process with stdin from the null device and stdout and stderr
-// merged into one pipe (no console window on Windows). read() and wait()
-// belong to one thread; kill() may be called from any thread at any time,
-// before or after the process exits, and also ends anything the child
-// started (its process group; a job object on Windows). Destroying a
-// process that wasn't waited for kills it and reaps it.
+// merged into one pipe, or stderr discarded (no console window on
+// Windows). read() and wait() belong to one thread; kill() may be called
+// from any thread at any time, before or after the process exits, and also
+// ends anything the child started (its process group; a job object on
+// Windows). Destroying a process that wasn't waited for kills it and reaps
+// it.
 class Process
 {
 public:
-    struct Options
-    {
-        std::filesystem::path dir;  // working directory; empty: the caller's
-        // Set in the child's environment, replacing any inherited value.
-        std::vector<std::pair<std::string, std::string>> env;
-    };
+    using Options = ProcessOptions;
 
     struct Result
     {
