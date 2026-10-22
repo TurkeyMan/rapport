@@ -989,8 +989,17 @@ public:
                     return "rgb(" + std::to_string(c.r) + "," + std::to_string(c.g) + "," +
                            std::to_string(c.b) + ")";
                 };
-                std::string rule = "columnview.anyui-soft row:selected, columnview.anyui-soft row:selected:focus { "
-                                   "background-color: " + rgb(soft_->first) + "; color: " + rgb(soft_->second) + "; }";
+                // The row under the pointer gets a light tint, as on gtk3 and
+                // win32; GTK 4 already gives rows :hover.
+                Color base = themeColor(w_, ThemeColor::Base), accent = themeColor(w_, ThemeColor::Accent);
+                const bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
+                const Color hover = mixColors(base, accent, dark ? 0.16f : 0.09f);
+                std::string rule = "columnview.anyui-soft row:hover { background-color: " + rgb(hover) +
+                                   "; } columnview.anyui-soft row:selected, columnview.anyui-soft row:selected:focus, "
+                                   "columnview.anyui-soft row:selected:hover { background-color: " +
+                                   rgb(soft_->first) + "; color: " + rgb(soft_->second) +
+                                   "; } columnview row.anyui-drop { box-shadow: inset 0 0 0 2px " +
+                                   rgb(themeColor(w_, ThemeColor::Highlight)) + "; }";
                 GtkCssProvider* css = gtk_css_provider_new();
                 gtk_css_provider_load_from_string(css, rule.c_str());
                 gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
@@ -1125,7 +1134,40 @@ public:
     // TODO(pengit): drag-reordering (GtkDragSource on the rows).
     void onReorder(ReorderFn) override {}
     void setReorderable(bool) override {}
-    void onCellDrag(CellDrag) override {}  // TODO(pengit): a GtkGestureDrag on the column view
+    // CellDrag: a drag gesture on the column view. The cell under a point
+    // is found by picking the widget there; the target row is framed with
+    // a CSS class. (No floating label on gtk4 yet: the cursor and the frame
+    // show the drag.)
+    void onCellDrag(CellDrag d) override
+    {
+        if (!cellDrag_.begin)
+        {
+            GtkGesture* drag = gtk_gesture_drag_new();
+            gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), GDK_BUTTON_PRIMARY);
+            g_signal_connect(drag, "drag-begin", G_CALLBACK(+[](GtkGestureDrag* g, double x, double y, gpointer p)
+                                                            { static_cast<WList*>(p)->cellDragBegin(g, x, y); }),
+                             this);
+            g_signal_connect(drag, "drag-update", G_CALLBACK(+[](GtkGestureDrag* g, double dx, double dy, gpointer p)
+                                                             { static_cast<WList*>(p)->cellDragUpdate(g, dx, dy); }),
+                             this);
+            g_signal_connect(drag, "drag-end", G_CALLBACK(+[](GtkGestureDrag*, double, double, gpointer p)
+                                                          { static_cast<WList*>(p)->cellDragEnd(true); }),
+                             this);
+            gtk_widget_add_controller(w_, GTK_EVENT_CONTROLLER(drag));
+            GtkEventController* keys = gtk_event_controller_key_new();
+            g_signal_connect(keys, "key-pressed",
+                             G_CALLBACK(+[](GtkEventControllerKey*, guint key, guint, GdkModifierType, gpointer p) -> gboolean
+                                        {
+                                            auto* self = static_cast<WList*>(p);
+                                            if (key != GDK_KEY_Escape || !self->cell_.dragging) return false;
+                                            self->cellDragEnd(false);
+                                            return true;
+                                        }),
+                             this);
+            gtk_widget_add_controller(w_, keys);
+        }
+        cellDrag_ = std::move(d);
+    }
 
     bool columnVisible(size_t column) const override
     {
@@ -1180,6 +1222,91 @@ private:
         size_t column;
         bool painted;
     };
+
+    // The cell widget at a point of the column view, its row and column.
+    struct CellHit
+    {
+        GtkWidget* cell = nullptr;
+        size_t row = 0, column = 0;
+    };
+    std::optional<CellHit> cellAt(double x, double y) const
+    {
+        for (GtkWidget* w = gtk_widget_pick(w_, x, y, GTK_PICK_DEFAULT); w && w != w_; w = gtk_widget_get_parent(w))
+        {
+            const size_t tagged = rowOf(w);
+            auto* ctx = static_cast<ColumnCtx*>(g_object_get_data(G_OBJECT(w), "anyui-ctx"));
+            if (tagged && ctx) return CellHit{w, tagged - 1, ctx->column};
+        }
+        return std::nullopt;
+    }
+    static GtkWidget* rowWidget(GtkWidget* cell)
+    {
+        for (GtkWidget* w = cell; w; w = gtk_widget_get_parent(w))
+            if (std::string_view(gtk_widget_get_css_name(w)) == "row") return w;
+        return nullptr;
+    }
+
+    struct CellDragState
+    {
+        bool pressed = false, dragging = false;
+        double x0 = 0, y0 = 0;
+        size_t from = 0;
+        CellDragStart start;
+        std::optional<size_t> target;
+        GtkWidget* targetRow = nullptr;  // framed
+    };
+    void cellDragBegin(GtkGestureDrag* g, double x, double y)
+    {
+        cell_ = {};
+        auto hit = cellAt(x, y);
+        std::optional<CellDragStart> start;
+        if (hit && model_)
+        {
+            graphene_point_t in = GRAPHENE_POINT_INIT(float(x), float(y)), out;
+            if (!gtk_widget_compute_point(w_, hit->cell, &in, &out)) out = in;
+            start = cellDrag_.begin(hit->row, hit->column, PointF{out.x, out.y});
+        }
+        if (!start)
+        {
+            gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_DENIED);  // an ordinary click
+            return;
+        }
+        cell_ = {true, false, x, y, hit->row, std::move(*start), std::nullopt, nullptr};
+    }
+    void cellDragUpdate(GtkGestureDrag* g, double dx, double dy)
+    {
+        if (!cell_.pressed) return;
+        if (!cell_.dragging)
+        {
+            int threshold = 8;
+            g_object_get(gtk_widget_get_settings(w_), "gtk-dnd-drag-threshold", &threshold, nullptr);
+            if (std::abs(dx) < threshold && std::abs(dy) < threshold) return;
+            cell_.dragging = true;
+            gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);  // no selection change on release
+            gtk_widget_grab_focus(w_);  // Esc reaches the key controller
+        }
+        if (cell_.targetRow) gtk_widget_remove_css_class(cell_.targetRow, "anyui-drop");
+        cell_.target.reset();
+        cell_.targetRow = nullptr;
+        if (auto hit = cellAt(cell_.x0 + dx, cell_.y0 + dy);
+            hit && cellDrag_.canDrop && cellDrag_.canDrop(cell_.from, hit->row, cell_.start.data))
+        {
+            cell_.target = hit->row;
+            if ((cell_.targetRow = rowWidget(hit->cell))) gtk_widget_add_css_class(cell_.targetRow, "anyui-drop");
+        }
+        gtk_widget_set_cursor_from_name(w_, cell_.target ? "grabbing" : "not-allowed");
+    }
+    void cellDragEnd(bool drop)
+    {
+        if (!cell_.pressed) return;
+        CellDragState c = std::move(cell_);
+        cell_ = {};
+        if (c.targetRow) gtk_widget_remove_css_class(c.targetRow, "anyui-drop");
+        gtk_widget_set_cursor(w_, nullptr);
+        if (drop && c.dragging && c.target && cellDrag_.drop) cellDrag_.drop(c.from, *c.target, c.start.data);
+    }
+    CellDrag cellDrag_;
+    CellDragState cell_;
 
     static size_t rowOf(gpointer obj)
     {
@@ -1264,6 +1391,7 @@ private:
                          &ctx);
         gtk_widget_add_controller(child, GTK_EVENT_CONTROLLER(click));
 
+        g_object_set_data(G_OBJECT(child), "anyui-ctx", &ctx);
         gtk_list_item_set_child(li, child);
     }
 
