@@ -2399,6 +2399,9 @@ class Gtk4Backend : public Backend
 public:
     static Backend* create(int*, char**)
     {
+        // Under WSLg, X11 draws faster than its Wayland (measured: 23 against
+        // 20 fps for a panning canvas; gtk3 39 against 29).
+        if (underWsl() && !std::getenv("GDK_BACKEND")) gdk_set_allowed_backends("x11,*");
         if (!gtk_init_check()) return nullptr;
         initMetrics();
         return new Gtk4Backend;
