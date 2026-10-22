@@ -3392,7 +3392,8 @@ public:
             RegisterClassExW(&wc);
             registered = true;
         }
-        const DWORD style = dialog_ ? (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME) : WS_OVERLAPPEDWINDOW;
+        DWORD style = dialog_ ? (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME) : WS_OVERLAPPEDWINDOW;
+        if (!spec.resizable) style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
         hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME : 0), L"anyuiWindow",
                                 wide(spec.title).c_str(), style | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
                                 parent ? parent->hwnd_ : nullptr, nullptr, instance(), this);

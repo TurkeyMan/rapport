@@ -301,6 +301,9 @@ struct WindowSpec
     // A dialog that leaves its parent usable (a find bar, a tool palette, a
     // save dialog previewing into the main view). It still stays above it.
     bool modal = true;
+    // Off for a window whose content has one right size (a small dialog):
+    // no resize border, no maximise.
+    bool resizable = true;
     Node content;
     Extent width, height;
     // The usual space between the window edge and its content; off for
@@ -1057,6 +1060,11 @@ public:
         w_.height = h;
         return *this;
     }
+    Window& resizable(bool on)
+    {
+        w_.resizable = on;
+        return *this;
+    }
     Window& margins(bool on)
     {
         w_.margins = on;
@@ -1090,6 +1098,11 @@ public:
     Dialog& modeless()
     {
         w_.modal = false;
+        return *this;
+    }
+    Dialog& resizable(bool on)
+    {
+        Window::resizable(on);
         return *this;
     }
 };

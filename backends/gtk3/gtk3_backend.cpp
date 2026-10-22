@@ -2333,6 +2333,7 @@ public:
         }
         gtk_window_set_default_size(win, px(spec.width), px(spec.height));
         if (parent) gtk_window_set_transient_for(win, GTK_WINDOW(parent->win_));
+        gtk_window_set_resizable(win, spec.resizable);
         // First in line, so Esc ends a list drag rather than the dialog.
         connect(
             win_, "key-press-event", +[](GtkWidget*, GdkEventKey* e, gpointer) -> gboolean

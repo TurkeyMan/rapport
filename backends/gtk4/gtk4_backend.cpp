@@ -1393,6 +1393,7 @@ public:
         gtk_window_set_title(win, spec.title.c_str());
         gtk_window_set_default_size(win, px(spec.width), px(spec.height));
         if (parent) gtk_window_set_transient_for(win, GTK_WINDOW(parent->win_));
+        gtk_window_set_resizable(win, spec.resizable);
         if (dialog_)
         {
             gtk_window_set_modal(win, parent != nullptr && spec.modal);
