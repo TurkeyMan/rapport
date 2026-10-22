@@ -83,7 +83,7 @@ namespace rap::qt6
 namespace
 {
 
-// ---------------------------------------------------------------- helpers
+// -- helpers ------------------------------------------------------------------
 
 struct metrics
 {
@@ -356,7 +356,7 @@ void hook(QObject* target, event_hook::fn fn)
     new event_hook(target, std::move(fn));
 }
 
-// ---------------------------------------------------------------- icons
+// -- icons --------------------------------------------------------------------
 
 // The desktop's icon for a kind of file: the name's MIME type (a trailing
 // '/' is a folder) and the icon theme's icon for it. Cached per extension.
@@ -435,7 +435,7 @@ QIcon to_q_icon(const icon& icon, int size, const QWidget* w)
     return {};
 }
 
-// ---------------------------------------------------------------- menus
+// -- menus --------------------------------------------------------------------
 
 // Appends `items` to `menu`. Each action keeps its own copy of what it runs,
 // so the Menu needn't outlive the QMenu. Shortcuts are display hints (the
@@ -491,7 +491,7 @@ void show_popup_menu(menu items, QWidget* parent, QPoint global)
     m->popup(global);
 }
 
-// ---------------------------------------------------------------- widgets
+// -- widgets ------------------------------------------------------------------
 
 class part
 {
@@ -969,7 +969,7 @@ private:
     std::function<void()> changed_;
 };
 
-// ---------------------------------------------------------------- containers
+// -- containers ---------------------------------------------------------------
 
 // Splitter panes: the first layout follows stretch factors (panes without
 // stretch at their natural size), or the sizes given before it; after
@@ -1184,7 +1184,7 @@ private:
     lazy_pages lazy_;
 };
 
-// ---------------------------------------------------------------- toolbar, values, canvas
+// -- toolbar, values, canvas --------------------------------------------------
 
 class tool_button_impl : public widget_base<rap::tool_button>
 {
@@ -1654,7 +1654,7 @@ void canvas_widget::key(QKeyEvent* e, bool press)
         e->ignore();
 }
 
-// ---------------------------------------------------------------- list
+// -- list ---------------------------------------------------------------------
 
 // The rapport model as Qt sees it: a row count kept in step with the
 // notifications, and text for type-ahead and accessibility. The view paints
@@ -2002,7 +2002,7 @@ public:
         return true;
     }
 
-    // ---- called by list_view
+    // -- called by list_view --------------------------------------------------
 
     void paint_row(QPainter* p, const QRect& r, int row) const
     {
@@ -2683,7 +2683,7 @@ void list_view::scrollContentsBy(int dx, int dy)
     if (owner && owner->overlaid()) viewport()->update();
 }
 
-// ---------------------------------------------------------------- window
+// -- window -------------------------------------------------------------------
 
 class window_impl;
 
@@ -2879,7 +2879,7 @@ public:
 
     std::vector<std::unique_ptr<part>> parts;
 
-    // ---- from Frame and key_filter
+    // -- from Frame and key_filter --------------------------------------------
 
     void escape()
     {
@@ -3075,7 +3075,7 @@ bool key_filter::eventFilter(QObject* o, QEvent* e)
     return owner && owner->filter_key(o, e);
 }
 
-// ---------------------------------------------------------------- builder
+// -- builder ------------------------------------------------------------------
 
 class builder
 {
@@ -3458,7 +3458,7 @@ private:
     build_sink& sink_;
 };
 
-// ---------------------------------------------------------------- backend
+// -- backend ------------------------------------------------------------------
 
 class qt6_backend : public backend
 {

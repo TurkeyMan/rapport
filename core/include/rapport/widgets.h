@@ -22,7 +22,7 @@
 namespace rap
 {
 
-// ---------------------------------------------------------------- basics
+// -- basics -------------------------------------------------------------------
 
 enum class orientation
 {
@@ -122,7 +122,7 @@ constexpr extent operator""_px(unsigned long long v)
 }
 }  // namespace literals
 
-// ---------------------------------------------------------------- menus
+// -- menus --------------------------------------------------------------------
 
 struct menu_item
 {
@@ -150,7 +150,7 @@ struct menu_bar_item
     std::function<rap::menu()> menu;
 };
 
-// ---------------------------------------------------------------- subscriptions
+// -- subscriptions ------------------------------------------------------------
 
 // Keeps a callback registered (a timer, a per-frame callback) for as long as
 // it lives; destroying or reset()ting it cancels. Move-only.
@@ -189,7 +189,7 @@ private:
     std::function<void()> cancel_;
 };
 
-// ---------------------------------------------------------------- images
+// -- images -------------------------------------------------------------------
 
 // Pixel layouts an Image can be created from. Bgra8Premultiplied (bytes
 // B,G,R,A; colour premultiplied by alpha) is what Cairo, Direct2D, GDK and
@@ -219,7 +219,7 @@ public:
     virtual void update(const uint8_t* pixels, size_t stride) = 0;
 };
 
-// ---------------------------------------------------------------- painting
+// -- painting -----------------------------------------------------------------
 
 // Tiny drawing API for custom-painted list cells (commit graph, ref pills)
 // and Canvas widgets. Origin is the cell's / canvas's top-left corner, in
@@ -294,7 +294,7 @@ struct cell_info
     bool focused = false;
 };
 
-// ---------------------------------------------------------------- icons
+// -- icons --------------------------------------------------------------------
 
 // An icon for a button or toolbar item: a named theme icon, an app-drawn
 // one, or both (the drawing is the fallback where the name isn't found,
@@ -318,7 +318,7 @@ struct icon
     explicit operator bool() const { return !name.empty() || !file.empty() || bool(draw); }
 };
 
-// ---------------------------------------------------------------- list model
+// -- list model ---------------------------------------------------------------
 
 class list_observer
 {
@@ -396,7 +396,7 @@ enum class sort_order
     descending
 };
 
-// ---------------------------------------------------------------- widgets
+// -- widgets ------------------------------------------------------------------
 
 class widget
 {
@@ -645,7 +645,7 @@ public:
     virtual void on_changed(std::function<void(int)>) = 0;
 };
 
-// ---------------------------------------------------------------- canvas
+// -- canvas -------------------------------------------------------------------
 
 enum modifier : unsigned
 {
@@ -765,7 +765,7 @@ public:
     [[nodiscard]] virtual subscription on_frame(std::function<void(double)>) = 0;
 };
 
-// ---------------------------------------------------------------- windows
+// -- windows ------------------------------------------------------------------
 
 enum class dialog_role
 {

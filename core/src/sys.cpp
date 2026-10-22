@@ -32,7 +32,7 @@ namespace fs = std::filesystem;
 namespace rap::sys
 {
 
-// ---------------------------------------------------------------- strings, paths
+// -- strings, paths -----------------------------------------------------------
 
 fs::path path_from_utf8(std::string_view utf8)
 {
@@ -60,7 +60,7 @@ std::optional<std::string> env(const char* name)
 #endif
 }
 
-// ---------------------------------------------------------------- files
+// -- files --------------------------------------------------------------------
 
 std::FILE* fopen(const fs::path& path, const char* mode)
 {
@@ -72,7 +72,7 @@ std::FILE* fopen(const fs::path& path, const char* mode)
 #endif
 }
 
-// ---------------------------------------------------------------- locations
+// -- locations ----------------------------------------------------------------
 
 fs::path executable_path()
 {
@@ -151,7 +151,7 @@ fs::path data_dir(std::string_view app)
 #endif
 }
 
-// ---------------------------------------------------------------- shared libraries
+// -- shared libraries ---------------------------------------------------------
 
 std::expected<library, std::string> library::open(const fs::path& name)
 {
@@ -262,7 +262,7 @@ bool library_installed(std::string_view name)
     return false;
 }
 
-// ---------------------------------------------------------------- processes
+// -- processes ----------------------------------------------------------------
 
 namespace
 {
@@ -607,7 +607,7 @@ process::run(std::string_view program, std::span<const std::string> args, const 
     return r;
 }
 
-// ---------------------------------------------------------------- mapped files
+// -- mapped files -------------------------------------------------------------
 
 std::expected<mapped_file, std::string> mapped_file::open(const fs::path& path, mode mode)
 {
@@ -784,7 +784,7 @@ void mapped_file::unlock()
 #endif
 }
 
-// ---------------------------------------------------------------- threads, memory
+// -- threads, memory ----------------------------------------------------------
 
 void lower_thread_priority()
 {

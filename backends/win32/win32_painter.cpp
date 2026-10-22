@@ -10,7 +10,7 @@
 namespace rap::win32
 {
 
-// ---------------------------------------------------------------- strings
+// -- strings ------------------------------------------------------------------
 
 std::wstring wide(const std::string& s)
 {
@@ -67,7 +67,7 @@ std::wstring from_crlf(const std::wstring& s)
     return out;
 }
 
-// ---------------------------------------------------------------- factories
+// -- factories ----------------------------------------------------------------
 
 ID2D1Factory* d2d_factory()
 {
@@ -105,7 +105,7 @@ IWICImagingFactory* wic_factory()
     return f;
 }
 
-// ---------------------------------------------------------------- DPI, fonts
+// -- DPI, fonts ---------------------------------------------------------------
 
 UINT dpi_of(HWND h)
 {
@@ -203,7 +203,7 @@ int extent_px(HWND h, extent e, bool vertical)
     return 0;
 }
 
-// ---------------------------------------------------------------- colours
+// -- colours ------------------------------------------------------------------
 
 color sys_color(int index)
 {
@@ -238,7 +238,7 @@ color theme_color_of(theme_color role)
     return color{0, 0, 0, 255};
 }
 
-// ---------------------------------------------------------------- images
+// -- images -------------------------------------------------------------------
 
 d2d_image::d2d_image(int w, int h, pixel_format format, const uint8_t* pixels, size_t stride)
     : w_(w)
@@ -291,7 +291,7 @@ ID2D1Bitmap* d2d_image::bitmap_for(ID2D1RenderTarget* rt) const
     return bmp.get();
 }
 
-// ---------------------------------------------------------------- painter
+// -- painter ------------------------------------------------------------------
 
 d2d_painter::d2d_painter(ID2D1RenderTarget* rt, float scale)
     : rt_(rt)
@@ -482,7 +482,7 @@ size_f d2d_painter::measure(const std::string& s, const text_style& style) const
     return {m.widthIncludingTrailingWhitespace, m.height};
 }
 
-// ---------------------------------------------------------------- icons
+// -- icons --------------------------------------------------------------------
 
 namespace
 {

@@ -9,7 +9,7 @@
 
 #include <memory>
 
-// ---------------------------------------------------------------- RapportRows
+// -- RapportRows --------------------------------------------------------------
 
 G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE(RapportRows, rapport_rows, RAPPORT, ROWS, GObject)
@@ -77,7 +77,7 @@ namespace rap::gtk4
 namespace
 {
 
-// ---------------------------------------------------------------- widgets
+// -- widgets ------------------------------------------------------------------
 
 // A container (box, form, group, toolbar) as a plain Widget, for handles.
 class plain_impl : public widget_base<rap::widget>
@@ -964,7 +964,7 @@ private:
     std::function<GtkWidget*(const node&)> build_;
 };
 
-// ---------------------------------------------------------------- list
+// -- list ---------------------------------------------------------------------
 
 class list_impl : public widget_base<rap::list>, public list_observer
 {
@@ -1605,9 +1605,9 @@ private:
     std::function<menu(size_t, size_t, point_f)> cell_menu_;
 };
 
-// ---------------------------------------------------------------- window
+// -- window -------------------------------------------------------------------
 
-// ---------------------------------------------------------------- canvas
+// -- canvas -------------------------------------------------------------------
 
 // Paint, resize, cursor and frame callbacks. Written without a GTK 4 build
 // to check it against.
@@ -2162,7 +2162,7 @@ private:
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
 };
 
-// ---------------------------------------------------------------- builder
+// -- builder ------------------------------------------------------------------
 
 class builder
 {
@@ -2537,7 +2537,7 @@ private:
     build_sink& sink_;
 };
 
-// ---------------------------------------------------------------- backend
+// -- backend ------------------------------------------------------------------
 
 class gtk4_backend : public backend
 {

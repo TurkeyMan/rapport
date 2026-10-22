@@ -23,7 +23,7 @@
 namespace rap::sys
 {
 
-// ---------------------------------------------------------------- strings, paths
+// -- strings, paths -----------------------------------------------------------
 
 // UTF-8 to path and back (fs::path's own conversions use the ANSI code page
 // on Windows).
@@ -33,12 +33,12 @@ std::string path_to_utf8(const std::filesystem::path&);
 // An environment variable, UTF-8. Empty optional if unset.
 std::optional<std::string> env(const char* name);
 
-// ---------------------------------------------------------------- files
+// -- files --------------------------------------------------------------------
 
 // fopen for any path (wide on Windows).
 std::FILE* fopen(const std::filesystem::path&, const char* mode);
 
-// ---------------------------------------------------------------- locations
+// -- locations ----------------------------------------------------------------
 
 // The running executable, absolute.
 std::filesystem::path executable_path();
@@ -51,7 +51,7 @@ std::filesystem::path config_dir(std::string_view app);
 std::filesystem::path cache_dir(std::string_view app);
 std::filesystem::path data_dir(std::string_view app);
 
-// ---------------------------------------------------------------- shared libraries
+// -- shared libraries ---------------------------------------------------------
 
 // A dynamically loaded library (dlopen / LoadLibrary). Move-only; unloads
 // when destroyed unless released.
@@ -95,7 +95,7 @@ private:
 // to offer before paying for the load.
 bool library_installed(std::string_view name);
 
-// ---------------------------------------------------------------- processes
+// -- processes ----------------------------------------------------------------
 
 // How Process starts a child.
 struct process_options
@@ -152,7 +152,7 @@ private:
     std::unique_ptr<impl> impl_;
 };
 
-// ---------------------------------------------------------------- mapped files
+// -- mapped files -------------------------------------------------------------
 
 // A file mapped into memory, for caches the OS pages in on demand. Map a
 // file read-only, or read-write to grow it in place: resize() may move the
@@ -209,7 +209,7 @@ private:
     std::size_t size_ = 0;
 };
 
-// ---------------------------------------------------------------- threads, memory
+// -- threads, memory ----------------------------------------------------------
 
 // Let the calling thread yield to the UI and other foreground work.
 void lower_thread_priority();

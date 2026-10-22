@@ -27,7 +27,7 @@
 namespace rap::win32
 {
 
-// ---------------------------------------------------------------- strings
+// -- strings ------------------------------------------------------------------
 
 std::wstring wide(const std::string& utf8);
 std::string narrow(const std::wstring& w);
@@ -37,7 +37,7 @@ std::wstring window_text(HWND h);
 std::wstring to_crlf(const std::wstring& s);
 std::wstring from_crlf(const std::wstring& s);
 
-// ---------------------------------------------------------------- COM objects
+// -- COM objects --------------------------------------------------------------
 
 template <class T>
 class com
@@ -79,7 +79,7 @@ ID2D1Factory* d2d_factory();
 IDWriteFactory* dwrite_factory();
 IWICImagingFactory* wic_factory();
 
-// ---------------------------------------------------------------- DPI, fonts
+// -- DPI, fonts ---------------------------------------------------------------
 
 // Device pixels per logical pixel for a window (1 at 96 dpi).
 float scale_of(HWND h);
@@ -95,7 +95,7 @@ float ui_font_size_dip();
 // Extent -> device pixels for a window.
 int extent_px(HWND h, extent e, bool vertical);
 
-// ---------------------------------------------------------------- colours
+// -- colours ------------------------------------------------------------------
 
 color sys_color(int index);
 color theme_color_of(theme_color role);
@@ -108,7 +108,7 @@ inline D2D1_COLOR_F d2d_color(color c)
     return D2D1::ColorF(c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f);
 }
 
-// ---------------------------------------------------------------- images
+// -- images -------------------------------------------------------------------
 
 // Pixels kept in memory (premultiplied BGRA) plus a Direct2D bitmap per
 // render target that has drawn them, created on first use.
@@ -131,7 +131,7 @@ private:
     mutable std::map<ID2D1RenderTarget*, bool> stale_;
 };
 
-// ---------------------------------------------------------------- painter
+// -- painter ------------------------------------------------------------------
 
 class d2d_painter : public painter
 {
@@ -180,7 +180,7 @@ HICON render_icon_handle(const icon& icon, int px, float scale);
 // Draws an icon with a Painter onto an HDC rectangle (owner-drawn buttons).
 void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink);
 
-// ---------------------------------------------------------------- layout
+// -- layout -------------------------------------------------------------------
 
 // Bumped whenever something may have changed a size (a relayout request); a
 // measurement from the same pass is reused. Without it a nested layout

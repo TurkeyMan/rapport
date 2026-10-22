@@ -141,7 +141,7 @@ key_event make_key_event(WPARAM vk, LPARAM lp, bool press)
     return e;
 }
 
-// ---------------------------------------------------------------- comctl32 v6
+// -- comctl32 v6 --------------------------------------------------------------
 
 // Without an application manifest the process binds comctl32 v5 at load,
 // while our activation context makes the controls themselves v6. Image
@@ -164,7 +164,7 @@ struct comctl6
 };
 comctl6 g_comctl;
 
-// ---------------------------------------------------------------- handlers
+// -- handlers -----------------------------------------------------------------
 
 // Anything that receives notifications from its HWND via the parent window
 // (WM_COMMAND, WM_NOTIFY, WM_HSCROLL, WM_DRAWITEM, WM_CTLCOLOR*).
@@ -313,7 +313,7 @@ HWND make_host(HWND parent, DWORD style = 0)
                            0, parent, nullptr, instance(), nullptr);
 }
 
-// ---------------------------------------------------------------- tooltips
+// -- tooltips -----------------------------------------------------------------
 
 void set_tooltip_text(HWND control, const std::string& text)
 {
@@ -338,7 +338,7 @@ void set_tooltip_text(HWND control, const std::string& text)
     if (!text.empty()) SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
 }
 
-// ---------------------------------------------------------------- menus
+// -- menus --------------------------------------------------------------------
 
 // Appends `items` to `m`; command id `base + n` runs actions[n - 1].
 void fill_menu(HMENU m, const menu& items, std::vector<std::function<void()>>& actions, UINT base = 0)
@@ -391,7 +391,7 @@ void show_popup_menu(HWND owner, const menu& items, POINT screen)
     if (id > 0 && id <= actions.size() && actions[id - 1]) actions[id - 1]();
 }
 
-// ---------------------------------------------------------------- window base
+// -- window base --------------------------------------------------------------
 
 // What every widget needs from its window: scale, fonts, relayout.
 class win_context
@@ -588,7 +588,7 @@ private:
     win_context& win_;
 };
 
-// ---------------------------------------------------------------- layout containers
+// -- layout containers --------------------------------------------------------
 
 class box_item : public item
 {
@@ -812,7 +812,7 @@ public:
     void show_all(bool) override {}
 };
 
-// ---------------------------------------------------------------- simple controls
+// -- simple controls ----------------------------------------------------------
 
 class label_impl : public leaf<rap::label>
 {
@@ -1978,7 +1978,7 @@ private:
     std::function<void(bool)> toggled_;
 };
 
-// ---------------------------------------------------------------- list
+// -- list ---------------------------------------------------------------------
 
 class list_impl;
 list_impl* g_dragging = nullptr;  // the list with a row drag in progress, for Esc
@@ -3006,7 +3006,7 @@ private:
     std::function<menu(size_t, size_t, point_f)> cell_menu_;
 };
 
-// ---------------------------------------------------------------- tabs
+// -- tabs ---------------------------------------------------------------------
 
 class tabs_impl : public leaf<rap::tabs>
 {
@@ -3207,7 +3207,7 @@ private:
     std::function<void(int)> changed_;
 };
 
-// ---------------------------------------------------------------- splitter
+// -- splitter -----------------------------------------------------------------
 
 // Panes side by side with draggable bars between them. Sizes are device px
 // per pane; the window keeps the panes' proportions until a drag.
@@ -3422,7 +3422,7 @@ private:
     bool dragging_ = false;
 };
 
-// ---------------------------------------------------------------- scroll
+// -- scroll -------------------------------------------------------------------
 
 // A child window that clips its content and scrolls it vertically (and
 // horizontally if asked).
@@ -3557,7 +3557,7 @@ private:
     long content_w_ = 0, content_h_ = 0;
 };
 
-// ---------------------------------------------------------------- frames
+// -- frames -------------------------------------------------------------------
 
 // One display-paced clock for every frame subscriber: a thread waits on the
 // compositor (DwmFlush) and posts a tick to the UI thread.
@@ -3629,7 +3629,7 @@ private:
 
 frame_clock* g_frames = nullptr;
 
-// ---------------------------------------------------------------- canvas
+// -- canvas -------------------------------------------------------------------
 
 class canvas_impl : public leaf<rap::canvas>
 {
@@ -3870,7 +3870,7 @@ private:
     std::function<bool(const key_event&)> key_;
 };
 
-// ---------------------------------------------------------------- window
+// -- window -------------------------------------------------------------------
 
 class window_impl : public rap::window, public win_context
 {
@@ -4446,7 +4446,7 @@ private:
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
 };
 
-// ---------------------------------------------------------------- builder
+// -- builder ------------------------------------------------------------------
 
 const wchar_t* stock_label(dialog_role r)
 {
@@ -4695,7 +4695,7 @@ private:
     metrics metrics_;
 };
 
-// ---------------------------------------------------------------- backend
+// -- backend ------------------------------------------------------------------
 
 class win32_backend : public backend
 {

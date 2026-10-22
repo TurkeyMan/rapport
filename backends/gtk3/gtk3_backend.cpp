@@ -13,7 +13,7 @@
 #include <memory>
 #include <set>
 
-// ---------------------------------------------------------------- RapportTreeRows
+// -- RapportTreeRows ----------------------------------------------------------
 
 G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE(RapportTreeRows, rapport_tree_rows, RAPPORT, TREE_ROWS, GObject)
@@ -144,7 +144,7 @@ static void rapport_tree_rows_init(RapportTreeRows* self)
     self->search_column = 0;
 }
 
-// ---------------------------------------------------------------- RapportPaintRenderer
+// -- RapportPaintRenderer -----------------------------------------------------
 
 // Cell renderer for painted columns; the column's data function sets the
 // row, and the owning list draws through `draw`.
@@ -250,7 +250,7 @@ namespace rap::gtk3
 namespace
 {
 
-// ---------------------------------------------------------------- widgets
+// -- widgets ------------------------------------------------------------------
 
 // A container (box, form, group, toolbar) as a plain Widget, for handles.
 class plain_impl : public widget_base<rap::widget>
@@ -1311,7 +1311,7 @@ private:
     std::function<GtkWidget*(const node&)> build_;
 };
 
-// ---------------------------------------------------------------- list
+// -- list ---------------------------------------------------------------------
 
 class list_impl : public widget_base<rap::list>, public list_observer
 {
@@ -2288,9 +2288,9 @@ private:
     std::optional<size_t> hot_;  // the row under the pointer
 };
 
-// ---------------------------------------------------------------- window
+// -- window -------------------------------------------------------------------
 
-// ---------------------------------------------------------------- canvas
+// -- canvas -------------------------------------------------------------------
 
 unsigned modifiers(guint state)
 {
@@ -3003,7 +3003,7 @@ private:
     bool fullscreen_ = false;
 };
 
-// ---------------------------------------------------------------- builder
+// -- builder ------------------------------------------------------------------
 
 void set_margins(GtkWidget* w, int m)
 {
@@ -3495,7 +3495,7 @@ private:
     build_sink& sink_;
 };
 
-// ---------------------------------------------------------------- backend
+// -- backend ------------------------------------------------------------------
 
 class gtk3_backend : public backend
 {

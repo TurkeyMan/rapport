@@ -321,7 +321,7 @@ struct window_spec
     std::vector<menu_bar_item> menu_bar;
 };
 
-// ---------------------------------------------------------------- builders
+// -- builders -----------------------------------------------------------------
 
 namespace layout
 {
