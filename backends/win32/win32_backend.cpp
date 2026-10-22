@@ -2400,6 +2400,16 @@ private:
     {
         RECT clip{};
         if (GetClipBox(dc, &clip) == NULLREGION || IsRectEmpty(&clip)) return;
+        // The column header is a child inside the client area, at the top:
+        // painting over it (the background clear) blanked it until hovered.
+        if (HWND header = ListView_GetHeader(h_); header && IsWindowVisible(header))
+        {
+            RECT hr{};
+            GetWindowRect(header, &hr);
+            MapWindowPoints(HWND_DESKTOP, h_, reinterpret_cast<POINT*>(&hr), 2);
+            clip.top = std::max(clip.top, hr.bottom);
+            if (clip.top >= clip.bottom) return;
+        }
         if (!rowTarget_)
         {
             const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
