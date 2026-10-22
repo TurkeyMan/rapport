@@ -687,6 +687,7 @@ public:
             +[](GtkNotebook*, GtkWidget*, guint page, gpointer p)
             {
                 auto* self = static_cast<WTabs*>(p);
+                self->ensureBuilt(int(page));
                 if (self->changed_) self->changed_(int(page));
             },
             this);
@@ -696,8 +697,91 @@ public:
     void setCurrent(int i) override { gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i); }
     void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
 
+    // Lazy pages: an empty box each, filled the first time it's shown.
+    void setLazy(std::vector<std::function<Node()>> lazy, std::vector<GtkWidget*> pages,
+                 std::function<GtkWidget*(const Node&)> build)
+    {
+        lazy_ = std::move(lazy);
+        pages_ = std::move(pages);
+        build_ = std::move(build);
+        ensureBuilt(current());
+    }
+    void ensureBuilt(int i)
+    {
+        if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)]) return;
+        const auto build = std::move(lazy_[size_t(i)]);
+        lazy_[size_t(i)] = nullptr;
+        GtkWidget* w = build_(build());
+        gtk_widget_set_hexpand(w, TRUE);
+        gtk_widget_set_vexpand(w, TRUE);
+        gtk_box_append(GTK_BOX(pages_[size_t(i)]), w);
+    }
+
 private:
     std::function<void(int)> changed_;
+    std::vector<std::function<Node()>> lazy_;
+    std::vector<GtkWidget*> pages_;
+    std::function<GtkWidget*(const Node&)> build_;
+};
+
+// Tabs as a list of page names down the left, the page beside it.
+class WSideTabs : public W<anyui::Tabs>
+{
+public:
+    WSideTabs(GtkWidget* box, GtkWidget* list, GtkWidget* stack)
+        : W(box)
+        , list_(list)
+        , stack_(stack)
+    {
+        connect(
+            list_, "row-selected",
+            +[](GtkListBox*, GtkListBoxRow* row, gpointer p)
+            {
+                auto* self = static_cast<WSideTabs*>(p);
+                if (!row) return;
+                const int i = gtk_list_box_row_get_index(row);
+                self->ensureBuilt(i);
+                gtk_stack_set_visible_child_name(GTK_STACK(self->stack_), std::to_string(i).c_str());
+                if (self->changed_) self->changed_(i);
+            },
+            this);
+    }
+
+    int current() const override
+    {
+        GtkListBoxRow* row = gtk_list_box_get_selected_row(GTK_LIST_BOX(list_));
+        return row ? gtk_list_box_row_get_index(row) : 0;
+    }
+    void setCurrent(int i) override { gtk_list_box_select_row(GTK_LIST_BOX(list_), gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i)); }
+    void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
+
+    // Lazy pages: an empty box each, filled the first time it's shown.
+    void setLazy(std::vector<std::function<Node()>> lazy, std::vector<GtkWidget*> pages,
+                 std::function<GtkWidget*(const Node&)> build)
+    {
+        lazy_ = std::move(lazy);
+        pages_ = std::move(pages);
+        build_ = std::move(build);
+        ensureBuilt(current());
+    }
+    void ensureBuilt(int i)
+    {
+        if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)]) return;
+        const auto build = std::move(lazy_[size_t(i)]);
+        lazy_[size_t(i)] = nullptr;
+        GtkWidget* w = build_(build());
+        gtk_widget_set_hexpand(w, TRUE);
+        gtk_widget_set_vexpand(w, TRUE);
+        gtk_box_append(GTK_BOX(pages_[size_t(i)]), w);
+    }
+
+private:
+    GtkWidget* list_;
+    GtkWidget* stack_;
+    std::function<void(int)> changed_;
+    std::vector<std::function<Node()>> lazy_;
+    std::vector<GtkWidget*> pages_;
+    std::function<GtkWidget*(const Node&)> build_;
 };
 
 // ---------------------------------------------------------------- list
@@ -1570,10 +1654,14 @@ private:
 
     GtkWidget* make(const Node& n, const spec::Tabs& s, Orientation)
     {
+        if (s.sidebar) return makeSidebar(n, s);
         GtkWidget* nb = gtk_notebook_new();
+        std::vector<GtkWidget*> pages;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
-            GtkWidget* page = build(s.pages[i], Orientation::Vertical);
+            const bool lazy = i < s.lazy.size() && s.lazy[i];
+            GtkWidget* page = lazy ? gtk_box_new(GTK_ORIENTATION_VERTICAL, 0) : build(s.pages[i], Orientation::Vertical);
+            pages.push_back(page);
             gtk_widget_set_margin_start(page, 6);
             gtk_widget_set_margin_end(page, 6);
             gtk_widget_set_margin_top(page, 6);
@@ -1581,8 +1669,51 @@ private:
             gtk_notebook_append_page(GTK_NOTEBOOK(nb), page,
                                      gtk_label_new_with_mnemonic(s.titles[i].c_str()));
         }
-        add<WTabs>(n, nb);
+        auto& tabs = add<WTabs>(n, nb);
+        if (!s.lazy.empty())
+            tabs.setLazy(s.lazy, std::move(pages),
+                         [&win = win_, &sink = sink_](const Node& page) { return Builder(win, sink).build(page, Orientation::Vertical); });
         return nb;
+    }
+
+    // Tabs as a list of page names down the left, the page in a stack beside it.
+    GtkWidget* makeSidebar(const Node& n, const spec::Tabs& s)
+    {
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        GtkWidget* list = gtk_list_box_new();
+        gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_BROWSE);
+        GtkWidget* stack = gtk_stack_new();
+        std::vector<GtkWidget*> pages;
+        for (size_t i = 0; i < s.pages.size(); ++i)
+        {
+            GtkWidget* label = gtk_label_new_with_mnemonic(s.titles[i].c_str());
+            gtk_widget_set_halign(label, GTK_ALIGN_START);
+            gtk_widget_set_margin_start(label, 12);
+            gtk_widget_set_margin_end(label, 12);
+            gtk_widget_set_margin_top(label, 8);
+            gtk_widget_set_margin_bottom(label, 8);
+            GtkWidget* row = gtk_list_box_row_new();
+            gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
+            gtk_list_box_append(GTK_LIST_BOX(list), row);
+            const bool lazy = i < s.lazy.size() && s.lazy[i];
+            GtkWidget* page = lazy ? gtk_box_new(GTK_ORIENTATION_VERTICAL, 0) : build(s.pages[i], Orientation::Vertical);
+            gtk_widget_set_margin_start(page, 6);
+            gtk_widget_set_margin_end(page, 6);
+            gtk_widget_set_margin_top(page, 6);
+            gtk_widget_set_margin_bottom(page, 6);
+            gtk_stack_add_named(GTK_STACK(stack), page, std::to_string(i).c_str());
+            pages.push_back(page);
+        }
+        gtk_box_append(GTK_BOX(box), list);
+        gtk_box_append(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+        gtk_widget_set_hexpand(stack, TRUE);
+        gtk_box_append(GTK_BOX(box), stack);
+        auto& tabs = add<WSideTabs>(n, box, list, stack);
+        tabs.setCurrent(0);
+        if (!s.lazy.empty())
+            tabs.setLazy(s.lazy, std::move(pages),
+                         [&win = win_, &sink = sink_](const Node& page) { return Builder(win, sink).build(page, Orientation::Vertical); });
+        return box;
     }
 
     GtkWidget* make(const Node&, const spec::Spacer&, Orientation)

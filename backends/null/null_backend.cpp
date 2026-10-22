@@ -151,9 +151,25 @@ public:
 class NTabs : public Stub<anyui::Tabs>
 {
 public:
-    int current() const override { return 0; }
-    void setCurrent(int) override {}
+    int current() const override { return current_; }
+    void setCurrent(int i) override
+    {
+        current_ = i;
+        if (i >= 0 && size_t(i) < lazy.size() && lazy[size_t(i)])
+        {
+            const auto build = std::move(lazy[size_t(i)]);
+            lazy[size_t(i)] = nullptr;
+            buildPage(build(), size_t(i));
+        }
+    }
     void onChanged(std::function<void(int)>) override {}
+
+    // Lazy pages: built (and printed) when first made current.
+    std::vector<std::function<Node()>> lazy;
+    std::function<void(const Node&, size_t)> buildPage;
+
+private:
+    int current_ = 0;
 };
 
 class NToolButton : public Stub<anyui::ToolButton>
@@ -296,11 +312,13 @@ public:
 
 private:
     template <class W>
-    void make(const Node& n)
+    W* make(const Node& n)
     {
         auto w = std::make_unique<W>();
+        W* raw = w.get();
         sink_.created(n, *w);
         win_.widgets.push_back(std::move(w));
+        return raw;
     }
 
     void suffix(const Node& n)
@@ -347,10 +365,23 @@ private:
     }
     void visit(const Node& n, const spec::Tabs& s, int d)
     {
-        std::printf("Tabs");
+        std::printf(s.sidebar ? "Tabs (sidebar)" : "Tabs");
         suffix(n);
-        make<NTabs>(n);
-        for (size_t i = 0; i < s.pages.size(); ++i) build(s.pages[i], d + 1, s.titles[i]);
+        auto* tabs = make<NTabs>(n);
+        for (size_t i = 0; i < s.pages.size(); ++i)
+        {
+            if (i < s.lazy.size() && s.lazy[i])
+                std::printf("%*s[%s] (lazy)\n", (d + 1) * 2, "", s.titles[i].c_str());
+            else
+                build(s.pages[i], d + 1, s.titles[i]);
+        }
+        if (!s.lazy.empty())
+        {
+            tabs->lazy = s.lazy;
+            tabs->buildPage = [&win = win_, &sink = sink_, d, titles = s.titles](const Node& page, size_t i)
+            { Builder(win, sink).build(page, d + 1, titles[i]); };
+            tabs->setCurrent(0);
+        }
     }
     void visit(const Node& n, const spec::Spacer&, int)
     {

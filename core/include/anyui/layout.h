@@ -96,7 +96,13 @@ struct Scroll
 struct Tabs
 {
     std::vector<std::string> titles;
-    Nodes pages;
+    Nodes pages;  // a lazy page's entry is an empty Box
+    // Per page: how to build it the first time it's shown (layout::Lazy),
+    // or empty for one built with the window. Empty if no page is lazy.
+    std::vector<std::function<Node()>> lazy;
+    // The page names as a list down the left with the page beside it (a
+    // settings dialog) rather than tabs along the top.
+    bool sidebar = false;
     std::function<void(int)> onChanged;
     anyui::Tabs** bind = nullptr;
 };
@@ -437,10 +443,33 @@ public:
     }
 };
 
+// A tab page built the first time it's shown rather than with the window,
+// for dialogs whose pages hold many controls. The contract:
+// - Its widgets, and so its binds and callbacks, exist only from then on.
+//   Code that reads them (an OK handler) checks whether the page was built.
+// - It doesn't count toward the window's natural size: it gets the tab
+//   area that the window's size and the other pages give it. Size the window
+//   (or the Tabs), and put content that might not fit in a Scroll.
+struct Lazy
+{
+    std::function<Node()> build;
+};
+
 struct Page
 {
+    Page(std::string title, Node content)
+        : title(std::move(title))
+        , content(std::move(content))
+    {
+    }
+    Page(std::string title, Lazy lazy)
+        : title(std::move(title))
+        , build(std::move(lazy.build))
+    {
+    }
     std::string title;
     Node content;
+    std::function<Node()> build;
 };
 
 class Tabs : public Builder<Tabs, spec::Tabs>
@@ -448,15 +477,23 @@ class Tabs : public Builder<Tabs, spec::Tabs>
 public:
     Tabs(std::initializer_list<Page> pages)
     {
+        bool anyLazy = false;
+        for (auto& p : pages) anyLazy |= bool(p.build);
         for (auto& p : pages)
         {
             s().titles.push_back(p.title);
-            s().pages.push_back(p.content);
+            s().pages.push_back(p.build ? Node{spec::Box{Vertical, {}}, {}} : p.content);
+            if (anyLazy) s().lazy.push_back(p.build);
         }
     }
     Tabs& onChanged(std::function<void(int)> f)
     {
         s().onChanged = std::move(f);
+        return *this;
+    }
+    Tabs& sidebar(bool on = true)
+    {
+        s().sidebar = on;
         return *this;
     }
     Tabs& bind(anyui::Tabs*& h)

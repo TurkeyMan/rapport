@@ -337,7 +337,7 @@ Ui::~Ui() = default;
 
 std::unique_ptr<Window> Ui::create(const WindowSpec& spec, Window* parent)
 {
-    Applier sink;
+    static Applier sink;  // stateless; backends may keep it (BuildSink)
     return backend_->createWindow(spec, parent, sink);
 }
 

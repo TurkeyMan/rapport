@@ -16,7 +16,7 @@
 namespace anyui
 {
 
-inline constexpr int kAbiVersion = 15;
+inline constexpr int kAbiVersion = 16;
 
 struct MessageSpec
 {
@@ -51,7 +51,8 @@ struct FileDialogSpec
 };
 
 // Backend reports each widget it creates so the core can apply callbacks,
-// binds and common state.
+// binds and common state. The sink outlives every window, so a backend may
+// keep it to build content later (lazy tab pages).
 class BuildSink
 {
 public:
@@ -71,7 +72,9 @@ public:
     // maps to a widget (not Spacer/Separator/Form/Box) and every dialog
     // button. Containers (Box, Form, Group, Toolbar) with a common.handle
     // also get created(), with a plain Widget for the container.
-    // The spec is only valid during the call.
+    // The spec is only valid during the call, except that a Tabs' lazy page
+    // builders may be kept and called (on the UI thread) when a page is
+    // first shown; the Nodes they return go through the sink the same way.
     virtual std::unique_ptr<Window> createWindow(const WindowSpec&, Window* parent, BuildSink&) = 0;
 
     virtual int run() = 0;  // main loop; returns the quit() code
