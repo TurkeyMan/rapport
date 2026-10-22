@@ -385,6 +385,8 @@ public:
     virtual ~WinContext() = default;
     virtual HWND hwnd() const = 0;
     virtual void relayout() = 0;
+    // Lays out and repaints now, in one go (a different tab page showing).
+    virtual void relayoutAtOnce() = 0;
     float scale() const { return scaleOf(hwnd()); }
     UINT dpi() const { return dpiOf(hwnd()); }
     int px(float logical) const { return int(std::lround(logical * scale())); }
@@ -2445,7 +2447,7 @@ public:
     {
         TabCtrl_SetCurSel(h_, i);
         ensureBuilt(i);
-        win_.relayout();
+        win_.relayoutAtOnce();
     }
     void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
     LRESULT notify(NMHDR* n, bool& handled) override
@@ -2454,7 +2456,7 @@ public:
         if (handled)
         {
             ensureBuilt(current());
-            win_.relayout();
+            win_.relayoutAtOnce();
             if (changed_) changed_(current());
         }
         return 0;
@@ -2513,7 +2515,11 @@ public:
     WSideTabs(WinContext& win, HWND parent, const spec::Tabs& s)
         : Leaf(win)
     {
-        adopt(createControl(win, parent, L"LISTBOX", L"", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_TABSTOP, WS_EX_CLIENTEDGE));
+        // Owner-drawn only to centre the names in rows taller than the text
+        // (a plain list box draws them at the top of each row).
+        adopt(createControl(win, parent, L"LISTBOX", L"",
+                            LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_TABSTOP,
+                            WS_EX_CLIENTEDGE));
         for (const std::string& t : s.titles)
         {
             // Mnemonics mean nothing in a list: "_General" shows as "General".
@@ -2535,14 +2541,14 @@ public:
     {
         SendMessageW(h_, LB_SETCURSEL, WPARAM(i), 0);
         ensureBuilt(i);
-        win_.relayout();
+        win_.relayoutAtOnce();
     }
     void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
     void command(WORD code) override
     {
         if (code != LBN_SELCHANGE) return;
         ensureBuilt(current());
-        win_.relayout();
+        win_.relayoutAtOnce();
         if (changed_) changed_(current());
     }
     void ensureBuilt(int i)
@@ -2552,6 +2558,21 @@ public:
         lazy[size_t(i)] = nullptr;
         pages[size_t(i)] = buildPage(build());
         win_.relayout();
+    }
+    bool drawItem(DRAWITEMSTRUCT* d) override
+    {
+        if (d->itemID == UINT(-1) || d->itemID >= titles_.size()) return false;
+        const bool selected = d->itemState & ODS_SELECTED;
+        FillRect(d->hDC, &d->rcItem, GetSysColorBrush(selected ? COLOR_HIGHLIGHT : COLOR_WINDOW));
+        SetBkMode(d->hDC, TRANSPARENT);
+        SetTextColor(d->hDC, GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
+        HGDIOBJ old = SelectObject(d->hDC, uiFont(win_.dpi()));
+        RECT text = d->rcItem;
+        text.left += px(8);
+        DrawTextW(d->hDC, titles_[d->itemID].c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SelectObject(d->hDC, old);
+        if ((d->itemState & ODS_FOCUS) && !(d->itemState & ODS_NOFOCUSRECT)) DrawFocusRect(d->hDC, &d->rcItem);
+        return true;
     }
     bool fills() const override { return true; }
     bool expandsInForm() const override { return true; }
@@ -2585,7 +2606,7 @@ private:
     int listWidth()
     {
         long w = px(120);
-        for (const std::wstring& t : titles_) w = std::max(w, textExtent(h_, t).cx + px(28));
+        for (const std::wstring& t : titles_) w = std::max(w, textExtent(h_, t).cx + px(36));
         return int(w);
     }
 
@@ -3038,8 +3059,6 @@ public:
         }
         adopt(CreateWindowExW(0, L"anyuiCanvas", L"", WS_CHILD | (s.focusable ? WS_TABSTOP : 0), 0, 0, 0, 0, parent,
                               nullptr, instance(), this));
-        HWND root = GetAncestor(parent, GA_ROOT);
-        SetWindowLongPtrW(root, GWL_EXSTYLE, GetWindowLongPtrW(root, GWL_EXSTYLE) & ~WS_EX_COMPOSITED);
     }
     ~WCanvas() override { *alive_ = false; }
 
@@ -3284,11 +3303,7 @@ public:
             registered = true;
         }
         const DWORD style = dialog_ ? (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME) : WS_OVERLAPPEDWINDOW;
-        // Dialogs paint whole: Windows draws every control into one buffer,
-        // back to front, and presents it at once, rather than control by
-        // control across several frames. (A canvas turns this off: Direct2D
-        // presents for itself.)
-        hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME | WS_EX_COMPOSITED : 0), L"anyuiWindow",
+        hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME : 0), L"anyuiWindow",
                                 wide(spec.title).c_str(), style | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
                                 parent ? parent->hwnd_ : nullptr, nullptr, instance(), this);
         initialW_ = spec.width;
@@ -3320,6 +3335,21 @@ public:
         if (relayoutPending_) return;
         relayoutPending_ = true;
         PostMessageW(hwnd_, WM_ANYUI_RELAYOUT, 0, 0);
+    }
+    // With drawing off, the old page goes and the new one comes (through
+    // the style bit, silently) and everything then paints in one pass,
+    // rather than control by control across several frames.
+    void relayoutAtOnce() override
+    {
+        if (!IsWindowVisible(hwnd_))
+        {
+            relayout();
+            return;
+        }
+        SendMessageW(hwnd_, WM_SETREDRAW, FALSE, 0);
+        layoutNow();
+        SendMessageW(hwnd_, WM_SETREDRAW, TRUE, 0);
+        RedrawWindow(hwnd_, nullptr, nullptr, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
     void layoutNow()
     {
