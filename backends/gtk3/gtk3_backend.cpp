@@ -1223,6 +1223,27 @@ public:
                 return self->popup(self->cursorRow(), nullptr);
             },
             this);
+        connect(
+            w_, "size-allocate",
+            +[](GtkWidget*, GdkRectangle* a, gpointer p)
+            { static_cast<WList*>(p)->fitStretch(a->width); },
+            this);
+    }
+
+    // Stretch columns share the width the others leave, once, when the list
+    // first has a size; then they become fixed like the rest, so widening
+    // one column never narrows another (the list scrolls sideways instead).
+    void fitStretch(int width)
+    {
+        if (fitted_ || width <= 1) return;
+        fitted_ = true;
+        for (auto* col : cols_)
+            if (gtk_tree_view_column_get_expand(col))
+            {
+                int w = gtk_tree_view_column_get_width(col);
+                if (w > 0) gtk_tree_view_column_set_fixed_width(col, w);
+                gtk_tree_view_column_set_expand(col, false);
+            }
     }
 
     ~WList() override
@@ -1304,7 +1325,12 @@ public:
     void setColumnWidths(const std::vector<float>& widths) override
     {
         for (size_t i = 0; i < widths.size() && i < cols_.size(); ++i)
-            if (widths[i] > 0) gtk_tree_view_column_set_fixed_width(cols_[i], int(widths[i]));
+            if (widths[i] > 0)
+            {
+                gtk_tree_view_column_set_fixed_width(cols_[i], int(widths[i]));
+                gtk_tree_view_column_set_expand(cols_[i], false);  // restored widths win
+            }
+        fitted_ = true;
     }
 
     void onSelectionChanged(std::function<void()> f) override { selChanged_ = std::move(f); }
@@ -1778,6 +1804,7 @@ private:
     std::vector<GtkTreeViewColumn*> cols_;
     std::vector<std::unique_ptr<ColumnCtx>> ctxs_;
     bool alive_ = true;
+    bool fitted_ = false;  // stretch columns have had their share of the width
     bool compact_ = false;
     std::optional<std::pair<Color, Color>> soft_;  // selection background, text
     float compactScale_ = 1;
