@@ -21,7 +21,7 @@ endif()
 add_library(anyui::anyui ALIAS anyui)
 target_link_libraries(anyui PUBLIC anyui_headers PRIVATE ${CMAKE_DL_LIBS})
 if(WIN32)
-    target_link_libraries(anyui PRIVATE shell32 ole32)
+    target_link_libraries(anyui PRIVATE shell32 ole32 uuid)
 endif()
 target_compile_definitions(anyui PRIVATE
     ANYUI_INSTALL_PLUGIN_DIR="${CMAKE_INSTALL_FULL_LIBDIR}/anyui")

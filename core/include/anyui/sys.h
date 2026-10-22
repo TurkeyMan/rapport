@@ -8,13 +8,17 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <expected>
 #include <filesystem>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace anyui::sys
 {
@@ -90,6 +94,113 @@ private:
 // on the loader's search path. A few stats, no load: use it to decide what
 // to offer before paying for the load.
 bool libraryInstalled(std::string_view name);
+
+// ---------------------------------------------------------------- processes
+
+// A child process with stdin from the null device and stdout and stderr
+// merged into one pipe (no console window on Windows). read() and wait()
+// belong to one thread; kill() may be called from any thread at any time,
+// before or after the process exits, and also ends anything the child
+// started (its process group; a job object on Windows). Destroying a
+// process that wasn't waited for kills it and reaps it.
+class Process
+{
+public:
+    struct Options
+    {
+        std::filesystem::path dir;  // working directory; empty: the caller's
+        // Set in the child's environment, replacing any inherited value.
+        std::vector<std::pair<std::string, std::string>> env;
+    };
+
+    struct Result
+    {
+        int exitCode = -1;
+        std::string output;  // stdout and stderr interleaved
+    };
+
+    // `program` is searched on PATH unless it is a path; `args` follow it.
+    static std::expected<std::unique_ptr<Process>, std::string>
+    start(std::string_view program, std::span<const std::string> args, const Options& = {});
+
+    // Starts, reads all output and waits.
+    static std::expected<Result, std::string>
+    run(std::string_view program, std::span<const std::string> args, const Options& = {});
+
+    Process(const Process&) = delete;
+    Process& operator=(const Process&) = delete;
+    ~Process();
+
+    // Blocks for output; 0 once the child closed it (normally on exit).
+    std::size_t read(char* buf, std::size_t size);
+    // Waits for the exit and returns its code; a POSIX signal death is
+    // 128 + signal. Read the output to the end first, or a child blocked on a
+    // full pipe never exits. Repeated calls return the same code.
+    int wait();
+    void kill();
+
+private:
+    struct Impl;
+    explicit Process(std::unique_ptr<Impl>);
+    std::unique_ptr<Impl> impl_;
+};
+
+// ---------------------------------------------------------------- mapped files
+
+// A file mapped into memory, for caches the OS pages in on demand. Map a
+// file read-only, or read-write to grow it in place: resize() may move the
+// mapping, so data structures inside it should link by offset, not pointer.
+// Pages written through data() reach the file in the OS's own time, or at
+// flush(). Move-only.
+class MappedFile
+{
+public:
+    enum class Mode
+    {
+        Read,
+        ReadWrite,  // creates the file if missing
+    };
+
+    static std::expected<MappedFile, std::string> open(const std::filesystem::path&, Mode);
+
+    MappedFile() = default;
+    MappedFile(MappedFile&& other) noexcept;
+    MappedFile& operator=(MappedFile&& other) noexcept;
+    MappedFile(const MappedFile&) = delete;
+    MappedFile& operator=(const MappedFile&) = delete;
+    ~MappedFile();
+
+    explicit operator bool() const { return file_ != kNoFile; }
+    std::byte* data() { return data_; }
+    const std::byte* data() const { return data_; }
+    std::size_t size() const { return size_; }
+
+    // Read-write only: sets the file's length (new bytes are zero) and
+    // remaps it. Grow in large steps; each call costs a remap.
+    std::expected<void, std::string> resize(std::size_t size);
+    // Read-write only: writes changed pages to disk before returning.
+    std::expected<void, std::string> flush();
+
+    // An exclusive advisory lock on the whole file, across processes; false
+    // if another process holds it, or if the filesystem can't lock (WSL paths
+    // seen from Windows, some network shares). Released by unlock() or on
+    // close.
+    bool tryLock();
+    void unlock();
+
+private:
+    std::expected<void, std::string> map();
+    void unmap();
+
+    static constexpr std::intptr_t kNoFile = -1;  // INVALID_HANDLE_VALUE, or no fd
+    std::intptr_t file_ = kNoFile;                // HANDLE or fd
+#ifdef _WIN32
+    void* mapping_ = nullptr;  // the file mapping object's HANDLE
+#endif
+    Mode mode_ = Mode::Read;
+    std::byte* data_ = nullptr;
+    std::size_t size_ = 0;
+};
 
 // ---------------------------------------------------------------- threads, memory
 
