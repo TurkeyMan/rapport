@@ -3634,6 +3634,8 @@ public:
     ~Win() override
     {
         windows().erase(this);
+        // WM_DESTROY can't see us once GWLP_USERDATA is cleared below.
+        if (lastShown() == this) lastShown() = nullptr;
         items.clear();
         widgets.clear();
         if (hwnd_)
