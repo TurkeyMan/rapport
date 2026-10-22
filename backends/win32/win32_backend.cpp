@@ -50,6 +50,7 @@ std::wstring mnemonic(const std::string& s)
 }
 constexpr UINT WM_ANYUI_FRAME = WM_APP + 2;
 constexpr UINT WM_ANYUI_RELAYOUT = WM_APP + 3;
+constexpr UINT WM_ANYUI_SELECTION = WM_APP + 4;  // a list's coalesced selection change
 
 HINSTANCE instance()
 {
@@ -1792,6 +1793,9 @@ public:
             ListView_InsertColumn(h_, int(i), &col);
         }
         setModel(s.model);
+        soft_ = s.softSelection;
+        if (soft_) SetWindowSubclass(h_, hotProc, 3, reinterpret_cast<DWORD_PTR>(this));
+        SetWindowSubclass(h_, selectionProc, 4, reinterpret_cast<DWORD_PTR>(this));
     }
     ~WList() override
     {
@@ -1909,12 +1913,12 @@ public:
         case LVN_ITEMCHANGED:
         {
             auto* v = reinterpret_cast<NMLISTVIEW*>(n);
-            if (!quiet_ && (v->uChanged & LVIF_STATE) && ((v->uOldState ^ v->uNewState) & LVIS_SELECTED) && selChanged_)
-                selChanged_();
+            if (!quiet_ && (v->uChanged & LVIF_STATE) && ((v->uOldState ^ v->uNewState) & LVIS_SELECTED))
+                selectionChanged();
             return 0;
         }
         case LVN_ODSTATECHANGED:
-            if (!quiet_ && selChanged_) selChanged_();
+            if (!quiet_) selectionChanged();
             return 0;
         case LVN_ITEMACTIVATE:
         {
@@ -2009,60 +2013,233 @@ public:
     bool expandsInForm() const override { return true; }
     SIZE measure() override
     {
-        long w = 0;
-        for (int x : widths_) w += x;
-        return {std::max<long>(w + px(4), px(200)), fontMetrics(win_.dpi()).cy * 8};
+        // A modest minimum, not the columns' total: that grows with every
+        // column the user widens and, restored, would widen the window.
+        return {px(200), fontMetrics(win_.dpi()).cy * 8};
     }
 
 private:
-    // Bold/coloured text from the model's styles; painted columns through
-    // a Direct2D DC target.
+    // The list paints all its rows itself, in one Direct2D pass per paint:
+    // a software DC target bound once to the area being repainted (binding
+    // one per cell cost ~0.5 ms apiece, a hardware one ~2.5 ms for the GPU
+    // readback). The ListView keeps scrolling, selection, the header,
+    // keyboard and accessibility; its own item drawing is skipped. Rows look
+    // the same with or without focus.
     LRESULT customDraw(NMLVCUSTOMDRAW* cd)
     {
-        switch (cd->nmcd.dwDrawStage)
+        if (cd->nmcd.dwDrawStage != CDDS_PREPAINT || !model_) return CDRF_DODEFAULT;
+        paintRows(cd->nmcd.hdc);
+        return CDRF_SKIPDEFAULT;
+    }
+
+    struct RowColors
+    {
+        Color background;
+        std::optional<Color> text;  // replaces ThemeColor::Text (solid selection)
+    };
+    RowColors rowColors(bool selected, bool hot) const
+    {
+        const Color base = themeColor(ThemeColor::Base), accent = themeColor(ThemeColor::Accent);
+        const bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
+        auto mixed = [&](float t)
         {
-        case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW;
-        case CDDS_ITEMPREPAINT: return CDRF_NOTIFYSUBITEMDRAW;
-        case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
+            auto m = [t](uint8_t a, uint8_t b) { return uint8_t(std::lround(a + (b - a) * t)); };
+            return Color{m(base.r, accent.r), m(base.g, accent.g), m(base.b, accent.b), 255};
+        };
+        if (!selected) return {hot && soft_ ? mixed(dark ? 0.16f : 0.09f) : base, std::nullopt};
+        if (soft_) return {mixed(dark ? (hot ? 0.46f : 0.38f) : (hot ? 0.30f : 0.24f)), std::nullopt};
+        return {themeColor(ThemeColor::Highlight), themeColor(ThemeColor::HighlightText)};
+    }
+
+    IDWriteTextFormat* textFormat(const TextStyle& st, Align align)
+    {
+        const int key = (st.bold ? 1 : 0) | (st.italic ? 2 : 0) | (st.monospace ? 4 : 0) | (int(align) << 3);
+        Com<IDWriteTextFormat>& f = formats_[key];
+        if (!f)
         {
-            if (!model_) return CDRF_DODEFAULT;
-            const size_t row = cd->nmcd.dwItemSpec, col = size_t(cd->iSubItem);
-            if (row >= model_->rowCount()) return CDRF_DODEFAULT;
-            if (col < columns_.size() && columns_[col].painted)
+            dwriteFactory()->CreateTextFormat(st.monospace ? L"Consolas" : uiFontFamily().c_str(), nullptr,
+                                              st.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+                                              st.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                                              DWRITE_FONT_STRETCH_NORMAL, uiFontSizeDip(), L"", f.put());
+            if (!f) return nullptr;
+            f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            f->SetTextAlignment(align == Align::End      ? DWRITE_TEXT_ALIGNMENT_TRAILING
+                                : align == Align::Center ? DWRITE_TEXT_ALIGNMENT_CENTER
+                                                         : DWRITE_TEXT_ALIGNMENT_LEADING);
+            DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            Com<IDWriteInlineObject> ellipsis;
+            dwriteFactory()->CreateEllipsisTrimmingSign(f.get(), ellipsis.put());
+            f->SetTrimming(&trim, ellipsis.get());
+        }
+        return f.get();
+    }
+
+    void paintRows(HDC dc)
+    {
+        RECT clip{};
+        if (GetClipBox(dc, &clip) == NULLREGION || IsRectEmpty(&clip)) return;
+        if (!rowTarget_)
+        {
+            const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+                96, 96);
+            if (FAILED(d2dFactory()->CreateDCRenderTarget(&props, rowTarget_.put()))) return;
+            // Crisp GDI-style glyphs, like the ListView's own text.
+            Com<IDWriteRenderingParams> def, params;
+            dwriteFactory()->CreateRenderingParams(def.put());
+            if (def &&
+                SUCCEEDED(dwriteFactory()->CreateCustomRenderingParams(
+                    def->GetGamma(), def->GetEnhancedContrast(), def->GetClearTypeLevel(), def->GetPixelGeometry(),
+                    DWRITE_RENDERING_MODE_GDI_CLASSIC, params.put())))
+                rowTarget_->SetTextRenderingParams(params.get());
+            rowTarget_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+        }
+        ID2D1DCRenderTarget* rt = rowTarget_.get();
+        if (FAILED(rt->BindDC(dc, &clip))) return;
+        const float s = win_.scale();
+        auto dip = [s](long v) { return v / s; };
+
+        // Column spans in client px: the header's item rects (in display
+        // order, hidden ones zero-wide) shifted by the horizontal scroll.
+        struct Span
+        {
+            size_t col;
+            long left, right;
+        };
+        std::vector<Span> spans;
+        HWND header = ListView_GetHeader(h_);
+        const size_t count = model_->rowCount();
+        RECT first{};
+        long scrollX = 0;
+        if (count && ListView_GetItemRect(h_, ListView_GetTopIndex(h_), &first, LVIR_BOUNDS)) scrollX = first.left;
+        for (size_t c = 0; c < columns_.size(); ++c)
+        {
+            RECT hr{};
+            if (!visible_[c] || !Header_GetItemRect(header, int(c), &hr) || hr.right <= hr.left) continue;
+            spans.push_back({c, hr.left + scrollX, hr.right + scrollX});
+        }
+
+        rt->BeginDraw();
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        const Color base = themeColor(ThemeColor::Base);
+        rt->Clear(D2D1::ColorF(base.r / 255.f, base.g / 255.f, base.b / 255.f));
+        {
+            D2DPainter painter(rt, s);  // sets the target's DPI: coordinates below are DIPs
+            const D2D1_MATRIX_3X2_F origin = D2D1::Matrix3x2F::Translation(-dip(clip.left), -dip(clip.top));
+            Com<ID2D1SolidColorBrush> brush;
+            rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0), brush.put());
+            auto fill = [&](RECT r, Color c)
             {
-                RECT r{};
-                ListView_GetSubItemRect(h_, int(row), int(col), LVIR_BOUNDS, &r);
-                if (col == 0) r.right = r.left + ListView_GetColumnWidth(h_, 0);
-                const bool selected = ListView_GetItemState(h_, int(row), LVIS_SELECTED) & LVIS_SELECTED;
-                FillRect(cd->nmcd.hdc, &r, GetSysColorBrush(selected ? COLOR_HIGHLIGHT : COLOR_WINDOW));
-                const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-                    D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
-                Com<ID2D1DCRenderTarget> rt;
-                if (SUCCEEDED(d2dFactory()->CreateDCRenderTarget(&props, rt.put())) &&
-                    SUCCEEDED(rt->BindDC(cd->nmcd.hdc, &r)))
+                brush->SetColor(D2D1::ColorF(c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f));
+                rt->SetTransform(origin);
+                rt->FillRectangle(D2D1::RectF(dip(r.left), dip(r.top), dip(r.right), dip(r.bottom)), brush.get());
+            };
+
+            for (int row = count ? ListView_GetTopIndex(h_) : 0; size_t(row) < count; ++row)
+            {
+                RECT rr{};
+                if (!ListView_GetItemRect(h_, row, &rr, LVIR_BOUNDS) || rr.top >= clip.bottom) break;
+                if (rr.bottom <= clip.top) continue;
+                const bool selected = ListView_GetItemState(h_, row, LVIS_SELECTED) & LVIS_SELECTED;
+                const RowColors colors = rowColors(selected, row == hot_);
+                fill(RECT{clip.left, rr.top, clip.right, rr.bottom}, colors.background);
+
+                for (const Span& sp : spans)
                 {
-                    rt->BeginDraw();
+                    if (sp.right <= clip.left || sp.left >= clip.right) continue;
+                    const RECT cell{sp.left, rr.top, sp.right, rr.bottom};
+                    const TextStyle st = model_->style(size_t(row), sp.col);
+                    if (st.bg && !selected) fill(cell, painter.resolve(*st.bg));
+                    if (columns_[sp.col].painted)
                     {
-                        D2DPainter p(rt.get(), win_.scale());
-                        if (selected) p.overrideColor(ThemeColor::Text, themeColor(ThemeColor::HighlightText));
-                        const float s = win_.scale();
-                        model_->paint(row, col, p, CellInfo{{(r.right - r.left) / s, (r.bottom - r.top) / s}, selected, false});
+                        D2DPainter cellPainter(rt, s);
+                        if (soft_)
+                        {
+                            cellPainter.overrideColor(ThemeColor::Highlight, colors.background);
+                            cellPainter.overrideColor(ThemeColor::HighlightText, themeColor(ThemeColor::Text));
+                        }
+                        if (colors.text) cellPainter.overrideColor(ThemeColor::Text, *colors.text);
+                        rt->SetTransform(D2D1::Matrix3x2F::Translation(dip(cell.left), dip(cell.top)) * origin);
+                        const SizeF size{dip(cell.right - cell.left), dip(cell.bottom - cell.top)};
+                        cellPainter.pushClip({0, 0, size.w, size.h});
+                        model_->paint(size_t(row), sp.col, cellPainter, CellInfo{size, selected, false});
+                        cellPainter.popClip();
+                        continue;
                     }
-                    rt->EndDraw();
+                    const std::wstring text = wide(model_->text(size_t(row), sp.col));
+                    if (text.empty()) continue;
+                    IDWriteTextFormat* format = textFormat(st, columns_[sp.col].align);
+                    if (!format) continue;
+                    const Color fg = colors.text && !st.fg ? *colors.text
+                                                           : painter.resolve(st.fg ? *st.fg : Paint{ThemeColor::Text});
+                    brush->SetColor(D2D1::ColorF(fg.r / 255.f, fg.g / 255.f, fg.b / 255.f, fg.a / 255.f));
+                    rt->SetTransform(origin);
+                    const float pad = 6;  // the ListView's own cell padding, in DIPs
+                    rt->DrawText(text.c_str(), UINT32(text.size()), format,
+                                 D2D1::RectF(dip(cell.left) + pad, dip(cell.top), dip(cell.right) - pad, dip(cell.bottom)),
+                                 brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
                 }
-                return CDRF_SKIPDEFAULT;
             }
-            const TextStyle st = model_->style(row, col);
-            SelectObject(cd->nmcd.hdc, uiFont(win_.dpi(), st.bold, st.monospace));
-            if (st.fg) cd->clrText = colorRef(std::holds_alternative<Color>(*st.fg) ? std::get<Color>(*st.fg)
-                                                                                  : themeColor(std::get<ThemeColor>(*st.fg)));
-            if (st.bg && !(ListView_GetItemState(h_, int(row), LVIS_SELECTED) & LVIS_SELECTED)) cd->clrTextBk = colorRef(std::holds_alternative<Color>(*st.bg) ? std::get<Color>(*st.bg)
-                                                                                    : themeColor(std::get<ThemeColor>(*st.bg)));
-            return CDRF_NEWFONT;
+
+            // The drop line while rows are dragged (the ListView would draw
+            // it, but its item painting is skipped).
+            RECT mark{};
+            if (dragging_ && SendMessageW(h_, LVM_GETINSERTMARKRECT, 0, reinterpret_cast<LPARAM>(&mark)) &&
+                !IsRectEmpty(&mark))
+                fill(mark, themeColor(ThemeColor::Text));
+            rt->SetTransform(D2D1::Matrix3x2F::Identity());
         }
+        if (rt->EndDraw() == D2DERR_RECREATE_TARGET) rowTarget_.reset();
+    }
+
+    // A click changes the selection in steps (everything off, then the new
+    // row on), and each step notified the app, which redrew its details
+    // twice. Changes are reported once, after the ListView is done: posted
+    // messages run before the next paint, so the details still land in the
+    // same frame as the highlight.
+    void selectionChanged()
+    {
+        if (!selChanged_ || selPending_) return;
+        selPending_ = true;
+        PostMessageW(h_, WM_ANYUI_SELECTION, 0, 0);
+    }
+    static LRESULT CALLBACK selectionProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        if (msg != WM_ANYUI_SELECTION) return DefSubclassProc(h, msg, wp, lp);
+        auto* self = reinterpret_cast<WList*>(data);
+        self->selPending_ = false;
+        if (self->selChanged_) self->selChanged_();
+        return 0;
+    }
+
+    // The row under the pointer gets a light tint (soft-selection lists,
+    // like Explorer's and TortoiseGit's).
+    void setHot(int row)
+    {
+        if (row == hot_) return;
+        for (int r : {hot_, row})
+        {
+            RECT rr{};
+            if (r >= 0 && ListView_GetItemRect(h_, r, &rr, LVIR_BOUNDS)) InvalidateRect(h_, &rr, FALSE);
         }
-        return CDRF_DODEFAULT;
+        hot_ = row;
+    }
+    static LRESULT CALLBACK hotProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<WList*>(data);
+        if (msg == WM_MOUSEMOVE)
+        {
+            LVHITTESTINFO hit{};
+            hit.pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            const int row = ListView_HitTest(h, &hit);
+            self->setHot(row >= 0 && (hit.flags & LVHT_ONITEM) ? row : -1);
+            TRACKMOUSEEVENT tme{sizeof tme, TME_LEAVE, h, 0};
+            TrackMouseEvent(&tme);
+        }
+        else if (msg == WM_MOUSELEAVE)
+            self->setHot(-1);
+        return DefSubclassProc(h, msg, wp, lp);
     }
 
     // Where dragged rows would land for a point in client coordinates: the
@@ -2168,6 +2345,11 @@ private:
     std::wstring text_;  // LVN_GETDISPINFO's buffer
     bool quiet_ = false;
     bool fitted_ = false;  // stretch columns have had their share of the width
+    bool selPending_ = false;  // a selection change is posted, not yet reported
+    Com<ID2D1DCRenderTarget> rowTarget_;
+    std::map<int, Com<IDWriteTextFormat>> formats_;  // by style and alignment
+    bool soft_ = false;
+    int hot_ = -1;  // the row under the pointer
     int sortColumn_ = -1;
     SortOrder sortOrder_ = SortOrder::Ascending;
     std::function<void()> selChanged_;
@@ -3108,11 +3290,14 @@ public:
         if (!shownOnce_)
         {
             shownOnce_ = true;
-            // First size: the requested one, but never smaller than the content.
+            // First size: one set by resize() before showing (a restored
+            // size) as it is; otherwise the spec's, but never smaller than
+            // the content.
             const SIZE n = root ? root->natural() : SIZE{200, 100};
             const int m = margin();
             long w = std::max<long>(n.cx + 2 * m, extentPx(hwnd_, initialW_, false));
             long h = std::max<long>(n.cy + 2 * m, extentPx(hwnd_, initialH_, true));
+            if (requested_) w = requested_->cx, h = requested_->cy;
             RECT r{0, 0, w, h};
             AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), FALSE,
                                DWORD(GetWindowLongPtrW(hwnd_, GWL_EXSTYLE)));
@@ -3163,6 +3348,7 @@ public:
     {
         if (fullscreen_ || IsZoomed(hwnd_)) return;
         RECT r{0, 0, px(sz.w), px(sz.h)};
+        if (!shownOnce_) requested_ = SIZE{r.right, r.bottom};
         adjust(r);
         SetWindowPos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
@@ -3433,6 +3619,7 @@ private:
     HWND hwnd_ = nullptr;
     bool dialog_, margins_;
     bool modal_ = false, finished_ = false, shownOnce_ = false, fullscreen_ = false, relayoutPending_ = false;
+    std::optional<SIZE> requested_;  // client size from resize() before the first show
     Extent initialW_, initialH_;
     SizeF minSize_{};
     WINDOWPLACEMENT placement_{};

@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <tuple>
 
 namespace anyui::win32
 {
@@ -437,12 +439,17 @@ void D2DPainter::popClip()
 
 Com<IDWriteTextLayout> D2DPainter::layout(const std::string& s, const TextStyle& style, float maxWidth) const
 {
-    Com<IDWriteTextFormat> format;
+    // Formats are immutable and few (a handful of styles), so they're made
+    // once each; creating one per call cost more than the drawing. UI thread
+    // only, like all painting.
     const float size = style.size > 0 ? style.size * 96.f / 72.f : uiFontSizeDip();
-    dwriteFactory()->CreateTextFormat(style.monospace ? L"Consolas" : uiFontFamily().c_str(), nullptr,
-                                      style.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
-                                      style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
-                                      DWRITE_FONT_STRETCH_NORMAL, size, L"", format.put());
+    static std::map<std::tuple<float, bool, bool, bool>, Com<IDWriteTextFormat>> formats;
+    Com<IDWriteTextFormat>& format = formats[{size, style.bold, style.italic, style.monospace}];
+    if (!format)
+        dwriteFactory()->CreateTextFormat(style.monospace ? L"Consolas" : uiFontFamily().c_str(), nullptr,
+                                          style.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+                                          style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                                          DWRITE_FONT_STRETCH_NORMAL, size, L"", format.put());
     Com<IDWriteTextLayout> layout;
     const std::wstring w = wide(s);
     if (format)
