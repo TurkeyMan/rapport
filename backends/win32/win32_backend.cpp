@@ -1146,6 +1146,9 @@ public:
                                 (s.wrap ? 0 : ES_AUTOHSCROLL | WS_HSCROLL) | (s.readOnly ? ES_READONLY : 0),
                             WS_EX_CLIENTEDGE));
         SendMessageW(h_, EM_SETEVENTMASK, 0, ENM_CHANGE);
+        // RichEdit holds 32,767 characters unless told otherwise, and cuts
+        // longer text off silently (a big diff showed only its start).
+        SendMessageW(h_, EM_EXLIMITTEXT, 0, 0x7ffffffe);
         SendMessageW(h_, EM_SETBKGNDCOLOR, 0, LPARAM(GetSysColor(COLOR_WINDOW)));
         if (mono_) SendMessageW(h_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont(win.dpi(), false, true)), FALSE);
         SetWindowSubclass(h_, wheelProc, 1, reinterpret_cast<DWORD_PTR>(this));
@@ -1188,13 +1191,10 @@ public:
     void setText(const std::string& t, std::vector<Span> spans) override
     {
         quiet_ = true;
-        SetWindowTextW(h_, wide(t).c_str());
-        // All span ends converted in one pass over the text (per span it was
-        // quadratic in a long diff).
-        std::vector<size_t> at;
-        for (const Span& sp : spans) at.insert(at.end(), {sp.begin, sp.end});
-        const std::vector<long> pos = units(t, at);
-        for (size_t i = 0; i < spans.size(); ++i) format(pos[2 * i], pos[2 * i + 1], spans[i].style);
+        if (spans.empty())
+            SetWindowTextW(h_, wide(t).c_str());
+        else
+            streamRtf(rtf(t, std::move(spans)));
         SendMessageW(h_, EM_SETSEL, 0, 0);
         quiet_ = false;
     }
@@ -1277,6 +1277,103 @@ private:
         while (at < t.size() && (uint8_t(t[at]) & 0xc0) == 0x80) ++at;  // finish the character
         return at;
     }
+    // Styled text goes in as one RTF stream. Formatting each span with
+    // EM_SETCHARFORMAT made RichEdit lay out again per span: seconds for a
+    // diff of a few thousand coloured lines.
+    std::string rtf(const std::string& t, std::vector<Span> spans) const
+    {
+        std::sort(spans.begin(), spans.end(), [](const Span& a, const Span& b) { return a.begin < b.begin; });
+        // The control's own font, so styled text looks like plain text.
+        LOGFONTW lf{};
+        GetObjectW(uiFont(win_.dpi(), false, mono_), sizeof lf, &lf);
+        const int halfPoints = lf.lfHeight ? int(std::lround(std::abs(lf.lfHeight) * 144.0 / win_.dpi())) : 18;
+        std::vector<COLORREF> colours;
+        auto colourIndex = [&](const Paint& p)
+        {
+            const COLORREF c = colorRef(std::holds_alternative<Color>(p) ? std::get<Color>(p) : themeColor(std::get<ThemeColor>(p)));
+            auto it = std::find(colours.begin(), colours.end(), c);
+            if (it == colours.end()) it = colours.insert(colours.end(), c);
+            return int(it - colours.begin()) + 1;  // 0 is the default colour
+        };
+        std::string body;
+        body.reserve(t.size() + t.size() / 4);
+        auto text = [&](size_t from, size_t to)
+        {
+            for (size_t i = from; i < to && i < t.size();)
+            {
+                const auto c = uint8_t(t[i]);
+                if (c < 0x80)
+                {
+                    ++i;
+                    if (c == '\\' || c == '{' || c == '}') body += '\\', body += char(c);
+                    else if (c == '\n') body += "\\par\n";
+                    else if (c == '\t') body += "\\tab ";
+                    else if (c != '\r') body += char(c);
+                    continue;
+                }
+                // UTF-8 -> code point -> \uN with UTF-16 units (signed, as RTF has them).
+                const int len = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1;
+                char32_t cp = len == 1 ? 0xfffd : char32_t(c & (0x7f >> len));
+                for (int k = 1; k < len && i + k < t.size(); ++k) cp = (cp << 6) | (uint8_t(t[i + k]) & 0x3f);
+                i += len;
+                auto unit = [&](int u) { body += "\\u" + std::to_string(int16_t(u)) + ' '; };
+                if (cp >= 0x10000)
+                {
+                    cp -= 0x10000;
+                    unit(0xd800 + int(cp >> 10));
+                    unit(0xdc00 + int(cp & 0x3ff));
+                }
+                else
+                    unit(int(cp));
+            }
+        };
+        size_t at = 0;
+        for (const Span& sp : spans)
+        {
+            const size_t begin = std::max(sp.begin, at), end = std::min(sp.end, t.size());
+            if (end <= begin) continue;
+            text(at, begin);
+            body += '{';
+            if (sp.style.fg) body += "\\cf" + std::to_string(colourIndex(*sp.style.fg));
+            if (sp.style.bg) body += "\\highlight" + std::to_string(colourIndex(*sp.style.bg));
+            if (sp.style.bold) body += "\\b";
+            if (sp.style.italic) body += "\\i";
+            if (sp.style.monospace && !mono_) body += "\\f1";
+            body += ' ';
+            text(begin, end);
+            body += '}';
+            at = end;
+        }
+        text(at, t.size());
+
+        std::string out = "{\\rtf1\\ansi\\uc0{\\fonttbl{\\f0 " + narrow(lf.lfFaceName) + ";}{\\f1 Consolas;}}{\\colortbl;";
+        for (COLORREF c : colours)
+            out += "\\red" + std::to_string(GetRValue(c)) + "\\green" + std::to_string(GetGValue(c)) + "\\blue" +
+                   std::to_string(GetBValue(c)) + ';';
+        out += "}\\f0\\fs" + std::to_string(halfPoints) + ' ' + body + '}';
+        return out;
+    }
+    void streamRtf(const std::string& rtf)
+    {
+        struct Reader
+        {
+            const std::string* data;
+            size_t at = 0;
+        } reader{&rtf};
+        EDITSTREAM es{};
+        es.dwCookie = reinterpret_cast<DWORD_PTR>(&reader);
+        es.pfnCallback = [](DWORD_PTR cookie, LPBYTE buf, LONG size, LONG* got) -> DWORD
+        {
+            auto* r = reinterpret_cast<Reader*>(cookie);
+            const size_t n = std::min<size_t>(size_t(size), r->data->size() - r->at);
+            std::memcpy(buf, r->data->data() + r->at, n);
+            r->at += n;
+            *got = LONG(n);
+            return 0;
+        };
+        SendMessageW(h_, EM_STREAMIN, SF_RTF, reinterpret_cast<LPARAM>(&es));
+    }
+
     void format(long a, long b, const TextStyle& st)
     {
         if (b <= a) return;
