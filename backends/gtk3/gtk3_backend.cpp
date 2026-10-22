@@ -1499,6 +1499,7 @@ public:
         contextMenu_ = std::move(f);
     }
     void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
+    void onCellContextMenu(std::function<Menu(size_t, size_t, PointF)> f) override { cellMenu_ = std::move(f); }
     void onReorder(ReorderFn f) override { reorder_ = std::move(f); }
     void setReorderable(bool v) override { reorderable_ = v; }
     void onCellDrag(CellDrag d) override
@@ -2074,10 +2075,18 @@ private:
         if (e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_SECONDARY) return false;
         std::optional<size_t> row;
         GtkTreePath* path = nullptr;
-        if (gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(w_), int(e->x), int(e->y), &path, nullptr,
+        GtkTreeViewColumn* col = nullptr;
+        std::optional<std::pair<size_t, PointF>> at;  // column, point in the cell
+        if (gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(w_), int(e->x), int(e->y), &path, &col,
                                           nullptr, nullptr))
         {
             row = size_t(gtk_tree_path_get_indices(path)[0]);
+            if (auto c = std::find(cols_.begin(), cols_.end(), col); c != cols_.end())
+            {
+                GdkRectangle area;
+                gtk_tree_view_get_cell_area(GTK_TREE_VIEW(w_), path, col, &area);
+                at = {size_t(c - cols_.begin()), PointF{float(e->x - area.x), float(e->y - area.y)}};
+            }
             // Keep a multi-selection when right-clicking inside it (two
             // revisions to compare). set_cursor would select only its row,
             // so the cursor moves only with a new selection.
@@ -2087,6 +2096,12 @@ private:
                 gtk_tree_view_set_cursor(GTK_TREE_VIEW(w_), path, nullptr, false);
             }
             gtk_tree_path_free(path);
+        }
+        if (cellMenu_ && row && at && alive_)
+        {
+            Menu items = cellMenu_(*row, at->first, at->second);
+            if (!items.empty()) menu_.show(std::move(items), w_, reinterpret_cast<GdkEvent*>(e));
+            return true;
         }
         popup(row, reinterpret_cast<GdkEvent*>(e));
         return true;
@@ -2119,6 +2134,7 @@ private:
     std::function<void(size_t, SortOrder)> sort_;
     std::function<Menu(std::optional<size_t>)> contextMenu_;
     std::function<Menu(size_t)> headerMenu_;
+    std::function<Menu(size_t, size_t, PointF)> cellMenu_;
     ReorderFn reorder_;
     bool reorderable_ = true;
     Drag drag_;

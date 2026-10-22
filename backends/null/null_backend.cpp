@@ -134,6 +134,7 @@ public:
     void setCurrent(size_t) override {}
     void scrollTo(size_t) override {}
     void onCellDrag(CellDrag) override {}
+    void onCellContextMenu(std::function<Menu(size_t, size_t, PointF)>) override {}
     void setSortIndicator(std::optional<size_t>, SortOrder) override {}
     std::vector<float> columnWidths() const override { return {}; }
     void setColumnWidths(const std::vector<float>&) override {}

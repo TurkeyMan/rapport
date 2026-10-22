@@ -1131,6 +1131,7 @@ public:
     }
     // TODO(pengit): header right-click menu (gesture on the header row).
     void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
+    void onCellContextMenu(std::function<Menu(size_t, size_t, PointF)> f) override { cellMenu_ = std::move(f); }
     // TODO(pengit): drag-reordering (GtkDragSource on the rows).
     void onReorder(ReorderFn) override {}
     void setReorderable(bool) override {}
@@ -1445,9 +1446,11 @@ private:
         if (tagged) row = tagged - 1;
         if (row && !gtk_selection_model_is_selected(sel_, guint(*row)))
             gtk_selection_model_select_item(sel_, guint(*row), true);
-        if (!contextMenu_) return;
+        auto* ctx = static_cast<ColumnCtx*>(g_object_get_data(G_OBJECT(cell), "anyui-ctx"));
+        const bool atCell = cellMenu_ && row && ctx;
+        if (!contextMenu_ && !atCell) return;
 
-        Menu menu = contextMenu_(row);
+        Menu menu = atCell ? cellMenu_(*row, ctx->column, PointF{float(x), float(y)}) : contextMenu_(row);
         if (menu.empty()) return;
 
         GMenu* model = ctxMenu_->build(std::move(menu));
@@ -1484,6 +1487,7 @@ private:
     std::function<void(size_t, SortOrder)> sort_;
     std::function<Menu(std::optional<size_t>)> contextMenu_;
     std::function<Menu(size_t)> headerMenu_;
+    std::function<Menu(size_t, size_t, PointF)> cellMenu_;
 };
 
 // ---------------------------------------------------------------- window

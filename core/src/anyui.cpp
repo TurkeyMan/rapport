@@ -197,6 +197,7 @@ private:
         if (s.onHeaderMenu) l.onHeaderMenu(s.onHeaderMenu);
         if (s.onReorder) l.onReorder(s.onReorder);
         if (s.onCellDrag.begin) l.onCellDrag(s.onCellDrag);
+        if (s.onCellContextMenu) l.onCellContextMenu(s.onCellContextMenu);
         bind(s.bind, w);
     }
     static void apply(const spec::MenuButton& s, Widget& w)

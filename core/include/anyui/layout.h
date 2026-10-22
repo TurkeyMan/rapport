@@ -233,6 +233,7 @@ struct List
     std::function<Menu(size_t)> onHeaderMenu;
     anyui::List::ReorderFn onReorder;
     anyui::List::CellDrag onCellDrag;
+    std::function<Menu(size_t, size_t, PointF)> onCellContextMenu;
     anyui::List** bind = nullptr;
 };
 struct MenuButton
@@ -767,6 +768,11 @@ public:
     List& onCellDrag(anyui::List::CellDrag d)
     {
         s().onCellDrag = std::move(d);
+        return *this;
+    }
+    List& onCellContextMenu(std::function<Menu(size_t, size_t, PointF)> f)
+    {
+        s().onCellContextMenu = std::move(f);
         return *this;
     }
     List& onHeaderMenu(std::function<Menu(size_t)> f)

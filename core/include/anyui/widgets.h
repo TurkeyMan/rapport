@@ -584,6 +584,11 @@ public:
     virtual void onContextMenu(std::function<Menu(std::optional<size_t> row)>) = 0;
     // Right-click on a column header (e.g. a menu of columns to show).
     virtual void onHeaderMenu(std::function<Menu(size_t column)>) = 0;
+    // A context menu that also knows where a right-click on a row landed:
+    // its column and the point in that cell (a label within it), as
+    // CellDrag::begin gets them. When set, right-clicks on rows use it; the
+    // menu key and clicks outside the rows still use onContextMenu.
+    virtual void onCellContextMenu(std::function<Menu(size_t row, size_t column, PointF inCell)>) = 0;
 
     // Drag-reordering. With a handler set, the user can drag the selected
     // rows to a new place. `destination` is the row they go in front of, in

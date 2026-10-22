@@ -2091,6 +2091,7 @@ public:
     void onSortRequested(std::function<void(size_t, SortOrder)> f) override { sort_ = std::move(f); }
     void onContextMenu(std::function<Menu(std::optional<size_t>)> f) override { context_ = std::move(f); }
     void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
+    void onCellContextMenu(std::function<Menu(size_t, size_t, PointF)> f) override { cellMenu_ = std::move(f); }
     void onReorder(ReorderFn f) override
     {
         reorder_ = std::move(f);
@@ -2177,7 +2178,24 @@ public:
                 if (hit.iItem >= 0) popupMenu(GetAncestor(h_, GA_ROOT), headerMenu_(size_t(hit.iItem)), pt);
                 return 1;
             }
-            if (context_)
+            if (auto* a = reinterpret_cast<NMITEMACTIVATE*>(n); cellMenu_ && a->iItem >= 0)
+            {
+                // Which cell, and where in it (a label the menu is about).
+                LVHITTESTINFO hit{};
+                hit.pt = a->ptAction;
+                ListView_SubItemHitTest(h_, &hit);
+                const int col = std::max(hit.iSubItem, 0);
+                RECT cell{};
+                ListView_GetSubItemRect(h_, a->iItem, col, LVIR_BOUNDS, &cell);
+                const float s = win_.scale();
+                POINT pt;
+                GetCursorPos(&pt);
+                popupMenu(GetAncestor(h_, GA_ROOT),
+                          cellMenu_(size_t(a->iItem), size_t(col),
+                                    PointF{(a->ptAction.x - cell.left) / s, (a->ptAction.y - cell.top) / s}),
+                          pt);
+            }
+            else if (context_)
             {
                 auto* a = reinterpret_cast<NMITEMACTIVATE*>(n);
                 POINT pt;
@@ -2730,6 +2748,7 @@ private:
     std::function<void(size_t, SortOrder)> sort_;
     std::function<Menu(std::optional<size_t>)> context_;
     std::function<Menu(size_t)> headerMenu_;
+    std::function<Menu(size_t, size_t, PointF)> cellMenu_;
 };
 
 // ---------------------------------------------------------------- tabs
