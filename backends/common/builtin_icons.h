@@ -4,14 +4,14 @@
 // caller's painter can override.
 #pragma once
 
-#include "anyui/backend.h"
+#include "rapport/backend.h"
 
 #include <algorithm>
 #include <cmath>
 #include <optional>
 #include <string>
 
-namespace anyui::common
+namespace rap::common
 {
 
 // Draws `fullName` (a trailing "-symbolic" ignored) into `s`; false when it
@@ -120,4 +120,4 @@ inline bool drawBuiltinIcon(const std::string& fullName, Painter& p, SizeF s)
     return true;
 }
 
-}  // namespace anyui::common
+}  // namespace rap::common

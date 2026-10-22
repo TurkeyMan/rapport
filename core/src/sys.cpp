@@ -1,4 +1,4 @@
-#include "anyui/sys.h"
+#include "rapport/sys.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -29,7 +29,7 @@ extern char** environ;
 
 namespace fs = std::filesystem;
 
-namespace anyui::sys
+namespace rap::sys
 {
 
 // ---------------------------------------------------------------- strings, paths
@@ -821,4 +821,4 @@ std::size_t availableMemory()
 #endif
 }
 
-}  // namespace anyui::sys
+}  // namespace rap::sys

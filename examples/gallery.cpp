@@ -1,8 +1,8 @@
-// Every anyui widget in one window, plus a log-style list with a painted
+// Every rapport widget in one window, plus a log-style list with a painted
 // graph column over 10,000 rows.
-//   ./anyui-gallery                 backend picked from the desktop
-//   ANYUI_BACKEND=gtk3 ./anyui-gallery
-#include <anyui/anyui.h>
+//   ./rapport-gallery                 backend picked from the desktop
+//   RAPPORT_BACKEND=gtk3 ./rapport-gallery
+#include <rapport/rapport.h>
 
 #include <cstdio>
 
@@ -11,7 +11,7 @@ namespace
 
 // Fake history: a main line with feature branches forking off and merging
 // back, enough to exercise lines, curves, dots and ref pills.
-class LogModel : public anyui::ListModel
+class LogModel : public rap::ListModel
 {
 public:
     size_t rowCount() const override { return 10000; }
@@ -29,17 +29,17 @@ public:
         return {};
     }
 
-    anyui::TextStyle style(size_t row, size_t col) const override
+    rap::TextStyle style(size_t row, size_t col) const override
     {
-        anyui::TextStyle s;
+        rap::TextStyle s;
         if (row == 0 && col == 1) s.bold = true;
         return s;
     }
 
-    void paint(size_t row, size_t, anyui::Painter& p, const anyui::CellInfo& cell) const override
+    void paint(size_t row, size_t, rap::Painter& p, const rap::CellInfo& cell) const override
     {
-        using anyui::ThemeColor;
-        const anyui::Color lanes[] = {{0x35, 0x84, 0xe4}, {0xe6, 0x61, 0x00}, {0x26, 0xa2, 0x69}};
+        using rap::ThemeColor;
+        const rap::Color lanes[] = {{0x35, 0x84, 0xe4}, {0xe6, 0x61, 0x00}, {0x26, 0xa2, 0x69}};
         float w = 14, mid = cell.size.h / 2;
         auto x = [&](int l) { return 8 + l * w; };
 
@@ -55,20 +55,20 @@ public:
         if (row % 12 == 9)  // fork point
             p.curve({x(1), 0}, {x(1), mid}, {x(1), mid}, {x(0), mid}, lanes[1], 2);
 
-        p.circle({x(here), mid}, 4, lanes[here], anyui::Paint{ThemeColor::Base});
+        p.circle({x(here), mid}, 4, lanes[here], rap::Paint{ThemeColor::Base});
 
         // Ref pill after the lanes.
         if (row % 40 == 0)
         {
             std::string ref = row == 0 ? "HEAD -> main" : "v" + std::to_string(250 - row / 40);
-            anyui::TextStyle ts;
-            ts.fg = anyui::Color{0xff, 0xff, 0xff};
+            rap::TextStyle ts;
+            ts.fg = rap::Color{0xff, 0xff, 0xff};
             ts.bold = true;
-            anyui::SizeF sz = p.measure(ref, ts);
+            rap::SizeF sz = p.measure(ref, ts);
             float px = x(2) + 6, py = (cell.size.h - sz.h) / 2;
             p.rect({px - 4, py, sz.w + 8, sz.h}, 4,
-                   anyui::Paint{row == 0 ? anyui::Color{0x26, 0xa2, 0x69}
-                                         : anyui::Color{0x91, 0x41, 0xac}},
+                   rap::Paint{row == 0 ? rap::Color{0x26, 0xa2, 0x69}
+                                         : rap::Color{0x91, 0x41, 0xac}},
                    std::nullopt);
             p.text({px, py}, ref, ts);
         }
@@ -87,24 +87,24 @@ const char* kDiff = "diff --git a/src/main.cpp b/src/main.cpp\n"
                     "+    puts(\"hello\");\n"
                     "+}\n";
 
-std::vector<anyui::TextView::Span> diffSpans(const std::string& text)
+std::vector<rap::TextView::Span> diffSpans(const std::string& text)
 {
-    std::vector<anyui::TextView::Span> spans;
+    std::vector<rap::TextView::Span> spans;
     size_t at = 0;
     while (at < text.size())
     {
         size_t end = text.find('\n', at);
         if (end == std::string::npos) end = text.size();
-        anyui::TextStyle s;
+        rap::TextStyle s;
         if (text.compare(at, 2, "@@") == 0)
         {
-            s.fg = anyui::ThemeColor::Accent;
+            s.fg = rap::ThemeColor::Accent;
             s.bold = true;
         }
         else if (text[at] == '+')
-            s.fg = anyui::ThemeColor::Positive;
+            s.fg = rap::ThemeColor::Positive;
         else if (text[at] == '-')
-            s.fg = anyui::ThemeColor::Negative;
+            s.fg = rap::ThemeColor::Negative;
         else if (text.compare(at, 4, "diff") == 0)
             s.bold = true;
         if (s.fg || s.bold) spans.push_back({at, end, s});
@@ -117,24 +117,24 @@ std::vector<anyui::TextView::Span> diffSpans(const std::string& text)
 
 int main(int argc, char** argv)
 {
-    auto loaded = anyui::Ui::load(argc, argv);
+    auto loaded = rap::Ui::load(argc, argv);
     if (!loaded)
     {
         std::fprintf(stderr, "%s", loaded.error().c_str());
         return 1;
     }
-    anyui::Ui& ui = **loaded;
+    rap::Ui& ui = **loaded;
 
     LogModel model;
-    anyui::Label* status = nullptr;
-    anyui::List* log = nullptr;
-    anyui::TextView* details = nullptr;
+    rap::Label* status = nullptr;
+    rap::List* log = nullptr;
+    rap::TextView* details = nullptr;
 
     auto say = [&](const std::string& s) { status->setText(s); };
 
-    using namespace anyui::layout;
+    using namespace rap::layout;
     auto win = ui.create(Window{
-        "anyui gallery — " + std::string(ui.backendName()),
+        "rapport gallery — " + std::string(ui.backendName()),
         {VBox{
             Tabs{
                 {"_Log",
@@ -160,21 +160,21 @@ int main(int argc, char** argv)
                                  [&](size_t row)
                                  {
                                      ui.message(nullptr,
-                                                {.icon = anyui::MessageSpec::Icon::Info,
+                                                {.icon = rap::MessageSpec::Icon::Info,
                                                  .title = "Commit",
                                                  .text = model.text(row, 1),
                                                  .detail = "Activated row " + std::to_string(row)});
                                  })
                              .onSortRequested(
-                                 [&](size_t col, anyui::SortOrder o)
+                                 [&](size_t col, rap::SortOrder o)
                                  {
                                      log->setSortIndicator(col, o);
                                      say("sort by column " + std::to_string(col) +
-                                         (o == anyui::SortOrder::Ascending ? " ascending"
+                                         (o == rap::SortOrder::Ascending ? " ascending"
                                                                            : " descending"));
                                  })
                              .onContextMenu(
-                                 [&](std::optional<size_t> row) -> anyui::Menu
+                                 [&](std::optional<size_t> row) -> rap::Menu
                                  {
                                      if (!row) return {};
                                      size_t r = *row;
@@ -185,7 +185,7 @@ int main(int argc, char** argv)
                                           .shortcut = "Ctrl+C"},
                                          {.label = "Show log of this branch",
                                           .action = [&] { say("show log"); }},
-                                         anyui::MenuItem::separator(),
+                                         rap::MenuItem::separator(),
                                          {.label = "Reset",
                                           .children =
                                               {
@@ -228,20 +228,20 @@ int main(int argc, char** argv)
                                    {
                                        ui.message(
                                            nullptr,
-                                           {.icon = anyui::MessageSpec::Icon::Question,
+                                           {.icon = rap::MessageSpec::Icon::Question,
                                             .title = "Question",
                                             .text = "Really do the thing?",
-                                            .buttons = {anyui::DialogRole::Yes,
-                                                        anyui::DialogRole::No}},
-                                           [&](anyui::DialogRole r)
-                                           { say(r == anyui::DialogRole::Yes ? "yes" : "no"); });
+                                            .buttons = {rap::DialogRole::Yes,
+                                                        rap::DialogRole::No}},
+                                           [&](rap::DialogRole r)
+                                           { say(r == rap::DialogRole::Yes ? "yes" : "no"); });
                                    }),
                                Button{"_Open files…"}.onClick(
                                    [&]
                                    {
                                        ui.chooseFiles(
                                            nullptr,
-                                           {.mode = anyui::FileDialogSpec::Mode::OpenMany,
+                                           {.mode = rap::FileDialogSpec::Mode::OpenMany,
                                             .title = "Pick files"},
                                            [&](std::vector<std::string> files)
                                            { say(std::to_string(files.size()) + " files"); });

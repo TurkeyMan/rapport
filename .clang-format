@@ -1,4 +1,4 @@
-# Project-wide style for anyui and pengit.
+# Project-wide style for rapport and pengit.
 BasedOnStyle: LLVM
 IndentWidth: 4
 ColumnLimit: 100

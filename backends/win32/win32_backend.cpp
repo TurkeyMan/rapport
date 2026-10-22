@@ -1,4 +1,4 @@
-// anyui Win32 backend: native controls (common controls v6), Direct2D and
+// rapport Win32 backend: native controls (common controls v6), Direct2D and
 // DirectWrite for canvases and drawn icons, our own box/form layout (Win32
 // has none), per-monitor DPI awareness.
 #include "win32_common.h"
@@ -20,12 +20,12 @@
 #include <thread>
 #include <unordered_map>
 
-namespace anyui::win32
+namespace rap::win32
 {
 namespace
 {
 
-constexpr UINT WM_ANYUI_POST = WM_APP + 1;
+constexpr UINT WM_RAPPORT_POST = WM_APP + 1;
 
 // GTK-style mnemonics ("_Save", "__" for a literal underscore) to Windows
 // ones ("&Save"); a literal '&' doubles.
@@ -48,9 +48,9 @@ std::wstring mnemonic(const std::string& s)
     }
     return out;
 }
-constexpr UINT WM_ANYUI_FRAME = WM_APP + 2;
-constexpr UINT WM_ANYUI_RELAYOUT = WM_APP + 3;
-constexpr UINT WM_ANYUI_SELECTION = WM_APP + 4;  // a list's coalesced selection change
+constexpr UINT WM_RAPPORT_FRAME = WM_APP + 2;
+constexpr UINT WM_RAPPORT_RELAYOUT = WM_APP + 3;
+constexpr UINT WM_RAPPORT_SELECTION = WM_APP + 4;  // a list's coalesced selection change
 
 HINSTANCE instance()
 {
@@ -302,14 +302,14 @@ void registerClasses()
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
     wc.lpfnWndProc = hostProc;
-    wc.lpszClassName = L"anyuiHost";
+    wc.lpszClassName = L"rapportHost";
     RegisterClassExW(&wc);
 }
 
 HWND makeHost(HWND parent, DWORD style = 0)
 {
     registerClasses();
-    return CreateWindowExW(WS_EX_CONTROLPARENT, L"anyuiHost", L"", WS_CHILD | WS_CLIPCHILDREN | style, 0, 0, 0,
+    return CreateWindowExW(WS_EX_CONTROLPARENT, L"rapportHost", L"", WS_CHILD | WS_CLIPCHILDREN | style, 0, 0, 0,
                            0, parent, nullptr, instance(), nullptr);
 }
 
@@ -540,7 +540,7 @@ public:
         if (IsWindowVisible(root))
             SetFocus(h_);
         else
-            SetPropW(root, L"anyui-focus", h_);
+            SetPropW(root, L"rapport-focus", h_);
     }
 
     void place(RECT r) override
@@ -814,7 +814,7 @@ public:
 
 // ---------------------------------------------------------------- simple controls
 
-class WLabel : public Leaf<anyui::Label>
+class WLabel : public Leaf<rap::Label>
 {
 public:
     WLabel(WinContext& win, HWND parent, const spec::Label& s)
@@ -846,7 +846,7 @@ private:
     bool ellipsize_;
 };
 
-class WButton : public Leaf<anyui::Button>
+class WButton : public Leaf<rap::Button>
 {
 public:
     WButton(WinContext& win, HWND parent, const std::string& text, DWORD extra = 0)
@@ -903,7 +903,7 @@ private:
     HIMAGELIST images_ = nullptr;
 };
 
-class WCheck : public Leaf<anyui::Check>
+class WCheck : public Leaf<rap::Check>
 {
 public:
     WCheck(WinContext& win, HWND parent, const spec::Check& s)
@@ -969,7 +969,7 @@ LRESULT CALLBACK enterSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
     return DefSubclassProc(h, msg, wp, lp);
 }
 
-class WEntry : public Leaf<anyui::Entry>
+class WEntry : public Leaf<rap::Entry>
 {
 public:
     WEntry(WinContext& win, HWND parent, const spec::Entry& s)
@@ -1009,7 +1009,7 @@ private:
     std::function<void()> activate_;
 };
 
-class WSelect : public Leaf<anyui::Select>
+class WSelect : public Leaf<rap::Select>
 {
 public:
     WSelect(WinContext& win, HWND parent, const spec::Select& s)
@@ -1080,7 +1080,7 @@ private:
     std::function<void(int)> changed_;
 };
 
-class WCombo : public Leaf<anyui::Combo>
+class WCombo : public Leaf<rap::Combo>
 {
 public:
     WCombo(WinContext& win, HWND parent, const spec::Combo& s)
@@ -1141,7 +1141,7 @@ private:
 // Multi-line text in a RichEdit control, so styled spans (diff colours)
 // show. Offsets in the API are UTF-8 bytes; RichEdit counts UTF-16 units
 // with each line break as one character.
-class WTextView : public Leaf<anyui::TextView>
+class WTextView : public Leaf<rap::TextView>
 {
 public:
     WTextView(WinContext& win, HWND parent, const spec::TextView& s)
@@ -1488,7 +1488,7 @@ private:
     HWND h_;
 };
 
-class WProgressBar : public Leaf<anyui::ProgressBar>
+class WProgressBar : public Leaf<rap::ProgressBar>
 {
 public:
     WProgressBar(WinContext& win, HWND parent)
@@ -1527,7 +1527,7 @@ private:
     bool marquee_ = false;
 };
 
-class WDatePicker : public Leaf<anyui::DatePicker>
+class WDatePicker : public Leaf<rap::DatePicker>
 {
 public:
     WDatePicker(WinContext& win, HWND parent, const spec::DatePicker& s)
@@ -1568,7 +1568,7 @@ private:
 
 // A number in an edit with an up/down control beside it (the edit is the
 // HWND laid out; the arrows ride on its right edge).
-class WSpin : public Leaf<anyui::Spin>
+class WSpin : public Leaf<rap::Spin>
 {
 public:
     WSpin(WinContext& win, HWND parent, const spec::Spin& s)
@@ -1676,7 +1676,7 @@ private:
 };
 
 // A trackbar works in integers: positions are value / step.
-class WSlider : public Leaf<anyui::Slider>
+class WSlider : public Leaf<rap::Slider>
 {
 public:
     WSlider(WinContext& win, HWND parent, const spec::Slider& s)
@@ -1766,7 +1766,7 @@ private:
 };
 
 // An owner-drawn button showing a swatch; clicking opens ChooseColor.
-class WColorButton : public Leaf<anyui::ColorButton>
+class WColorButton : public Leaf<rap::ColorButton>
 {
 public:
     WColorButton(WinContext& win, HWND parent, const spec::ColorButton& s)
@@ -1820,7 +1820,7 @@ private:
     std::function<void(Color)> changed_;
 };
 
-class WMenuButton : public Leaf<anyui::MenuButton>
+class WMenuButton : public Leaf<rap::MenuButton>
 {
 public:
     WMenuButton(WinContext& win, HWND parent, const spec::MenuButton& s)
@@ -1886,7 +1886,7 @@ private:
 
 // Flat, owner-drawn toolbar button: icon only, hover and pressed/checked
 // backgrounds, tooltip with the label.
-class WToolButton : public Leaf<anyui::ToolButton>
+class WToolButton : public Leaf<rap::ToolButton>
 {
 public:
     WToolButton(WinContext& win, HWND parent, const spec::ToolButton& s)
@@ -1984,7 +1984,7 @@ class WList;
 WList* g_dragging = nullptr;  // the list with a row drag in progress, for Esc
 
 // A virtual report-style ListView: the model is asked for visible cells only.
-class WList : public Leaf<anyui::List>, public ListObserver
+class WList : public Leaf<rap::List>, public ListObserver
 {
 public:
     WList(WinContext& win, HWND parent, const spec::List& s)
@@ -2607,11 +2607,11 @@ private:
     {
         if (!selChanged_ || selPending_) return;
         selPending_ = true;
-        PostMessageW(h_, WM_ANYUI_SELECTION, 0, 0);
+        PostMessageW(h_, WM_RAPPORT_SELECTION, 0, 0);
     }
     static LRESULT CALLBACK selectionProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
-        if (msg != WM_ANYUI_SELECTION) return DefSubclassProc(h, msg, wp, lp);
+        if (msg != WM_RAPPORT_SELECTION) return DefSubclassProc(h, msg, wp, lp);
         auto* self = reinterpret_cast<WList*>(data);
         self->selPending_ = false;
         if (self->selChanged_) self->selChanged_();
@@ -2845,7 +2845,7 @@ private:
                 WNDCLASSEXW wc{sizeof wc};
                 wc.lpfnWndProc = DefWindowProcW;
                 wc.hInstance = instance();
-                wc.lpszClassName = L"AnyuiAutoScrollAnchor";
+                wc.lpszClassName = L"RapportAutoScrollAnchor";
                 return RegisterClassExW(&wc);
             }();
             anchor_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
@@ -3008,7 +3008,7 @@ private:
 
 // ---------------------------------------------------------------- tabs
 
-class WTabs : public Leaf<anyui::Tabs>
+class WTabs : public Leaf<rap::Tabs>
 {
 public:
     WTabs(WinContext& win, HWND parent, const spec::Tabs& s)
@@ -3097,7 +3097,7 @@ private:
 };
 
 // Tabs as a list of page names down the left, the page beside it.
-class WSideTabs : public Leaf<anyui::Tabs>
+class WSideTabs : public Leaf<rap::Tabs>
 {
 public:
     WSideTabs(WinContext& win, HWND parent, const spec::Tabs& s)
@@ -3211,7 +3211,7 @@ private:
 
 // Panes side by side with draggable bars between them. Sizes are device px
 // per pane; the window keeps the panes' proportions until a drag.
-class WSplitter : public anyui::Splitter, public Item
+class WSplitter : public rap::Splitter, public Item
 {
 public:
     WSplitter(WinContext& win, HWND parent, Orientation dir)
@@ -3408,7 +3408,7 @@ private:
         // Lay out and paint now: a posted relayout, and WM_PAINT after it,
         // wait behind the stream of mouse moves, leaving stale pixels where
         // the bar has passed.
-        SendMessageW(win_.hwnd(), WM_ANYUI_RELAYOUT, 0, 0);
+        SendMessageW(win_.hwnd(), WM_RAPPORT_RELAYOUT, 0, 0);
         RedrawWindow(win_.hwnd(), nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
 
@@ -3607,7 +3607,7 @@ private:
                 while (running_)
                 {
                     if (FAILED(DwmFlush())) Sleep(16);
-                    if (!pending_.exchange(true)) PostMessageW(target_, WM_ANYUI_FRAME, 0, 0);
+                    if (!pending_.exchange(true)) PostMessageW(target_, WM_RAPPORT_FRAME, 0, 0);
                 }
             });
     }
@@ -3631,7 +3631,7 @@ FrameClock* g_frames = nullptr;
 
 // ---------------------------------------------------------------- canvas
 
-class WCanvas : public Leaf<anyui::Canvas>
+class WCanvas : public Leaf<rap::Canvas>
 {
 public:
     WCanvas(WinContext& win, HWND parent, const spec::Canvas& s)
@@ -3646,11 +3646,11 @@ public:
             wc.style = CS_DBLCLKS;
             wc.hInstance = instance();
             wc.lpfnWndProc = proc;
-            wc.lpszClassName = L"anyuiCanvas";
+            wc.lpszClassName = L"rapportCanvas";
             RegisterClassExW(&wc);
             registered = true;
         }
-        adopt(CreateWindowExW(0, L"anyuiCanvas", L"", WS_CHILD | (s.focusable ? WS_TABSTOP : 0), 0, 0, 0, 0, parent,
+        adopt(CreateWindowExW(0, L"rapportCanvas", L"", WS_CHILD | (s.focusable ? WS_TABSTOP : 0), 0, 0, 0, 0, parent,
                               nullptr, instance(), this));
     }
     ~WCanvas() override { *alive_ = false; }
@@ -3802,7 +3802,7 @@ private:
             const int delta = GET_WHEEL_DELTA_WPARAM(wp);
             const float s = win_.scale();
             ScrollEvent e{{pt.x / s, pt.y / s}, 0, 0, delta % WHEEL_DELTA != 0, keyModifiers()};
-            // Windows: positive = away from the user (up/right); anyui: +1 = down/right.
+            // Windows: positive = away from the user (up/right); rapport: +1 = down/right.
             if (msg == WM_MOUSEWHEEL)
                 e.dy = -float(delta) / WHEEL_DELTA;
             else
@@ -3872,7 +3872,7 @@ private:
 
 // ---------------------------------------------------------------- window
 
-class Win : public anyui::Window, public WinContext
+class Win : public rap::Window, public WinContext
 {
 public:
     Win(const WindowSpec& spec, Win* parent)
@@ -3890,7 +3890,7 @@ public:
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
             wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
             wc.lpfnWndProc = proc;
-            wc.lpszClassName = L"anyuiWindow";
+            wc.lpszClassName = L"rapportWindow";
             wc.hIcon = appIcon(SM_CXICON);
             wc.hIconSm = appIcon(SM_CXSMICON);
             RegisterClassExW(&wc);
@@ -3898,7 +3898,7 @@ public:
         }
         DWORD style = dialog_ ? (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME) : WS_OVERLAPPEDWINDOW;
         if (!spec.resizable) style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
-        hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME : 0), L"anyuiWindow",
+        hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME : 0), L"rapportWindow",
                                 wide(spec.title).c_str(), style | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
                                 parent ? parent->hwnd_ : nullptr, nullptr, instance(), this);
         initialW_ = spec.width;
@@ -3917,7 +3917,7 @@ public:
             SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
             if (modal_ && parent_) EnableWindow(parent_->hwnd_, TRUE);
             if (menuBar_ && GetMenu(hwnd_) != menuBar_) DestroyMenu(menuBar_);  // detached: ours to free
-            RemovePropW(hwnd_, L"anyui-focus");
+            RemovePropW(hwnd_, L"rapport-focus");
             DestroyWindow(hwnd_);
         }
     }
@@ -3933,7 +3933,7 @@ public:
         ++g_layoutPass;
         if (relayoutPending_) return;
         relayoutPending_ = true;
-        PostMessageW(hwnd_, WM_ANYUI_RELAYOUT, 0, 0);
+        PostMessageW(hwnd_, WM_RAPPORT_RELAYOUT, 0, 0);
     }
     // With drawing off, the old page goes and the new one comes (through
     // the style bit, silently) and everything then paints in one pass,
@@ -4007,7 +4007,7 @@ public:
             modal_ = true;
             EnableWindow(parent_->hwnd_, FALSE);
         }
-        const bool snapshot = std::getenv("ANYUI_SNAPSHOT") != nullptr;
+        const bool snapshot = std::getenv("RAPPORT_SNAPSHOT") != nullptr;
         ShowWindow(hwnd_, snapshot ? SW_SHOWNOACTIVATE : SW_SHOW);
         if (!snapshot) SetForegroundWindow(hwnd_);
         lastShown() = this;
@@ -4240,21 +4240,21 @@ private:
             close();
     }
 
-    // ANYUI_SNAPSHOT=file.png: after ANYUI_SNAPSHOT_DELAY ms (default 500),
+    // RAPPORT_SNAPSHOT=file.png: after RAPPORT_SNAPSHOT_DELAY ms (default 500),
     // save the window shown last as PNG and quit. For checking without a screen grabber.
     void snapshotIfAsked()
     {
         static bool taken = false;
-        const char* path = std::getenv("ANYUI_SNAPSHOT");
+        const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (taken || !path || !*path) return;
         taken = true;
-        const char* delay = std::getenv("ANYUI_SNAPSHOT_DELAY");
+        const char* delay = std::getenv("RAPPORT_SNAPSHOT_DELAY");
         SetTimer(hwnd_, 0xA11, delay ? UINT(std::atoi(delay)) : 500u, nullptr);
     }
     static void takeSnapshot()
     {
         Win* w = lastShown();
-        const char* path = std::getenv("ANYUI_SNAPSHOT");
+        const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (!w || !path) return;
         RECT r;
         GetWindowRect(w->hwnd_, &r);
@@ -4311,7 +4311,7 @@ private:
             case WM_SIZE:
                 if (self->root) self->layoutNow();
                 return 0;
-            case WM_ANYUI_RELAYOUT: self->layoutNow(); return 0;
+            case WM_RAPPORT_RELAYOUT: self->layoutNow(); return 0;
             case WM_GETMINMAXINFO:
             {
                 auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
@@ -4339,11 +4339,11 @@ private:
             case WM_ACTIVATE:
                 if (LOWORD(wp) == WA_INACTIVE)
                 {
-                    if (HWND f = GetFocus(); f && IsChild(h, f)) SetPropW(h, L"anyui-focus", f);
+                    if (HWND f = GetFocus(); f && IsChild(h, f)) SetPropW(h, L"rapport-focus", f);
                 }
                 else if (!HIWORD(wp))  // not minimised
                 {
-                    auto f = static_cast<HWND>(GetPropW(h, L"anyui-focus"));
+                    auto f = static_cast<HWND>(GetPropW(h, L"rapport-focus"));
                     if (!f || !IsWindow(f) || !IsChild(h, f) || !IsWindowVisible(f) || !IsWindowEnabled(f))
                         f = GetNextDlgTabItem(h, nullptr, FALSE);
                     if (f) SetFocus(f);
@@ -4702,9 +4702,9 @@ public:
         wc.cbSize = sizeof wc;
         wc.hInstance = instance();
         wc.lpfnWndProc = messageProc;
-        wc.lpszClassName = L"anyuiMessages";
+        wc.lpszClassName = L"rapportMessages";
         RegisterClassExW(&wc);
-        messages_ = CreateWindowExW(0, L"anyuiMessages", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance(), this);
+        messages_ = CreateWindowExW(0, L"rapportMessages", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance(), this);
         frames_ = std::make_unique<FrameClock>(messages_);
         g_frames = frames_.get();
     }
@@ -4717,7 +4717,7 @@ public:
 
     std::string_view name() const override { return "win32"; }
 
-    std::unique_ptr<anyui::Window> createWindow(const WindowSpec& spec, anyui::Window* parent, BuildSink& sink) override
+    std::unique_ptr<rap::Window> createWindow(const WindowSpec& spec, rap::Window* parent, BuildSink& sink) override
     {
         auto win = std::make_unique<Win>(spec, static_cast<Win*>(parent));
         win->setMenuBar(spec.menuBar);
@@ -4765,10 +4765,10 @@ public:
     }
     void post(std::function<void()> f) override
     {
-        PostMessageW(messages_, WM_ANYUI_POST, 0, reinterpret_cast<LPARAM>(new std::function<void()>(std::move(f))));
+        PostMessageW(messages_, WM_RAPPORT_POST, 0, reinterpret_cast<LPARAM>(new std::function<void()>(std::move(f))));
     }
 
-    void message(anyui::Window* parent, const MessageSpec& m, std::function<void(DialogRole)> done) override
+    void message(rap::Window* parent, const MessageSpec& m, std::function<void(DialogRole)> done) override
     {
         UINT type = MB_OK;
         auto has = [&](DialogRole r) { return std::find(m.buttons.begin(), m.buttons.end(), r) != m.buttons.end(); };
@@ -4795,7 +4795,7 @@ public:
         }
     }
 
-    void chooseFiles(anyui::Window* parent, const FileDialogSpec& f, std::function<void(std::vector<std::string>)> done) override
+    void chooseFiles(rap::Window* parent, const FileDialogSpec& f, std::function<void(std::vector<std::string>)> done) override
     {
         std::vector<std::string> out;
         const bool save = f.mode == FileDialogSpec::Mode::Save;
@@ -4953,7 +4953,7 @@ public:
         CloseClipboard();
     }
 
-    std::unique_ptr<anyui::Image> createImage(int w, int h, PixelFormat format, const uint8_t* pixels, size_t stride) override
+    std::unique_ptr<rap::Image> createImage(int w, int h, PixelFormat format, const uint8_t* pixels, size_t stride) override
     {
         return std::make_unique<D2DImage>(w, h, format, pixels, stride);
     }
@@ -5001,13 +5001,13 @@ private:
         auto* self = reinterpret_cast<Win32Backend*>(GetWindowLongPtrW(h, GWLP_USERDATA));
         switch (msg)
         {
-        case WM_ANYUI_POST:
+        case WM_RAPPORT_POST:
         {
             std::unique_ptr<std::function<void()>> fn(reinterpret_cast<std::function<void()>*>(lp));
             (*fn)();
             return 0;
         }
-        case WM_ANYUI_FRAME:
+        case WM_RAPPORT_FRAME:
             if (self && self->frames_) self->frames_->tick();
             return 0;
         case WM_TIMER:
@@ -5047,6 +5047,6 @@ private:
 };
 
 }  // namespace
-}  // namespace anyui::win32
+}  // namespace rap::win32
 
-ANYUI_BACKEND_ENTRY(win32, anyui::win32::Win32Backend)
+RAPPORT_BACKEND_ENTRY(win32, rap::win32::Win32Backend)

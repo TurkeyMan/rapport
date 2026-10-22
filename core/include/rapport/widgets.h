@@ -1,6 +1,6 @@
 // Toolkit-agnostic widget interfaces.
 //
-// Backends (anyui_qt.so, anyui_gtk.so, ...) implement these with native
+// Backends (rapport_qt.so, rapport_gtk.so, ...) implement these with native
 // widgets. Apps only ever see these abstract types. All calls happen on the
 // UI thread; worker threads hand results back with Backend::post().
 //
@@ -19,7 +19,7 @@
 #include <variant>
 #include <vector>
 
-namespace anyui
+namespace rap
 {
 
 // ---------------------------------------------------------------- basics
@@ -820,4 +820,4 @@ public:
     virtual void onCloseRequest(std::function<bool()>) = 0;
 };
 
-}  // namespace anyui
+}  // namespace rap

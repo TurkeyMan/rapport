@@ -4,7 +4,7 @@
 // themeColor().
 #pragma once
 
-#include "anyui/backend.h"
+#include "rapport/backend.h"
 
 #include <gtk/gtk.h>
 
@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-namespace anyui::gtkcommon
+namespace rap::gtkcommon
 {
 
 struct Metrics
@@ -293,7 +293,7 @@ inline std::string gtkAccel(std::string s)
     return out + s;
 }
 
-// An Image as a cairo image surface (ARGB32 premultiplied, i.e. anyui's
+// An Image as a cairo image surface (ARGB32 premultiplied, i.e. rapport's
 // Bgra8Premultiplied byte order on little-endian machines).
 class CairoImage : public Image
 {
@@ -690,7 +690,7 @@ inline RectF withoutWindowsTaskbar(RectF area)
     return area;
 }
 
-// The anyui key for a GDK keyval (the same in GTK 3 and 4).
+// The rapport key for a GDK keyval (the same in GTK 3 and 4).
 inline Key keyFor(guint keyval)
 {
     switch (keyval)
@@ -730,4 +730,4 @@ inline Key keyFor(guint keyval)
     return gdk_keyval_to_unicode(keyval) ? Key::Character : Key::Other;
 }
 
-}  // namespace anyui::gtkcommon
+}  // namespace rap::gtkcommon

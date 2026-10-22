@@ -7,7 +7,7 @@
 #include <map>
 #include <tuple>
 
-namespace anyui::win32
+namespace rap::win32
 {
 
 // ---------------------------------------------------------------- strings
@@ -578,4 +578,4 @@ void drawIconOnDC(HDC dc, RECT r, const Icon& icon, float scale, Color ink)
     rt->EndDraw();
 }
 
-}  // namespace anyui::win32
+}  // namespace rap::win32

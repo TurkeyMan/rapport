@@ -1,8 +1,8 @@
-// GTK 3 backend (package anyui-gtk3).
+// GTK 3 backend (package rapport-gtk3).
 //
 // Lists use GtkTreeView in fixed-height mode over a virtual GtkTreeModel
-// (AnyuiTreeRows) whose iters carry the row index; cells pull text from the
-// anyui::ListModel through cell data functions, so only visible rows are
+// (RapportTreeRows) whose iters carry the row index; cells pull text from the
+// rap::ListModel through cell data functions, so only visible rows are
 // ever touched. Painted columns use a custom cell renderer.
 #include <gtk/gtk.h>
 
@@ -13,18 +13,18 @@
 #include <memory>
 #include <set>
 
-// ---------------------------------------------------------------- AnyuiTreeRows
+// ---------------------------------------------------------------- RapportTreeRows
 
 G_BEGIN_DECLS
-G_DECLARE_FINAL_TYPE(AnyuiTreeRows, anyui_tree_rows, ANYUI, TREE_ROWS, GObject)
+G_DECLARE_FINAL_TYPE(RapportTreeRows, rapport_tree_rows, RAPPORT, TREE_ROWS, GObject)
 G_END_DECLS
 
-struct _AnyuiTreeRows
+struct _RapportTreeRows
 {
     GObject parent_instance;
     gint stamp;
     guint count;
-    anyui::ListModel* model;
+    rap::ListModel* model;
     guint searchColumn;
 };
 
@@ -33,7 +33,7 @@ static guint rowOf(GtkTreeIter* iter)
     return GPOINTER_TO_UINT(iter->user_data);
 }
 
-static gboolean setIter(AnyuiTreeRows* self, GtkTreeIter* iter, guint row)
+static gboolean setIter(RapportTreeRows* self, GtkTreeIter* iter, guint row)
 {
     if (row >= self->count)
     {
@@ -61,7 +61,7 @@ static GType rows_get_column_type(GtkTreeModel*, gint)
 static gboolean rows_get_iter(GtkTreeModel* m, GtkTreeIter* iter, GtkTreePath* path)
 {
     if (gtk_tree_path_get_depth(path) != 1) return false;
-    return setIter(ANYUI_TREE_ROWS(m), iter, guint(gtk_tree_path_get_indices(path)[0]));
+    return setIter(RAPPORT_TREE_ROWS(m), iter, guint(gtk_tree_path_get_indices(path)[0]));
 }
 
 static GtkTreePath* rows_get_path(GtkTreeModel*, GtkTreeIter* iter)
@@ -72,7 +72,7 @@ static GtkTreePath* rows_get_path(GtkTreeModel*, GtkTreeIter* iter)
 // Only used by type-ahead search; cells use data functions instead.
 static void rows_get_value(GtkTreeModel* m, GtkTreeIter* iter, gint, GValue* value)
 {
-    auto* self = ANYUI_TREE_ROWS(m);
+    auto* self = RAPPORT_TREE_ROWS(m);
     g_value_init(value, G_TYPE_STRING);
     if (self->model && rowOf(iter) < self->count)
         g_value_set_string(value, self->model->text(rowOf(iter), self->searchColumn).c_str());
@@ -80,18 +80,18 @@ static void rows_get_value(GtkTreeModel* m, GtkTreeIter* iter, gint, GValue* val
 
 static gboolean rows_iter_next(GtkTreeModel* m, GtkTreeIter* iter)
 {
-    return setIter(ANYUI_TREE_ROWS(m), iter, rowOf(iter) + 1);
+    return setIter(RAPPORT_TREE_ROWS(m), iter, rowOf(iter) + 1);
 }
 
 static gboolean rows_iter_previous(GtkTreeModel* m, GtkTreeIter* iter)
 {
     guint row = rowOf(iter);
-    return row > 0 && setIter(ANYUI_TREE_ROWS(m), iter, row - 1);
+    return row > 0 && setIter(RAPPORT_TREE_ROWS(m), iter, row - 1);
 }
 
 static gboolean rows_iter_children(GtkTreeModel* m, GtkTreeIter* iter, GtkTreeIter* parent)
 {
-    return !parent && setIter(ANYUI_TREE_ROWS(m), iter, 0);
+    return !parent && setIter(RAPPORT_TREE_ROWS(m), iter, 0);
 }
 
 static gboolean rows_iter_has_child(GtkTreeModel*, GtkTreeIter*)
@@ -101,12 +101,12 @@ static gboolean rows_iter_has_child(GtkTreeModel*, GtkTreeIter*)
 
 static gint rows_iter_n_children(GtkTreeModel* m, GtkTreeIter* iter)
 {
-    return iter ? 0 : gint(ANYUI_TREE_ROWS(m)->count);
+    return iter ? 0 : gint(RAPPORT_TREE_ROWS(m)->count);
 }
 
 static gboolean rows_iter_nth_child(GtkTreeModel* m, GtkTreeIter* iter, GtkTreeIter* parent, gint n)
 {
-    return !parent && n >= 0 && setIter(ANYUI_TREE_ROWS(m), iter, guint(n));
+    return !parent && n >= 0 && setIter(RAPPORT_TREE_ROWS(m), iter, guint(n));
 }
 
 static gboolean rows_iter_parent(GtkTreeModel*, GtkTreeIter*, GtkTreeIter*)
@@ -114,7 +114,7 @@ static gboolean rows_iter_parent(GtkTreeModel*, GtkTreeIter*, GtkTreeIter*)
     return false;
 }
 
-static void anyui_tree_rows_iface_init(GtkTreeModelIface* iface)
+static void rapport_tree_rows_iface_init(GtkTreeModelIface* iface)
 {
     iface->get_flags = rows_get_flags;
     iface->get_n_columns = rows_get_n_columns;
@@ -131,12 +131,12 @@ static void anyui_tree_rows_iface_init(GtkTreeModelIface* iface)
     iface->iter_parent = rows_iter_parent;
 }
 
-G_DEFINE_TYPE_WITH_CODE(AnyuiTreeRows, anyui_tree_rows, G_TYPE_OBJECT,
-                        G_IMPLEMENT_INTERFACE(GTK_TYPE_TREE_MODEL, anyui_tree_rows_iface_init))
+G_DEFINE_TYPE_WITH_CODE(RapportTreeRows, rapport_tree_rows, G_TYPE_OBJECT,
+                        G_IMPLEMENT_INTERFACE(GTK_TYPE_TREE_MODEL, rapport_tree_rows_iface_init))
 
-static void anyui_tree_rows_class_init(AnyuiTreeRowsClass*) {}
+static void rapport_tree_rows_class_init(RapportTreeRowsClass*) {}
 
-static void anyui_tree_rows_init(AnyuiTreeRows* self)
+static void rapport_tree_rows_init(RapportTreeRows* self)
 {
     self->stamp = g_random_int();
     self->count = 0;
@@ -144,7 +144,7 @@ static void anyui_tree_rows_init(AnyuiTreeRows* self)
     self->searchColumn = 0;
 }
 
-// ---------------------------------------------------------------- AnyuiPaintRenderer
+// ---------------------------------------------------------------- RapportPaintRenderer
 
 // Cell renderer for painted columns; the column's data function sets the
 // row, and the owning list draws through `draw`.
@@ -152,11 +152,11 @@ using PaintFn = void (*)(gpointer ctx, guint row, cairo_t*, GtkWidget*, const Gd
                          GtkCellRendererState);
 
 G_BEGIN_DECLS
-G_DECLARE_FINAL_TYPE(AnyuiPaintRenderer, anyui_paint_renderer, ANYUI, PAINT_RENDERER,
+G_DECLARE_FINAL_TYPE(RapportPaintRenderer, rapport_paint_renderer, RAPPORT, PAINT_RENDERER,
                      GtkCellRenderer)
 G_END_DECLS
 
-struct _AnyuiPaintRenderer
+struct _RapportPaintRenderer
 {
     GtkCellRenderer parent_instance;
     guint row;
@@ -165,13 +165,13 @@ struct _AnyuiPaintRenderer
     gint height;
 };
 
-G_DEFINE_TYPE(AnyuiPaintRenderer, anyui_paint_renderer, GTK_TYPE_CELL_RENDERER)
+G_DEFINE_TYPE(RapportPaintRenderer, rapport_paint_renderer, GTK_TYPE_CELL_RENDERER)
 
 static void paint_renderer_render(GtkCellRenderer* cell, cairo_t* cr, GtkWidget* widget,
                                   const GdkRectangle* background, const GdkRectangle* area,
                                   GtkCellRendererState flags)
 {
-    auto* self = ANYUI_PAINT_RENDERER(cell);
+    auto* self = RAPPORT_PAINT_RENDERER(cell);
     // Full row height so graph lines join between rows; the cell area
     // excludes the view's vertical padding.
     GdkRectangle full{area->x, background->y, area->width, background->height};
@@ -182,7 +182,7 @@ static void paint_renderer_get_preferred_height(GtkCellRenderer* cell, GtkWidget
                                                 gint* natural)
 {
     // Either pointer may be null.
-    gint h = ANYUI_PAINT_RENDERER(cell)->height;
+    gint h = RAPPORT_PAINT_RENDERER(cell)->height;
     if (min) *min = h;
     if (natural) *natural = h;
 }
@@ -194,7 +194,7 @@ static void paint_renderer_get_preferred_width(GtkCellRenderer*, GtkWidget*, gin
     if (natural) *natural = 1;
 }
 
-static void anyui_paint_renderer_class_init(AnyuiPaintRendererClass* klass)
+static void rapport_paint_renderer_class_init(RapportPaintRendererClass* klass)
 {
     auto* cell = GTK_CELL_RENDERER_CLASS(klass);
     cell->render = paint_renderer_render;
@@ -202,7 +202,7 @@ static void anyui_paint_renderer_class_init(AnyuiPaintRendererClass* klass)
     cell->get_preferred_width = paint_renderer_get_preferred_width;
 }
 
-static void anyui_paint_renderer_init(AnyuiPaintRenderer* self)
+static void rapport_paint_renderer_init(RapportPaintRenderer* self)
 {
     self->row = 0;
     self->ctx = nullptr;
@@ -210,15 +210,15 @@ static void anyui_paint_renderer_init(AnyuiPaintRenderer* self)
     self->height = 16;
 }
 
-namespace anyui::gtk3
+namespace rap::gtk3
 {
 namespace
 {
 using namespace gtkcommon;
 }
-}  // namespace anyui::gtk3
+}  // namespace rap::gtk3
 
-anyui::Color anyui::gtkcommon::themeColor(GtkWidget* w, ThemeColor role)
+rap::Color rap::gtkcommon::themeColor(GtkWidget* w, ThemeColor role)
 {
     GtkStyleContext* ctx = gtk_widget_get_style_context(w);
     GdkRGBA fg;
@@ -245,7 +245,7 @@ anyui::Color anyui::gtkcommon::themeColor(GtkWidget* w, ThemeColor role)
     return fallbackColor(role, toColor(fg), isDarkText(fg));
 }
 
-namespace anyui::gtk3
+namespace rap::gtk3
 {
 namespace
 {
@@ -253,13 +253,13 @@ namespace
 // ---------------------------------------------------------------- widgets
 
 // A container (box, form, group, toolbar) as a plain Widget, for handles.
-class WPlain : public W<anyui::Widget>
+class WPlain : public W<rap::Widget>
 {
 public:
     using W::W;
 };
 
-class WLabel : public W<anyui::Label>
+class WLabel : public W<rap::Label>
 {
 public:
     explicit WLabel(const spec::Label& s)
@@ -305,7 +305,7 @@ GtkWidget* iconWidget(const Icon& icon, int size)
     return area;
 }
 
-class WButton : public W<anyui::Button>
+class WButton : public W<rap::Button>
 {
 public:
     explicit WButton(const std::string& text)
@@ -411,7 +411,7 @@ GtkWidget* buildMenu(const Menu& items)
     return menu;
 }
 
-// A popup menu built from an anyui::Menu. Its GTK items point into the
+// A popup menu built from an rap::Menu. Its GTK items point into the
 // Menu it holds, so the two are replaced together.
 class PopupMenu
 {
@@ -455,7 +455,7 @@ private:
     std::function<void()> onHide_;
 };
 
-class WToolButton : public W<anyui::ToolButton>
+class WToolButton : public W<rap::ToolButton>
 {
 public:
     explicit WToolButton(const spec::ToolButton& s)
@@ -516,7 +516,7 @@ private:
     std::function<void(bool)> toggled_;
 };
 
-class WSlider : public W<anyui::Slider>
+class WSlider : public W<rap::Slider>
 {
 public:
     explicit WSlider(const spec::Slider& s)
@@ -560,7 +560,7 @@ private:
     std::function<void(double)> changed_;
 };
 
-class WSpin : public W<anyui::Spin>
+class WSpin : public W<rap::Spin>
 {
 public:
     explicit WSpin(const spec::Spin& s)
@@ -603,7 +603,7 @@ GdkRGBA toRgba(Color c)
     return {c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0};
 }
 
-class WColorButton : public W<anyui::ColorButton>
+class WColorButton : public W<rap::ColorButton>
 {
 public:
     explicit WColorButton(const spec::ColorButton& s)
@@ -640,7 +640,7 @@ private:
     std::function<void(Color)> changed_;
 };
 
-class WCheck : public W<anyui::Check>
+class WCheck : public W<rap::Check>
 {
 public:
     explicit WCheck(const spec::Check& s)
@@ -693,7 +693,7 @@ private:
     bool updating_ = false;
 };
 
-class WMenuButton : public W<anyui::MenuButton>
+class WMenuButton : public W<rap::MenuButton>
 {
 public:
     explicit WMenuButton(const spec::MenuButton& s)
@@ -775,7 +775,7 @@ private:
     bool updating_ = false;
 };
 
-class WProgressBar : public W<anyui::ProgressBar>
+class WProgressBar : public W<rap::ProgressBar>
 {
 public:
     WProgressBar()
@@ -793,7 +793,7 @@ public:
 
 // GTK 3 has no date picker: a button showing the date, with a calendar in
 // a popover. onChanged fires when the popover closes on a new date.
-class WDatePicker : public W<anyui::DatePicker>
+class WDatePicker : public W<rap::DatePicker>
 {
 public:
     explicit WDatePicker(const spec::DatePicker& s)
@@ -881,7 +881,7 @@ private:
     bool updating_ = false;
 };
 
-class WEntry : public W<anyui::Entry>
+class WEntry : public W<rap::Entry>
 {
 public:
     explicit WEntry(const spec::Entry& s)
@@ -928,7 +928,7 @@ private:
     std::function<void()> activate_;
 };
 
-class WSelect : public W<anyui::Select>
+class WSelect : public W<rap::Select>
 {
 public:
     explicit WSelect(const spec::Select& s)
@@ -960,7 +960,7 @@ private:
     std::function<void(int)> changed_;
 };
 
-class WCombo : public W<anyui::Combo>
+class WCombo : public W<rap::Combo>
 {
 public:
     explicit WCombo(const spec::Combo& s)
@@ -1007,7 +1007,7 @@ private:
     std::function<void()> activate_;
 };
 
-class WTextView : public W<anyui::TextView>
+class WTextView : public W<rap::TextView>
 {
 public:
     explicit WTextView(const spec::TextView& s)
@@ -1116,8 +1116,8 @@ private:
 };
 
 // A splitter of n panes is a chain of n-1 nested GtkPaneds (each marked
-// "anyui-split-chain"); sizes are one per pane, along the split.
-class WSplitter : public W<anyui::Splitter>
+// "rapport-split-chain"); sizes are one per pane, along the split.
+class WSplitter : public W<rap::Splitter>
 {
 public:
     explicit WSplitter(GtkWidget* paned)
@@ -1141,7 +1141,7 @@ public:
             auto* p = GTK_PANED(w);
             out.push_back(float(gtk_paned_get_position(p)));
             GtkWidget* next = gtk_paned_get_child2(p);
-            if (!next || !g_object_get_data(G_OBJECT(next), "anyui-split-chain"))
+            if (!next || !g_object_get_data(G_OBJECT(next), "rapport-split-chain"))
             {
                 out.push_back(next ? length(next) : 0);
                 return out;
@@ -1158,14 +1158,14 @@ public:
     // position fits.
     void setSizes(const std::vector<float>& s) override
     {
-        g_object_set_data(G_OBJECT(w_), "anyui-user-sized", GINT_TO_POINTER(1));
+        g_object_set_data(G_OBJECT(w_), "rapport-user-sized", GINT_TO_POINTER(1));
         GtkWidget* w = w_;
         for (size_t i = 0; i + 1 < s.size() && w; ++i)
         {
             auto* p = GTK_PANED(w);
             if (s[i] > 0) placeDivider(p, int(s[i]));
             GtkWidget* next = gtk_paned_get_child2(p);
-            w = next && g_object_get_data(G_OBJECT(next), "anyui-split-chain") ? next : nullptr;
+            w = next && g_object_get_data(G_OBJECT(next), "rapport-split-chain") ? next : nullptr;
         }
     }
 
@@ -1179,15 +1179,15 @@ private:
         // known to fit either.
         if (maxPos >= position && maxPos != G_MAXINT) return;
         // Too long for now: again when the splitter grows (once it fits).
-        auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(p), "anyui-want-position"));
+        auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(p), "rapport-want-position"));
         if (!want)
         {
             want = new int(position);
-            g_object_set_data_full(G_OBJECT(p), "anyui-want-position", want, +[](gpointer d) { delete static_cast<int*>(d); });
+            g_object_set_data_full(G_OBJECT(p), "rapport-want-position", want, +[](gpointer d) { delete static_cast<int*>(d); });
             g_signal_connect(p, "notify::max-position",
                              G_CALLBACK(+[](GObject* obj, GParamSpec*, gpointer)
                                         {
-                                            auto* want = static_cast<int*>(g_object_get_data(obj, "anyui-want-position"));
+                                            auto* want = static_cast<int*>(g_object_get_data(obj, "rapport-want-position"));
                                             if (!want || *want < 0) return;
                                             int maxPos = 0;
                                             g_object_get(obj, "max-position", &maxPos, nullptr);
@@ -1201,7 +1201,7 @@ private:
     }
 };
 
-class WTabs : public W<anyui::Tabs>
+class WTabs : public W<rap::Tabs>
 {
 public:
     explicit WTabs(GtkWidget* notebook)
@@ -1251,7 +1251,7 @@ private:
 };
 
 // Tabs as a list of page names down the left, the page beside it.
-class WSideTabs : public W<anyui::Tabs>
+class WSideTabs : public W<rap::Tabs>
 {
 public:
     WSideTabs(GtkWidget* box, GtkWidget* list, GtkWidget* stack)
@@ -1313,13 +1313,13 @@ private:
 
 // ---------------------------------------------------------------- list
 
-class WList : public W<anyui::List>, public ListObserver
+class WList : public W<rap::List>, public ListObserver
 {
 public:
     explicit WList(const spec::List& s)
         : W(gtk_tree_view_new(), gtk_scrolled_window_new(nullptr, nullptr))
     {
-        rows_ = ANYUI_TREE_ROWS(g_object_new(anyui_tree_rows_get_type(), nullptr));
+        rows_ = RAPPORT_TREE_ROWS(g_object_new(rapport_tree_rows_get_type(), nullptr));
         auto* view = GTK_TREE_VIEW(w_);
         gtk_container_add(GTK_CONTAINER(outer_), w_);
         gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), GTK_SHADOW_IN);
@@ -1667,8 +1667,8 @@ private:
         GtkCellRenderer* r;
         if (c.painted)
         {
-            r = GTK_CELL_RENDERER(g_object_new(anyui_paint_renderer_get_type(), nullptr));
-            auto* pr = ANYUI_PAINT_RENDERER(r);
+            r = GTK_CELL_RENDERER(g_object_new(rapport_paint_renderer_get_type(), nullptr));
+            auto* pr = RAPPORT_PAINT_RENDERER(r);
             pr->ctx = ctx.get();
             pr->draw = &WList::paintCell;
             pr->height = int(g_metrics.lineHeight * (compact_ ? compactScale_ : 1.f) + 0.5f);
@@ -1676,7 +1676,7 @@ private:
             gtk_tree_view_column_set_cell_data_func(
                 col, r,
                 +[](GtkTreeViewColumn*, GtkCellRenderer* r, GtkTreeModel*, GtkTreeIter* iter,
-                    gpointer) { ANYUI_PAINT_RENDERER(r)->row = rowOf(iter); },
+                    gpointer) { RAPPORT_PAINT_RENDERER(r)->row = rowOf(iter); },
                 nullptr, nullptr);
         }
         else
@@ -2240,7 +2240,7 @@ private:
         return true;
     }
 
-    AnyuiTreeRows* rows_ = nullptr;
+    RapportTreeRows* rows_ = nullptr;
     GtkTreeSelection* sel_ = nullptr;
     PopupMenu menu_;
     ListModel* model_ = nullptr;
@@ -2321,7 +2321,7 @@ const char* cursorName(Cursor c)
     return "default";
 }
 
-class WCanvas : public W<anyui::Canvas>
+class WCanvas : public W<rap::Canvas>
 {
 public:
     explicit WCanvas(const spec::Canvas& s)
@@ -2558,10 +2558,10 @@ private:
     PointF lastPos_;
 };
 
-class WWindow : public anyui::Window, public Part
+class WWindow : public rap::Window, public Part
 {
-    // Development aid: ANYUI_SNAPSHOT=file.png saves the window shown last,
-    // ANYUI_SNAPSHOT_DELAY ms (default 500) after it appears, then quits
+    // Development aid: RAPPORT_SNAPSHOT=file.png saves the window shown last,
+    // RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears, then quits
     // the main loop. For checking layouts and canvases without a screen
     // grabber.
     // The most recently shown window is the one a snapshot captures (a
@@ -2576,10 +2576,10 @@ class WWindow : public anyui::Window, public Part
     {
         lastShown() = win_;
         static bool taken = false;
-        const char* path = std::getenv("ANYUI_SNAPSHOT");
+        const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (taken || !path || !*path) return;
         taken = true;
-        const char* delay = std::getenv("ANYUI_SNAPSHOT_DELAY");
+        const char* delay = std::getenv("RAPPORT_SNAPSHOT_DELAY");
         g_timeout_add(
             delay ? guint(std::atoi(delay)) : 500u,
             +[](gpointer) -> gboolean
@@ -2595,7 +2595,7 @@ class WWindow : public anyui::Window, public Part
                 cairo_t* cr = cairo_create(surface);
                 gtk_widget_draw(win, cr);
                 cairo_destroy(cr);
-                cairo_surface_write_to_png(surface, std::getenv("ANYUI_SNAPSHOT"));
+                cairo_surface_write_to_png(surface, std::getenv("RAPPORT_SNAPSHOT"));
                 cairo_surface_destroy(surface);
                 gtk_main_quit();
                 return G_SOURCE_REMOVE;
@@ -2611,7 +2611,7 @@ public:
         auto* win = GTK_WINDOW(win_);
         gtk_window_set_title(win, spec.title.c_str());
         // Snapshot runs are automated: never take the user's keyboard focus.
-        if (const char* snap = std::getenv("ANYUI_SNAPSHOT"); snap && *snap)
+        if (const char* snap = std::getenv("RAPPORT_SNAPSHOT"); snap && *snap)
         {
             gtk_window_set_accept_focus(win, false);
             gtk_window_set_focus_on_map(win, false);
@@ -2914,13 +2914,13 @@ private:
 public:
     void addRoleButton(GtkWidget* button, DialogRole role)
     {
-        g_object_set_data(G_OBJECT(button), "anyui-role", GINT_TO_POINTER(int(role)));
+        g_object_set_data(G_OBJECT(button), "rapport-role", GINT_TO_POINTER(int(role)));
         connect(
             button, "clicked",
             +[](GtkButton* b, gpointer p)
             {
                 auto role =
-                    DialogRole(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "anyui-role")));
+                    DialogRole(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "rapport-role")));
                 static_cast<WWindow*>(p)->finish(role);
             },
             this);
@@ -3136,7 +3136,7 @@ private:
         if (std::ranges::all_of(split->stretch, [](int f) { return f == 0; }))
             std::ranges::fill(split->stretch, 1);
         g_object_set_data_full(
-            G_OBJECT(top), "anyui-initial-split", split,
+            G_OBJECT(top), "rapport-initial-split", split,
             +[](gpointer p) { delete static_cast<Split*>(p); });
 
         g_signal_connect(top, "size-allocate",
@@ -3154,9 +3154,9 @@ private:
                                             {
                                                 auto* top = static_cast<GtkWidget*>(t);
                                                 auto* split = static_cast<Split*>(g_object_get_data(
-                                                    G_OBJECT(top), "anyui-initial-split"));
+                                                    G_OBJECT(top), "rapport-initial-split"));
                                                 if (split && !g_object_get_data(G_OBJECT(top),
-                                                                                "anyui-user-sized"))
+                                                                                "rapport-user-sized"))
                                                     apply(*split, top);
                                                 return G_SOURCE_REMOVE;
                                             },
@@ -3215,7 +3215,7 @@ private:
         GtkWidget* paned = gtk_paned_new(gtkOrientation(s.dir));
         auto* p = GTK_PANED(paned);
         gtk_paned_set_wide_handle(p, true);
-        g_object_set_data(G_OBJECT(paned), "anyui-split-chain", GINT_TO_POINTER(1));
+        g_object_set_data(G_OBJECT(paned), "rapport-split-chain", GINT_TO_POINTER(1));
         gtk_paned_pack1(p, first, !anyStretch || s.panes[from].common.stretch > 0, false);
         gtk_paned_pack2(p, panes(s, from + 1), !anyStretch || restStretch, false);
         return paned;
@@ -3482,7 +3482,7 @@ public:
 
     std::string_view name() const override { return "gtk3"; }
 
-    std::unique_ptr<anyui::Window> createWindow(const WindowSpec& spec, anyui::Window* parent,
+    std::unique_ptr<rap::Window> createWindow(const WindowSpec& spec, rap::Window* parent,
                                                 BuildSink& sink) override
     {
         auto win = std::make_unique<WWindow>(spec, static_cast<WWindow*>(parent));
@@ -3520,7 +3520,7 @@ public:
             +[](gpointer p) { delete static_cast<std::function<void()>*>(p); });
     }
 
-    std::unique_ptr<anyui::Image> createImage(int w, int h, PixelFormat format,
+    std::unique_ptr<rap::Image> createImage(int w, int h, PixelFormat format,
                                               const uint8_t* pixels, size_t stride) override
     {
         return std::make_unique<CairoImage>(w, h, format, pixels, stride);
@@ -3555,7 +3555,7 @@ public:
             });
     }
 
-    void message(anyui::Window* parent, const MessageSpec& m,
+    void message(rap::Window* parent, const MessageSpec& m,
                  std::function<void(DialogRole)> done) override
     {
         GtkMessageType type = GTK_MESSAGE_INFO;
@@ -3604,7 +3604,7 @@ public:
         gtk_widget_show(dlg);
     }
 
-    void chooseFiles(anyui::Window* parent, const FileDialogSpec& f,
+    void chooseFiles(rap::Window* parent, const FileDialogSpec& f,
                      std::function<void(std::vector<std::string>)> done) override
     {
         GtkFileChooserAction action = GTK_FILE_CHOOSER_ACTION_OPEN;
@@ -3629,7 +3629,7 @@ public:
                 if (end > at) gtk_file_filter_add_pattern(ff, flt.pattern.substr(at, end - at).c_str());
                 at = end + 1;
             }
-            g_object_set_data_full(G_OBJECT(ff), "anyui-ext", g_strdup(defaultExtension(flt.pattern).c_str()),
+            g_object_set_data_full(G_OBJECT(ff), "rapport-ext", g_strdup(defaultExtension(flt.pattern).c_str()),
                                    g_free);
             gtk_file_chooser_add_filter(chooser, ff);
         }
@@ -3661,7 +3661,7 @@ public:
                                // Cancel reopens the chooser on the typed name.
                                GtkFileFilter* ff = gtk_file_chooser_get_filter(chooser);
                                const char* ext =
-                                   ff ? static_cast<const char*>(g_object_get_data(G_OBJECT(ff), "anyui-ext")) : nullptr;
+                                   ff ? static_cast<const char*>(g_object_get_data(G_OBJECT(ff), "rapport-ext")) : nullptr;
                                if (gtk_file_chooser_get_action(chooser) == GTK_FILE_CHOOSER_ACTION_SAVE &&
                                    out.size() == 1 && ext)
                                {
@@ -3723,7 +3723,7 @@ public:
     }
 
 private:
-    static GtkWindow* parentWindow(anyui::Window* w)
+    static GtkWindow* parentWindow(rap::Window* w)
     {
         return w ? GTK_WINDOW(static_cast<WWindow*>(w)->gtkWindow()) : nullptr;
     }
@@ -3734,6 +3734,6 @@ private:
 };
 
 }  // namespace
-}  // namespace anyui::gtk3
+}  // namespace rap::gtk3
 
-ANYUI_BACKEND_ENTRY(gtk3, anyui::gtk3::Gtk3Backend)
+RAPPORT_BACKEND_ENTRY(gtk3, rap::gtk3::Gtk3Backend)

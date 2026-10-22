@@ -1,6 +1,6 @@
-// Interface implemented by toolkit backend plugins (anyui_qt.so, ...).
+// Interface implemented by toolkit backend plugins (rapport_qt.so, ...).
 //
-// Apps don't use this directly; see anyui.h. Backends and the core are
+// Apps don't use this directly; see rapport.h. Backends and the core are
 // built by the same compiler against the same headers - this is a C++
 // interface, not a stable C ABI. Bump kAbiVersion on any change here or
 // in widgets.h / layout.h.
@@ -13,10 +13,10 @@
 #include <string_view>
 #include <vector>
 
-namespace anyui
+namespace rap
 {
 
-inline constexpr int kAbiVersion = 23;
+inline constexpr int kAbiVersion = 24;
 
 struct MessageSpec
 {
@@ -102,29 +102,29 @@ public:
 // Backend entry point. Returns nullptr if the ABI doesn't match or the
 // toolkit can't start (e.g. no display), so the loader can fall back.
 //
-// Each backend exports it as anyui_create_backend_<name> (see
-// ANYUI_BACKEND_ENTRY), so several can be linked into one program: as
+// Each backend exports it as rapport_create_backend_<name> (see
+// RAPPORT_BACKEND_ENTRY), so several can be linked into one program: as
 // plugins they are dlopened by name, and statically linked ones are
-// registered with ANYUI_BUILTIN_BACKEND (anyui.h).
+// registered with RAPPORT_BUILTIN_BACKEND (rapport.h).
 using CreateBackendFn = Backend*(int abi, int* argc, char** argv);
 inline std::string createBackendSymbol(std::string_view name)
 {
-    return "anyui_create_backend_" + std::string(name);
+    return "rapport_create_backend_" + std::string(name);
 }
 
-}  // namespace anyui
+}  // namespace rap
 
 #if defined(_WIN32)
-#define ANYUI_EXPORT __declspec(dllexport)
+#define RAPPORT_EXPORT __declspec(dllexport)
 #else
-#define ANYUI_EXPORT __attribute__((visibility("default")))
+#define RAPPORT_EXPORT __attribute__((visibility("default")))
 #endif
 
-// In the backend: ANYUI_BACKEND_ENTRY(gtk3, anyui::gtk3::Gtk3Backend)
-#define ANYUI_BACKEND_ENTRY(name, ...)                                                             \
-    extern "C" ANYUI_EXPORT anyui::Backend* anyui_create_backend_##name(int abi, int* argc,        \
+// In the backend: RAPPORT_BACKEND_ENTRY(gtk3, rap::gtk3::Gtk3Backend)
+#define RAPPORT_BACKEND_ENTRY(name, ...)                                                             \
+    extern "C" RAPPORT_EXPORT rap::Backend* rapport_create_backend_##name(int abi, int* argc,        \
                                                                         char** argv)               \
     {                                                                                              \
-        if (abi != anyui::kAbiVersion) return nullptr;                                             \
+        if (abi != rap::kAbiVersion) return nullptr;                                             \
         return __VA_ARGS__::create(argc, argv);                                                    \
     }

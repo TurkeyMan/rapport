@@ -1,7 +1,7 @@
 // Headless backend: builds stub widgets, prints the layout tree, and runs
 // posted tasks until quit(). For tests and for checking plugin loading on
 // machines without a toolkit.
-#include "anyui/backend.h"
+#include "rapport/backend.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -9,7 +9,7 @@
 #include <memory>
 #include <mutex>
 
-namespace anyui::null
+namespace rap::null
 {
 namespace
 {
@@ -24,13 +24,13 @@ public:
     void focus() override {}
 };
 
-class NLabel : public Stub<anyui::Label>
+class NLabel : public Stub<rap::Label>
 {
 public:
     void setText(const std::string&) override {}
 };
 
-class NButton : public Stub<anyui::Button>
+class NButton : public Stub<rap::Button>
 {
 public:
     void setText(const std::string&) override {}
@@ -39,7 +39,7 @@ public:
     std::function<void()> click;
 };
 
-class NCheck : public Stub<anyui::Check>
+class NCheck : public Stub<rap::Check>
 {
 public:
     bool checked() const override { return value == CheckState::Checked; }
@@ -50,7 +50,7 @@ public:
     CheckState value = CheckState::Unchecked;
 };
 
-class NMenuButton : public Stub<anyui::MenuButton>
+class NMenuButton : public Stub<rap::MenuButton>
 {
 public:
     void setText(const std::string&) override {}
@@ -59,14 +59,14 @@ public:
     void onMenu(std::function<Menu()>) override {}
 };
 
-class NProgressBar : public Stub<anyui::ProgressBar>
+class NProgressBar : public Stub<rap::ProgressBar>
 {
 public:
     void setFraction(float) override {}
     void pulse() override {}
 };
 
-class NDatePicker : public Stub<anyui::DatePicker>
+class NDatePicker : public Stub<rap::DatePicker>
 {
 public:
     Date date() const override { return value; }
@@ -75,7 +75,7 @@ public:
     Date value;
 };
 
-class NEntry : public Stub<anyui::Entry>
+class NEntry : public Stub<rap::Entry>
 {
 public:
     std::string text() const override { return value; }
@@ -86,7 +86,7 @@ public:
     std::string value;
 };
 
-class NSelect : public Stub<anyui::Select>
+class NSelect : public Stub<rap::Select>
 {
 public:
     void setItems(std::vector<std::string>) override {}
@@ -96,7 +96,7 @@ public:
     int value = -1;
 };
 
-class NCombo : public Stub<anyui::Combo>
+class NCombo : public Stub<rap::Combo>
 {
 public:
     void setItems(std::vector<std::string>) override {}
@@ -107,7 +107,7 @@ public:
     std::string value;
 };
 
-class NTextView : public Stub<anyui::TextView>
+class NTextView : public Stub<rap::TextView>
 {
 public:
     std::string text() const override { return value; }
@@ -124,7 +124,7 @@ public:
     std::pair<size_t, size_t> selected{0, 0};
 };
 
-class NList : public Stub<anyui::List>
+class NList : public Stub<rap::List>
 {
 public:
     void setModel(ListModel* m) override { model = m; }
@@ -150,14 +150,14 @@ public:
     ListModel* model = nullptr;
 };
 
-class NSplitter : public Stub<anyui::Splitter>
+class NSplitter : public Stub<rap::Splitter>
 {
 public:
     std::vector<float> sizes() const override { return {}; }
     void setSizes(const std::vector<float>&) override {}
 };
 
-class NTabs : public Stub<anyui::Tabs>
+class NTabs : public Stub<rap::Tabs>
 {
 public:
     int current() const override { return current_; }
@@ -181,7 +181,7 @@ private:
     int current_ = 0;
 };
 
-class NToolButton : public Stub<anyui::ToolButton>
+class NToolButton : public Stub<rap::ToolButton>
 {
 public:
     void setIcon(const Icon&) override {}
@@ -208,7 +208,7 @@ private:
     double value_ = 0;
 };
 
-class NColorButton : public Stub<anyui::ColorButton>
+class NColorButton : public Stub<rap::ColorButton>
 {
 public:
     Color color() const override { return color_; }
@@ -219,7 +219,7 @@ private:
     Color color_;
 };
 
-class NCanvas : public Stub<anyui::Canvas>
+class NCanvas : public Stub<rap::Canvas>
 {
 public:
     void invalidate() override {}
@@ -235,7 +235,7 @@ public:
 };
 
 // Keeps its size; there is nothing to draw on.
-class NImage : public anyui::Image
+class NImage : public rap::Image
 {
 public:
     NImage(int w, int h)
@@ -251,7 +251,7 @@ private:
     int w_, h_;
 };
 
-class NWindow : public anyui::Window
+class NWindow : public rap::Window
 {
 public:
     void setTitle(const std::string&) override {}
@@ -317,7 +317,7 @@ public:
                                std::holds_alternative<spec::Group>(n.spec) ||
                                std::holds_alternative<spec::Scroll>(n.spec) ||
                                std::holds_alternative<spec::Toolbar>(n.spec);
-        if (container && n.common.handle) make<Stub<anyui::Widget>>(n);
+        if (container && n.common.handle) make<Stub<rap::Widget>>(n);
     }
 
 private:
@@ -475,13 +475,13 @@ private:
     {
         std::printf("Slider %g..%g = %g", s.min, s.max, s.value);
         suffix(n);
-        make<NValue<anyui::Slider>>(n);
+        make<NValue<rap::Slider>>(n);
     }
     void visit(const Node& n, const spec::Spin& s, int)
     {
         std::printf("Spin %g..%g = %g", s.min, s.max, s.value);
         suffix(n);
-        make<NValue<anyui::Spin>>(n);
+        make<NValue<rap::Spin>>(n);
     }
     void visit(const Node& n, const spec::ColorButton&, int)
     {
@@ -539,7 +539,7 @@ public:
 
     std::string_view name() const override { return "null"; }
 
-    std::unique_ptr<anyui::Window> createWindow(const WindowSpec& spec, anyui::Window*,
+    std::unique_ptr<rap::Window> createWindow(const WindowSpec& spec, rap::Window*,
                                                 BuildSink& sink) override
     {
         auto w = std::make_unique<NWindow>();
@@ -577,14 +577,14 @@ public:
         queue_.push_back(std::move(f));
     }
 
-    void message(anyui::Window*, const MessageSpec& m,
+    void message(rap::Window*, const MessageSpec& m,
                  std::function<void(DialogRole)> done) override
     {
         std::printf("message: %s: %s\n", m.title.c_str(), m.text.c_str());
         if (done) done(m.buttons.empty() ? DialogRole::Ok : m.buttons.front());
     }
 
-    void chooseFiles(anyui::Window*, const FileDialogSpec&,
+    void chooseFiles(rap::Window*, const FileDialogSpec&,
                      std::function<void(std::vector<std::string>)> done) override
     {
         if (done) done({});
@@ -593,7 +593,7 @@ public:
     void setClipboard(const std::string&) override {}
     void setClipboardImage(int, int, PixelFormat, const uint8_t*, size_t) override {}
 
-    std::unique_ptr<anyui::Image> createImage(int w, int h, PixelFormat, const uint8_t*,
+    std::unique_ptr<rap::Image> createImage(int w, int h, PixelFormat, const uint8_t*,
                                               size_t) override
     {
         return std::make_unique<NImage>(w, h);
@@ -620,6 +620,6 @@ private:
 };
 
 }  // namespace
-}  // namespace anyui::null
+}  // namespace rap::null
 
-ANYUI_BACKEND_ENTRY(null, anyui::null::NullBackend)
+RAPPORT_BACKEND_ENTRY(null, rap::null::NullBackend)

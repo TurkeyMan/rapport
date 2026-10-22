@@ -1,13 +1,13 @@
-// The rebase dialog from pengit's design notes, as an anyui smoke test.
-//   ANYUI_BACKEND=null ./anyui-demo   prints the tree without a display
-#include <anyui/anyui.h>
+// The rebase dialog from pengit's design notes, as an rapport smoke test.
+//   RAPPORT_BACKEND=null ./rapport-demo   prints the tree without a display
+#include <rapport/rapport.h>
 
 #include <cstdio>
 
 namespace
 {
 
-class TodoModel : public anyui::ListModel
+class TodoModel : public rap::ListModel
 {
 public:
     size_t rowCount() const override { return rows_.size(); }
@@ -22,7 +22,7 @@ private:
         std::string action, subject;
     };
     std::vector<Row> rows_{
-        {"pick", "Add anyui layout builders"},
+        {"pick", "Add rapport layout builders"},
         {"squash", "fixup: form labels"},
         {"pick", "Null backend"},
     };
@@ -32,7 +32,7 @@ private:
 
 int main(int argc, char** argv)
 {
-    auto ui = anyui::Ui::load(argc, argv);
+    auto ui = rap::Ui::load(argc, argv);
     if (!ui)
     {
         std::fprintf(stderr, "%s", ui.error().c_str());
@@ -41,13 +41,13 @@ int main(int argc, char** argv)
     std::printf("backend: %.*s\n", int((*ui)->backendName().size()), (*ui)->backendName().data());
 
     TodoModel model;
-    anyui::Label* branchName = nullptr;
-    anyui::Combo* upstream = nullptr;
-    anyui::List* commitList = nullptr;
-    anyui::TextView* commitMessage = nullptr;
-    anyui::Check* preserveMerges = nullptr;
+    rap::Label* branchName = nullptr;
+    rap::Combo* upstream = nullptr;
+    rap::List* commitList = nullptr;
+    rap::TextView* commitMessage = nullptr;
+    rap::Check* preserveMerges = nullptr;
 
-    using namespace anyui::layout;
+    using namespace rap::layout;
     auto dlg = (*ui)->create(Dialog{
         "Rebase",
         {VBox{
@@ -73,7 +73,7 @@ int main(int argc, char** argv)
     bool bound = branchName && upstream && commitList && commitMessage && preserveMerges;
     std::printf("binds: %s\n", bound ? "all filled" : "MISSING");
 
-    dlg->onFinished([&](anyui::DialogRole) { (*ui)->quit(); });
+    dlg->onFinished([&](rap::DialogRole) { (*ui)->quit(); });
     dlg->show();
     (*ui)->post([&] { std::printf("posted task ran\n"); });
     return (*ui)->run();

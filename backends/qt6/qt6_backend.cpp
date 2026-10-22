@@ -4,7 +4,7 @@
 // default button, Esc ends a dialog).
 //
 // No moc: signals go to lambdas, and events to overrides and event filters.
-#include "anyui/backend.h"
+#include "rapport/backend.h"
 #include "qt_painter.h"
 
 #include "builtin_icons.h"
@@ -75,7 +75,7 @@
 #include <tuple>
 #include <unordered_map>
 
-namespace anyui::qt6
+namespace rap::qt6
 {
 namespace
 {
@@ -117,7 +117,7 @@ QString qs(const std::string& s)
     return QString::fromUtf8(s.data(), qsizetype(s.size()));
 }
 
-// anyui's access keys ("_File", "__" for an underscore) as Qt's ("&File",
+// rapport's access keys ("_File", "__" for an underscore) as Qt's ("&File",
 // "&&" for an ampersand).
 QString mnemonic(const std::string& s)
 {
@@ -496,7 +496,7 @@ public:
     virtual ~Part() = default;
 };
 
-// A widget's anyui interface over its Qt widget. The window deletes its Qt
+// A widget's rapport interface over its Qt widget. The window deletes its Qt
 // widgets later (deleteLater) than these, so Qt-side code that calls back
 // into a part checks that it's still there.
 template <class Base>
@@ -511,7 +511,7 @@ public:
     void setVisible(bool v) override
     {
         // In a toolbar, its action shows and hides it.
-        if (auto* action = qobject_cast<QAction*>(w_->property("anyui-toolbar-action").value<QObject*>()))
+        if (auto* action = qobject_cast<QAction*>(w_->property("rapport-toolbar-action").value<QObject*>()))
             return action->setVisible(v);
         // Not yet in its parent, showing it would open it as a window; it
         // shows with its parent anyway.
@@ -526,7 +526,7 @@ protected:
     QWidget* w_;
 };
 
-class WPlain : public W<anyui::Widget>
+class WPlain : public W<rap::Widget>
 {
 public:
     using W::W;
@@ -578,7 +578,7 @@ private:
     bool elide_;
 };
 
-class WLabel : public W<anyui::Label>
+class WLabel : public W<rap::Label>
 {
 public:
     explicit WLabel(const spec::Label& s)
@@ -598,7 +598,7 @@ private:
     ElidedLabel* label() const { return static_cast<ElidedLabel*>(w_); }
 };
 
-class WButton : public W<anyui::Button>
+class WButton : public W<rap::Button>
 {
 public:
     explicit WButton(QPushButton* b)
@@ -634,7 +634,7 @@ protected:
     }
 };
 
-class WCheck : public W<anyui::Check>
+class WCheck : public W<rap::Check>
 {
 public:
     explicit WCheck(const spec::Check& s)
@@ -675,7 +675,7 @@ private:
 
 // A push button with a drop-down menu, rebuilt each time it opens. Pushed
 // is drawn as checked.
-class WMenuButton : public W<anyui::MenuButton>
+class WMenuButton : public W<rap::MenuButton>
 {
 public:
     explicit WMenuButton(const spec::MenuButton& s)
@@ -705,7 +705,7 @@ private:
     std::function<Menu()> menuFn_;
 };
 
-class WProgressBar : public W<anyui::ProgressBar>
+class WProgressBar : public W<rap::ProgressBar>
 {
 public:
     WProgressBar()
@@ -727,7 +727,7 @@ private:
     QProgressBar* bar() const { return static_cast<QProgressBar*>(w_); }
 };
 
-class WDatePicker : public W<anyui::DatePicker>
+class WDatePicker : public W<rap::DatePicker>
 {
 public:
     explicit WDatePicker(const spec::DatePicker& s)
@@ -776,7 +776,7 @@ void handleEnter(QLineEdit* edit, const std::function<void()>* activate)
          });
 }
 
-class WEntry : public W<anyui::Entry>
+class WEntry : public W<rap::Entry>
 {
 public:
     explicit WEntry(const spec::Entry& s)
@@ -802,7 +802,7 @@ private:
     std::function<void()> activate_;
 };
 
-class WSelect : public W<anyui::Select>
+class WSelect : public W<rap::Select>
 {
 public:
     explicit WSelect(const spec::Select& s)
@@ -833,7 +833,7 @@ private:
     bool quiet_ = false;
 };
 
-class WCombo : public W<anyui::Combo>
+class WCombo : public W<rap::Combo>
 {
 public:
     explicit WCombo(const spec::Combo& s)
@@ -870,7 +870,7 @@ private:
 
 // QPlainTextEdit: lays out lazily, so long diffs open at once. Styled spans
 // go in as one pass of inserts, each run with its format.
-class WTextView : public W<anyui::TextView>
+class WTextView : public W<rap::TextView>
 {
 public:
     explicit WTextView(const spec::TextView& s)
@@ -971,7 +971,7 @@ private:
 // Splitter panes: the first layout follows stretch factors (panes without
 // stretch at their natural size), or the sizes given before it; after
 // that, spare space goes to the stretching panes only.
-class WSplitter : public W<anyui::Splitter>
+class WSplitter : public W<rap::Splitter>
 {
 public:
     WSplitter(QSplitter* s, std::vector<int> stretch)
@@ -1111,7 +1111,7 @@ struct LazyPages
     }
 };
 
-class WTabs : public W<anyui::Tabs>
+class WTabs : public W<rap::Tabs>
 {
 public:
     explicit WTabs(QTabWidget* t)
@@ -1144,7 +1144,7 @@ private:
 };
 
 // Tabs as a list of page names down the left, the page beside it.
-class WSideTabs : public W<anyui::Tabs>
+class WSideTabs : public W<rap::Tabs>
 {
 public:
     WSideTabs(QWidget* box, QListWidget* list, QStackedWidget* stack)
@@ -1183,7 +1183,7 @@ private:
 
 // ---------------------------------------------------------------- toolbar, values, canvas
 
-class WToolButton : public W<anyui::ToolButton>
+class WToolButton : public W<rap::ToolButton>
 {
 public:
     explicit WToolButton(const spec::ToolButton& s)
@@ -1224,7 +1224,7 @@ private:
 
 // A slider over doubles: QSlider counts whole steps from `min`, and an
 // optional label shows the value.
-class WSlider : public W<anyui::Slider>
+class WSlider : public W<rap::Slider>
 {
 public:
     explicit WSlider(const spec::Slider& s)
@@ -1300,7 +1300,7 @@ private:
     std::function<void(double)> changed_;
 };
 
-class WSpin : public W<anyui::Spin>
+class WSpin : public W<rap::Spin>
 {
 public:
     explicit WSpin(const spec::Spin& s)
@@ -1340,7 +1340,7 @@ private:
 };
 
 // A button showing the colour; clicking opens Qt's colour chooser.
-class WColorButton : public W<anyui::ColorButton>
+class WColorButton : public W<rap::ColorButton>
 {
 public:
     explicit WColorButton(const spec::ColorButton& s)
@@ -1435,7 +1435,7 @@ int buttonNumber(Qt::MouseButton b)
     }
 }
 
-class WCanvas : public W<anyui::Canvas>
+class WCanvas : public W<rap::Canvas>
 {
 public:
     explicit WCanvas(const spec::Canvas& s)
@@ -1653,7 +1653,7 @@ void CanvasWidget::key(QKeyEvent* e, bool press)
 
 // ---------------------------------------------------------------- list
 
-// The anyui model as Qt sees it: a row count kept in step with the
+// The rapport model as Qt sees it: a row count kept in step with the
 // notifications, and text for type-ahead and accessibility. The view paints
 // rows itself, so nothing else is asked of it.
 class RowsModel : public QAbstractTableModel
@@ -1691,7 +1691,7 @@ public:
         return Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemNeverHasChildren;
     }
 
-    // The anyui model has already changed; the count catches up here.
+    // The rapport model has already changed; the count catches up here.
     void reset(int n)
     {
         beginResetModel();
@@ -1763,7 +1763,7 @@ protected:
     void scrollContentsBy(int dx, int dy) override;
 };
 
-class WList : public W<anyui::List>, public ListObserver
+class WList : public W<rap::List>, public ListObserver
 {
 public:
     explicit WList(const spec::List& s)
@@ -2708,7 +2708,7 @@ public:
     bool eventFilter(QObject* o, QEvent* e) override;
 };
 
-class WWindow : public anyui::Window
+class WWindow : public rap::Window
 {
 public:
     WWindow(const WindowSpec& spec, WWindow* parent)
@@ -2721,7 +2721,7 @@ public:
         if (dialog_)
             frame_->setWindowModality(parent && spec.modal ? Qt::WindowModal : Qt::NonModal);
         // Snapshot runs are automated: never take the user's keyboard focus.
-        if (const char* snap = std::getenv("ANYUI_SNAPSHOT"); snap && *snap)
+        if (const char* snap = std::getenv("RAPPORT_SNAPSHOT"); snap && *snap)
             frame_->setAttribute(Qt::WA_ShowWithoutActivating);
         layout_ = new QVBoxLayout(frame_);
         layout_->setSpacing(0);
@@ -2917,8 +2917,8 @@ public:
     }
 
 private:
-    // Development aid: ANYUI_SNAPSHOT=file.png saves the window shown last,
-    // ANYUI_SNAPSHOT_DELAY ms (default 500) after it appears, then quits.
+    // Development aid: RAPPORT_SNAPSHOT=file.png saves the window shown last,
+    // RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears, then quits.
     static QPointer<QWidget>& lastShown()
     {
         static QPointer<QWidget> w;
@@ -2929,15 +2929,15 @@ private:
     {
         lastShown() = frame_.data();
         static bool taken = false;
-        const char* path = std::getenv("ANYUI_SNAPSHOT");
+        const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (taken || !path || !*path) return;
         taken = true;
-        const char* delay = std::getenv("ANYUI_SNAPSHOT_DELAY");
+        const char* delay = std::getenv("RAPPORT_SNAPSHOT_DELAY");
         QTimer::singleShot(delay ? std::atoi(delay) : 500, qApp,
                            []
                            {
                                if (QWidget* w = lastShown())
-                                   w->grab().save(qs(std::getenv("ANYUI_SNAPSHOT")));
+                                   w->grab().save(qs(std::getenv("RAPPORT_SNAPSHOT")));
                                QCoreApplication::exit(0);
                            });
     }
@@ -3353,7 +3353,7 @@ private:
             }
             QWidget* w = build(item, Orientation::Horizontal);
             QAction* action = bar->addWidget(w);
-            w->setProperty("anyui-toolbar-action", QVariant::fromValue<QObject*>(action));
+            w->setProperty("rapport-toolbar-action", QVariant::fromValue<QObject*>(action));
         }
         return bar;
     }
@@ -3464,7 +3464,7 @@ public:
 
     std::string_view name() const override { return "qt6"; }
 
-    std::unique_ptr<anyui::Window> createWindow(const WindowSpec& spec, anyui::Window* parent,
+    std::unique_ptr<rap::Window> createWindow(const WindowSpec& spec, rap::Window* parent,
                                                 BuildSink& sink) override
     {
         auto win = std::make_unique<WWindow>(spec, static_cast<WWindow*>(parent));
@@ -3493,7 +3493,7 @@ public:
         QMetaObject::invokeMethod(qApp, [f = std::move(f)] { f(); }, Qt::QueuedConnection);
     }
 
-    std::unique_ptr<anyui::Image> createImage(int w, int h, PixelFormat format,
+    std::unique_ptr<rap::Image> createImage(int w, int h, PixelFormat format,
                                               const uint8_t* pixels, size_t stride) override
     {
         return std::make_unique<QtImage>(w, h, format, pixels, stride);
@@ -3521,7 +3521,7 @@ public:
             });
     }
 
-    void message(anyui::Window* parent, const MessageSpec& m,
+    void message(rap::Window* parent, const MessageSpec& m,
                  std::function<void(DialogRole)> done) override
     {
         auto* box = new QMessageBox(parentWidget(parent));
@@ -3552,7 +3552,7 @@ public:
         box->show();
     }
 
-    void chooseFiles(anyui::Window* parent, const FileDialogSpec& f,
+    void chooseFiles(rap::Window* parent, const FileDialogSpec& f,
                      std::function<void(std::vector<std::string>)> done) override
     {
         auto* dlg = new QFileDialog(parentWidget(parent), qs(f.title));
@@ -3627,7 +3627,7 @@ public:
     }
 
 private:
-    static QWidget* parentWidget(anyui::Window* w)
+    static QWidget* parentWidget(rap::Window* w)
     {
         return w ? static_cast<WWindow*>(w)->frame() : nullptr;
     }
@@ -3661,6 +3661,6 @@ private:
 };
 
 }  // namespace
-}  // namespace anyui::qt6
+}  // namespace rap::qt6
 
-ANYUI_BACKEND_ENTRY(qt6, anyui::qt6::Qt6Backend)
+RAPPORT_BACKEND_ENTRY(qt6, rap::qt6::Qt6Backend)

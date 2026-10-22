@@ -1,11 +1,11 @@
-// anyui-canvas: exercises Canvas, Image, Painter, icons and the toolbar /
+// rapport-canvas: exercises Canvas, Image, Painter, icons and the toolbar /
 // slider / spin / colour widgets, logging every input event to stdout.
 //
 // Canvas: drag an image to pan (left button), wheel to zoom, middle-click to
 // reset, right-click logs. Click the drawn play/pause button (or the toolbar
 // toggle) to pause the orbiting disc. Keys: arrows pan, F11 fullscreen,
 // Ctrl+C copies the test card, Esc quits.
-#include "anyui/anyui.h"
+#include "rapport/rapport.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-using namespace anyui;
+using namespace rap;
 
 namespace
 {
@@ -134,13 +134,13 @@ int main(int argc, char** argv)
         (*ui)->createImage(64, 48, PixelFormat::Bgra8Premultiplied, card.data(), 64 * 4);
     auto discImage = (*ui)->createImage(32, 32, PixelFormat::Rgba8, discPx.data(), 32 * 4);
 
-    anyui::Canvas* canvas = nullptr;
-    anyui::Label* status = nullptr;
-    anyui::Slider* zoomSlider = nullptr;
-    anyui::ToolButton* playToggle = nullptr;
-    anyui::Widget* toolbar = nullptr;  // handles: hidden in fullscreen
-    anyui::Widget* bottomBar = nullptr;
-    std::unique_ptr<anyui::Window> win;
+    rap::Canvas* canvas = nullptr;
+    rap::Label* status = nullptr;
+    rap::Slider* zoomSlider = nullptr;
+    rap::ToolButton* playToggle = nullptr;
+    rap::Widget* toolbar = nullptr;  // handles: hidden in fullscreen
+    rap::Widget* bottomBar = nullptr;
+    std::unique_ptr<rap::Window> win;
 
     PointF pan{0, 0}, dragFrom{};
     bool dragging = false, paused = false;
@@ -289,9 +289,9 @@ int main(int argc, char** argv)
         return true;
     };
 
-    using namespace anyui::layout;
+    using namespace rap::layout;
     win = (*ui)->create(layout::Window{
-        "anyui canvas",
+        "rapport canvas",
         {VBox{
             layout::Toolbar{
                 layout::ToolButton{playPauseIcon(paused), "Play / pause"}

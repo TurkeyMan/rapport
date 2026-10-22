@@ -1,9 +1,9 @@
-// anyui::sys: the few OS services an application needs beside its UI, with
+// rap::sys: the few OS services an application needs beside its UI, with
 // one API on Linux and Windows. Standard C++ plus the OS; no toolkit, no
 // foundation library. Strings are UTF-8 everywhere; paths are
 // std::filesystem::path (wide on Windows, converted at the edges here).
 //
-// Part of libanyui but independent of the backend: callable before a Ui is
+// Part of librapport but independent of the backend: callable before a Ui is
 // loaded and from any thread. The core uses it to find and load backends.
 #pragma once
 
@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-namespace anyui::sys
+namespace rap::sys
 {
 
 // ---------------------------------------------------------------- strings, paths
@@ -217,4 +217,4 @@ void lowerThreadPriority();
 // Memory the system could hand out without swapping; 0 if unknown.
 std::size_t availableMemory();
 
-}  // namespace anyui::sys
+}  // namespace rap::sys

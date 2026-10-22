@@ -4,7 +4,7 @@
 // backend turns into native widgets and native layouts. No pixel positions:
 // boxes, forms and splitters, with semantic sizes and stretch.
 //
-//     using namespace anyui::layout;
+//     using namespace rap::layout;
 //     auto dlg = ui.create(Dialog{"Rebase", {
 //         VBox{
 //             Form{
@@ -41,7 +41,7 @@
 #include <variant>
 #include <vector>
 
-namespace anyui
+namespace rap
 {
 
 struct Node;
@@ -81,7 +81,7 @@ struct Splitter
 {
     Orientation dir;  // direction the panes are laid out in
     Nodes panes;
-    anyui::Splitter** bind = nullptr;
+    rap::Splitter** bind = nullptr;
 };
 struct Group
 {
@@ -105,7 +105,7 @@ struct Tabs
     // settings dialog) rather than tabs along the top.
     bool sidebar = false;
     std::function<void(int)> onChanged;
-    anyui::Tabs** bind = nullptr;
+    rap::Tabs** bind = nullptr;
 };
 struct Spacer
 {
@@ -121,7 +121,7 @@ struct Label
     // Cut long text with "..." instead of widening the window to fit it
     // (status lines).
     bool ellipsize = false;
-    anyui::Label** bind = nullptr;
+    rap::Label** bind = nullptr;
 };
 struct Button
 {
@@ -130,7 +130,7 @@ struct Button
     Icon icon;
     bool iconOnly = false;  // show the icon; the text becomes the tooltip/accessible name
     std::function<void()> onClick;
-    anyui::Button** bind = nullptr;
+    rap::Button** bind = nullptr;
 };
 // Row of tool items: ToolButton nodes, Separator and Spacer.
 struct Toolbar
@@ -146,7 +146,7 @@ struct ToolButton
     bool checked = false;
     std::function<void()> onClick;
     std::function<void(bool)> onToggled;
-    anyui::ToolButton** bind = nullptr;
+    rap::ToolButton** bind = nullptr;
 };
 struct Slider
 {
@@ -156,14 +156,14 @@ struct Slider
     bool showValue = false;
     std::vector<std::pair<double, std::string>> marks;  // ticks, optional labels
     std::function<void(double)> onChanged;
-    anyui::Slider** bind = nullptr;
+    rap::Slider** bind = nullptr;
 };
 struct Spin
 {
     double min = 0, max = 100, value = 0, step = 1;
     int digits = 0;
     std::function<void(double)> onChanged;
-    anyui::Spin** bind = nullptr;
+    rap::Spin** bind = nullptr;
 };
 struct ColorButton
 {
@@ -171,28 +171,28 @@ struct ColorButton
     bool alpha = false;  // let the chooser edit alpha
     std::string title;   // chooser dialog title
     std::function<void(Color)> onChanged;
-    anyui::ColorButton** bind = nullptr;
+    rap::ColorButton** bind = nullptr;
 };
 struct Check
 {
     std::string text;
     CheckState state = CheckState::Unchecked;
     std::function<void(bool)> onToggled;
-    anyui::Check** bind = nullptr;
+    rap::Check** bind = nullptr;
 };
 struct Entry
 {
     std::string text, placeholder;
     std::function<void(const std::string&)> onChanged;
     std::function<void()> onActivate;
-    anyui::Entry** bind = nullptr;
+    rap::Entry** bind = nullptr;
 };
 struct Select
 {
     std::vector<std::string> items;
     int current = 0;
     std::function<void(int)> onChanged;
-    anyui::Select** bind = nullptr;
+    rap::Select** bind = nullptr;
 };
 struct Combo
 {
@@ -200,7 +200,7 @@ struct Combo
     std::string text;
     std::function<void(const std::string&)> onChanged;
     std::function<void()> onActivate;
-    anyui::Combo** bind = nullptr;
+    rap::Combo** bind = nullptr;
 };
 struct TextView
 {
@@ -210,7 +210,7 @@ struct TextView
     bool wrap = true;
     bool compact = false;  // the same denser font as compact lists
     std::function<void()> onChanged;
-    anyui::TextView** bind = nullptr;
+    rap::TextView** bind = nullptr;
 };
 struct List
 {
@@ -236,10 +236,10 @@ struct List
     std::function<void(size_t, SortOrder)> onSortRequested;
     std::function<Menu(std::optional<size_t>)> onContextMenu;
     std::function<Menu(size_t)> onHeaderMenu;
-    anyui::List::ReorderFn onReorder;
-    anyui::List::CellDrag onCellDrag;
+    rap::List::ReorderFn onReorder;
+    rap::List::CellDrag onCellDrag;
     std::function<Menu(size_t, size_t, PointF)> onCellContextMenu;
-    anyui::List** bind = nullptr;
+    rap::List** bind = nullptr;
 };
 struct MenuButton
 {
@@ -247,20 +247,20 @@ struct MenuButton
     Icon icon;
     bool pushed = false;
     std::function<Menu()> onMenu;
-    anyui::MenuButton** bind = nullptr;
+    rap::MenuButton** bind = nullptr;
 };
 struct ProgressBar
 {
-    anyui::ProgressBar** bind = nullptr;
+    rap::ProgressBar** bind = nullptr;
 };
 struct DatePicker
 {
     Date date;
     std::function<void(Date)> onChanged;
-    anyui::DatePicker** bind = nullptr;
+    rap::DatePicker** bind = nullptr;
 };
 
-// App-drawn surface; see anyui::Canvas.
+// App-drawn surface; see rap::Canvas.
 struct Canvas
 {
     bool focusable = true;  // takes keyboard focus on click (needed for onKey)
@@ -269,7 +269,7 @@ struct Canvas
     std::function<bool(const PointerEvent&)> onPointer;
     std::function<bool(const ScrollEvent&)> onScroll;
     std::function<bool(const KeyEvent&)> onKey;
-    anyui::Canvas** bind = nullptr;
+    rap::Canvas** bind = nullptr;
 };
 
 // Without onClick, a dialog button ends the dialog with its role.
@@ -278,7 +278,7 @@ struct DialogButton
     DialogRole role = DialogRole::None;
     std::string text;  // empty = the toolkit's stock label for the role
     std::function<void()> onClick;
-    anyui::Button** bind = nullptr;
+    rap::Button** bind = nullptr;
 };
 // Row of dialog buttons; the backend orders them by platform convention.
 struct Buttons
@@ -326,10 +326,10 @@ struct WindowSpec
 namespace layout
 {
 
-using anyui::Orientation;
+using rap::Orientation;
 inline constexpr Orientation Horizontal = Orientation::Horizontal;
 inline constexpr Orientation Vertical = Orientation::Vertical;
-using namespace anyui::literals;
+using namespace rap::literals;
 
 template <class Self, class S>
 class Builder
@@ -432,7 +432,7 @@ public:
         s().dir = dir;
         (s().panes.push_back(Node(std::forward<Panes>(panes))), ...);
     }
-    Splitter& bind(anyui::Splitter*& h)
+    Splitter& bind(rap::Splitter*& h)
     {
         s().bind = &h;
         return *this;
@@ -513,7 +513,7 @@ public:
         s().sidebar = on;
         return *this;
     }
-    Tabs& bind(anyui::Tabs*& h)
+    Tabs& bind(rap::Tabs*& h)
     {
         s().bind = &h;
         return *this;
@@ -546,7 +546,7 @@ public:
         s().ellipsize = v;
         return *this;
     }
-    Label& bind(anyui::Label*& h)
+    Label& bind(rap::Label*& h)
     {
         s().bind = &h;
         return *this;
@@ -578,7 +578,7 @@ public:
         s().onClick = std::move(f);
         return *this;
     }
-    Button& bind(anyui::Button*& h)
+    Button& bind(rap::Button*& h)
     {
         s().bind = &h;
         return *this;
@@ -603,7 +603,7 @@ public:
         s().onToggled = std::move(f);
         return *this;
     }
-    Check& bind(anyui::Check*& h)
+    Check& bind(rap::Check*& h)
     {
         s().bind = &h;
         return *this;
@@ -629,7 +629,7 @@ public:
         s().onActivate = std::move(f);
         return *this;
     }
-    Entry& bind(anyui::Entry*& h)
+    Entry& bind(rap::Entry*& h)
     {
         s().bind = &h;
         return *this;
@@ -649,7 +649,7 @@ public:
         s().onChanged = std::move(f);
         return *this;
     }
-    Select& bind(anyui::Select*& h)
+    Select& bind(rap::Select*& h)
     {
         s().bind = &h;
         return *this;
@@ -674,7 +674,7 @@ public:
         s().onActivate = std::move(f);
         return *this;
     }
-    Combo& bind(anyui::Combo*& h)
+    Combo& bind(rap::Combo*& h)
     {
         s().bind = &h;
         return *this;
@@ -710,7 +710,7 @@ public:
         s().onChanged = std::move(f);
         return *this;
     }
-    TextView& bind(anyui::TextView*& h)
+    TextView& bind(rap::TextView*& h)
     {
         s().bind = &h;
         return *this;
@@ -770,12 +770,12 @@ public:
         s().onContextMenu = std::move(f);
         return *this;
     }
-    List& onReorder(anyui::List::ReorderFn f)
+    List& onReorder(rap::List::ReorderFn f)
     {
         s().onReorder = std::move(f);
         return *this;
     }
-    List& onCellDrag(anyui::List::CellDrag d)
+    List& onCellDrag(rap::List::CellDrag d)
     {
         s().onCellDrag = std::move(d);
         return *this;
@@ -790,7 +790,7 @@ public:
         s().onHeaderMenu = std::move(f);
         return *this;
     }
-    List& bind(anyui::List*& h)
+    List& bind(rap::List*& h)
     {
         s().bind = &h;
         return *this;
@@ -816,7 +816,7 @@ public:
         s().onMenu = std::move(f);
         return *this;
     }
-    MenuButton& bind(anyui::MenuButton*& h)
+    MenuButton& bind(rap::MenuButton*& h)
     {
         s().bind = &h;
         return *this;
@@ -827,7 +827,7 @@ class ProgressBar : public Builder<ProgressBar, spec::ProgressBar>
 {
 public:
     ProgressBar() = default;
-    ProgressBar& bind(anyui::ProgressBar*& h)
+    ProgressBar& bind(rap::ProgressBar*& h)
     {
         s().bind = &h;
         return *this;
@@ -843,7 +843,7 @@ public:
         s().onChanged = std::move(f);
         return *this;
     }
-    DatePicker& bind(anyui::DatePicker*& h)
+    DatePicker& bind(rap::DatePicker*& h)
     {
         s().bind = &h;
         return *this;
@@ -884,7 +884,7 @@ public:
         s().onKey = std::move(f);
         return *this;
     }
-    Canvas& bind(anyui::Canvas*& h)
+    Canvas& bind(rap::Canvas*& h)
     {
         s().bind = &h;
         return *this;
@@ -922,7 +922,7 @@ public:
         s().onToggled = std::move(f);
         return *this;
     }
-    ToolButton& bind(anyui::ToolButton*& h)
+    ToolButton& bind(rap::ToolButton*& h)
     {
         s().bind = &h;
         return *this;
@@ -960,7 +960,7 @@ public:
         s().onChanged = std::move(f);
         return *this;
     }
-    Slider& bind(anyui::Slider*& h)
+    Slider& bind(rap::Slider*& h)
     {
         s().bind = &h;
         return *this;
@@ -983,7 +983,7 @@ public:
         s().onChanged = std::move(f);
         return *this;
     }
-    Spin& bind(anyui::Spin*& h)
+    Spin& bind(rap::Spin*& h)
     {
         s().bind = &h;
         return *this;
@@ -1008,7 +1008,7 @@ public:
         s().onChanged = std::move(f);
         return *this;
     }
-    ColorButton& bind(anyui::ColorButton*& h)
+    ColorButton& bind(rap::ColorButton*& h)
     {
         s().bind = &h;
         return *this;
@@ -1028,7 +1028,7 @@ public:
         b_.onClick = std::move(f);
         return *this;
     }
-    DialogButton& bind(anyui::Button*& h)
+    DialogButton& bind(rap::Button*& h)
     {
         b_.bind = &h;
         return *this;
@@ -1130,4 +1130,4 @@ public:
 };
 
 }  // namespace layout
-}  // namespace anyui
+}  // namespace rap

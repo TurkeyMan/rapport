@@ -3,7 +3,7 @@
 // images as QImages.
 #pragma once
 
-#include "anyui/backend.h"
+#include "rapport/backend.h"
 
 #include <QApplication>
 #include <QColor>
@@ -23,7 +23,7 @@
 #include <utility>
 #include <vector>
 
-namespace anyui::qt6
+namespace rap::qt6
 {
 
 inline QColor qcolor(Color c)
@@ -77,7 +77,7 @@ inline Color resolve(const QWidget* w, const Paint& p)
 }
 
 // Pixels uploaded once and drawn many times. Premultiplied ARGB32 is
-// anyui's BGRA byte order on little-endian machines, so most uploads are a
+// rapport's BGRA byte order on little-endian machines, so most uploads are a
 // straight copy.
 class QtImage : public Image
 {
@@ -189,7 +189,7 @@ public:
         p_.drawPolygon(poly);
     }
 
-    // anyui's angles are radians clockwise from 3 o'clock; Qt's arcs are in
+    // rapport's angles are radians clockwise from 3 o'clock; Qt's arcs are in
     // degrees anticlockwise.
     void arc(PointF c, float r, float start, float end, const Paint& paint, float width, LineCap cap) override
     {
@@ -284,4 +284,4 @@ private:
     std::vector<std::pair<ThemeColor, Color>> overrides_;
 };
 
-}  // namespace anyui::qt6
+}  // namespace rap::qt6

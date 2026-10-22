@@ -1,9 +1,9 @@
-// anyui: native widgets from whichever toolkit the desktop uses, picked at
+// rapport: native widgets from whichever toolkit the desktop uses, picked at
 // runtime.
 //
-//     auto ui = anyui::Ui::load(argc, argv);
+//     auto ui = rap::Ui::load(argc, argv);
 //     if (!ui) { fprintf(stderr, "%s\n", ui.error().c_str()); return 1; }
-//     auto win = ui->create(anyui::layout::Window{"Hello", {...}});
+//     auto win = ui->create(rap::layout::Window{"Hello", {...}});
 //     win->show();
 //     return ui->run();
 #pragma once
@@ -15,15 +15,15 @@
 #include <string>
 #include <vector>
 
-namespace anyui
+namespace rap
 {
 
 struct LoadOptions
 {
     // Force a backend ("qt6", "gtk4", "gtk3", "null"). Empty = detect. The
-    // ANYUI_BACKEND environment variable overrides detection too.
+    // RAPPORT_BACKEND environment variable overrides detection too.
     std::string backend;
-    // Extra plugin directories, searched first. ANYUI_PLUGIN_PATH
+    // Extra plugin directories, searched first. RAPPORT_PLUGIN_PATH
     // (colon-separated) is searched next, then next to the executable,
     // then the install directory.
     std::vector<std::string> searchPaths;
@@ -39,7 +39,7 @@ struct Detection
 // diagnostics (`--version`-style output, bug reports).
 Detection detect(const LoadOptions& = {});
 
-// A backend linked into the program (ANYUI_STATIC builds, e.g. one
+// A backend linked into the program (RAPPORT_STATIC builds, e.g. one
 // self-contained .exe). Builtins are tried before plugins of the same name.
 // Use the macro below, at namespace scope in one of the app's own source
 // files: a registration inside a static library would be dropped by the
@@ -97,10 +97,10 @@ private:
     std::unique_ptr<Backend> backend_;
 };
 
-}  // namespace anyui
+}  // namespace rap
 
-// ANYUI_BUILTIN_BACKEND(gtk3) registers the statically linked gtk3 backend.
-#define ANYUI_BUILTIN_BACKEND(name)                                                                \
-    extern "C" anyui::Backend* anyui_create_backend_##name(int, int*, char**);                     \
-    static const bool anyui_builtin_backend_##name =                                               \
-        (anyui::registerBuiltinBackend(#name, &anyui_create_backend_##name), true)
+// RAPPORT_BUILTIN_BACKEND(gtk3) registers the statically linked gtk3 backend.
+#define RAPPORT_BUILTIN_BACKEND(name)                                                                \
+    extern "C" rap::Backend* rapport_create_backend_##name(int, int*, char**);                     \
+    static const bool rapport_builtin_backend_##name =                                               \
+        (rap::registerBuiltinBackend(#name, &rapport_create_backend_##name), true)

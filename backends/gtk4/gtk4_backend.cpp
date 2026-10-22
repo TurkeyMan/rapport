@@ -1,60 +1,60 @@
-// GTK 4 backend (package anyui-gtk4).
+// GTK 4 backend (package rapport-gtk4).
 //
-// Lists use GtkColumnView over a lazy GListModel (AnyuiRows) whose items
+// Lists use GtkColumnView over a lazy GListModel (RapportRows) whose items
 // are bare GObjects tagged with their row index; cells pull text from the
-// anyui::ListModel at bind time. Painted columns are GtkDrawingAreas.
+// rap::ListModel at bind time. Painted columns are GtkDrawingAreas.
 #include <gtk/gtk.h>
 
 #include "gtk_common.h"
 
 #include <memory>
 
-// ---------------------------------------------------------------- AnyuiRows
+// ---------------------------------------------------------------- RapportRows
 
 G_BEGIN_DECLS
-G_DECLARE_FINAL_TYPE(AnyuiRows, anyui_rows, ANYUI, ROWS, GObject)
+G_DECLARE_FINAL_TYPE(RapportRows, rapport_rows, RAPPORT, ROWS, GObject)
 G_END_DECLS
 
-struct _AnyuiRows
+struct _RapportRows
 {
     GObject parent_instance;
     guint count;
 };
 
-static GType anyui_rows_get_item_type(GListModel*)
+static GType rapport_rows_get_item_type(GListModel*)
 {
     return G_TYPE_OBJECT;
 }
-static guint anyui_rows_get_n_items(GListModel* m)
+static guint rapport_rows_get_n_items(GListModel* m)
 {
-    return ANYUI_ROWS(m)->count;
+    return RAPPORT_ROWS(m)->count;
 }
 
-static gpointer anyui_rows_get_item(GListModel* m, guint pos)
+static gpointer rapport_rows_get_item(GListModel* m, guint pos)
 {
-    if (pos >= ANYUI_ROWS(m)->count) return nullptr;
+    if (pos >= RAPPORT_ROWS(m)->count) return nullptr;
     auto* item = G_OBJECT(g_object_new(G_TYPE_OBJECT, nullptr));
-    g_object_set_data(item, "anyui-row", GUINT_TO_POINTER(pos));
+    g_object_set_data(item, "rapport-row", GUINT_TO_POINTER(pos));
     return item;
 }
 
-static void anyui_rows_iface_init(GListModelInterface* iface)
+static void rapport_rows_iface_init(GListModelInterface* iface)
 {
-    iface->get_item_type = anyui_rows_get_item_type;
-    iface->get_n_items = anyui_rows_get_n_items;
-    iface->get_item = anyui_rows_get_item;
+    iface->get_item_type = rapport_rows_get_item_type;
+    iface->get_n_items = rapport_rows_get_n_items;
+    iface->get_item = rapport_rows_get_item;
 }
 
-G_DEFINE_TYPE_WITH_CODE(AnyuiRows, anyui_rows, G_TYPE_OBJECT,
-                        G_IMPLEMENT_INTERFACE(G_TYPE_LIST_MODEL, anyui_rows_iface_init))
+G_DEFINE_TYPE_WITH_CODE(RapportRows, rapport_rows, G_TYPE_OBJECT,
+                        G_IMPLEMENT_INTERFACE(G_TYPE_LIST_MODEL, rapport_rows_iface_init))
 
-static void anyui_rows_class_init(AnyuiRowsClass*) {}
-static void anyui_rows_init(AnyuiRows* self)
+static void rapport_rows_class_init(RapportRowsClass*) {}
+static void rapport_rows_init(RapportRows* self)
 {
     self->count = 0;
 }
 
-namespace anyui::gtk4
+namespace rap::gtk4
 {
 namespace
 {
@@ -63,16 +63,16 @@ using namespace gtkcommon;
 
 // TODO: take accent and contrast from the settings portal.
 }  // namespace
-}  // namespace anyui::gtk4
+}  // namespace rap::gtk4
 
-anyui::Color anyui::gtkcommon::themeColor(GtkWidget* w, ThemeColor role)
+rap::Color rap::gtkcommon::themeColor(GtkWidget* w, ThemeColor role)
 {
     GdkRGBA fg;
     gtk_widget_get_color(w, &fg);
     return fallbackColor(role, toColor(fg), isDarkText(fg));
 }
 
-namespace anyui::gtk4
+namespace rap::gtk4
 {
 namespace
 {
@@ -80,13 +80,13 @@ namespace
 // ---------------------------------------------------------------- widgets
 
 // A container (box, form, group, toolbar) as a plain Widget, for handles.
-class WPlain : public W<anyui::Widget>
+class WPlain : public W<rap::Widget>
 {
 public:
     using W::W;
 };
 
-class WLabel : public W<anyui::Label>
+class WLabel : public W<rap::Label>
 {
 public:
     explicit WLabel(const spec::Label& s)
@@ -100,7 +100,7 @@ public:
     void setText(const std::string& t) override { gtk_label_set_text(GTK_LABEL(w_), t.c_str()); }
 };
 
-class WButton : public W<anyui::Button>
+class WButton : public W<rap::Button>
 {
 public:
     explicit WButton(const std::string& text)
@@ -130,7 +130,7 @@ private:
 
 // GTK 4 has no GtkToolbar: a flat button in a box. Written without a GTK 4
 // build. TODO(pengit): toggles' pressed look, drawn icons.
-class WToolButton : public W<anyui::ToolButton>
+class WToolButton : public W<rap::ToolButton>
 {
 public:
     explicit WToolButton(const spec::ToolButton& s)
@@ -226,7 +226,7 @@ private:
 };
 
 // TODO(pengit): GtkColorButton is deprecated since GTK 4.10 (GtkColorDialogButton).
-class WColorButton : public W<anyui::ColorButton>
+class WColorButton : public W<rap::ColorButton>
 {
 public:
     explicit WColorButton(const spec::ColorButton& s)
@@ -260,7 +260,7 @@ private:
     std::function<void(Color)> changed_;
 };
 
-class WCheck : public W<anyui::Check>
+class WCheck : public W<rap::Check>
 {
 public:
     explicit WCheck(const spec::Check& s)
@@ -314,7 +314,7 @@ private:
 
 // TODO(pengit): build the menu as a GtkPopoverMenu (like WList's context
 // menu) and show the pushed state; untested without GTK 4 headers.
-// An anyui::Menu as a GMenu model plus the actions its items name, for
+// An rap::Menu as a GMenu model plus the actions its items name, for
 // popover menus. Built afresh each time a menu opens (so it shows the app's
 // state then); the actions call into the Menu kept here, which lives until
 // the next build. Separators become GMenu sections.
@@ -419,7 +419,7 @@ void attachMenu(GtkMenuButton* button, MenuActions* actions, std::function<Menu(
         new Ctx{actions, fn}, +[](gpointer p) { delete static_cast<Ctx*>(p); });
 }
 
-class WMenuButton : public W<anyui::MenuButton>
+class WMenuButton : public W<rap::MenuButton>
 {
 public:
     explicit WMenuButton(const spec::MenuButton& s)
@@ -444,7 +444,7 @@ private:
     MenuActions actions_;
 };
 
-class WProgressBar : public W<anyui::ProgressBar>
+class WProgressBar : public W<rap::ProgressBar>
 {
 public:
     WProgressBar()
@@ -461,7 +461,7 @@ public:
 };
 
 // A menu button showing the date, with a calendar in its popover.
-class WDatePicker : public W<anyui::DatePicker>
+class WDatePicker : public W<rap::DatePicker>
 {
 public:
     explicit WDatePicker(const spec::DatePicker& s)
@@ -538,7 +538,7 @@ private:
     bool updating_ = false;
 };
 
-class WEntry : public W<anyui::Entry>
+class WEntry : public W<rap::Entry>
 {
 public:
     explicit WEntry(const spec::Entry& s)
@@ -581,7 +581,7 @@ private:
     std::function<void()> activate_;
 };
 
-class WSelect : public W<anyui::Select>
+class WSelect : public W<rap::Select>
 {
 public:
     explicit WSelect(const spec::Select& s)
@@ -624,7 +624,7 @@ private:
 G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 
 // GTK 4 has no non-deprecated editable combo; GtkComboBoxText still works.
-class WCombo : public W<anyui::Combo>
+class WCombo : public W<rap::Combo>
 {
 public:
     explicit WCombo(const spec::Combo& s)
@@ -673,7 +673,7 @@ private:
 
 G_GNUC_END_IGNORE_DEPRECATIONS
 
-class WTextView : public W<anyui::TextView>
+class WTextView : public W<rap::TextView>
 {
 public:
     explicit WTextView(const spec::TextView& s)
@@ -686,8 +686,8 @@ public:
         gtk_text_view_set_wrap_mode(tv, s.wrap ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
         gtk_text_view_set_left_margin(tv, 4);
         // TODO(pengit): relies on a compact list having installed the
-        // display-wide anyui-compact rule; untested without GTK 4 headers.
-        if (s.compact) gtk_widget_add_css_class(w_, "anyui-compact");
+        // display-wide rapport-compact rule; untested without GTK 4 headers.
+        if (s.compact) gtk_widget_add_css_class(w_, "rapport-compact");
         gtk_text_view_set_right_margin(tv, 4);
         setReadOnly(s.readOnly);
         buffer_ = gtk_text_view_get_buffer(tv);
@@ -774,8 +774,8 @@ private:
 };
 
 // A splitter of n panes is a chain of n-1 nested GtkPaneds (each marked
-// "anyui-split-chain"); sizes are one per pane, along the split.
-class WSplitter : public W<anyui::Splitter>
+// "rapport-split-chain"); sizes are one per pane, along the split.
+class WSplitter : public W<rap::Splitter>
 {
 public:
     explicit WSplitter(GtkWidget* paned)
@@ -794,7 +794,7 @@ public:
             auto* p = GTK_PANED(w);
             out.push_back(float(gtk_paned_get_position(p)));
             GtkWidget* next = gtk_paned_get_end_child(p);
-            if (!next || !g_object_get_data(G_OBJECT(next), "anyui-split-chain"))
+            if (!next || !g_object_get_data(G_OBJECT(next), "rapport-split-chain"))
             {
                 out.push_back(next ? float(vertical ? gtk_widget_get_height(next)
                                                     : gtk_widget_get_width(next))
@@ -813,14 +813,14 @@ public:
     // position fits.
     void setSizes(const std::vector<float>& s) override
     {
-        g_object_set_data(G_OBJECT(w_), "anyui-user-sized", GINT_TO_POINTER(1));
+        g_object_set_data(G_OBJECT(w_), "rapport-user-sized", GINT_TO_POINTER(1));
         GtkWidget* w = w_;
         for (size_t i = 0; i + 1 < s.size() && w; ++i)
         {
             auto* p = GTK_PANED(w);
             if (s[i] > 0) placeDivider(p, int(s[i]));
             GtkWidget* next = gtk_paned_get_end_child(p);
-            w = next && g_object_get_data(G_OBJECT(next), "anyui-split-chain") ? next : nullptr;
+            w = next && g_object_get_data(G_OBJECT(next), "rapport-split-chain") ? next : nullptr;
         }
     }
 
@@ -834,15 +834,15 @@ private:
         // known to fit either.
         if (maxPos >= position && maxPos != G_MAXINT) return;
         // Too long for now: again when the splitter grows (once it fits).
-        auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(p), "anyui-want-position"));
+        auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(p), "rapport-want-position"));
         if (!want)
         {
             want = new int(position);
-            g_object_set_data_full(G_OBJECT(p), "anyui-want-position", want, +[](gpointer d) { delete static_cast<int*>(d); });
+            g_object_set_data_full(G_OBJECT(p), "rapport-want-position", want, +[](gpointer d) { delete static_cast<int*>(d); });
             g_signal_connect(p, "notify::max-position",
                              G_CALLBACK(+[](GObject* obj, GParamSpec*, gpointer)
                                         {
-                                            auto* want = static_cast<int*>(g_object_get_data(obj, "anyui-want-position"));
+                                            auto* want = static_cast<int*>(g_object_get_data(obj, "rapport-want-position"));
                                             if (!want || *want < 0) return;
                                             int maxPos = 0;
                                             g_object_get(obj, "max-position", &maxPos, nullptr);
@@ -856,7 +856,7 @@ private:
     }
 };
 
-class WTabs : public W<anyui::Tabs>
+class WTabs : public W<rap::Tabs>
 {
 public:
     explicit WTabs(GtkWidget* notebook)
@@ -905,7 +905,7 @@ private:
 };
 
 // Tabs as a list of page names down the left, the page beside it.
-class WSideTabs : public W<anyui::Tabs>
+class WSideTabs : public W<rap::Tabs>
 {
 public:
     WSideTabs(GtkWidget* box, GtkWidget* list, GtkWidget* stack)
@@ -966,13 +966,13 @@ private:
 
 // ---------------------------------------------------------------- list
 
-class WList : public W<anyui::List>, public ListObserver
+class WList : public W<rap::List>, public ListObserver
 {
 public:
     explicit WList(const spec::List& s)
         : W(nullptr, gtk_scrolled_window_new())
     {
-        rows_ = ANYUI_ROWS(g_object_new(anyui_rows_get_type(), nullptr));
+        rows_ = RAPPORT_ROWS(g_object_new(rapport_rows_get_type(), nullptr));
         auto* rows = G_LIST_MODEL(rows_);  // ownership passes to the selection model
         switch (s.selection)
         {
@@ -1000,8 +1000,8 @@ public:
             {
                 std::string px = std::to_string(compactFont(w_).px) + "px";
                 std::string rule =
-                    "columnview.anyui-compact, textview.anyui-compact { font-size: " + px +
-                    "; } columnview.anyui-compact row cell { padding-top: 0; "
+                    "columnview.rapport-compact, textview.rapport-compact { font-size: " + px +
+                    "; } columnview.rapport-compact row cell { padding-top: 0; "
                     "padding-bottom: 0; }";
                 GtkCssProvider* css = gtk_css_provider_new();
                 gtk_css_provider_load_from_string(css, rule.c_str());
@@ -1011,7 +1011,7 @@ public:
                 g_object_unref(css);
                 installed = true;
             }
-            gtk_widget_add_css_class(w_, "anyui-compact");
+            gtk_widget_add_css_class(w_, "rapport-compact");
         }
         if (s.softSelection)
         {
@@ -1032,11 +1032,11 @@ public:
                 Color base = themeColor(w_, ThemeColor::Base), accent = themeColor(w_, ThemeColor::Accent);
                 const bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
                 const Color hover = mixColors(base, accent, dark ? 0.16f : 0.09f);
-                std::string rule = "columnview.anyui-soft row:hover { background-color: " + rgb(hover) +
-                                   "; } columnview.anyui-soft row:selected, columnview.anyui-soft row:selected:focus, "
-                                   "columnview.anyui-soft row:selected:hover { background-color: " +
+                std::string rule = "columnview.rapport-soft row:hover { background-color: " + rgb(hover) +
+                                   "; } columnview.rapport-soft row:selected, columnview.rapport-soft row:selected:focus, "
+                                   "columnview.rapport-soft row:selected:hover { background-color: " +
                                    rgb(soft_->first) + "; color: " + rgb(soft_->second) +
-                                   "; } columnview row.anyui-drop { box-shadow: inset 0 0 0 2px " +
+                                   "; } columnview row.rapport-drop { box-shadow: inset 0 0 0 2px " +
                                    rgb(themeColor(w_, ThemeColor::Highlight)) + "; }";
                 GtkCssProvider* css = gtk_css_provider_new();
                 gtk_css_provider_load_from_string(css, rule.c_str());
@@ -1046,7 +1046,7 @@ public:
                 g_object_unref(css);
                 installed = true;
             }
-            gtk_widget_add_css_class(w_, "anyui-soft");
+            gtk_widget_add_css_class(w_, "rapport-soft");
         }
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
         gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
@@ -1335,7 +1335,7 @@ private:
         for (GtkWidget* w = gtk_widget_pick(w_, x, y, GTK_PICK_DEFAULT); w && w != w_; w = gtk_widget_get_parent(w))
         {
             const size_t tagged = rowOf(w);
-            auto* ctx = static_cast<ColumnCtx*>(g_object_get_data(G_OBJECT(w), "anyui-ctx"));
+            auto* ctx = static_cast<ColumnCtx*>(g_object_get_data(G_OBJECT(w), "rapport-ctx"));
             if (tagged && ctx) return CellHit{w, tagged - 1, ctx->column};
         }
         return std::nullopt;
@@ -1386,14 +1386,14 @@ private:
             gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);  // no selection change on release
             gtk_widget_grab_focus(w_);  // Esc reaches the key controller
         }
-        if (cell_.targetRow) gtk_widget_remove_css_class(cell_.targetRow, "anyui-drop");
+        if (cell_.targetRow) gtk_widget_remove_css_class(cell_.targetRow, "rapport-drop");
         cell_.target.reset();
         cell_.targetRow = nullptr;
         if (auto hit = cellAt(cell_.x0 + dx, cell_.y0 + dy);
             hit && cellDrag_.canDrop && cellDrag_.canDrop(cell_.from, hit->row, cell_.start.data))
         {
             cell_.target = hit->row;
-            if ((cell_.targetRow = rowWidget(hit->cell))) gtk_widget_add_css_class(cell_.targetRow, "anyui-drop");
+            if ((cell_.targetRow = rowWidget(hit->cell))) gtk_widget_add_css_class(cell_.targetRow, "rapport-drop");
         }
         gtk_widget_set_cursor_from_name(w_, cell_.target ? "grabbing" : "not-allowed");
     }
@@ -1402,7 +1402,7 @@ private:
         if (!cell_.pressed) return;
         CellDragState c = std::move(cell_);
         cell_ = {};
-        if (c.targetRow) gtk_widget_remove_css_class(c.targetRow, "anyui-drop");
+        if (c.targetRow) gtk_widget_remove_css_class(c.targetRow, "rapport-drop");
         gtk_widget_set_cursor(w_, nullptr);
         if (drop && c.dragging && c.target && cellDrag_.drop) cellDrag_.drop(c.from, *c.target, c.start.data);
     }
@@ -1411,7 +1411,7 @@ private:
 
     static size_t rowOf(gpointer obj)
     {
-        return GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(obj), "anyui-row"));
+        return GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(obj), "rapport-row"));
     }
 
     void addColumn(const Column& c, size_t index)
@@ -1485,8 +1485,8 @@ private:
             child = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
             gtk_box_append(GTK_BOX(child), image);
             gtk_box_append(GTK_BOX(child), label);
-            g_object_set_data(G_OBJECT(child), "anyui-label", label);
-            g_object_set_data(G_OBJECT(child), "anyui-image", image);
+            g_object_set_data(G_OBJECT(child), "rapport-label", label);
+            g_object_set_data(G_OBJECT(child), "rapport-image", image);
         }
 
         GtkGesture* click = gtk_gesture_click_new();
@@ -1501,7 +1501,7 @@ private:
                          &ctx);
         gtk_widget_add_controller(child, GTK_EVENT_CONTROLLER(click));
 
-        g_object_set_data(G_OBJECT(child), "anyui-ctx", &ctx);
+        g_object_set_data(G_OBJECT(child), "rapport-ctx", &ctx);
         gtk_list_item_set_child(li, child);
     }
 
@@ -1512,14 +1512,14 @@ private:
         size_t row = rowOf(gtk_list_item_get_item(li));
         GtkWidget* child = gtk_list_item_get_child(li);
         // Stored +1 so 0 means "not bound".
-        g_object_set_data(G_OBJECT(child), "anyui-row", GSIZE_TO_POINTER(row + 1));
+        g_object_set_data(G_OBJECT(child), "rapport-row", GSIZE_TO_POINTER(row + 1));
         if (ctx.painted)
         {
             gtk_widget_queue_draw(child);
             return;
         }
-        auto* label = GTK_LABEL(g_object_get_data(G_OBJECT(child), "anyui-label"));
-        auto* image = GTK_IMAGE(g_object_get_data(G_OBJECT(child), "anyui-image"));
+        auto* label = GTK_LABEL(g_object_get_data(G_OBJECT(child), "rapport-label"));
+        auto* image = GTK_IMAGE(g_object_get_data(G_OBJECT(child), "rapport-image"));
         const Icon icon = model_->icon(row, ctx.column);
         GIcon* gicon = !icon.file.empty() ? fileTypeIcon(icon.file) : !icon.name.empty() ? namedGIcon(icon.name) : nullptr;
         gtk_image_set_from_gicon(image, gicon);
@@ -1561,7 +1561,7 @@ private:
         if (tagged) row = tagged - 1;
         if (row && !gtk_selection_model_is_selected(sel_, guint(*row)))
             gtk_selection_model_select_item(sel_, guint(*row), true);
-        auto* ctx = static_cast<ColumnCtx*>(g_object_get_data(G_OBJECT(cell), "anyui-ctx"));
+        auto* ctx = static_cast<ColumnCtx*>(g_object_get_data(G_OBJECT(cell), "rapport-ctx"));
         const bool atCell = cellMenu_ && row && ctx;
         if (!contextMenu_ && !atCell) return;
 
@@ -1585,7 +1585,7 @@ private:
         gtk_popover_popup(GTK_POPOVER(popover_));
     }
 
-    AnyuiRows* rows_ = nullptr;  // owned by sel_
+    RapportRows* rows_ = nullptr;  // owned by sel_
     GtkSelectionModel* sel_ = nullptr;
     std::unordered_map<GtkListItem*, ColumnCtx*> bound_;  // cells showing a row now
     std::optional<std::pair<Color, Color>> soft_;  // selection background, text
@@ -1624,7 +1624,7 @@ unsigned modifiers(GdkModifierType state)
 // Input mirrors the gtk3 WCanvas: presses, releases and the wheel from a
 // legacy controller (raw events, so a release after a drag still arrives),
 // motion and crossing from a motion controller, keys from a key controller.
-class WCanvas : public W<anyui::Canvas>
+class WCanvas : public W<rap::Canvas>
 {
 public:
     explicit WCanvas(const spec::Canvas& s)
@@ -1833,7 +1833,7 @@ private:
     PointF lastPos_{}, lastMove_{};
 };
 
-class WWindow : public anyui::Window, public Part
+class WWindow : public rap::Window, public Part
 {
 public:
     WWindow(const WindowSpec& spec, WWindow* parent)
@@ -1904,8 +1904,8 @@ public:
         snapshotIfAsked();
     }
 
-    // Development aid, as in gtk3: ANYUI_SNAPSHOT=file.png saves the window
-    // shown last ANYUI_SNAPSHOT_DELAY ms (default 500) after it appears,
+    // Development aid, as in gtk3: RAPPORT_SNAPSHOT=file.png saves the window
+    // shown last RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears,
     // then quits the main loop.
     static GtkWidget*& lastShown()
     {
@@ -1921,10 +1921,10 @@ public:
     {
         lastShown() = win_;
         static bool taken = false;
-        const char* path = std::getenv("ANYUI_SNAPSHOT");
+        const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (taken || !path || !*path) return;
         taken = true;
-        const char* delay = std::getenv("ANYUI_SNAPSHOT_DELAY");
+        const char* delay = std::getenv("RAPPORT_SNAPSHOT_DELAY");
         g_timeout_add(
             delay ? guint(std::atoi(delay)) : 500u,
             +[](gpointer) -> gboolean
@@ -1940,7 +1940,7 @@ public:
                     {
                         GskRenderer* renderer = gtk_native_get_renderer(GTK_NATIVE(win));
                         GdkTexture* tex = gsk_renderer_render_texture(renderer, node, nullptr);
-                        gdk_texture_save_to_png(tex, std::getenv("ANYUI_SNAPSHOT"));
+                        gdk_texture_save_to_png(tex, std::getenv("RAPPORT_SNAPSHOT"));
                         g_object_unref(tex);
                         gsk_render_node_unref(node);
                     }
@@ -2085,13 +2085,13 @@ public:
 
     void addRoleButton(GtkWidget* button, DialogRole role)
     {
-        g_object_set_data(G_OBJECT(button), "anyui-role", GINT_TO_POINTER(int(role)));
+        g_object_set_data(G_OBJECT(button), "rapport-role", GINT_TO_POINTER(int(role)));
         connect(
             button, "clicked",
             +[](GtkButton* b, gpointer p)
             {
                 auto role =
-                    DialogRole(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "anyui-role")));
+                    DialogRole(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "rapport-role")));
                 static_cast<WWindow*>(p)->finish(role);
             },
             this);
@@ -2253,7 +2253,7 @@ private:
         GtkWidget* paned = gtk_paned_new(gtkOrientation(s.dir));
         auto* p = GTK_PANED(paned);
         gtk_paned_set_wide_handle(p, true);
-        g_object_set_data(G_OBJECT(paned), "anyui-split-chain", GINT_TO_POINTER(1));
+        g_object_set_data(G_OBJECT(paned), "rapport-split-chain", GINT_TO_POINTER(1));
         gtk_paned_set_start_child(p, first);
         gtk_paned_set_end_child(p, panes(s, from + 1));
         gtk_paned_set_resize_start_child(p, !anyStretch || s.panes[from].common.stretch > 0);
@@ -2411,7 +2411,7 @@ private:
         for (auto& [at, label] : s.marks)
             gtk_scale_add_mark(GTK_SCALE(scale), at, GTK_POS_BOTTOM,
                                label.empty() ? nullptr : label.c_str());
-        return add<WValue<anyui::Slider>>(n, scale).outer();
+        return add<WValue<rap::Slider>>(n, scale).outer();
     }
 
     GtkWidget* make(const Node& n, const spec::Spin& s, Orientation)
@@ -2419,7 +2419,7 @@ private:
         GtkWidget* spin = gtk_spin_button_new_with_range(s.min, s.max, s.step > 0 ? s.step : 1);
         gtk_spin_button_set_digits(GTK_SPIN_BUTTON(spin), guint(std::max(s.digits, 0)));
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin), s.value);
-        return add<WValue<anyui::Spin>>(n, spin).outer();
+        return add<WValue<rap::Spin>>(n, spin).outer();
     }
 
     GtkWidget* make(const Node& n, const spec::ColorButton& s, Orientation)
@@ -2524,7 +2524,7 @@ public:
 
     std::string_view name() const override { return "gtk4"; }
 
-    std::unique_ptr<anyui::Window> createWindow(const WindowSpec& spec, anyui::Window* parent,
+    std::unique_ptr<rap::Window> createWindow(const WindowSpec& spec, rap::Window* parent,
                                                 BuildSink& sink) override
     {
         auto win = std::make_unique<WWindow>(spec, static_cast<WWindow*>(parent));
@@ -2565,7 +2565,7 @@ public:
             +[](gpointer p) { delete static_cast<std::function<void()>*>(p); });
     }
 
-    void message(anyui::Window* parent, const MessageSpec& m,
+    void message(rap::Window* parent, const MessageSpec& m,
                  std::function<void(DialogRole)> done) override
     {
         GtkAlertDialog* dlg = gtk_alert_dialog_new("%s", m.text.c_str());
@@ -2676,7 +2676,7 @@ public:
         std::pair<std::string, std::string> pending_;  // typed, with extension
     };
 
-    void chooseFiles(anyui::Window* parent, const FileDialogSpec& f,
+    void chooseFiles(rap::Window* parent, const FileDialogSpec& f,
                      std::function<void(std::vector<std::string>)> done) override
     {
         GtkFileDialog* dlg = gtk_file_dialog_new();
@@ -2810,7 +2810,7 @@ public:
     }
 
     // TODO(pengit): a GdkTexture-backed Image would avoid cairo for painting.
-    std::unique_ptr<anyui::Image> createImage(int w, int h, PixelFormat format,
+    std::unique_ptr<rap::Image> createImage(int w, int h, PixelFormat format,
                                               const uint8_t* pixels, size_t stride) override
     {
         return std::make_unique<CairoImage>(w, h, format, pixels, stride);
@@ -2845,7 +2845,7 @@ public:
     }
 
 private:
-    static GtkWindow* parentWindow(anyui::Window* w)
+    static GtkWindow* parentWindow(rap::Window* w)
     {
         return w ? GTK_WINDOW(static_cast<WWindow*>(w)->gtkWindow()) : nullptr;
     }
@@ -2856,6 +2856,6 @@ private:
 };
 
 }  // namespace
-}  // namespace anyui::gtk4
+}  // namespace rap::gtk4
 
-ANYUI_BACKEND_ENTRY(gtk4, anyui::gtk4::Gtk4Backend)
+RAPPORT_BACKEND_ENTRY(gtk4, rap::gtk4::Gtk4Backend)

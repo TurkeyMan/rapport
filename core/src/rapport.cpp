@@ -1,5 +1,5 @@
-#include "anyui/anyui.h"
-#include "anyui/sys.h"
+#include "rapport/rapport.h"
+#include "rapport/sys.h"
 
 #include <algorithm>
 #include <cctype>
@@ -8,13 +8,13 @@
 #include <map>
 #include <sstream>
 
-#ifndef ANYUI_INSTALL_PLUGIN_DIR
-#define ANYUI_INSTALL_PLUGIN_DIR ""
+#ifndef RAPPORT_INSTALL_PLUGIN_DIR
+#define RAPPORT_INSTALL_PLUGIN_DIR ""
 #endif
 
 namespace fs = std::filesystem;
 
-namespace anyui
+namespace rap
 {
 namespace
 {
@@ -71,15 +71,15 @@ std::vector<fs::path> pluginDirs(const LoadOptions& opts)
 {
     std::vector<fs::path> dirs;
     for (auto& p : opts.searchPaths) dirs.push_back(sys::pathFromUtf8(p));
-    for (auto& p : split(env("ANYUI_PLUGIN_PATH"), kPathSeparator))
+    for (auto& p : split(env("RAPPORT_PLUGIN_PATH"), kPathSeparator))
         dirs.push_back(sys::pathFromUtf8(p));
     if (auto d = exeDir(); !d.empty())
     {
         dirs.push_back(d);
-        dirs.push_back(d / "anyui");
-        dirs.push_back(d / ".." / "lib" / "anyui");
+        dirs.push_back(d / "rapport");
+        dirs.push_back(d / ".." / "lib" / "rapport");
     }
-    if (*ANYUI_INSTALL_PLUGIN_DIR) dirs.emplace_back(ANYUI_INSTALL_PLUGIN_DIR);
+    if (*RAPPORT_INSTALL_PLUGIN_DIR) dirs.emplace_back(RAPPORT_INSTALL_PLUGIN_DIR);
     return dirs;
 }
 
@@ -238,7 +238,7 @@ Detection detect(const LoadOptions& opts)
 {
     Detection d;
 
-    std::string forced = !opts.backend.empty() ? opts.backend : env("ANYUI_BACKEND");
+    std::string forced = !opts.backend.empty() ? opts.backend : env("RAPPORT_BACKEND");
     if (!forced.empty())
     {
         d.preference = {lower(forced)};
@@ -300,7 +300,7 @@ std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
             errors += "  " + name + ": built in, but failed to start (no display?)\n";
             continue;
         }
-        std::string file = "anyui_" + name + kPluginSuffix;
+        std::string file = "rapport_" + name + kPluginSuffix;
         bool found = false;
         for (auto& dir : dirs)
         {
@@ -318,7 +318,7 @@ std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
             auto* create = lib->function<CreateBackendFn>(createBackendSymbol(name).c_str());
             if (!create)
             {
-                errors += "  " + name + ": " + sys::pathToUtf8(path) + " is not an anyui backend\n";
+                errors += "  " + name + ": " + sys::pathToUtf8(path) + " is not an rapport backend\n";
                 break;
             }
             // Never unload: toolkits register atexit handlers and TLS.
@@ -332,7 +332,7 @@ std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
     }
 
     std::string desktop = det.desktop.empty() ? "unknown" : det.desktop;
-    return std::unexpected("anyui: no usable UI backend (desktop: " + desktop + ")\n" + errors);
+    return std::unexpected("rapport: no usable UI backend (desktop: " + desktop + ")\n" + errors);
 }
 
 Ui::~Ui() = default;
@@ -343,4 +343,4 @@ std::unique_ptr<Window> Ui::create(const WindowSpec& spec, Window* parent)
     return backend_->createWindow(spec, parent, sink);
 }
 
-}  // namespace anyui
+}  // namespace rap
