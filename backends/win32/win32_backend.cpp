@@ -2018,6 +2018,7 @@ public:
     }
     ~WList() override
     {
+        if (anchor_) DestroyWindow(anchor_);
         if (g_dragging == this) g_dragging = nullptr;
         if (model_) model_->removeObserver(this);
     }
@@ -2551,15 +2552,6 @@ private:
                     painter.text({6, 2}, cell_.start.label, ts);
                 }
             }
-            if (auto_.on)
-            {
-                // The autoscroll anchor: a ring with up and down arrows.
-                rt->SetTransform(D2D1::Matrix3x2F::Translation(dip(auto_.anchor.x), dip(auto_.anchor.y)) * origin);
-                painter.circle({0, 0}, 11, Paint{ThemeColor::Base}, Paint{ThemeColor::Mid});
-                painter.polygon({{-4, -3}, {4, -3}, {0, -8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
-                painter.polygon({{-4, 3}, {4, 3}, {0, 8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
-                painter.circle({0, 0}, 1.5f, Paint{ThemeColor::Text}, std::nullopt);
-            }
             rt->SetTransform(D2D1::Matrix3x2F::Identity());
         }
         if (rt->EndDraw() == D2DERR_RECREATE_TARGET)
@@ -2799,7 +2791,71 @@ private:
         KillTimer(h_, 0xa5c0);
         if (GetCapture() == h_) ReleaseCapture();
         if (g_dragging == this) g_dragging = nullptr;
-        InvalidateRect(h_, nullptr, FALSE);
+        if (anchor_) ShowWindow(anchor_, SW_HIDE);
+    }
+
+    // The anchor floats above the list in a window of its own (layered,
+    // see-through to the mouse, never active): painted into the rows, each
+    // scroll's blit carried it off with them until the next repaint.
+    void showAnchor(POINT at)
+    {
+        const float s = win_.scale();
+        const int side = int(std::ceil(26 * s)) + 2;  // the ring is 11 px round, plus its stroke
+        if (!anchor_)
+        {
+            static const ATOM cls = []
+            {
+                WNDCLASSEXW wc{sizeof wc};
+                wc.lpfnWndProc = DefWindowProcW;
+                wc.hInstance = instance();
+                wc.lpszClassName = L"AnyuiAutoScrollAnchor";
+                return RegisterClassExW(&wc);
+            }();
+            anchor_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                                      MAKEINTATOM(cls), nullptr, WS_POPUP, 0, 0, side, side, GetAncestor(h_, GA_ROOT),
+                                      nullptr, instance(), nullptr);
+            if (!anchor_) return;
+        }
+        // Drawn premultiplied into a DIB, handed over with its alpha.
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), side, -side, 1, 32, BI_RGB};
+        void* bits = nullptr;
+        HDC screen = GetDC(nullptr), mem = CreateCompatibleDC(screen);
+        HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ old = SelectObject(mem, bmp);
+        const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            96, 96);
+        Com<ID2D1DCRenderTarget> rt;
+        RECT all{0, 0, side, side};
+        if (bits && SUCCEEDED(d2dFactory()->CreateDCRenderTarget(&props, rt.put())) &&
+            SUCCEEDED(rt->BindDC(mem, &all)))
+        {
+            rt->BeginDraw();
+            rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+            {
+                D2DPainter p(rt.get(), s);
+                const float c = side / s / 2;
+                p.circle({c, c}, 11, Paint{ThemeColor::Base}, Paint{ThemeColor::Mid});
+                p.polygon({{c - 4, c - 3}, {c + 4, c - 3}, {c, c - 8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
+                p.polygon({{c - 4, c + 3}, {c + 4, c + 3}, {c, c + 8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
+                p.circle({c, c}, 1.5f, Paint{ThemeColor::Text}, std::nullopt);
+            }
+            rt->EndDraw();
+            POINT pos = at;
+            ClientToScreen(h_, &pos);
+            pos.x -= side / 2;
+            pos.y -= side / 2;
+            SIZE size{side, side};
+            POINT zero{};
+            BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+            UpdateLayeredWindow(anchor_, screen, &pos, &size, mem, &zero, 0, &blend, ULW_ALPHA);
+            ShowWindow(anchor_, SW_SHOWNOACTIVATE);
+        }
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
     }
     static LRESULT CALLBACK autoScrollProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
@@ -2813,7 +2869,7 @@ private:
             g_dragging = self;  // Esc stops it, as it cancels drags
             SetTimer(h, 0xa5c0, 8, nullptr);
             SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
-            InvalidateRect(h, nullptr, FALSE);
+            self->showAnchor(a.anchor);
             return 0;
         case WM_MOUSEMOVE:
             if (!a.on) break;
@@ -2835,14 +2891,6 @@ private:
                 {
                     ListView_Scroll(h, 0, rows * rowPx);
                     a.pending -= rows * rowPx;
-                    // The scroll moved the painted anchor with the rows:
-                    // repaint where it was carried to and where it stays.
-                    const int r = int(std::ceil(13 * s));
-                    for (int dy : {0, -rows * rowPx})
-                    {
-                        RECT ring{a.anchor.x - r, a.anchor.y + dy - r, a.anchor.x + r, a.anchor.y + dy + r};
-                        InvalidateRect(h, &ring, FALSE);
-                    }
                 }
             }
             return 0;
@@ -2891,6 +2939,7 @@ private:
     CellDrag cellDrag_;
     CellDragState cell_;
     AutoScrollState auto_;
+    HWND anchor_ = nullptr;  // the autoscroll anchor's window, made on first use
     std::vector<Column> columns_;
     std::vector<bool> visible_;
     std::vector<int> widths_;
