@@ -825,7 +825,10 @@ public:
     }
     SIZE measure() override
     {
-        SIZE s = textExtent(h_, windowText(h_));
+        // Line breaks in the text are lines (measured single-line, the
+        // label asked for one line's height and showed only the first).
+        const std::wstring text = windowText(h_);
+        SIZE s = textExtent(h_, text, text.find(L'\n') != std::wstring::npos);
         if (ellipsize_) s.cx = std::min<long>(s.cx, px(40));
         return s;
     }
