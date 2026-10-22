@@ -1121,7 +1121,32 @@ public:
         SendMessageW(h_, EM_SETEVENTMASK, 0, ENM_CHANGE);
         SendMessageW(h_, EM_SETBKGNDCOLOR, 0, LPARAM(GetSysColor(COLOR_WINDOW)));
         if (mono_) SendMessageW(h_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont(win.dpi(), false, true)), FALSE);
+        SetWindowSubclass(h_, wheelProc, 1, reinterpret_cast<DWORD_PTR>(this));
         setText(s.text, {});
+    }
+
+    // RichEdit animates wheel scrolling: each notch glides, and quick
+    // wheeling queues glides, so the view lags behind the wheel. Scroll by
+    // whole lines at once instead, as many per notch as the system setting
+    // says (a page when it says so); high-resolution wheels send fractions
+    // of a notch, which add up.
+    static LRESULT CALLBACK wheelProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        if (msg != WM_MOUSEWHEEL || (GET_KEYSTATE_WPARAM(wp) & (MK_CONTROL | MK_SHIFT)))
+            return DefSubclassProc(h, msg, wp, lp);  // Ctrl zooms, Shift scrolls sideways
+        auto* self = reinterpret_cast<WTextView*>(data);
+        UINT perNotch = 3;
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &perNotch, 0);
+        if (perNotch == WHEEL_PAGESCROLL)
+        {
+            SendMessageW(h, WM_VSCROLL, GET_WHEEL_DELTA_WPARAM(wp) > 0 ? SB_PAGEUP : SB_PAGEDOWN, 0);
+            return 0;
+        }
+        self->wheel_ += GET_WHEEL_DELTA_WPARAM(wp) * int(perNotch);
+        const int lines = self->wheel_ / WHEEL_DELTA;
+        self->wheel_ -= lines * WHEEL_DELTA;
+        if (lines) SendMessageW(h, EM_LINESCROLL, 0, -lines);
+        return 0;
     }
     std::string text() const override
     {
@@ -1201,6 +1226,7 @@ private:
         SendMessageW(h_, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
     }
 
+    int wheel_ = 0;  // wheel delta × lines per notch not yet scrolled
     bool mono_;
     bool quiet_ = false;
     std::function<void()> changed_;
