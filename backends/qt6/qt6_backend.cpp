@@ -2109,13 +2109,8 @@ public:
         for (size_t i = 0; i < cols_.size(); ++i)
         {
             if (h->isSectionHidden(int(i))) continue;
-            if (int(i) == filled)
-            {
-                used += h->minimumSectionSize();
-                continue;
-            }
-            used += h->sectionSize(int(i));
-            stretching += cols_[i].stretch;
+            stretching += cols_[i].stretch;  // the filled one has its share left to it
+            if (int(i) != filled) used += h->sectionSize(int(i));
         }
         const int spare = width - used;
         if (spare <= 0 || !stretching) return;

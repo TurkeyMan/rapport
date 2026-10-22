@@ -2015,6 +2015,7 @@ public:
         if (s.autoScroll) SetWindowSubclass(h_, autoScrollProc, 7, reinterpret_cast<DWORD_PTR>(this));
         if (soft_) SetWindowSubclass(h_, hotProc, 3, reinterpret_cast<DWORD_PTR>(this));
         SetWindowSubclass(h_, selectionProc, 4, reinterpret_cast<DWORD_PTR>(this));
+        SetWindowSubclass(h_, sizeProc, 8, reinterpret_cast<DWORD_PTR>(this));
     }
     ~WList() override
     {
@@ -2087,6 +2088,7 @@ public:
         if (!v) widths_[c] = ListView_GetColumnWidth(h_, int(c));
         visible_[c] = v;
         ListView_SetColumnWidth(h_, int(c), v ? widths_[c] : 0);
+        fillLast();
     }
     void onSelectionChanged(std::function<void()> f) override { selChanged_ = std::move(f); }
     void onActivate(std::function<void(size_t)> f) override { activate_ = std::move(f); }
@@ -2123,6 +2125,12 @@ public:
         handled = true;
         switch (n->code)
         {
+        case HDN_ITEMCHANGEDW:
+        case HDN_ITEMCHANGEDA:
+            // A column before the last resized (live while dragged).
+            if (reinterpret_cast<NMHEADERW*>(n)->iItem != lastVisibleColumn()) fillLast();
+            handled = false;
+            return 0;
         case LVN_GETDISPINFOW:
         {
             auto* d = reinterpret_cast<NMLVDISPINFOW*>(n);
@@ -2237,6 +2245,34 @@ public:
         Leaf::place(r);
         fitStretch();
     }
+    // A stretching last column keeps the list's right edge: it takes what
+    // the others leave as the list resizes (on its own WM_SIZE: placing is
+    // deferred, and a scroll bar coming or going changes the client width
+    // too) and as they're dragged wider.
+    int lastVisibleColumn() const
+    {
+        for (int i = int(columns_.size()) - 1; i >= 0; --i)
+            if (visible_[size_t(i)]) return i;
+        return -1;
+    }
+    int filledColumn() const
+    {
+        const int last = lastVisibleColumn();
+        return last >= 0 && columns_[size_t(last)].stretch ? last : -1;
+    }
+    void fillLast()
+    {
+        const int last = filledColumn();
+        if (last < 0) return;
+        RECT c;
+        GetClientRect(h_, &c);
+        if (c.right <= 0) return;
+        long others = 0;
+        for (int i = 0; i < last; ++i)
+            if (visible_[size_t(i)]) others += ListView_GetColumnWidth(h_, i);
+        const int w = int(std::max<long>(px(40), c.right - others));
+        if (ListView_GetColumnWidth(h_, last) != w) ListView_SetColumnWidth(h_, last, w);
+    }
     // Stretch columns share the width the others leave, once, when the list
     // first has a size. After that only the user changes column widths:
     // resizing one never resizes the others, and a list wider than its
@@ -2249,6 +2285,7 @@ public:
         fitted_ = true;
         long fixed = 0;
         int stretchers = 0;
+        const int filled = filledColumn();  // has its share, then fillLast's rest
         for (size_t i = 0; i < columns_.size(); ++i)
         {
             if (!visible_[i]) continue;
@@ -2260,7 +2297,7 @@ public:
         if (!stretchers) return;
         const long each = std::max<long>(px(40), (c.right - fixed) / stretchers);
         for (size_t i = 0; i < columns_.size(); ++i)
-            if (visible_[i] && columns_[i].stretch) ListView_SetColumnWidth(h_, int(i), each);
+            if (visible_[i] && columns_[i].stretch && int(i) != filled) ListView_SetColumnWidth(h_, int(i), each);
     }
     bool fills() const override { return true; }
     bool expandsInForm() const override { return true; }
@@ -2856,6 +2893,12 @@ private:
         DeleteObject(bmp);
         DeleteDC(mem);
         ReleaseDC(nullptr, screen);
+    }
+    static LRESULT CALLBACK sizeProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+        if (msg == WM_SIZE) reinterpret_cast<WList*>(data)->fillLast();
+        return r;
     }
     static LRESULT CALLBACK autoScrollProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
