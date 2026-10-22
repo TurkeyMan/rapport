@@ -210,6 +210,9 @@ public:
     virtual bool fills() const { return false; }
     // Takes spare width as a form field (text entry, lists, containers).
     virtual bool expands_in_form() const { return false; }
+    // Width beyond its natural size that it would show to advantage, given
+    // from a row's spare space: an ellipsized label's full text.
+    virtual long wants_wider() const { return 0; }
 
     bool visible = true;
     int stretch = 0;

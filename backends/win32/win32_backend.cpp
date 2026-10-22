@@ -651,6 +651,22 @@ public:
             stretch_sum += c->stretch;
         }
         long spare = std::max(0L, total - used);
+        if (dir_ == orientation::horizontal)
+        {
+            // As GTK shares out natural sizes: an even share each, the
+            // smallest wants first, so one long label can't starve the rest.
+            std::vector<size_t> wanting;
+            for (size_t i = 0; i < shown.size(); ++i)
+                if (shown[i]->wants_wider() > 0) wanting.push_back(i);
+            std::ranges::sort(wanting, {}, [&](size_t i) { return shown[i]->wants_wider(); });
+            for (size_t k = 0; k < wanting.size() && spare > 0; ++k)
+            {
+                const long more =
+                    std::min(spare / long(wanting.size() - k), shown[wanting[k]]->wants_wider());
+                sizes[wanting[k]] += more;
+                spare -= more;
+            }
+        }
         if (stretch_sum > 0)
         {
             long given = 0;
@@ -845,14 +861,19 @@ public:
         // label asked for one line's height and showed only the first).
         const std::wstring text = window_text(h_);
         SIZE s = text_extent(h_, text, text.find(L'\n') != std::wstring::npos);
+        full_cx_ = s.cx;
         if (ellipsize_) s.cx = std::min<long>(s.cx, px(40));
         return s;
     }
+    // Measured at a token width so it never widens a window, it still shows
+    // its whole text in a row with room for it, as GTK and Qt do.
+    long wants_wider() const override { return ellipsize_ ? std::max(0L, full_cx_ - px(40)) : 0; }
     // Its natural width is a token one, so it fills across a column.
     bool expands_in_form() const override { return ellipsize_; }
 
 private:
     bool ellipsize_;
+    long full_cx_ = 0;
 };
 
 class button_impl : public leaf<rap::button>
