@@ -414,6 +414,11 @@ struct MoveBatch
 };
 MoveBatch* g_moves = nullptr;
 
+// A moved control repaints whole: Windows would otherwise carry its old
+// pixels along and repaint only what's newly uncovered, and a label whose
+// text changed as it moved shows a mix of old and new text.
+constexpr UINT kMoveFlags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS;
+
 bool placedAt(HWND h, int x, int y, int w, int hgt)
 {
     RECT r;
@@ -434,7 +439,7 @@ void moveControl(HWND h, int x, int y, int w, int hgt)
     if (g_moves)
         g_moves->moves[GetParent(h)].push_back({h, RECT{x, y, x + w, y + hgt}});
     else
-        SetWindowPos(h, nullptr, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(h, nullptr, x, y, w, hgt, kMoveFlags);
 }
 
 // Batches the moves of a layout pass (nested passes join the outer one).
@@ -454,8 +459,7 @@ public:
             HDWP dwp = BeginDeferWindowPos(int(list.size()));
             for (auto& [h, r] : list)
                 if (dwp)
-                    dwp = DeferWindowPos(dwp, h, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
-                                         SWP_NOZORDER | SWP_NOACTIVATE);
+                    dwp = DeferWindowPos(dwp, h, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, kMoveFlags);
             if (dwp) EndDeferWindowPos(dwp);
         }
     }
@@ -590,13 +594,16 @@ public:
         }
         if (n > 1) main += spacing_ * (n - 1);
         main += 2 * margin_;
-        cross += 2 * margin_;
+        cross += 2 * (margin_ / 2);
         return dir_ == Orientation::Horizontal ? SIZE{main, cross} : SIZE{cross, main};
     }
 
     void place(RECT r) override
     {
-        InflateRect(&r, -margin_, -margin_);
+        if (dir_ == Orientation::Horizontal)
+            InflateRect(&r, -margin_, -(margin_ / 2));
+        else
+            InflateRect(&r, -(margin_ / 2), -margin_);
         std::vector<Item*> shown;
         for (Item* c : children)
             if (c->visible) shown.push_back(c);
@@ -2540,13 +2547,17 @@ public:
     void setCurrent(int i) override
     {
         SendMessageW(h_, LB_SETCURSEL, WPARAM(i), 0);
+        if (i == shown_) return;
+        shown_ = i;
         ensureBuilt(i);
         win_.relayoutAtOnce();
     }
     void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
     void command(WORD code) override
     {
-        if (code != LBN_SELCHANGE) return;
+        // A click on the empty space below the names reports a change too.
+        if (code != LBN_SELCHANGE || current() == shown_) return;
+        shown_ = current();
         ensureBuilt(current());
         win_.relayoutAtOnce();
         if (changed_) changed_(current());
@@ -2611,6 +2622,7 @@ private:
     }
 
     std::vector<std::wstring> titles_;
+    int shown_ = 0;  // the page showing
     std::function<void(int)> changed_;
 };
 
@@ -3437,7 +3449,9 @@ public:
         RECT r{0, 0, px(sz.w), px(sz.h)};
         if (!shownOnce_) requested_ = SIZE{r.right, r.bottom};
         adjust(r);
-        SetWindowPos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT now;
+        GetWindowRect(hwnd_, &now);
+        placeOnScreen(now.left, now.top, r.right - r.left, r.bottom - r.top);
     }
     void setMinSize(SizeF s) override { minSize_ = s; }
     std::optional<PointF> position() const override
@@ -3449,7 +3463,36 @@ public:
     }
     void move(PointF p) override
     {
-        SetWindowPos(hwnd_, nullptr, px(p.x), px(p.y), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT now;
+        GetWindowRect(hwnd_, &now);
+        placeOnScreen(px(p.x), px(p.y), now.right - now.left, now.bottom - now.top);
+    }
+    // A window keeps clear of the taskbar: what would pass the edge of its
+    // monitor's work area slides back inside (the visible frame, that is;
+    // Windows' resize borders are invisible and may overhang).
+    void placeOnScreen(int x, int y, int w, int h)
+    {
+        RECT want{x, y, x + w, y + h};
+        MONITORINFO mi{sizeof mi};
+        GetMonitorInfoW(MonitorFromRect(&want, MONITOR_DEFAULTTONEAREST), &mi);
+        RECT inset{0, 0, 0, 0};  // invisible border on each side
+        RECT outer, visible;
+        using DwmGet = HRESULT(WINAPI*)(HWND, DWORD, PVOID, DWORD);
+        static DwmGet dwmGet = reinterpret_cast<DwmGet>(
+            reinterpret_cast<void*>(GetProcAddress(LoadLibraryW(L"dwmapi.dll"), "DwmGetWindowAttribute")));
+        if (dwmGet && GetWindowRect(hwnd_, &outer) &&
+            SUCCEEDED(dwmGet(hwnd_, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, &visible, sizeof visible)) && IsWindowVisible(hwnd_))
+            inset = RECT{visible.left - outer.left, visible.top - outer.top, outer.right - visible.right, outer.bottom - visible.bottom};
+        const RECT& work = mi.rcWork;
+        const auto fit = [](int pos, int size, int lo, int hi, int before, int after)
+        {
+            if (pos + size - after > hi) pos = hi - size + after;  // past the far edge: back inside
+            if (pos + before < lo) pos = lo - before;                 // the near edge wins if it's too big
+            return pos;
+        };
+        x = fit(x, w, int(work.left), int(work.right), int(inset.left), int(inset.right));
+        y = fit(y, h, int(work.top), int(work.bottom), int(inset.top), int(inset.bottom));
+        SetWindowPos(hwnd_, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     RectF workArea() const override
     {

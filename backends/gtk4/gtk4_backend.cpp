@@ -1558,10 +1558,12 @@ private:
         for (auto& c : s.items) gtk_box_append(GTK_BOX(box), build(c, s.dir));
         if (s.margins)
         {
-            gtk_widget_set_margin_start(box, 6);
-            gtk_widget_set_margin_end(box, 6);
-            gtk_widget_set_margin_top(box, 6);
-            gtk_widget_set_margin_bottom(box, 6);
+            // A bar along a window edge: the full margin at its ends, half along its sides.
+            const bool row = s.dir == Orientation::Horizontal;
+            gtk_widget_set_margin_start(box, row ? 6 : 3);
+            gtk_widget_set_margin_end(box, row ? 6 : 3);
+            gtk_widget_set_margin_top(box, row ? 3 : 6);
+            gtk_widget_set_margin_bottom(box, row ? 3 : 6);
         }
         return box;
     }

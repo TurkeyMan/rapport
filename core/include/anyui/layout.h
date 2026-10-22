@@ -65,8 +65,9 @@ struct Box
 {
     Orientation dir;
     Nodes items;
-    // The usual window margin around the items: for a bar along the edge of
-    // a window that has margins off.
+    // The usual window margin around the items, for a bar along the edge of
+    // a window that has margins off (a status line): the full margin at its
+    // ends and half of it along its sides.
     bool margins = false;
 };
 // Label/field pairs; the backend applies its own label alignment rules.
