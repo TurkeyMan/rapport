@@ -226,6 +226,11 @@ struct List
     // Painted cells see the same colours through ThemeColor::Highlight and
     // ThemeColor::HighlightText.
     bool softSelection = false;
+    // Hold the middle button and move away from where it was pressed: the
+    // list scrolls up or down at a speed that grows with the distance (a
+    // small dead zone around the anchor, which is marked while held).
+    // Release, or Esc, stops. Opt-in, for long lists (a history).
+    bool autoScroll = false;
     std::function<void()> onSelectionChanged;
     std::function<void(size_t)> onActivate;
     std::function<void(size_t, SortOrder)> onSortRequested;
@@ -728,6 +733,11 @@ public:
     List& softSelection(bool v = true)
     {
         s().softSelection = v;
+        return *this;
+    }
+    List& autoScroll(bool v = true)
+    {
+        s().autoScroll = v;
         return *this;
     }
     List& compact(bool v = true)

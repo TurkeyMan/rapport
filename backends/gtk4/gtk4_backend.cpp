@@ -1016,6 +1016,7 @@ public:
         for (size_t i = 0; i < s.columns.size(); ++i) addColumn(s.columns[i], i);
 
         ctxMenu_ = std::make_unique<MenuActions>(w_, "ctx");
+        if (s.autoScroll) enableAutoScroll();
 
         connect(
             sel_, "selection-changed",
@@ -1135,6 +1136,67 @@ public:
     // TODO(pengit): drag-reordering (GtkDragSource on the rows).
     void onReorder(ReorderFn) override {}
     void setReorderable(bool) override {}
+    // Autoscroll (spec.autoScroll): with the middle button held, a tick
+    // callback scrolls by the pointer's offset from the anchor. (The anchor
+    // isn't drawn on gtk4 yet: the cursor shows the mode.)
+    void enableAutoScroll()
+    {
+        GtkGesture* click = gtk_gesture_click_new();
+        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_MIDDLE);
+        gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
+        g_signal_connect(click, "pressed", G_CALLBACK(+[](GtkGestureClick* g, int, double, double y, gpointer p)
+                                                       {
+                                                           auto* self = static_cast<WList*>(p);
+                                                           gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+                                                           self->startAutoScroll(y);
+                                                       }),
+                         this);
+        g_signal_connect(click, "released", G_CALLBACK(+[](GtkGestureClick*, int, double, double, gpointer p)
+                                                        { static_cast<WList*>(p)->stopAutoScroll(); }),
+                         this);
+        g_signal_connect(click, "cancel", G_CALLBACK(+[](GtkGesture*, GdkEventSequence*, gpointer p)
+                                                      { static_cast<WList*>(p)->stopAutoScroll(); }),
+                         this);
+        gtk_widget_add_controller(w_, GTK_EVENT_CONTROLLER(click));
+        GtkEventController* motion = gtk_event_controller_motion_new();
+        g_signal_connect(motion, "motion", G_CALLBACK(+[](GtkEventControllerMotion*, double, double y, gpointer p)
+                                                       { static_cast<WList*>(p)->autoY_ = y; }),
+                         this);
+        gtk_widget_add_controller(w_, motion);
+    }
+    void startAutoScroll(double y)
+    {
+        stopAutoScroll();
+        autoY0_ = autoY_ = y;
+        autoLast_ = 0;
+        autoTick_ = gtk_widget_add_tick_callback(
+            w_,
+            +[](GtkWidget*, GdkFrameClock* clock, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<WList*>(p);
+                const gint64 now = gdk_frame_clock_get_frame_time(clock);
+                const double dt = self->autoLast_ ? (now - self->autoLast_) / 1e6 : 0;
+                self->autoLast_ = now;
+                GtkAdjustment* adj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(self->outer_));
+                const double v = gtk_adjustment_get_value(adj) + autoScrollSpeed(float(self->autoY_ - self->autoY0_)) * dt;
+                gtk_adjustment_set_value(adj, std::clamp(v, gtk_adjustment_get_lower(adj),
+                                                         gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj)));
+                return G_SOURCE_CONTINUE;
+            },
+            this, nullptr);
+        gtk_widget_set_cursor_from_name(w_, "all-scroll");
+    }
+    void stopAutoScroll()
+    {
+        if (!autoTick_) return;
+        gtk_widget_remove_tick_callback(w_, autoTick_);
+        autoTick_ = 0;
+        gtk_widget_set_cursor(w_, nullptr);
+    }
+    guint autoTick_ = 0;
+    double autoY0_ = 0, autoY_ = 0;
+    gint64 autoLast_ = 0;
+
     // CellDrag: a drag gesture on the column view. The cell under a point
     // is found by picking the widget there; the target row is framed with
     // a CSS class. (No floating label on gtk4 yet: the cursor and the frame

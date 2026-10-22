@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <memory>
+#include <set>
 
 // ---------------------------------------------------------------- AnyuiTreeRows
 
@@ -1292,6 +1293,12 @@ public:
         // Windows don't have it; Shift/Ctrl-click select ranges and sets.
         gtk_tree_view_set_rubber_banding(view, false);
         compact_ = s.compact;
+        if ((autoScroll_ = s.autoScroll))
+        {
+            autoLists().insert(this);
+            connectAfter(w_, "draw", +[](GtkWidget* w, cairo_t* cr, gpointer p) -> gboolean
+                         { static_cast<WList*>(p)->drawAutoScroll(w, cr); return false; }, this);
+        }
         if (s.softSelection)
         {
             soft_ = softSelectionColors(w_);
@@ -1403,6 +1410,7 @@ public:
 
     ~WList() override
     {
+        autoLists().erase(this);
         if (model_) model_->removeObserver(this);
         g_object_unref(rows_);
     }
@@ -1836,6 +1844,12 @@ public:
     // might close the dialog). Returns whether a drag was cancelled.
     static bool cancelActiveDrag()
     {
+        for (WList* l : autoLists())
+            if (l->auto_.on)
+            {
+                l->stopAutoScroll();
+                return true;
+            }
         WList* list = active_;
         if (!list) return false;
         list->drag_ = {};
@@ -1934,6 +1948,11 @@ private:
 
     gboolean dragMotion(GdkEventMotion* e)
     {
+        if (auto_.on)
+        {
+            auto_.y = e->y;
+            return true;
+        }
         trackHover(e);
         if (cell_.pressed) return cellMotion(e);
         if (!drag_.pressed || !(e->state & GDK_BUTTON1_MASK)) return false;
@@ -1963,6 +1982,11 @@ private:
 
     gboolean dragReleased(GdkEventButton* e)
     {
+        if (auto_.on && e->button == GDK_BUTTON_MIDDLE)
+        {
+            stopAutoScroll();
+            return true;
+        }
         if (cell_.pressed) return cellReleased(e);
         if (!drag_.pressed || e->button != GDK_BUTTON_PRIMARY) return false;
         Drag d = drag_;
@@ -2068,8 +2092,49 @@ private:
         p.text({box.x + 6, box.y + 2}, cell_.start.label, ts);
     }
 
+    // Autoscroll (spec.autoScroll): the middle button held, the list
+    // scrolls each frame by the pointer's offset from the anchor.
+    void startAutoScroll(GdkEventButton* e)
+    {
+        auto_ = AutoScroll{true, e->y, e->y, e->x, 0, 0};
+        auto_.tick = gtk_widget_add_tick_callback(
+            w_,
+            +[](GtkWidget*, GdkFrameClock* clock, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<WList*>(p);
+                AutoScroll& a = self->auto_;
+                const gint64 now = gdk_frame_clock_get_frame_time(clock);
+                const double dt = a.last ? (now - a.last) / 1e6 : 0;
+                a.last = now;
+                if (GtkAdjustment* adj = gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(self->w_)))
+                {
+                    const double v = gtk_adjustment_get_value(adj) + autoScrollSpeed(float(a.y - a.y0)) * dt;
+                    gtk_adjustment_set_value(adj, std::clamp(v, gtk_adjustment_get_lower(adj),
+                                                             gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj)));
+                }
+                return G_SOURCE_CONTINUE;
+            },
+            this, nullptr);
+        setDragCursor("all-scroll");
+        gtk_widget_queue_draw(w_);
+    }
+    void stopAutoScroll()
+    {
+        if (!auto_.on) return;
+        gtk_widget_remove_tick_callback(w_, auto_.tick);
+        auto_ = {};
+        setDragCursor(nullptr);
+        gtk_widget_queue_draw(w_);
+    }
+
     gboolean buttonPressed(GdkEventButton* e)
     {
+        if (autoScroll_ && e->button == GDK_BUTTON_MIDDLE && e->type == GDK_BUTTON_PRESS &&
+            onBinWindow(reinterpret_cast<GdkEvent*>(e)))
+        {
+            startAutoScroll(e);
+            return true;
+        }
         if (cellPressed(e)) return false;  // selects as usual; dragging begins on motion
         if (dragPressed(e)) return true;
         if (e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_SECONDARY) return false;
@@ -2140,6 +2205,28 @@ private:
     Drag drag_;
     CellDrag cellDrag_;
     CellDragState cell_;
+    struct AutoScroll
+    {
+        bool on = false;
+        double y0 = 0, y = 0, x0 = 0;  // anchor and pointer, bin window coordinates
+        gint64 last = 0;               // previous frame's time
+        guint tick = 0;
+    };
+    bool autoScroll_ = false;
+    AutoScroll auto_;
+    static std::set<WList*>& autoLists()  // lists that autoscroll, for Esc
+    {
+        static std::set<WList*> lists;
+        return lists;
+    }
+    void drawAutoScroll(GtkWidget* w, cairo_t* cr)
+    {
+        if (!auto_.on) return;
+        int wx, wy;
+        gtk_tree_view_convert_bin_window_to_widget_coords(GTK_TREE_VIEW(w), int(auto_.x0), int(auto_.y0), &wx, &wy);
+        CairoPainter p(cr, w);
+        paintAutoScrollAnchor(p, float(wx), float(wy));
+    }
     std::optional<size_t> hot_;  // the row under the pointer
 };
 

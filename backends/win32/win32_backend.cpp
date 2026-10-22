@@ -2012,6 +2012,7 @@ public:
         }
         setModel(s.model);
         soft_ = s.softSelection;
+        if (s.autoScroll) SetWindowSubclass(h_, autoScrollProc, 7, reinterpret_cast<DWORD_PTR>(this));
         if (soft_) SetWindowSubclass(h_, hotProc, 3, reinterpret_cast<DWORD_PTR>(this));
         SetWindowSubclass(h_, selectionProc, 4, reinterpret_cast<DWORD_PTR>(this));
     }
@@ -2491,6 +2492,15 @@ private:
                     painter.text({6, 2}, cell_.start.label, ts);
                 }
             }
+            if (auto_.on)
+            {
+                // The autoscroll anchor: a ring with up and down arrows.
+                rt->SetTransform(D2D1::Matrix3x2F::Translation(dip(auto_.anchor.x), dip(auto_.anchor.y)) * origin);
+                painter.circle({0, 0}, 11, Paint{ThemeColor::Base}, Paint{ThemeColor::Mid});
+                painter.polygon({{-4, -3}, {4, -3}, {0, -8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
+                painter.polygon({{-4, 3}, {4, 3}, {0, 8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
+                painter.circle({0, 0}, 1.5f, Paint{ThemeColor::Text}, std::nullopt);
+            }
             rt->SetTransform(D2D1::Matrix3x2F::Identity());
         }
         if (rt->EndDraw() == D2DERR_RECREATE_TARGET) rowTarget_.reset();
@@ -2592,6 +2602,7 @@ private:
 public:
     void cancelDrag()
     {
+        stopAutoScroll();
         endCellDrag(false);
         endDrag(false, POINT{});
     }
@@ -2695,6 +2706,85 @@ private:
         if (drop && c.target && cellDrag_.drop) cellDrag_.drop(c.from, *c.target, c.start.data);
     }
 
+    // Autoscroll (spec.autoScroll): with the middle button held, a timer
+    // scrolls by the pointer's offset from the anchor. The ListView scrolls
+    // whole rows, so pixels gather until a row's worth.
+    struct AutoScrollState
+    {
+        bool on = false;
+        POINT anchor{};
+        int y = 0;
+        double last = 0, pending = 0;  // ms; pixels not yet scrolled
+    };
+    static double nowMs()
+    {
+        static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        return double(t.QuadPart) * 1000.0 / double(f.QuadPart);
+    }
+    static float autoScrollSpeed(float offset)  // px/s; as gtk_common's
+    {
+        const float dead = 8, d = std::abs(offset) - dead;
+        if (d <= 0) return 0;
+        return (offset < 0 ? -1.f : 1.f) * (d * 6 + d * d * 0.05f);
+    }
+    void stopAutoScroll()
+    {
+        if (!auto_.on) return;
+        auto_ = {};
+        KillTimer(h_, 0xa5c0);
+        if (GetCapture() == h_) ReleaseCapture();
+        if (g_dragging == this) g_dragging = nullptr;
+        InvalidateRect(h_, nullptr, FALSE);
+    }
+    static LRESULT CALLBACK autoScrollProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<WList*>(data);
+        AutoScrollState& a = self->auto_;
+        switch (msg)
+        {
+        case WM_MBUTTONDOWN:
+            a = {true, {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}, GET_Y_LPARAM(lp), nowMs(), 0};
+            SetCapture(h);
+            g_dragging = self;  // Esc stops it, as it cancels drags
+            SetTimer(h, 0xa5c0, 8, nullptr);
+            SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        case WM_MOUSEMOVE:
+            if (!a.on) break;
+            a.y = GET_Y_LPARAM(lp);
+            SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+            return 0;
+        case WM_TIMER:
+        {
+            if (wp != 0xa5c0 || !a.on) break;
+            const double now = nowMs();
+            const float s = self->win_.scale();
+            a.pending += autoScrollSpeed((a.y - a.anchor.y) / s) * s * (now - a.last) / 1000.0;
+            a.last = now;
+            RECT row{};
+            if (ListView_GetItemRect(h, ListView_GetTopIndex(h), &row, LVIR_BOUNDS) && row.bottom > row.top)
+            {
+                const int rowPx = row.bottom - row.top, rows = int(a.pending / rowPx);
+                if (rows)
+                {
+                    ListView_Scroll(h, 0, rows * rowPx);
+                    a.pending -= rows * rowPx;
+                }
+            }
+            return 0;
+        }
+        case WM_MBUTTONUP:
+        case WM_CAPTURECHANGED:
+            if (a.on) self->stopAutoScroll();
+            if (msg == WM_MBUTTONUP) return 0;
+            break;
+        }
+        return DefSubclassProc(h, msg, wp, lp);
+    }
+
     static LRESULT CALLBACK dragProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
         auto* self = reinterpret_cast<WList*>(data);
@@ -2729,6 +2819,7 @@ private:
     bool reorderable_ = false, dragging_ = false;
     CellDrag cellDrag_;
     CellDragState cell_;
+    AutoScrollState auto_;
     std::vector<Column> columns_;
     std::vector<bool> visible_;
     std::vector<int> widths_;

@@ -98,6 +98,25 @@ inline Color fallbackColor(ThemeColor role, Color text, bool dark)
     return text;
 }
 
+// List autoscroll: px/s for the pointer `offset` px above (negative) or
+// below the anchor. A dead zone, then speed growing faster than the
+// distance, so a nudge creeps and a long reach races.
+inline float autoScrollSpeed(float offset)
+{
+    const float dead = 8, d = std::abs(offset) - dead;
+    if (d <= 0) return 0;
+    return (offset < 0 ? -1.f : 1.f) * (d * 6 + d * d * 0.05f);
+}
+
+// The autoscroll anchor: a ring with up and down arrows, centred at (x, y).
+inline void paintAutoScrollAnchor(Painter& p, float x, float y)
+{
+    p.circle({x, y}, 11, Paint{ThemeColor::Base}, Paint{ThemeColor::Mid});
+    p.polygon({{x - 4, y - 3}, {x + 4, y - 3}, {x, y - 8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
+    p.polygon({{x - 4, y + 3}, {x + 4, y + 3}, {x, y + 8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
+    p.circle({x, y}, 1.5f, Paint{ThemeColor::Text}, std::nullopt);
+}
+
 inline Color mixColors(Color a, Color b, float t)
 {
     auto f = [&](uint8_t x, uint8_t y) { return uint8_t(x + (y - x) * t + 0.5f); };
