@@ -980,6 +980,12 @@ public:
         hook(s,
              [this](QEvent* e)
              {
+                 // Sizes set for a window about to grow (a pane shown and the
+                 // window widened in the same step) take their place once it
+                 // has; QSplitter would give the growth to the stretching pane.
+                 // The new size is in place before the event, so this frame
+                 // is laid out with them.
+                 if (laidOut_ && wanted_ && e->type() == QEvent::Resize) apply(*wanted_);
                  if (laidOut_ || length() <= 1) return false;
                  if (e->type() == QEvent::Show)
                  {
@@ -993,6 +999,7 @@ public:
                  }
                  return false;
              });
+        QObject::connect(s, &QSplitter::splitterMoved, s, [this] { wanted_.reset(); });
     }
 
     std::vector<float> sizes() const override
@@ -1064,11 +1071,21 @@ private:
             if (size_t(i) < s.size() && s[size_t(i)] > 0) sizes[i] = int(s[size_t(i)]);
             used += sizes[i];
         }
-        if (n) sizes[n - 1] = std::max(0, paneLength() - used);
+        const int rest = paneLength() - used;
+        if (n) sizes[n - 1] = std::max(0, rest);
+        // Kept until the last pane has room for at least its minimum.
+        const QWidget* last = n ? splitter()->widget(n - 1) : nullptr;
+        const QSize min = last ? last->minimumSizeHint() : QSize();
+        if (last && last->isVisibleTo(splitter()) &&
+            rest < std::max(1, splitter()->orientation() == Qt::Vertical ? min.height() : min.width()))
+            wanted_ = s;
+        else
+            wanted_.reset();
         splitter()->setSizes(sizes);
     }
 
     std::vector<int> stretch_;
+    std::optional<std::vector<float>> wanted_;
     std::optional<std::vector<float>> pending_;
     bool laidOut_ = false;
 };
