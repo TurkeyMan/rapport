@@ -50,6 +50,18 @@
 #include <QTextBlock>
 #include <QTimer>
 #include <QTreeView>
+#include <QDateTime>
+#include <QCursor>
+#include <QPainter>
+#include <QPixmap>
+#include <QWheelEvent>
+#include <QToolButton>
+#include <QToolBar>
+#include <QSlider>
+#include <QPointingDevice>
+#include <QMouseEvent>
+#include <QDoubleSpinBox>
+#include <QColorDialog>
 
 #include <algorithm>
 #include <cmath>
@@ -476,6 +488,9 @@ public:
     void setEnabled(bool e) override { w_->setEnabled(e); }
     void setVisible(bool v) override
     {
+        // In a toolbar, its action shows and hides it.
+        if (auto* action = qobject_cast<QAction*>(w_->property("anyui-toolbar-action").value<QObject*>()))
+            return action->setVisible(v);
         // Not yet in its parent, showing it would open it as a window; it
         // shows with its parent anyway.
         if (v && !w_->parentWidget()) return;
@@ -1127,81 +1142,474 @@ private:
     LazyPages lazy_;
 };
 
-// ---------------------------------------------------------------- IfritView's widgets
-
-// TODO(ifritview): Canvas, Toolbar/ToolButton, Slider, Spin, ColorButton and
-// Image are IfritView's to write. Until then they hold their state behind
-// an empty placeholder, as the null backend's do.
+// ---------------------------------------------------------------- toolbar, values, canvas
 
 class WToolButton : public W<anyui::ToolButton>
 {
 public:
-    WToolButton()
-        : W(new QWidget)
+    explicit WToolButton(const spec::ToolButton& s)
+        : W(new QToolButton)
     {
+        auto* b = button();
+        b->setAutoRaise(true);
+        b->setIconSize(QSize(16, 16));
+        b->setAccessibleName(qs(s.label));
+        if (!s.label.empty()) b->setToolTip(qs(s.label));
+        b->setCheckable(s.toggle);
+        b->setChecked(s.checked);
+        if (s.icon) setIcon(s.icon);
+        QObject::connect(b, &QToolButton::clicked, b, [this] { if (click_) click_(); });
+        QObject::connect(b, &QToolButton::toggled, b,
+                         [this](bool on)
+                         {
+                             if (!quiet_ && toggled_) toggled_(on);
+                         });
     }
-    void setIcon(const Icon&) override {}
-    bool checked() const override { return checked_; }
-    void setChecked(bool c) override { checked_ = c; }
-    void onClick(std::function<void()>) override {}
-    void onToggled(std::function<void(bool)>) override {}
+    void setIcon(const Icon& icon) override { button()->setIcon(toQIcon(icon, 16, w_)); }
+    bool checked() const override { return button()->isChecked(); }
+    void setChecked(bool c) override
+    {
+        quiet_ = true;  // set from code: no onToggled
+        button()->setChecked(c);
+        quiet_ = false;
+    }
+    void onClick(std::function<void()> f) override { click_ = std::move(f); }
+    void onToggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
 
 private:
-    bool checked_ = false;
+    QToolButton* button() const { return static_cast<QToolButton*>(w_); }
+    std::function<void()> click_;
+    std::function<void(bool)> toggled_;
+    bool quiet_ = false;
 };
 
-template <class Base>
-class WValue : public W<Base>
+// A slider over doubles: QSlider counts whole steps from `min`, and an
+// optional label shows the value.
+class WSlider : public W<anyui::Slider>
 {
 public:
-    explicit WValue(double v)
-        : W<Base>(new QWidget)
-        , value_(v)
+    explicit WSlider(const spec::Slider& s)
+        : W(new QWidget)
+        , slider_(new QSlider(Qt::Horizontal))
+        , min_(s.min)
+        , max_(s.max)
+        , step_(s.step > 0 ? s.step : (s.max - s.min) / 1000)
+        , digits_(s.digits)
     {
+        auto* row = new QHBoxLayout(w_);
+        row->setContentsMargins(0, 0, 0, 0);
+        row->addWidget(slider_, 1);
+        if (s.showValue)
+        {
+            label_ = new QLabel;
+            label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            label_->setMinimumWidth(label_->fontMetrics().horizontalAdvance(QString(digits_ + 5, QChar('0'))));
+            row->addWidget(label_);
+        }
+        slider_->setFocusPolicy(Qt::StrongFocus);
+        slider_->setSingleStep(1);
+        slider_->setPageStep(std::max(1, int(std::lround(s.page / step_))));
+        if (s.marks.size() >= 2)
+        {
+            slider_->setTickPosition(QSlider::TicksBelow);
+            slider_->setTickInterval(std::max(1, int(std::lround((s.marks[1].first - s.marks[0].first) / step_))));
+        }
+        applyRange();
+        setValue(s.value);
+        QObject::connect(slider_, &QSlider::valueChanged, slider_,
+                         [this](int)
+                         {
+                             showValue();
+                             if (!quiet_ && changed_) changed_(value());
+                         });
     }
-    double value() const override { return value_; }
-    void setValue(double v) override { value_ = v; }
-    void setRange(double, double) override {}
-    void onChanged(std::function<void(double)>) override {}
+    double value() const override { return min_ + slider_->value() * step_; }
+    void setValue(double v) override
+    {
+        quiet_ = true;
+        slider_->setValue(int(std::lround((std::clamp(v, min_, max_) - min_) / step_)));
+        quiet_ = false;
+        showValue();
+    }
+    void setRange(double mn, double mx) override
+    {
+        const double v = value();
+        min_ = mn;
+        max_ = mx;
+        applyRange();
+        setValue(v);
+    }
+    void onChanged(std::function<void(double)> f) override { changed_ = std::move(f); }
 
 private:
-    double value_;
+    void applyRange()
+    {
+        quiet_ = true;
+        slider_->setRange(0, std::max(0, int(std::lround((max_ - min_) / step_))));
+        quiet_ = false;
+    }
+    void showValue()
+    {
+        if (label_) label_->setText(QString::number(value(), 'f', digits_));
+    }
+
+    QSlider* slider_;
+    QLabel* label_ = nullptr;
+    double min_, max_, step_;
+    int digits_;
+    bool quiet_ = false;
+    std::function<void(double)> changed_;
 };
 
+class WSpin : public W<anyui::Spin>
+{
+public:
+    explicit WSpin(const spec::Spin& s)
+        : W(new QDoubleSpinBox)
+    {
+        auto* b = box();
+        b->setDecimals(s.digits);
+        b->setRange(s.min, s.max);
+        b->setSingleStep(s.step);
+        b->setValue(s.value);
+        b->setAccelerated(true);
+        QObject::connect(b, &QDoubleSpinBox::valueChanged, b,
+                         [this](double v)
+                         {
+                             if (!quiet_ && changed_) changed_(v);
+                         });
+    }
+    double value() const override { return box()->value(); }
+    void setValue(double v) override
+    {
+        quiet_ = true;
+        box()->setValue(v);
+        quiet_ = false;
+    }
+    void setRange(double mn, double mx) override
+    {
+        quiet_ = true;
+        box()->setRange(mn, mx);
+        quiet_ = false;
+    }
+    void onChanged(std::function<void(double)> f) override { changed_ = std::move(f); }
+
+private:
+    QDoubleSpinBox* box() const { return static_cast<QDoubleSpinBox*>(w_); }
+    bool quiet_ = false;
+    std::function<void(double)> changed_;
+};
+
+// A button showing the colour; clicking opens Qt's colour chooser.
 class WColorButton : public W<anyui::ColorButton>
 {
 public:
-    explicit WColorButton(Color c)
-        : W(new QWidget)
-        , color_(c)
+    explicit WColorButton(const spec::ColorButton& s)
+        : W(new QPushButton)
+        , color_(s.color)
+        , alpha_(s.alpha)
+        , title_(qs(s.title))
     {
+        auto* b = static_cast<QPushButton*>(w_);
+        b->setIconSize(QSize(36, 14));
+        swatch();
+        QObject::connect(b, &QPushButton::clicked, b,
+                         [this]
+                         {
+                             QColorDialog::ColorDialogOptions opts;
+                             if (alpha_) opts |= QColorDialog::ShowAlphaChannel;
+                             const QColor c = QColorDialog::getColor(qcolor(color_), w_->window(), title_, opts);
+                             if (!c.isValid()) return;  // cancelled
+                             color_ = fromQColor(c);
+                             swatch();
+                             if (changed_) changed_(color_);
+                         });
     }
     Color color() const override { return color_; }
-    void setColor(Color c) override { color_ = c; }
-    void onChanged(std::function<void(Color)>) override {}
+    void setColor(Color c) override
+    {
+        color_ = c;
+        swatch();
+    }
+    void onChanged(std::function<void(Color)> f) override { changed_ = std::move(f); }
 
 private:
+    void swatch()
+    {
+        auto* b = static_cast<QPushButton*>(w_);
+        const qreal dpr = b->devicePixelRatioF();
+        QPixmap pm(QSize(36, 14) * dpr);
+        pm.setDevicePixelRatio(dpr);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setPen(b->palette().color(QPalette::Mid));
+        p.setBrush(qcolor(color_));
+        p.drawRect(QRectF(0.5, 0.5, 35, 13));
+        p.end();
+        b->setIcon(QIcon(pm));
+    }
+
     Color color_;
+    bool alpha_;
+    QString title_;
+    std::function<void(Color)> changed_;
 };
+
+class WCanvas;
+
+// The Qt side of a canvas: painting and input handed to its WCanvas while
+// it's there (the window deletes Qt widgets after the parts).
+class CanvasWidget : public QWidget
+{
+public:
+    WCanvas* owner = nullptr;
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
+    void mousePressEvent(QMouseEvent* e) override { press(e); }
+    void mouseDoubleClickEvent(QMouseEvent* e) override { press(e); }  // Qt's second press of a double click
+    void mouseReleaseEvent(QMouseEvent* e) override;
+    void mouseMoveEvent(QMouseEvent* e) override;
+    void enterEvent(QEnterEvent* e) override;
+    void leaveEvent(QEvent* e) override;
+    void wheelEvent(QWheelEvent* e) override;
+    void keyPressEvent(QKeyEvent* e) override { key(e, true); }
+    void keyReleaseEvent(QKeyEvent* e) override { key(e, false); }
+
+private:
+    void press(QMouseEvent* e);
+    void key(QKeyEvent* e, bool press);
+};
+
+int buttonNumber(Qt::MouseButton b)
+{
+    switch (b)
+    {
+    case Qt::LeftButton: return 1;
+    case Qt::MiddleButton: return 2;
+    case Qt::RightButton: return 3;
+    case Qt::BackButton: return 4;
+    case Qt::ForwardButton: return 5;
+    default: return 0;
+    }
+}
 
 class WCanvas : public W<anyui::Canvas>
 {
 public:
-    WCanvas()
-        : W(new QWidget)
+    explicit WCanvas(const spec::Canvas& s)
+        : W(new CanvasWidget)
     {
+        auto* c = canvas();
+        c->owner = this;
+        c->setMouseTracking(true);
+        c->setFocusPolicy(s.focusable ? Qt::StrongFocus : Qt::NoFocus);
+        c->setAttribute(Qt::WA_OpaquePaintEvent);  // the app paints every pixel
+        c->setMinimumSize(1, 1);
+        c->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        frames_ = new QTimer(c);
+        frames_->setTimerType(Qt::PreciseTimer);
+        QObject::connect(frames_, &QTimer::timeout, c, [this] { tick(); });
     }
+    ~WCanvas() override
+    {
+        *alive_ = false;
+        canvas()->owner = nullptr;
+        frames_->stop();
+    }
+
     void invalidate() override { w_->update(); }
     SizeF size() const override { return {float(w_->width()), float(w_->height())}; }
     float deviceScale() const override { return float(w_->devicePixelRatioF()); }
-    void setCursor(Cursor) override {}
-    void onPaint(std::function<void(Painter&, SizeF)>) override {}
-    void onResize(std::function<void(SizeF)>) override {}
-    void onPointer(std::function<bool(const PointerEvent&)>) override {}
-    void onScroll(std::function<bool(const ScrollEvent&)>) override {}
-    void onKey(std::function<bool(const KeyEvent&)>) override {}
-    Subscription onFrame(std::function<void(double)>) override { return {}; }
+    void setCursor(Cursor c) override
+    {
+        switch (c)
+        {
+        case Cursor::Default: w_->unsetCursor(); break;
+        case Cursor::Pointer: w_->setCursor(Qt::PointingHandCursor); break;
+        case Cursor::Text: w_->setCursor(Qt::IBeamCursor); break;
+        case Cursor::Crosshair: w_->setCursor(Qt::CrossCursor); break;
+        case Cursor::Grab: w_->setCursor(Qt::OpenHandCursor); break;
+        case Cursor::Grabbing: w_->setCursor(Qt::ClosedHandCursor); break;
+        case Cursor::ZoomIn:
+        case Cursor::ZoomOut: w_->setCursor(Qt::CrossCursor); break;  // Qt has no zoom cursors
+        case Cursor::Move: w_->setCursor(Qt::SizeAllCursor); break;
+        case Cursor::Wait: w_->setCursor(Qt::WaitCursor); break;
+        case Cursor::Hidden: w_->setCursor(Qt::BlankCursor); break;
+        }
+    }
+    void onPaint(std::function<void(Painter&, SizeF)> f) override { paint_ = std::move(f); }
+    void onResize(std::function<void(SizeF)> f) override { resize_ = std::move(f); }
+    void onPointer(std::function<bool(const PointerEvent&)> f) override { pointer_ = std::move(f); }
+    void onScroll(std::function<bool(const ScrollEvent&)> f) override { scroll_ = std::move(f); }
+    void onKey(std::function<bool(const KeyEvent&)> f) override { key_ = std::move(f); }
+
+    // Frames at the screen's refresh rate while anyone's subscribed.
+    Subscription onFrame(std::function<void(double)> f) override
+    {
+        const int id = ++nextFrame_;
+        frameFns_.push_back({id, std::move(f)});
+        if (!frames_->isActive())
+        {
+            const QScreen* screen = w_->screen();
+            const double hz = screen && screen->refreshRate() > 1 ? screen->refreshRate() : 60;
+            frames_->start(std::max(1, int(1000 / hz)));
+        }
+        return Subscription(
+            [this, alive = alive_, id]
+            {
+                if (!*alive) return;
+                std::erase_if(frameFns_, [id](auto& e) { return e.first == id; });
+                if (frameFns_.empty()) frames_->stop();
+            });
+    }
+
+    // From CanvasWidget.
+    void paint(QPainter& qp)
+    {
+        if (!paint_) return;
+        QtPainter p(qp, w_);
+        paint_(p, size());
+    }
+    void resized()
+    {
+        if (resize_) resize_(size());
+    }
+    bool pointer(const PointerEvent& e) { return pointer_ && pointer_(e); }
+    bool scroll(const ScrollEvent& e) { return scroll_ && scroll_(e); }
+    bool key(const KeyEvent& e) { return key_ && key_(e); }
+
+    // Presses counted as gtk3 does: each press arrives once, with how many
+    // came in quick succession at much the same place.
+    int clicks(int button, QPointF pos, quint64 time)
+    {
+        const bool again = button == lastButton_ && time - lastTime_ <= quint64(QApplication::doubleClickInterval()) &&
+                           std::abs(pos.x() - lastPos_.x()) <= QApplication::startDragDistance() &&
+                           std::abs(pos.y() - lastPos_.y()) <= QApplication::startDragDistance();
+        clicks_ = again ? clicks_ + 1 : 1;
+        lastButton_ = button;
+        lastTime_ = time;
+        lastPos_ = pos;
+        return clicks_;
+    }
+
+private:
+    CanvasWidget* canvas() const { return static_cast<CanvasWidget*>(w_); }
+    void tick()
+    {
+        const double t = double(QDateTime::currentMSecsSinceEpoch()) / 1000.0;
+        auto fns = frameFns_;  // callbacks may unsubscribe
+        for (auto& [id, fn] : fns)
+            if (std::any_of(frameFns_.begin(), frameFns_.end(), [id = id](auto& e) { return e.first == id; })) fn(t);
+    }
+
+    std::function<void(Painter&, SizeF)> paint_;
+    std::function<void(SizeF)> resize_;
+    std::function<bool(const PointerEvent&)> pointer_;
+    std::function<bool(const ScrollEvent&)> scroll_;
+    std::function<bool(const KeyEvent&)> key_;
+    QTimer* frames_;
+    std::vector<std::pair<int, std::function<void(double)>>> frameFns_;
+    int nextFrame_ = 0;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    int clicks_ = 0, lastButton_ = 0;
+    quint64 lastTime_ = 0;
+    QPointF lastPos_;
 };
+
+void CanvasWidget::paintEvent(QPaintEvent*)
+{
+    if (!owner) return;
+    QPainter p(this);
+    owner->paint(p);
+}
+
+void CanvasWidget::resizeEvent(QResizeEvent*)
+{
+    if (owner) owner->resized();
+}
+
+void CanvasWidget::press(QMouseEvent* e)
+{
+    if (!owner) return;
+    if (focusPolicy() != Qt::NoFocus && !hasFocus()) setFocus(Qt::MouseFocusReason);
+    PointerEvent ev{PointerEvent::Type::Press, {float(e->position().x()), float(e->position().y())}, buttonNumber(e->button()), 1,
+                    modifiersOf(e->modifiers())};
+    ev.clicks = owner->clicks(ev.button, e->position(), e->timestamp());
+    if (owner->pointer(ev)) e->accept();
+}
+
+void CanvasWidget::mouseReleaseEvent(QMouseEvent* e)
+{
+    if (!owner) return;
+    owner->pointer({PointerEvent::Type::Release, {float(e->position().x()), float(e->position().y())}, buttonNumber(e->button()), 1,
+                    modifiersOf(e->modifiers())});
+}
+
+void CanvasWidget::mouseMoveEvent(QMouseEvent* e)
+{
+    if (!owner) return;
+    owner->pointer({PointerEvent::Type::Move, {float(e->position().x()), float(e->position().y())}, 0, 1, modifiersOf(e->modifiers())});
+}
+
+void CanvasWidget::enterEvent(QEnterEvent* e)
+{
+    if (!owner) return;
+    owner->pointer({PointerEvent::Type::Enter, {float(e->position().x()), float(e->position().y())}, 0, 1,
+                    modifiersOf(QApplication::keyboardModifiers())});
+}
+
+void CanvasWidget::leaveEvent(QEvent*)
+{
+    if (!owner) return;
+    const QPointF at = mapFromGlobal(QCursor::pos());
+    owner->pointer({PointerEvent::Type::Leave, {float(at.x()), float(at.y())}, 0, 1, modifiersOf(QApplication::keyboardModifiers())});
+}
+
+// Wheels report eighths of a degree, 120 to a notch, positive away from the
+// user (up, and left for a horizontal wheel); touchpads also report pixels.
+void CanvasWidget::wheelEvent(QWheelEvent* e)
+{
+    if (!owner) return;
+    ScrollEvent ev{{float(e->position().x()), float(e->position().y())}, 0, 0, false, modifiersOf(e->modifiers())};
+    const bool touchpad = e->pointingDevice() && e->pointingDevice()->type() == QInputDevice::DeviceType::TouchPad;
+    if (touchpad && !e->pixelDelta().isNull())
+    {
+        ev.dx = -float(e->pixelDelta().x());
+        ev.dy = -float(e->pixelDelta().y());
+        ev.precise = true;
+    }
+    else
+    {
+        ev.dx = -float(e->angleDelta().x()) / 120.f;
+        ev.dy = -float(e->angleDelta().y()) / 120.f;
+    }
+    if ((ev.dx != 0 || ev.dy != 0) && owner->scroll(ev))
+        e->accept();
+    else
+        e->ignore();
+}
+
+void CanvasWidget::key(QKeyEvent* e, bool press)
+{
+    if (!owner) return;
+    KeyEvent ev;
+    ev.press = press;
+    ev.key = keyFor(e->key());
+    if (ev.key == Key::Character)
+    {
+        const QString t = e->text().toLower();
+        ev.codepoint = !t.isEmpty() && !t[0].isNull() && t[0].isPrint() ? char32_t(t.toUcs4().value(0))
+                                                                         : char32_t(QChar(e->key()).toLower().unicode());
+    }
+    ev.modifiers = modifiersOf(e->modifiers());
+    ev.repeat = e->isAutoRepeat();
+    if (owner->key(ev))
+        e->accept();
+    else
+        e->ignore();
+}
 
 // ---------------------------------------------------------------- list
 
@@ -2849,36 +3257,53 @@ private:
         return b;
     }
 
-    // TODO(ifritview): the toolbar and its items, sliders, spins, colour
-    // buttons and canvases.
-    QWidget* make(const Node& n, const spec::ToolButton&, Orientation)
+    QWidget* make(const Node& n, const spec::ToolButton& s, Orientation)
     {
-        return add<WToolButton>(n).widget();
+        return add<WToolButton>(n, s).widget();
     }
+    // A QToolBar: separators as its own, stretching spacers as expanding gaps.
     QWidget* make(const Node&, const spec::Toolbar& s, Orientation)
     {
-        auto* bar = new QWidget;
-        auto* l = new QHBoxLayout(bar);
-        l->setContentsMargins(0, 0, 0, 0);
+        auto* bar = new QToolBar;
+        bar->setMovable(false);
+        bar->setFloatable(false);
+        bar->setIconSize(QSize(16, 16));
+        bar->setToolButtonStyle(Qt::ToolButtonIconOnly);
         for (const Node& item : s.items)
-            l->addWidget(build(item, Orientation::Horizontal), item.common.stretch);
+        {
+            if (std::holds_alternative<spec::Separator>(item.spec))
+            {
+                bar->addSeparator();
+                continue;
+            }
+            if (std::holds_alternative<spec::Spacer>(item.spec))
+            {
+                auto* gap = new QWidget;
+                gap->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+                bar->addWidget(gap);
+                continue;
+            }
+            QWidget* w = build(item, Orientation::Horizontal);
+            QAction* action = bar->addWidget(w);
+            w->setProperty("anyui-toolbar-action", QVariant::fromValue<QObject*>(action));
+        }
         return bar;
     }
     QWidget* make(const Node& n, const spec::Slider& s, Orientation)
     {
-        return add<WValue<anyui::Slider>>(n, s.value).widget();
+        return add<WSlider>(n, s).widget();
     }
     QWidget* make(const Node& n, const spec::Spin& s, Orientation)
     {
-        return add<WValue<anyui::Spin>>(n, s.value).widget();
+        return add<WSpin>(n, s).widget();
     }
     QWidget* make(const Node& n, const spec::ColorButton& s, Orientation)
     {
-        return add<WColorButton>(n, s.color).widget();
+        return add<WColorButton>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::Canvas&, Orientation)
+    QWidget* make(const Node& n, const spec::Canvas& s, Orientation)
     {
-        return add<WCanvas>(n).widget();
+        return add<WCanvas>(n, s).widget();
     }
 
     // QDialogButtonBox puts the roles in the platform's order, with its

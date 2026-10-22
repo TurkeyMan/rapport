@@ -1737,7 +1737,7 @@ private:
         double sx = 0, sy = 0;
         if (native) gtk_native_get_surface_transform(native, &sx, &sy);
         graphene_point_t in = GRAPHENE_POINT_INIT(float(x - sx), float(y - sy)), out = in;
-        if (native) gtk_widget_compute_point(GTK_WIDGET(native), w_, &in, &out);
+        if (native && !gtk_widget_compute_point(GTK_WIDGET(native), w_, &in, &out)) out = in;
         return {out.x, out.y};
     }
 
