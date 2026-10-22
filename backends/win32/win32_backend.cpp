@@ -144,7 +144,7 @@ key_event make_key_event(WPARAM vk, LPARAM lp, bool press)
 // ---------------------------------------------------------------- comctl32 v6
 
 // Without an application manifest the process binds comctl32 v5 at load,
-// while our activation context makes the controls themselves v6. image
+// while our activation context makes the controls themselves v6. Image
 // lists handed to v6 controls must come from v6 too (v5 ones have no alpha),
 // so these functions are resolved from the v6 DLL once it's active.
 struct comctl6
