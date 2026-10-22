@@ -2961,6 +2961,17 @@ private:
     // Only X11 (and Windows) let apps place their windows.
     static bool placeable() { return QGuiApplication::platformName() != "wayland"; }
 
+    // The frame as it shows. Some window managers (weston's, under WSLg)
+    // count an invisible shadow as frame: margins equal on the left, right
+    // and bottom and wider than a border are taken for one, and left out.
+    QRect visible_frame() const
+    {
+        const QRect f = frame_->frameGeometry(), g = frame_->geometry();
+        const int l = g.left() - f.left(), r = f.right() - g.right(), b = f.bottom() - g.bottom();
+        const int shadow = l == r && r == b && l > 8 ? l : 0;
+        return f.adjusted(shadow, shadow, -shadow, -shadow);
+    }
+
     // Keeps the whole frame in the work area: the size shrinks to fit, and
     // the position slides back inside, as on win32. Once shown.
     void keep_on_screen()
@@ -2968,7 +2979,7 @@ private:
         if (!frame_->isVisible() || !placeable()) return;
         const rect_f wa = work_area();
         if (wa.w <= 0 || wa.h <= 0) return;
-        const QRect f = frame_->frameGeometry();
+        const QRect f = visible_frame();
         const int extra_w = f.width() - frame_->width(), extra_h = f.height() - frame_->height();
         const int w = std::min(frame_->width(), int(wa.w) - extra_w);
         const int h = std::min(frame_->height(), int(wa.h) - extra_h);
@@ -2978,7 +2989,9 @@ private:
             std::clamp(f.x(), int(wa.x), std::max(int(wa.x), int(wa.x + wa.w) - (w + extra_w)));
         const int y =
             std::clamp(f.y(), int(wa.y), std::max(int(wa.y), int(wa.y + wa.h) - (h + extra_h)));
-        if (x != f.x() || y != f.y()) frame_->move(x, y);
+        // move() places the outer frame, shadow and all.
+        const QPoint outer = frame_->frameGeometry().topLeft();
+        if (x != f.x() || y != f.y()) frame_->move(outer.x() + x - f.x(), outer.y() + y - f.y());
     }
 
     // A menu bar's menus are rebuilt each time one opens, so they show the
