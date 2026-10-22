@@ -1198,10 +1198,17 @@ public:
     void append(const std::string& t, const TextStyle& style) override
     {
         quiet_ = true;
-        const int n = GetWindowTextLengthW(h_);
-        SendMessageW(h_, EM_SETSEL, WPARAM(n), LPARAM(n));
+        // Positions from RichEdit itself: GetWindowTextLength counts each
+        // line break as CR LF, two to RichEdit's one, which put the style a
+        // character late per line ("Success" with a black S).
+        CHARRANGE end{-1, -1};
+        SendMessageW(h_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&end));
+        CHARRANGE at{};
+        SendMessageW(h_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&at));
         SendMessageW(h_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(wide(t).c_str()));
-        format(n, n + long(wide(t).size()), style);
+        CHARRANGE after{};
+        SendMessageW(h_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&after));
+        format(at.cpMin, after.cpMax, style);
         quiet_ = false;
     }
     void setReadOnly(bool r) override { SendMessageW(h_, EM_SETREADONLY, r, 0); }
@@ -1389,7 +1396,14 @@ public:
             SendMessageW(h_, PBM_SETMARQUEE, FALSE, 0);
             marquee_ = false;
         }
-        SendMessageW(h_, PBM_SETPOS, WPARAM(std::clamp(f, 0.f, 1.f) * 1000), 0);
+        // The themed bar animates every increase, so an instant operation's
+        // 100% still crawled across. A decrease shows at once: go one past
+        // the value, then back (at 100%, the range grows by one meanwhile).
+        const int pos = int(std::lround(std::clamp(f, 0.f, 1.f) * 1000));
+        if (pos == 1000) SendMessageW(h_, PBM_SETRANGE32, 0, 1001);
+        SendMessageW(h_, PBM_SETPOS, WPARAM(pos + 1), 0);
+        SendMessageW(h_, PBM_SETPOS, WPARAM(pos), 0);
+        if (pos == 1000) SendMessageW(h_, PBM_SETRANGE32, 0, 1000);
     }
     void pulse() override
     {
