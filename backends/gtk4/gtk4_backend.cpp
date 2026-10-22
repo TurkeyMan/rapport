@@ -625,6 +625,39 @@ public:
 
     void onChanged(std::function<void()> f) override { changed_ = std::move(f); }
 
+    // GTK counts characters; the API counts UTF-8 bytes.
+    std::pair<size_t, size_t> selection() const override
+    {
+        GtkTextIter a, b;
+        gtk_text_buffer_get_selection_bounds(buffer_, &a, &b);
+        const std::string t = text();
+        auto bytes = [&](const GtkTextIter& it)
+        {
+            const char* at = g_utf8_offset_to_pointer(t.c_str(), gtk_text_iter_get_offset(&it));
+            return size_t(std::min<ptrdiff_t>(at - t.c_str(), ptrdiff_t(t.size())));
+        };
+        return {bytes(a), bytes(b)};
+    }
+
+    void select(size_t begin, size_t end) override
+    {
+        const std::string t = text();
+        auto iter = [&](size_t byte)
+        {
+            GtkTextIter it;
+            gtk_text_buffer_get_iter_at_offset(
+                buffer_, &it,
+                int(g_utf8_pointer_to_offset(t.c_str(), t.c_str() + std::min(byte, t.size()))));
+            return it;
+        };
+        GtkTextIter a = iter(begin), b = iter(end);
+        gtk_text_buffer_select_range(buffer_, &b, &a);  // the caret at the end
+        // A mark, not an iter: scrolling to an iter needs line heights GTK
+        // may not have computed yet; a mark scroll waits for them.
+        gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(w_), gtk_text_buffer_get_insert(buffer_), 0.1,
+                                     false, 0, 0);
+    }
+
 private:
     GtkTextBuffer* buffer_;
     TagCache tags_;
@@ -1439,7 +1472,10 @@ public:
         if (!icon.name.empty()) gtk_window_set_icon_name(GTK_WINDOW(win_), icon.name.c_str());
     }
     void onKey(std::function<bool(const KeyEvent&)>) override {}
+    void setMenuBarVisible(bool) override {}  // TODO(pengit): with the menu bar
 
+    // TODO(pengit): the menu bar (a row of flat GtkMenuButtons whose
+    // create-popup func builds the GMenu model each time one opens).
     void setContent(GtkWidget* content, bool margins = true)
     {
         int margin = !margins ? 0 : dialog_ ? 12 : 6;

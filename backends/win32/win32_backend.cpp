@@ -340,10 +340,9 @@ void setTooltipText(HWND control, const std::string& text)
 
 // ---------------------------------------------------------------- menus
 
-// Builds a popup menu; command ids index into `actions`.
-HMENU buildMenu(const Menu& items, std::vector<std::function<void()>>& actions)
+// Appends `items` to `m`; command id `base + n` runs actions[n - 1].
+void fillMenu(HMENU m, const Menu& items, std::vector<std::function<void()>>& actions, UINT base = 0)
 {
-    HMENU m = CreatePopupMenu();
     for (const MenuItem& it : items)
     {
         if (it.isSeparator())
@@ -353,16 +352,32 @@ HMENU buildMenu(const Menu& items, std::vector<std::function<void()>>& actions)
         }
         std::wstring label = mnemonic(it.label);
         if (!it.shortcut.empty()) label += L"\t" + wide(it.shortcut);
-        UINT flags = MF_STRING | (it.enabled ? 0 : MF_GRAYED) | (it.checked && *it.checked ? MF_CHECKED : 0);
+        UINT flags = MF_STRING | (it.checked && *it.checked ? MF_CHECKED : 0);
         if (!it.children.empty())
         {
-            HMENU sub = buildMenu(it.children, actions);
-            AppendMenuW(m, flags | MF_POPUP, reinterpret_cast<UINT_PTR>(sub), label.c_str());
+            HMENU sub = CreatePopupMenu();
+            fillMenu(sub, it.children, actions, base);
+            AppendMenuW(m, flags | (it.enabled ? 0 : MF_GRAYED) | MF_POPUP, reinterpret_cast<UINT_PTR>(sub),
+                        label.c_str());
             continue;
         }
         actions.push_back(it.action);
-        AppendMenuW(m, flags, UINT_PTR(actions.size()), label.c_str());
+        const UINT id = base + UINT(actions.size());
+        AppendMenuW(m, flags | (it.enabled && it.action ? 0 : MF_GRAYED), id, label.c_str());
+        if (it.radio)
+        {
+            MENUITEMINFOW mi{sizeof mi};
+            mi.fMask = MIIM_FTYPE;
+            mi.fType = MFT_STRING | MFT_RADIOCHECK;
+            SetMenuItemInfoW(m, id, FALSE, &mi);
+        }
     }
+}
+
+HMENU buildMenu(const Menu& items, std::vector<std::function<void()>>& actions)
+{
+    HMENU m = CreatePopupMenu();
+    fillMenu(m, items, actions);
     return m;
 }
 
@@ -1131,6 +1146,9 @@ public:
         SendMessageW(h_, EM_SETBKGNDCOLOR, 0, LPARAM(GetSysColor(COLOR_WINDOW)));
         if (mono_) SendMessageW(h_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont(win.dpi(), false, true)), FALSE);
         SetWindowSubclass(h_, wheelProc, 1, reinterpret_cast<DWORD_PTR>(this));
+        // No error beep for typing into a read-only view (RichEdit allows
+        // beeps by default); that it can't be edited is plain to see.
+        SendMessageW(h_, EM_SETEDITSTYLE, 0, SES_ALLOWBEEPS);
         setText(s.text, {});
     }
 
@@ -1168,8 +1186,12 @@ public:
     {
         quiet_ = true;
         SetWindowTextW(h_, wide(t).c_str());
-        std::sort(spans.begin(), spans.end(), [](const Span& a, const Span& b) { return a.begin < b.begin; });
-        for (const Span& sp : spans) format(units(t, sp.begin), units(t, sp.end), sp.style);
+        // All span ends converted in one pass over the text (per span it was
+        // quadratic in a long diff).
+        std::vector<size_t> at;
+        for (const Span& sp : spans) at.insert(at.end(), {sp.begin, sp.end});
+        const std::vector<long> pos = units(t, at);
+        for (size_t i = 0; i < spans.size(); ++i) format(pos[2 * i], pos[2 * i + 1], spans[i].style);
         SendMessageW(h_, EM_SETSEL, 0, 0);
         quiet_ = false;
     }
@@ -1183,6 +1205,20 @@ public:
         quiet_ = false;
     }
     void setReadOnly(bool r) override { SendMessageW(h_, EM_SETREADONLY, r, 0); }
+    std::pair<size_t, size_t> selection() const override
+    {
+        CHARRANGE cr{};
+        SendMessageW(h_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&cr));
+        const std::string t = text();
+        return {bytesAt(t, cr.cpMin), bytesAt(t, cr.cpMax)};
+    }
+    void select(size_t begin, size_t end) override
+    {
+        const std::vector<long> pos = units(text(), {begin, end});
+        CHARRANGE cr{pos[0], pos[1]};
+        SendMessageW(h_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&cr));
+        SendMessageW(h_, EM_SCROLLCARET, 0, 0);
+    }
     void onChanged(std::function<void()> f) override { changed_ = std::move(f); }
     void command(WORD code) override
     {
@@ -1197,15 +1233,39 @@ public:
     }
 
 private:
-    // UTF-8 byte offset -> RichEdit character position (CR LF counts as one).
-    static long units(const std::string& t, size_t bytes)
+    // RichEdit positions count UTF-16 units, with CR LF as one.
+    static int unitsOf(const std::string& t, size_t i)
     {
-        bytes = std::min(bytes, t.size());
-        std::wstring w = wide(t.substr(0, bytes));
+        const auto c = uint8_t(t[i]);
+        if ((c & 0xc0) == 0x80) return 0;  // continuation byte
+        if (c == '\n' && i > 0 && t[i - 1] == '\r') return 0;
+        return c >= 0xf0 ? 2 : 1;  // four-byte sequences are surrogate pairs
+    }
+    // UTF-8 byte offsets -> RichEdit positions, in one pass.
+    static std::vector<long> units(const std::string& t, const std::vector<size_t>& bytes)
+    {
+        std::vector<size_t> order(bytes.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return bytes[a] < bytes[b]; });
+        std::vector<long> out(bytes.size());
+        size_t at = 0;
         long n = 0;
-        for (size_t i = 0; i < w.size(); ++i)
-            if (!(w[i] == L'\n' && i > 0 && w[i - 1] == L'\r')) ++n;
-        return n;
+        for (size_t i : order)
+        {
+            const size_t target = std::min(bytes[i], t.size());
+            for (; at < target; ++at) n += unitsOf(t, at);
+            out[i] = n;
+        }
+        return out;
+    }
+    // A RichEdit position -> the UTF-8 byte offset where it falls.
+    static size_t bytesAt(const std::string& t, long pos)
+    {
+        long n = 0;
+        size_t at = 0;
+        for (; at < t.size() && n < pos; ++at) n += unitsOf(t, at);
+        while (at < t.size() && (uint8_t(t[at]) & 0xc0) == 0x80) ++at;  // finish the character
+        return at;
     }
     void format(long a, long b, const TextStyle& st)
     {
@@ -3331,6 +3391,7 @@ public:
         {
             SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
             if (modal_ && parent_) EnableWindow(parent_->hwnd_, TRUE);
+            if (menuBar_ && GetMenu(hwnd_) != menuBar_) DestroyMenu(menuBar_);  // detached: ours to free
             DestroyWindow(hwnd_);
         }
     }
@@ -3398,7 +3459,7 @@ public:
             long h = std::max<long>(n.cy + 2 * m, extentPx(hwnd_, initialH_, true));
             if (requested_) w = requested_->cx, h = requested_->cy;
             RECT r{0, 0, w, h};
-            AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), FALSE,
+            AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), GetMenu(hwnd_) != nullptr,
                                DWORD(GetWindowLongPtrW(hwnd_, GWL_EXSTYLE)));
             UINT flags = SWP_NOZORDER | SWP_NOACTIVATE;
             int x = 0, y = 0;
@@ -3509,6 +3570,7 @@ public:
         fullscreen_ = on;
         if (on)
         {
+            if (menuBar_) SetMenu(hwnd_, nullptr);  // no chrome in fullscreen
             placement_.length = sizeof placement_;
             GetWindowPlacement(hwnd_, &placement_);
             style_ = GetWindowLongPtrW(hwnd_, GWL_STYLE);
@@ -3521,6 +3583,7 @@ public:
         else
         {
             SetWindowLongPtrW(hwnd_, GWL_STYLE, style_);
+            if (menuBar_ && menuBarWanted_) SetMenu(hwnd_, menuBar_);
             SetWindowPlacement(hwnd_, &placement_);
             SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
@@ -3528,6 +3591,50 @@ public:
         if (onFullscreen_) onFullscreen_(on);
     }
     void onFullscreenChanged(std::function<void(bool)> f) override { onFullscreen_ = std::move(f); }
+
+    // The menu bar lives in the frame (SetMenu), outside the layout. Each
+    // menu is refilled as it opens (WM_INITMENUPOPUP), so it shows the
+    // app's state as it is then; its commands have ids from kMenuBarIds up,
+    // a block per menu.
+    static constexpr UINT kMenuBarIds = 0x4000, kMenuBarBlock = 0x400;
+    void setMenuBar(const std::vector<MenuBarItem>& menus)
+    {
+        if (menus.empty()) return;
+        menuBar_ = CreateMenu();
+        for (const MenuBarItem& m : menus)
+        {
+            BarMenu bar{m, CreatePopupMenu(), {}};
+            AppendMenuW(menuBar_, MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(bar.popup), mnemonic(m.title).c_str());
+            bars_.push_back(std::move(bar));
+        }
+        SetMenu(hwnd_, menuBar_);
+    }
+    void setMenuBarVisible(bool on) override
+    {
+        menuBarWanted_ = on;
+        if (menuBar_ && !fullscreen_) SetMenu(hwnd_, on ? menuBar_ : nullptr);
+    }
+    bool menuOpening(HMENU popup)
+    {
+        for (size_t i = 0; i < bars_.size(); ++i)
+        {
+            BarMenu& bar = bars_[i];
+            if (bar.popup != popup) continue;
+            while (GetMenuItemCount(popup) > 0) DeleteMenu(popup, 0, MF_BYPOSITION);  // destroys submenus too
+            bar.actions.clear();
+            fillMenu(popup, bar.item.menu ? bar.item.menu() : Menu{}, bar.actions, kMenuBarIds + UINT(i) * kMenuBarBlock);
+            return true;
+        }
+        return false;
+    }
+    bool menuCommand(UINT id)
+    {
+        if (id <= kMenuBarIds) return false;
+        const size_t i = (id - kMenuBarIds - 1) / kMenuBarBlock, n = (id - kMenuBarIds) - i * kMenuBarBlock;
+        if (i >= bars_.size() || n == 0 || n > bars_[i].actions.size()) return false;
+        if (auto action = bars_[i].actions[n - 1]) action();  // a copy: the action may rebuild the menus
+        return true;
+    }
     void setIcon(const Icon& icon) override
     {
         if (!icon) return;
@@ -3565,9 +3672,10 @@ public:
         if (!onKey_) return false;
         wchar_t cls[32] = {};
         GetClassNameW(GetFocus(), cls, 32);
-        if ((!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
-            !(GetWindowLongPtrW(GetFocus(), GWL_STYLE) & ES_READONLY))
-            return false;  // typing
+        const bool typing = (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
+                            !(GetWindowLongPtrW(GetFocus(), GWL_STYLE) & ES_READONLY);
+        const bool notText = m.wParam == VK_ESCAPE || (m.wParam >= VK_F1 && m.wParam <= VK_F12);
+        if (typing && !notText) return false;
         return onKey_(keyEvent(m.wParam, m.lParam, m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN));
     }
 
@@ -3594,7 +3702,7 @@ private:
     }
     void adjust(RECT& r) const
     {
-        AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), FALSE,
+        AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), GetMenu(hwnd_) != nullptr,
                            DWORD(GetWindowLongPtrW(hwnd_, GWL_EXSTYLE)));
     }
     void closeRequested()
@@ -3699,7 +3807,11 @@ private:
                 return 0;
             }
             case WM_CLOSE: self->closeRequested(); return 0;
+            case WM_INITMENUPOPUP:
+                if (self->menuOpening(reinterpret_cast<HMENU>(wp))) return 0;
+                break;
             case WM_COMMAND:
+                if (!lp && HIWORD(wp) == 0 && self->menuCommand(LOWORD(wp))) return 0;
                 if (LOWORD(wp) == IDCANCEL && !lp)
                 {
                     if (self->dialog_) self->closeRequested();
@@ -3750,6 +3862,15 @@ private:
     bool dialog_, margins_;
     bool modal_ = false, finished_ = false, shownOnce_ = false, fullscreen_ = false, relayoutPending_ = false;
     std::optional<SIZE> requested_;  // client size from resize() before the first show
+    struct BarMenu
+    {
+        MenuBarItem item;
+        HMENU popup;
+        std::vector<std::function<void()>> actions;
+    };
+    HMENU menuBar_ = nullptr;  // destroyed with the window while attached
+    std::vector<BarMenu> bars_;
+    bool menuBarWanted_ = true;
     Extent initialW_, initialH_;
     SizeF minSize_{};
     WINDOWPLACEMENT placement_{};
@@ -4056,6 +4177,7 @@ public:
     std::unique_ptr<anyui::Window> createWindow(const WindowSpec& spec, anyui::Window* parent, BuildSink& sink) override
     {
         auto win = std::make_unique<Win>(spec, static_cast<Win*>(parent));
+        win->setMenuBar(spec.menuBar);
         win->root = Builder(*win, sink).build(spec.content, win->hwnd(), Orientation::Vertical);
         return win;
     }

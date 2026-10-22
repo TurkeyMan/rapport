@@ -135,11 +135,20 @@ struct MenuItem
     std::string shortcut;            // display hint, e.g. "Ctrl+C"
     bool enabled = true;
     std::optional<bool> checked;  // set = checkable item
+    bool radio = false;           // a checkable item drawn as one of a group
 
     static MenuItem separator() { return {}; }
     bool isSeparator() const { return label.empty() && children.empty(); }
 };
 using Menu = std::vector<MenuItem>;
+
+// One menu of a window's menu bar: "_File", and its items, built each time
+// it opens so they can show the app's current state.
+struct MenuBarItem
+{
+    std::string title;  // '_' marks the access key, as in MenuItem::label
+    std::function<Menu()> menu;
+};
 
 // ---------------------------------------------------------------- subscriptions
 
@@ -542,6 +551,11 @@ public:
     virtual void append(const std::string&, const TextStyle& = {}) = 0;
     virtual void setReadOnly(bool) = 0;
     virtual void onChanged(std::function<void()>) = 0;
+    // The selected range as byte offsets [begin, end) into text(), like
+    // Span's; begin == end is the caret.
+    virtual std::pair<size_t, size_t> selection() const = 0;
+    // Selects [begin, end) and scrolls it into view.
+    virtual void select(size_t begin, size_t end) = 0;
 };
 
 class List : public Widget
@@ -757,10 +771,14 @@ public:
     virtual void setFullscreen(bool) = 0;
     virtual void onFullscreenChanged(std::function<void(bool)>) = 0;
     virtual void setIcon(const Icon&) = 0;
+    // Shows or hides the menu bar (fullscreen views hide their chrome).
+    virtual void setMenuBarVisible(bool) = 0;
 
-    // Keys reach this before the focused widget (except text entry while it
-    // has focus); return true to consume. For app-wide keys (navigation,
-    // fullscreen) that must work whatever has focus.
+    // Keys reach this before the focused widget; return true to consume. For
+    // app-wide keys (navigation, fullscreen, find) that must work whatever
+    // has focus. While an editable text field has focus only Escape and the
+    // function keys come here; the rest are typing. Read-only text views
+    // don't count as editable.
     virtual void onKey(std::function<bool(const KeyEvent&)>) = 0;
     // Dialogs: fired once with the role of the button that ended it
     // (Cancel for Esc / close box). There is no blocking exec(): GTK4

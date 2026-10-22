@@ -3,6 +3,7 @@
 // machines without a toolkit.
 #include "anyui/backend.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -114,7 +115,13 @@ public:
     void append(const std::string& t, const TextStyle&) override { value += t; }
     void setReadOnly(bool) override {}
     void onChanged(std::function<void()>) override {}
+    std::pair<size_t, size_t> selection() const override { return selected; }
+    void select(size_t begin, size_t end) override
+    {
+        selected = {std::min(begin, value.size()), std::min(end, value.size())};
+    }
     std::string value;
+    std::pair<size_t, size_t> selected{0, 0};
 };
 
 class NList : public Stub<anyui::List>
@@ -261,6 +268,7 @@ public:
     void setFullscreen(bool on) override { fullscreen_ = on; }
     void onFullscreenChanged(std::function<void(bool)>) override {}
     void setIcon(const Icon&) override {}
+    void setMenuBarVisible(bool) override {}
     void onKey(std::function<bool(const KeyEvent&)>) override {}
 
     std::vector<std::unique_ptr<Widget>> widgets;
@@ -378,7 +386,8 @@ private:
         if (!s.lazy.empty())
         {
             tabs->lazy = s.lazy;
-            tabs->buildPage = [&win = win_, &sink = sink_, d, titles = s.titles](const Node& page, size_t i)
+            tabs->buildPage =
+                [&win = win_, &sink = sink_, d, titles = s.titles](const Node& page, size_t i)
             { Builder(win, sink).build(page, d + 1, titles[i]); };
             tabs->setCurrent(0);
         }

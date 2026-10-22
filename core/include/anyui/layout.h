@@ -303,6 +303,9 @@ struct WindowSpec
     // The usual space between the window edge and its content; off for
     // edge-to-edge content (an image viewer, a canvas-only window).
     bool margins = true;
+    // Menus across the top, outside the margins. Item shortcuts are display
+    // hints: the window's onKey handles the keys.
+    std::vector<MenuBarItem> menuBar;
 };
 
 // ---------------------------------------------------------------- builders
@@ -1041,8 +1044,9 @@ class Window
 {
 public:
     Window(std::string title, std::initializer_list<Node> content)
-        : w_{std::move(title), false, detail::single(content), {}, {}}
     {
+        w_.title = std::move(title);
+        w_.content = detail::single(content);
     }
     Window& size(Extent w, Extent h)
     {
@@ -1053,6 +1057,11 @@ public:
     Window& margins(bool on)
     {
         w_.margins = on;
+        return *this;
+    }
+    Window& menuBar(std::vector<MenuBarItem> menus)
+    {
+        w_.menuBar = std::move(menus);
         return *this;
     }
     operator WindowSpec() const& { return w_; }

@@ -334,9 +334,12 @@ private:
     std::function<void()> click_;
 };
 
-GtkWidget* buildMenu(const Menu& items)
+GtkWidget* buildMenu(const Menu& items);
+
+// Appends `items` to `menu`; the GTK items point into `items`, which must
+// outlive them.
+void fillMenu(GtkWidget* menu, const Menu& items)
 {
-    GtkWidget* menu = gtk_menu_new();
     for (const MenuItem& item : items)
     {
         GtkWidget* mi;
@@ -354,6 +357,7 @@ GtkWidget* buildMenu(const Menu& items)
             if (item.checked)
             {
                 mi = gtk_check_menu_item_new_with_mnemonic(item.label.c_str());
+                gtk_check_menu_item_set_draw_as_radio(GTK_CHECK_MENU_ITEM(mi), item.radio);
                 gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(mi), *item.checked);
             }
             else
@@ -381,6 +385,12 @@ GtkWidget* buildMenu(const Menu& items)
         }
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
     }
+}
+
+GtkWidget* buildMenu(const Menu& items)
+{
+    GtkWidget* menu = gtk_menu_new();
+    fillMenu(menu, items);
     return menu;
 }
 
@@ -1041,6 +1051,39 @@ public:
     }
 
     void onChanged(std::function<void()> f) override { changed_ = std::move(f); }
+
+    // GTK counts characters; the API counts UTF-8 bytes.
+    std::pair<size_t, size_t> selection() const override
+    {
+        GtkTextIter a, b;
+        gtk_text_buffer_get_selection_bounds(buffer_, &a, &b);
+        const std::string t = text();
+        auto bytes = [&](const GtkTextIter& it)
+        {
+            const char* at = g_utf8_offset_to_pointer(t.c_str(), gtk_text_iter_get_offset(&it));
+            return size_t(std::min<ptrdiff_t>(at - t.c_str(), ptrdiff_t(t.size())));
+        };
+        return {bytes(a), bytes(b)};
+    }
+
+    void select(size_t begin, size_t end) override
+    {
+        const std::string t = text();
+        auto iter = [&](size_t byte)
+        {
+            GtkTextIter it;
+            gtk_text_buffer_get_iter_at_offset(
+                buffer_, &it,
+                int(g_utf8_pointer_to_offset(t.c_str(), t.c_str() + std::min(byte, t.size()))));
+            return it;
+        };
+        GtkTextIter a = iter(begin), b = iter(end);
+        gtk_text_buffer_select_range(buffer_, &b, &a);  // the caret at the end
+        // A mark, not an iter: scrolling to an iter needs line heights GTK
+        // may not have computed yet; a mark scroll waits for them.
+        gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(w_), gtk_text_buffer_get_insert(buffer_), 0.1,
+                                     false, 0, 0);
+    }
 
 private:
     GtkTextBuffer* buffer_;
@@ -2309,6 +2352,7 @@ public:
                 if (fs != self->fullscreen_)
                 {
                     self->fullscreen_ = fs;
+                    self->showMenuBar();
                     if (self->onFullscreen_) self->onFullscreen_(fs);
                 }
                 return false;
@@ -2319,9 +2363,17 @@ public:
         auto key = +[](GtkWidget* w, GdkEventKey* e, gpointer p) -> gboolean
         {
             auto* self = static_cast<WWindow*>(p);
+            if (e->keyval == GDK_KEY_F10 && e->type == GDK_KEY_PRESS)
+                self->rebuildMenuBar();  // opens it
             if (!self->onKey_) return false;
             GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(w));
-            if (focus && (GTK_IS_EDITABLE(focus) || GTK_IS_TEXT_VIEW(focus))) return false;
+            const bool typing =
+                focus &&
+                (GTK_IS_EDITABLE(focus) ||
+                 (GTK_IS_TEXT_VIEW(focus) && gtk_text_view_get_editable(GTK_TEXT_VIEW(focus))));
+            const bool notText = e->keyval == GDK_KEY_Escape ||
+                                 (e->keyval >= GDK_KEY_F1 && e->keyval <= GDK_KEY_F12);
+            if (typing && !notText) return false;
             KeyEvent ev;
             ev.press = e->type == GDK_KEY_PRESS;
             ev.key = keyFor(e->keyval);
@@ -2434,18 +2486,98 @@ public:
 
     void onKey(std::function<bool(const KeyEvent&)> f) override { onKey_ = std::move(f); }
 
-    void setContent(GtkWidget* content, bool margins = true)
+    void setContent(GtkWidget* content, bool margins, const std::vector<MenuBarItem>& menus)
     {
         int margin = !margins ? 0 : dialog_ ? 12 : 6;
         gtk_widget_set_margin_start(content, margin);
         gtk_widget_set_margin_end(content, margin);
         gtk_widget_set_margin_top(content, margin);
         gtk_widget_set_margin_bottom(content, margin);
-        gtk_container_add(GTK_CONTAINER(win_), content);
+        GtkWidget* top = content;
+        if (!menus.empty())
+        {
+            top = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+            gtk_box_pack_start(GTK_BOX(top), buildMenuBar(menus), false, false, 0);
+            gtk_box_pack_start(GTK_BOX(top), content, true, true, 0);
+        }
+        gtk_container_add(GTK_CONTAINER(win_), top);
         // GTK 3 widgets start hidden; widgets the app hides later stay hidden.
-        gtk_widget_show_all(content);
+        gtk_widget_show_all(top);
     }
 
+    void setMenuBarVisible(bool on) override
+    {
+        menuBarWanted_ = on;
+        showMenuBar();
+    }
+
+private:
+    // A menu bar's menus are rebuilt whenever the bar is entered (a click
+    // on it, an access key, F10), so they show the app's state as it is.
+    // Nothing can change that state while a menu is open but its items,
+    // and choosing one closes the menus.
+    struct BarMenu
+    {
+        MenuBarItem item;
+        GtkWidget* menu = nullptr;  // the submenu, refilled in place
+        Menu current;               // what its GTK items point into
+    };
+
+    GtkWidget* buildMenuBar(const std::vector<MenuBarItem>& menus)
+    {
+        menuBar_ = gtk_menu_bar_new();
+        for (const MenuBarItem& m : menus)
+        {
+            auto bar = std::make_unique<BarMenu>(BarMenu{m, nullptr, {}});
+            GtkWidget* top = gtk_menu_item_new_with_mnemonic(m.title.c_str());
+            bar->menu = gtk_menu_new();
+            gtk_menu_item_set_submenu(GTK_MENU_ITEM(top), bar->menu);
+            gtk_menu_shell_append(GTK_MENU_SHELL(menuBar_), top);
+            connect(
+                top, "mnemonic-activate",
+                +[](GtkWidget*, gboolean, gpointer p) -> gboolean
+                {
+                    static_cast<WWindow*>(p)->rebuildMenuBar();
+                    return false;
+                },
+                this);
+            bars_.push_back(std::move(bar));
+        }
+        connect(
+            menuBar_, "button-press-event",
+            +[](GtkWidget*, GdkEventButton*, gpointer p) -> gboolean
+            {
+                static_cast<WWindow*>(p)->rebuildMenuBar();
+                return false;
+            },
+            this);
+        rebuildMenuBar();
+        return menuBar_;
+    }
+
+    void rebuildMenuBar()
+    {
+        for (auto& bar : bars_)
+        {
+            GList* old = gtk_container_get_children(GTK_CONTAINER(bar->menu));
+            for (GList* l = old; l; l = l->next) gtk_widget_destroy(GTK_WIDGET(l->data));
+            g_list_free(old);
+            bar->current = bar->item.menu ? bar->item.menu() : Menu{};
+            fillMenu(bar->menu, bar->current);
+            gtk_widget_show_all(bar->menu);
+        }
+    }
+
+    void showMenuBar()
+    {
+        if (menuBar_) gtk_widget_set_visible(menuBar_, menuBarWanted_ && !fullscreen_);
+    }
+
+    GtkWidget* menuBar_ = nullptr;
+    std::vector<std::unique_ptr<BarMenu>> bars_;
+    bool menuBarWanted_ = true;
+
+public:
     void addRoleButton(GtkWidget* button, DialogRole role)
     {
         g_object_set_data(G_OBJECT(button), "anyui-role", GINT_TO_POINTER(int(role)));
@@ -3014,7 +3146,7 @@ public:
     {
         auto win = std::make_unique<WWindow>(spec, static_cast<WWindow*>(parent));
         win->setContent(Builder(*win, sink).build(spec.content, Orientation::Vertical),
-                        spec.margins);
+                        spec.margins, spec.menuBar);
         return win;
     }
 
