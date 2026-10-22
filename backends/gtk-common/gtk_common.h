@@ -506,6 +506,13 @@ protected:
         g_signal_connect(obj, signal, G_CALLBACK(callback), data);
         conns_.push_back({obj, data});
     }
+    // After the default handler (drawing over what the widget drew).
+    template <class F>
+    void connectAfter(gpointer obj, const char* signal, F* callback, gpointer data)
+    {
+        g_signal_connect_after(obj, signal, G_CALLBACK(callback), data);
+        conns_.push_back({obj, data});
+    }
 
     virtual void onDisconnect() {}
 

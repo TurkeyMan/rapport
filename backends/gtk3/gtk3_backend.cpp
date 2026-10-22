@@ -1491,6 +1491,13 @@ public:
     void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
     void onReorder(ReorderFn f) override { reorder_ = std::move(f); }
     void setReorderable(bool v) override { reorderable_ = v; }
+    void onCellDrag(CellDrag d) override
+    {
+        if (!cellDrag_.begin)  // the pointer's label, drawn over the rows
+            connectAfter(w_, "draw", +[](GtkWidget* w, cairo_t* cr, gpointer p) -> gboolean
+                          { static_cast<WList*>(p)->drawCellDrag(w, cr); return false; }, this);
+        cellDrag_ = std::move(d);
+    }
 
     bool columnVisible(size_t column) const override
     {
@@ -1754,6 +1761,16 @@ private:
         double x0 = 0, y0 = 0;
         size_t row = 0;
     };
+    // A CellDrag in progress: from a press `begin` accepted.
+    struct CellDragState
+    {
+        bool pressed = false, dragging = false;
+        double x0 = 0, y0 = 0;  // press, bin window coordinates
+        double x = 0, y = 0;    // pointer now
+        size_t from = 0;
+        CellDragStart start;
+        std::optional<size_t> target;
+    };
 
     bool onBinWindow(GdkEvent* e) const
     {
@@ -1808,6 +1825,8 @@ public:
         WList* list = active_;
         if (!list) return false;
         list->drag_ = {};
+        list->cell_ = {};
+        gtk_widget_queue_draw(list->w_);
         active_ = nullptr;
         gtk_tree_view_set_drag_dest_row(GTK_TREE_VIEW(list->w_), nullptr,
                                         GTK_TREE_VIEW_DROP_BEFORE);
@@ -1861,6 +1880,7 @@ private:
 
     gboolean dragMotion(GdkEventMotion* e)
     {
+        if (cell_.pressed) return cellMotion(e);
         if (!drag_.pressed || !(e->state & GDK_BUTTON1_MASK)) return false;
         if (!drag_.dragging)
         {
@@ -1888,6 +1908,7 @@ private:
 
     gboolean dragReleased(GdkEventButton* e)
     {
+        if (cell_.pressed) return cellReleased(e);
         if (!drag_.pressed || e->button != GDK_BUTTON_PRIMARY) return false;
         Drag d = drag_;
         drag_ = {};
@@ -1909,8 +1930,92 @@ private:
         return false;
     }
 
+    // A press on something the app lets you drag out of a cell. Selection
+    // still happens as for any click; the drag starts past the threshold.
+    bool cellPressed(GdkEventButton* e)
+    {
+        cell_ = {};
+        if (!cellDrag_.begin || e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_PRIMARY ||
+            !onBinWindow(reinterpret_cast<GdkEvent*>(e)) || (e->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK)))
+            return false;
+        auto* view = GTK_TREE_VIEW(w_);
+        GtkTreePath* path = nullptr;
+        GtkTreeViewColumn* col = nullptr;
+        if (!gtk_tree_view_get_path_at_pos(view, int(e->x), int(e->y), &path, &col, nullptr, nullptr)) return false;
+        GdkRectangle area;
+        gtk_tree_view_get_cell_area(view, path, col, &area);
+        const size_t row = size_t(gtk_tree_path_get_indices(path)[0]);
+        gtk_tree_path_free(path);
+        auto c = std::find(cols_.begin(), cols_.end(), col);
+        if (c == cols_.end()) return false;
+        auto start = cellDrag_.begin(row, size_t(c - cols_.begin()), {float(e->x - area.x), float(e->y - area.y)});
+        if (!start) return false;
+        cell_ = {true, false, e->x, e->y, e->x, e->y, row, std::move(*start), std::nullopt};
+        return true;
+    }
+
+    gboolean cellMotion(GdkEventMotion* e)
+    {
+        if (!(e->state & GDK_BUTTON1_MASK)) return false;
+        cell_.x = e->x;
+        cell_.y = e->y;
+        if (!cell_.dragging)
+        {
+            int threshold = 8;
+            g_object_get(gtk_widget_get_settings(w_), "gtk-dnd-drag-threshold", &threshold, nullptr);
+            if (std::abs(e->x - cell_.x0) < threshold && std::abs(e->y - cell_.y0) < threshold) return true;
+            cell_.dragging = true;
+            active_ = this;
+        }
+        auto* view = GTK_TREE_VIEW(w_);
+        cell_.target.reset();
+        GtkTreePath* path = nullptr;
+        if (gtk_tree_view_get_path_at_pos(view, int(e->x), int(e->y), &path, nullptr, nullptr, nullptr))
+        {
+            const size_t row = size_t(gtk_tree_path_get_indices(path)[0]);
+            if (cellDrag_.canDrop && cellDrag_.canDrop(cell_.from, row, cell_.start.data)) cell_.target = row;
+            gtk_tree_view_set_drag_dest_row(view, cell_.target ? path : nullptr, GTK_TREE_VIEW_DROP_INTO_OR_BEFORE);
+            gtk_tree_path_free(path);
+        }
+        else
+            gtk_tree_view_set_drag_dest_row(view, nullptr, GTK_TREE_VIEW_DROP_BEFORE);
+        setDragCursor(cell_.target ? "grabbing" : "not-allowed");
+        gtk_widget_queue_draw(w_);
+        return true;
+    }
+
+    gboolean cellReleased(GdkEventButton* e)
+    {
+        if (e->button != GDK_BUTTON_PRIMARY) return false;
+        CellDragState d = std::move(cell_);
+        cell_ = {};
+        if (!d.dragging) return false;  // a plain click
+        if (active_ == this) active_ = nullptr;
+        gtk_tree_view_set_drag_dest_row(GTK_TREE_VIEW(w_), nullptr, GTK_TREE_VIEW_DROP_BEFORE);
+        setDragCursor(nullptr);
+        gtk_widget_queue_draw(w_);
+        if (d.target && cellDrag_.drop) cellDrag_.drop(d.from, *d.target, d.start.data);
+        return true;
+    }
+
+    void drawCellDrag(GtkWidget* w, cairo_t* cr)
+    {
+        if (!cell_.dragging || cell_.start.label.empty()) return;
+        int wx, wy;
+        gtk_tree_view_convert_bin_window_to_widget_coords(GTK_TREE_VIEW(w), int(cell_.x), int(cell_.y), &wx, &wy);
+        CairoPainter p(cr, w);
+        TextStyle ts;
+        ts.bold = true;
+        const SizeF t = p.measure(cell_.start.label, ts);
+        const RectF box{float(wx) + 12, float(wy) + 4, t.w + 12, t.h + 4};
+        p.rect(box, 4, Paint{ThemeColor::Highlight}, Paint{ThemeColor::Mid});
+        ts.fg = ThemeColor::HighlightText;
+        p.text({box.x + 6, box.y + 2}, cell_.start.label, ts);
+    }
+
     gboolean buttonPressed(GdkEventButton* e)
     {
+        if (cellPressed(e)) return false;  // selects as usual; dragging begins on motion
         if (dragPressed(e)) return true;
         if (e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_SECONDARY) return false;
         std::optional<size_t> row;
@@ -1919,13 +2024,14 @@ private:
                                           nullptr, nullptr))
         {
             row = size_t(gtk_tree_path_get_indices(path)[0]);
-            // Keep a multi-selection when right-clicking inside it.
+            // Keep a multi-selection when right-clicking inside it (two
+            // revisions to compare). set_cursor would select only its row,
+            // so the cursor moves only with a new selection.
             if (!gtk_tree_selection_path_is_selected(sel_, path))
             {
                 gtk_tree_selection_unselect_all(sel_);
-                gtk_tree_selection_select_path(sel_, path);
+                gtk_tree_view_set_cursor(GTK_TREE_VIEW(w_), path, nullptr, false);
             }
-            gtk_tree_view_set_cursor(GTK_TREE_VIEW(w_), path, nullptr, false);
             gtk_tree_path_free(path);
         }
         popup(row, reinterpret_cast<GdkEvent*>(e));
@@ -1962,6 +2068,8 @@ private:
     ReorderFn reorder_;
     bool reorderable_ = true;
     Drag drag_;
+    CellDrag cellDrag_;
+    CellDragState cell_;
 };
 
 // ---------------------------------------------------------------- window

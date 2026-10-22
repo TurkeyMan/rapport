@@ -1008,6 +1008,7 @@ public:
     // TODO(pengit): drag-reordering (GtkDragSource on the rows).
     void onReorder(ReorderFn) override {}
     void setReorderable(bool) override {}
+    void onCellDrag(CellDrag) override {}  // TODO(pengit): a GtkGestureDrag on the column view
 
     bool columnVisible(size_t column) const override
     {

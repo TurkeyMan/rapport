@@ -2088,6 +2088,11 @@ public:
         reorderable_ = bool(reorder_);
     }
     void setReorderable(bool on) override { reorderable_ = on && reorder_; }
+    void onCellDrag(CellDrag d) override
+    {
+        if (!cellDrag_.begin) SetWindowSubclass(h_, cellPressProc, 5, reinterpret_cast<DWORD_PTR>(this));
+        cellDrag_ = std::move(d);
+    }
 
     void modelReset() override
     {
@@ -2175,6 +2180,16 @@ public:
         case NM_CUSTOMDRAW:
             return customDraw(reinterpret_cast<NMLVCUSTOMDRAW*>(n));
         case LVN_BEGINDRAG:
+            // Past the drag threshold: a press `begin` accepted drags its
+            // label, any other the rows (if they reorder).
+            if (cell_.pressed)
+            {
+                cell_.dragging = true;
+                g_dragging = this;
+                SetCapture(h_);
+                SetWindowSubclass(h_, cellDragProc, 6, reinterpret_cast<DWORD_PTR>(this));
+                return 0;
+            }
             if (reorderable_ && reorder_)
             {
                 dragging_ = true;
@@ -2428,6 +2443,27 @@ private:
             if (dragging_ && SendMessageW(h_, LVM_GETINSERTMARKRECT, 0, reinterpret_cast<LPARAM>(&mark)) &&
                 !IsRectEmpty(&mark))
                 fill(mark, themeColor(ThemeColor::Text));
+            // A cell drag: the drop row framed, the label at the pointer.
+            if (cell_.dragging)
+            {
+                const Color hl = themeColor(ThemeColor::Highlight);
+                brush->SetColor(D2D1::ColorF(hl.r / 255.f, hl.g / 255.f, hl.b / 255.f));
+                rt->SetTransform(origin);
+                RECT tr{};
+                if (cell_.target && ListView_GetItemRect(h_, int(*cell_.target), &tr, LVIR_BOUNDS))
+                    rt->DrawRectangle(D2D1::RectF(dip(tr.left) + 1, dip(tr.top) + 1, dip(tr.right) - 1, dip(tr.bottom) - 1),
+                                      brush.get(), 2);
+                if (!cell_.start.label.empty())
+                {
+                    rt->SetTransform(D2D1::Matrix3x2F::Translation(dip(cell_.pt.x) + 12, dip(cell_.pt.y) + 4) * origin);
+                    TextStyle ts;
+                    ts.bold = true;
+                    const SizeF t = painter.measure(cell_.start.label, ts);
+                    painter.rect({0, 0, t.w + 12, t.h + 4}, 4, Paint{ThemeColor::Highlight}, Paint{ThemeColor::Mid});
+                    ts.fg = ThemeColor::HighlightText;
+                    painter.text({6, 2}, cell_.start.label, ts);
+                }
+            }
             rt->SetTransform(D2D1::Matrix3x2F::Identity());
         }
         if (rt->EndDraw() == D2DERR_RECREATE_TARGET) rowTarget_.reset();
@@ -2527,7 +2563,11 @@ private:
         SendMessageW(h_, LVM_SETINSERTMARK, 0, reinterpret_cast<LPARAM>(&mark));
     }
 public:
-    void cancelDrag() { endDrag(false, POINT{}); }
+    void cancelDrag()
+    {
+        endCellDrag(false);
+        endDrag(false, POINT{});
+    }
 
 private:
     void endDrag(bool drop, POINT pt)
@@ -2546,6 +2586,88 @@ private:
             if (!rows.empty() && !noop(target)) reorder_(rows, target);
         }
     }
+    // CellDrag: the press is noted before the ListView sees it (it selects
+    // as usual, then reports LVN_BEGINDRAG past the threshold).
+    struct CellDragState
+    {
+        bool pressed = false, dragging = false;
+        size_t from = 0;
+        CellDragStart start;
+        std::optional<size_t> target;
+        POINT pt{};  // pointer, client coordinates
+    };
+    static LRESULT CALLBACK cellPressProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<WList*>(data);
+        if (msg == WM_LBUTTONDOWN && !(wp & (MK_SHIFT | MK_CONTROL)) && self->cellDrag_.begin && self->model_)
+        {
+            self->cell_ = {};
+            LVHITTESTINFO hit{};
+            hit.pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (ListView_SubItemHitTest(h, &hit) >= 0 && (hit.flags & LVHT_ONITEM) && size_t(hit.iItem) < self->model_->rowCount())
+            {
+                RECT cell{};
+                ListView_GetSubItemRect(h, hit.iItem, hit.iSubItem, LVIR_BOUNDS, &cell);
+                const float s = self->win_.scale();
+                if (auto start = self->cellDrag_.begin(size_t(hit.iItem), size_t(hit.iSubItem),
+                                                        PointF{(hit.pt.x - cell.left) / s, (hit.pt.y - cell.top) / s}))
+                    self->cell_ = {true, false, size_t(hit.iItem), std::move(*start), std::nullopt, hit.pt};
+            }
+        }
+        else if (msg == WM_LBUTTONUP && !self->cell_.dragging)
+            self->cell_ = {};
+        return DefSubclassProc(h, msg, wp, lp);
+    }
+    static LRESULT CALLBACK cellDragProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<WList*>(data);
+        switch (msg)
+        {
+        case WM_MOUSEMOVE:
+        {
+            CellDragState& c = self->cell_;
+            c.pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            LVHITTESTINFO hit{};
+            hit.pt = c.pt;
+            const int row = ListView_HitTest(h, &hit);
+            c.target.reset();
+            if (row >= 0 && (hit.flags & LVHT_ONITEM) && self->cellDrag_.canDrop &&
+                self->cellDrag_.canDrop(c.from, size_t(row), c.start.data))
+                c.target = size_t(row);
+            SetCursor(LoadCursorW(nullptr, c.target ? IDC_HAND : IDC_NO));
+            RECT client;
+            GetClientRect(h, &client);
+            const int edge = self->px(20);
+            if (c.pt.y < edge) ListView_Scroll(h, 0, -self->px(8));
+            else if (c.pt.y > client.bottom - edge) ListView_Scroll(h, 0, self->px(8));
+            InvalidateRect(h, nullptr, FALSE);  // one paint pass: a few ms
+            return 0;
+        }
+        case WM_LBUTTONUP: self->endCellDrag(true); return 0;
+        case WM_CAPTURECHANGED:
+        case WM_CANCELMODE: self->endCellDrag(false); return 0;
+        case WM_KEYDOWN:
+            if (wp == VK_ESCAPE)
+            {
+                self->endCellDrag(false);
+                return 0;
+            }
+            break;
+        }
+        return DefSubclassProc(h, msg, wp, lp);
+    }
+    void endCellDrag(bool drop)
+    {
+        if (!cell_.dragging) return;
+        CellDragState c = std::move(cell_);
+        cell_ = {};
+        if (g_dragging == this) g_dragging = nullptr;
+        RemoveWindowSubclass(h_, cellDragProc, 6);
+        if (GetCapture() == h_) ReleaseCapture();
+        InvalidateRect(h_, nullptr, FALSE);
+        if (drop && c.target && cellDrag_.drop) cellDrag_.drop(c.from, *c.target, c.start.data);
+    }
+
     static LRESULT CALLBACK dragProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
         auto* self = reinterpret_cast<WList*>(data);
@@ -2578,6 +2700,8 @@ private:
 
     ReorderFn reorder_;
     bool reorderable_ = false, dragging_ = false;
+    CellDrag cellDrag_;
+    CellDragState cell_;
     std::vector<Column> columns_;
     std::vector<bool> visible_;
     std::vector<int> widths_;

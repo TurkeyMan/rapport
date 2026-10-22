@@ -133,6 +133,7 @@ public:
     void select(const std::vector<size_t>&) override {}
     void setCurrent(size_t) override {}
     void scrollTo(size_t) override {}
+    void onCellDrag(CellDrag) override {}
     void setSortIndicator(std::optional<size_t>, SortOrder) override {}
     std::vector<float> columnWidths() const override { return {}; }
     void setColumnWidths(const std::vector<float>&) override {}

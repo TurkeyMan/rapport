@@ -592,6 +592,25 @@ public:
     using ReorderFn = std::function<bool(const std::vector<size_t>& rows, size_t destination)>;
     virtual void onReorder(ReorderFn) = 0;
     virtual void setReorderable(bool) = 0;  // on once onReorder is set
+
+    // Dragging something out of a cell (not the row itself) onto another
+    // row: a branch label onto a commit. `begin` decides from where a press
+    // landed whether a drag starts there; past the drag threshold the label
+    // follows the pointer, rows `canDrop` accepts highlight, and a release
+    // over one calls `drop`. Esc, or a release anywhere else, cancels. A
+    // press `begin` declines works as usual (selection, onReorder).
+    struct CellDragStart
+    {
+        std::string label;  // shown under the pointer
+        std::string data;   // the app's own: handed back to canDrop and drop
+    };
+    struct CellDrag
+    {
+        std::function<std::optional<CellDragStart>(size_t row, size_t column, PointF inCell)> begin;
+        std::function<bool(size_t from, size_t to, const std::string& data)> canDrop;
+        std::function<void(size_t from, size_t to, const std::string& data)> drop;
+    };
+    virtual void onCellDrag(CellDrag) = 0;
 };
 
 // Draggable divider between panes.
