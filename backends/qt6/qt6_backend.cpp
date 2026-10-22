@@ -2725,7 +2725,6 @@ public:
             frame_->setAttribute(Qt::WA_ShowWithoutActivating);
         layout_ = new QVBoxLayout(frame_);
         layout_->setSpacing(0);
-        if (!spec.resizable) layout_->setSizeConstraint(QLayout::SetFixedSize);
         filter_ = new KeyFilter;
         filter_->owner = this;
         qApp->installEventFilter(filter_);
@@ -2760,11 +2759,17 @@ public:
         layout_->addWidget(content);
         if (!spec.menuBar.empty()) buildMenuBar(spec.menuBar);
         const int w = px(spec.width), h = px(spec.height);
-        if (w > 0 || h > 0)
-        {
-            const QSize hint = frame_->sizeHint().expandedTo(frame_->minimumSizeHint());
-            frame_->resize(w > 0 ? w : hint.width(), h > 0 ? h : hint.height());
-        }
+        frame_->ensurePolished();  // the style's fonts and margins, before sizing by them
+        layout_->activate();
+        const QSize hint = frame_->sizeHint().expandedTo(frame_->minimumSizeHint());
+        const QSize size(w > 0 ? w : hint.width(), h > 0 ? h : hint.height());
+        // Fixed at the size it opens at (the spec's, else its content's), not
+        // at whatever its content asks for later (QLayout::SetFixedSize
+        // would follow a page shown or hidden).
+        if (!spec.resizable)
+            frame_->setFixedSize(size);
+        else if (w > 0 || h > 0)
+            frame_->resize(size);
     }
 
     void setTitle(const std::string& t) override { frame_->setWindowTitle(qs(t)); }
