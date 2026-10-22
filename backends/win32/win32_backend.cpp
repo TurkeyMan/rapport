@@ -842,6 +842,8 @@ public:
         if (ellipsize_) s.cx = std::min<long>(s.cx, px(40));
         return s;
     }
+    // Its natural width is a token one, so it fills across a column.
+    bool expands_in_form() const override { return ellipsize_; }
 
 private:
     bool ellipsize_;
