@@ -610,4 +610,44 @@ private:
     std::vector<std::pair<std::string, GtkTextTag*>> tags_;
 };
 
+// The anyui key for a GDK keyval (the same in GTK 3 and 4).
+inline Key keyFor(guint keyval)
+{
+    switch (keyval)
+    {
+    case GDK_KEY_Escape: return Key::Escape;
+    case GDK_KEY_Return:
+    case GDK_KEY_KP_Enter:
+    case GDK_KEY_ISO_Enter: return Key::Enter;
+    case GDK_KEY_Tab:
+    case GDK_KEY_ISO_Left_Tab: return Key::Tab;
+    case GDK_KEY_BackSpace: return Key::Backspace;
+    case GDK_KEY_Delete:
+    case GDK_KEY_KP_Delete: return Key::Delete;
+    case GDK_KEY_Insert:
+    case GDK_KEY_KP_Insert: return Key::Insert;
+    case GDK_KEY_space: return Key::Space;
+    case GDK_KEY_Left:
+    case GDK_KEY_KP_Left: return Key::Left;
+    case GDK_KEY_Right:
+    case GDK_KEY_KP_Right: return Key::Right;
+    case GDK_KEY_Up:
+    case GDK_KEY_KP_Up: return Key::Up;
+    case GDK_KEY_Down:
+    case GDK_KEY_KP_Down: return Key::Down;
+    case GDK_KEY_Home:
+    case GDK_KEY_KP_Home: return Key::Home;
+    case GDK_KEY_End:
+    case GDK_KEY_KP_End: return Key::End;
+    case GDK_KEY_Page_Up:
+    case GDK_KEY_KP_Page_Up: return Key::PageUp;
+    case GDK_KEY_Page_Down:
+    case GDK_KEY_KP_Page_Down: return Key::PageDown;
+    default: break;
+    }
+    if (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12)
+        return Key(int(Key::F1) + int(keyval - GDK_KEY_F1));
+    return gdk_keyval_to_unicode(keyval) ? Key::Character : Key::Other;
+}
+
 }  // namespace anyui::gtkcommon

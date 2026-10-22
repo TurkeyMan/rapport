@@ -1492,8 +1492,19 @@ private:
 
 // Paint, resize, cursor and frame callbacks. Written without a GTK 4 build
 // to check it against.
-// TODO(pengit): input (GtkGestureClick, GtkEventControllerMotion /Scroll
-// /Key) and focus, mirroring the gtk3 WCanvas.
+unsigned modifiers(GdkModifierType state)
+{
+    unsigned m = 0;
+    if (state & GDK_SHIFT_MASK) m |= ModShift;
+    if (state & GDK_CONTROL_MASK) m |= ModCtrl;
+    if (state & GDK_ALT_MASK) m |= ModAlt;
+    if (state & (GDK_SUPER_MASK | GDK_META_MASK)) m |= ModMeta;
+    return m;
+}
+
+// Input mirrors the gtk3 WCanvas: presses, releases and the wheel from a
+// legacy controller (raw events, so a release after a drag still arrives),
+// motion and crossing from a motion controller, keys from a key controller.
 class WCanvas : public W<anyui::Canvas>
 {
 public:
@@ -1519,6 +1530,28 @@ public:
                 if (self->resize_) self->resize_({float(w), float(h)});
             },
             this);
+        focusable_ = s.focusable;
+
+        GtkEventController* legacy = gtk_event_controller_legacy_new();
+        connect(legacy, "event", +[](GtkEventControllerLegacy*, GdkEvent* e, gpointer p) -> gboolean
+                { return static_cast<WCanvas*>(p)->rawEvent(e); }, this);
+        gtk_widget_add_controller(w_, legacy);
+
+        GtkEventController* motion = gtk_event_controller_motion_new();
+        connect(motion, "motion", +[](GtkEventControllerMotion* c, double x, double y, gpointer p)
+                { static_cast<WCanvas*>(p)->crossing(GTK_EVENT_CONTROLLER(c), PointerEvent::Type::Move, x, y); }, this);
+        connect(motion, "enter", +[](GtkEventControllerMotion* c, double x, double y, gpointer p)
+                { static_cast<WCanvas*>(p)->crossing(GTK_EVENT_CONTROLLER(c), PointerEvent::Type::Enter, x, y); }, this);
+        connect(motion, "leave", +[](GtkEventControllerMotion* c, gpointer p)
+                { static_cast<WCanvas*>(p)->crossing(GTK_EVENT_CONTROLLER(c), PointerEvent::Type::Leave, -1, -1); }, this);
+        gtk_widget_add_controller(w_, motion);
+
+        GtkEventController* keys = gtk_event_controller_key_new();
+        connect(keys, "key-pressed", +[](GtkEventControllerKey*, guint keyval, guint code, GdkModifierType state, gpointer p) -> gboolean
+                { return static_cast<WCanvas*>(p)->key(true, keyval, code, state); }, this);
+        connect(keys, "key-released", +[](GtkEventControllerKey*, guint keyval, guint code, GdkModifierType state, gpointer p)
+                { static_cast<WCanvas*>(p)->key(false, keyval, code, state); }, this);
+        gtk_widget_add_controller(w_, keys);
     }
 
     ~WCanvas() override { onDisconnect(); }
@@ -1539,9 +1572,9 @@ public:
 
     void onPaint(std::function<void(Painter&, SizeF)> f) override { paint_ = std::move(f); }
     void onResize(std::function<void(SizeF)> f) override { resize_ = std::move(f); }
-    void onPointer(std::function<bool(const PointerEvent&)>) override {}
-    void onScroll(std::function<bool(const ScrollEvent&)>) override {}
-    void onKey(std::function<bool(const KeyEvent&)>) override {}
+    void onPointer(std::function<bool(const PointerEvent&)> f) override { pointer_ = std::move(f); }
+    void onScroll(std::function<bool(const ScrollEvent&)> f) override { scroll_ = std::move(f); }
+    void onKey(std::function<bool(const KeyEvent&)> f) override { key_ = std::move(f); }
 
     Subscription onFrame(std::function<void(double)> f) override
     {
@@ -1576,10 +1609,109 @@ protected:
     }
 
 private:
+    // A raw event's position, from its surface to this widget.
+    PointF widgetPos(GdkEvent* e) const
+    {
+        double x = 0, y = 0;
+        gdk_event_get_position(e, &x, &y);
+        GtkNative* native = gtk_widget_get_native(w_);
+        double sx = 0, sy = 0;
+        if (native) gtk_native_get_surface_transform(native, &sx, &sy);
+        graphene_point_t in = GRAPHENE_POINT_INIT(float(x - sx), float(y - sy)), out = in;
+        if (native) gtk_widget_compute_point(GTK_WIDGET(native), w_, &in, &out);
+        return {out.x, out.y};
+    }
+
+    bool rawEvent(GdkEvent* e)
+    {
+        const GdkEventType type = gdk_event_get_event_type(e);
+        if (type == GDK_BUTTON_PRESS || type == GDK_BUTTON_RELEASE)
+        {
+            PointerEvent ev{type == GDK_BUTTON_PRESS ? PointerEvent::Type::Press : PointerEvent::Type::Release, widgetPos(e),
+                            int(gdk_button_event_get_button(e)), 1, modifiers(gdk_event_get_modifier_state(e))};
+            if (ev.type == PointerEvent::Type::Press)
+            {
+                if (focusable_ && !gtk_widget_has_focus(w_)) gtk_widget_grab_focus(w_);
+                // Count clicks ourselves, as gtk3 does, so each press arrives once.
+                int time = 400, distance = 5;
+                g_object_get(gtk_widget_get_settings(w_), "gtk-double-click-time", &time, "gtk-double-click-distance", &distance,
+                             nullptr);
+                const guint32 t = gdk_event_get_time(e);
+                const bool again = ev.button == lastButton_ && t - lastTime_ <= guint32(time) &&
+                                   std::abs(ev.pos.x - lastPos_.x) <= distance && std::abs(ev.pos.y - lastPos_.y) <= distance;
+                clicks_ = again ? clicks_ + 1 : 1;
+                ev.clicks = clicks_;
+                lastButton_ = ev.button;
+                lastTime_ = t;
+                lastPos_ = ev.pos;
+            }
+            return pointer_ && pointer_(ev);
+        }
+        if (type == GDK_SCROLL && scroll_)
+        {
+            ScrollEvent ev{widgetPos(e), 0, 0, false, modifiers(gdk_event_get_modifier_state(e))};
+            switch (gdk_scroll_event_get_direction(e))
+            {
+            case GDK_SCROLL_UP: ev.dy = -1; break;
+            case GDK_SCROLL_DOWN: ev.dy = 1; break;
+            case GDK_SCROLL_LEFT: ev.dx = -1; break;
+            case GDK_SCROLL_RIGHT: ev.dx = 1; break;
+            case GDK_SCROLL_SMOOTH:
+            {
+                double dx = 0, dy = 0;
+                gdk_scroll_event_get_deltas(e, &dx, &dy);
+                ev.dx = float(dx);
+                ev.dy = float(dy);
+                // Wheels report whole notches; touchpads, pixels.
+                ev.precise = gdk_scroll_event_get_unit(e) == GDK_SCROLL_UNIT_SURFACE;
+                break;
+            }
+            }
+            if (ev.dx == 0 && ev.dy == 0) return false;
+            return scroll_(ev);
+        }
+        return false;
+    }
+
+    void crossing(GtkEventController* c, PointerEvent::Type type, double x, double y)
+    {
+        if (!pointer_) return;
+        PointF pos{float(x), float(y)};
+        if (type == PointerEvent::Type::Leave) pos = lastMove_;
+        pointer_({type, pos, 0, 1, modifiers(gtk_event_controller_get_current_event_state(c))});
+        if (type != PointerEvent::Type::Leave) lastMove_ = pos;
+    }
+
+    bool key(bool press, guint keyval, guint code, GdkModifierType state)
+    {
+        if (!key_) return false;
+        KeyEvent ev;
+        ev.press = press;
+        ev.key = keyFor(keyval);
+        if (ev.key == Key::Character) ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval));
+        ev.modifiers = modifiers(state);
+        if (press)
+        {
+            ev.repeat = std::ranges::find(held_, code) != held_.end();
+            if (!ev.repeat) held_.push_back(code);
+        }
+        else
+            std::erase(held_, code);
+        return key_(ev);
+    }
+
     std::function<void(Painter&, SizeF)> paint_;
     std::function<void(SizeF)> resize_;
+    std::function<bool(const PointerEvent&)> pointer_;
+    std::function<bool(const ScrollEvent&)> scroll_;
+    std::function<bool(const KeyEvent&)> key_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     std::vector<guint> ticks_;
+    std::vector<guint> held_;
+    bool focusable_ = false;
+    int clicks_ = 0, lastButton_ = 0;
+    guint32 lastTime_ = 0;
+    PointF lastPos_{}, lastMove_{};
 };
 
 class WWindow : public anyui::Window, public Part
@@ -1594,6 +1726,26 @@ public:
         gtk_window_set_default_size(win, px(spec.width), px(spec.height));
         if (parent) gtk_window_set_transient_for(win, GTK_WINDOW(parent->win_));
         gtk_window_set_resizable(win, spec.resizable);
+        // Window keys come first (capture phase), except while a text field
+        // is being typed in: then only Escape and the F-keys, as on gtk3.
+        GtkEventController* keys = gtk_event_controller_key_new();
+        gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
+        connect(keys, "key-pressed", +[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer p) -> gboolean
+                { return static_cast<WWindow*>(p)->windowKey(true, keyval, state); }, this);
+        connect(keys, "key-released", +[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer p)
+                { static_cast<WWindow*>(p)->windowKey(false, keyval, state); }, this);
+        gtk_widget_add_controller(win_, keys);
+        connect(win_, "notify::fullscreened",
+                +[](GObject*, GParamSpec*, gpointer p)
+                {
+                    auto* self = static_cast<WWindow*>(p);
+                    const bool fs = gtk_window_is_fullscreen(GTK_WINDOW(self->win_));
+                    if (fs == self->fullscreen_) return;
+                    self->fullscreen_ = fs;
+                    if (self->menuBar_) self->setMenuBarVisible(self->menuBarWanted_);  // hidden in fullscreen
+                    if (self->onFullscreen_) self->onFullscreen_(fs);
+                },
+                this);
         if (dialog_)
         {
             gtk_window_set_modal(win, parent != nullptr && spec.modal);
@@ -1684,9 +1836,7 @@ public:
     void onFinished(std::function<void(DialogRole)> f) override { onFinished_ = std::move(f); }
     void onCloseRequest(std::function<bool()> f) override { onCloseRequest_ = std::move(f); }
 
-    // Written without a GTK 4 build. TODO(pengit): onFullscreenChanged
-    // (notify::fullscreened), window keys (a capture-phase
-    // GtkEventControllerKey), drawn window icons.
+    // TODO(pengit): drawn window icons.
     SizeF size() const override
     {
         return {float(gtk_widget_get_width(win_)), float(gtk_widget_get_height(win_))};
@@ -1717,12 +1867,12 @@ public:
         else
             gtk_window_unfullscreen(GTK_WINDOW(win_));
     }
-    void onFullscreenChanged(std::function<void(bool)>) override {}
+    void onFullscreenChanged(std::function<void(bool)> f) override { onFullscreen_ = std::move(f); }
     void setIcon(const Icon& icon) override
     {
         if (!icon.name.empty()) gtk_window_set_icon_name(GTK_WINDOW(win_), icon.name.c_str());
     }
-    void onKey(std::function<bool(const KeyEvent&)>) override {}
+    void onKey(std::function<bool(const KeyEvent&)> f) override { onKey_ = std::move(f); }
     void setMenuBarVisible(bool on) override
     {
         menuBarWanted_ = on;
@@ -1765,9 +1915,25 @@ public:
         gtk_widget_set_vexpand(content, true);
         gtk_box_append(GTK_BOX(box), content);
         gtk_window_set_child(GTK_WINDOW(win_), box);
-        connect(win_, "notify::fullscreened", +[](GObject*, GParamSpec*, gpointer p)
-                { auto* w = static_cast<WWindow*>(p); w->setMenuBarVisible(w->menuBarWanted_); }, this);
     }
+
+    bool windowKey(bool press, guint keyval, GdkModifierType state)
+    {
+        if (!onKey_) return false;
+        GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
+        const bool typing = focus && (GTK_IS_EDITABLE(focus) || (GTK_IS_TEXT_VIEW(focus) && gtk_text_view_get_editable(GTK_TEXT_VIEW(focus))));
+        const bool notText = keyval == GDK_KEY_Escape || (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12);
+        if (typing && !notText) return false;
+        KeyEvent ev;
+        ev.press = press;
+        ev.key = keyFor(keyval);
+        if (ev.key == Key::Character) ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval));
+        ev.modifiers = modifiers(state);
+        return onKey_(ev);
+    }
+    std::function<bool(const KeyEvent&)> onKey_;
+    std::function<void(bool)> onFullscreen_;
+    bool fullscreen_ = false;
 
     struct BarMenu
     {
