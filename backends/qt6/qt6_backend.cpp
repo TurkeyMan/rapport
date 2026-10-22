@@ -3387,15 +3387,9 @@ public:
             if (!std::getenv("DISPLAY") && !std::getenv("WAYLAND_DISPLAY") &&
                 !std::getenv("QT_QPA_PLATFORM"))
                 return nullptr;
-            // Under WSLg, Wayland gives an app no window positions, so nothing
-            // could keep a window on screen; its X server does.
-            if (underWsl() && std::getenv("DISPLAY") && !std::getenv("QT_QPA_PLATFORM"))
-                qputenv("QT_QPA_PLATFORM", "xcb");
-            // With XInput 2, WSLg shows no pointer over Qt's windows (hover
-            // and clicks still work). Core X input shows it; WSLg's mouse
-            // comes through RDP, so XI2's touch and smooth scrolling add
-            // nothing there.
-            if (underWsl() && !std::getenv("QT_XCB_NO_XI2")) qputenv("QT_XCB_NO_XI2", "1");
+            // Under WSLg, Qt keeps its own choice, Wayland: on its X11 the
+            // pointer comes and goes over Qt's windows and doesn't change
+            // shape. (Wayland can't place windows, but WSL is for testing.)
 #endif
             // Keeps argc: the caller's, alive for the program.
             app = new QApplication(*argc, argv);
