@@ -4277,6 +4277,15 @@ public:
             std::vector<COMDLG_FILTERSPEC> fs;
             for (size_t i = 0; i < names.size(); ++i) fs.push_back({names[i].c_str(), specs[i].c_str()});
             if (!fs.empty()) dlg->SetFileTypes(UINT(fs.size()), fs.data());
+            // Saving: a name typed without an extension gets the chosen
+            // type's (the dialog follows the type from this default).
+            if (f.mode == FileDialogSpec::Mode::Save && !f.filters.empty())
+            {
+                const std::string& first = f.filters.front().pattern;
+                const size_t dot = first.find("*.");
+                const std::string ext = dot == std::string::npos ? "" : first.substr(dot + 2, first.find(';', dot) - dot - 2);
+                if (!ext.empty() && ext.find_first_of("*?") == std::string::npos) dlg->SetDefaultExtension(wide(ext).c_str());
+            }
             if (!f.initialPath.empty())
             {
                 const std::wstring path = wide(f.initialPath);

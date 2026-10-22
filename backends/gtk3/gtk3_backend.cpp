@@ -3282,7 +3282,12 @@ public:
         {
             GtkFileFilter* ff = gtk_file_filter_new();
             gtk_file_filter_set_name(ff, flt.name.c_str());
-            gtk_file_filter_add_pattern(ff, flt.pattern.c_str());
+            for (size_t at = 0; at <= flt.pattern.size();)  // "*.patch;*.diff"
+            {
+                size_t end = std::min(flt.pattern.find(';', at), flt.pattern.size());
+                if (end > at) gtk_file_filter_add_pattern(ff, flt.pattern.substr(at, end - at).c_str());
+                at = end + 1;
+            }
             gtk_file_chooser_add_filter(chooser, ff);
         }
         if (!f.initialPath.empty())

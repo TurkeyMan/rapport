@@ -43,9 +43,10 @@ struct FileDialogSpec
     };
     Mode mode = Mode::Open;
     std::string title, initialPath;
-    struct Filter  // {"Patches", "*.patch"}
+    struct Filter  // {"Patches", "*.patch;*.diff"}
     {
-        std::string name, pattern;
+        std::string name;
+        std::string pattern;  // one or more globs, separated by ';'
     };
     std::vector<Filter> filters;
 };
