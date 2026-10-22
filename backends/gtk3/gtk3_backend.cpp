@@ -887,6 +887,9 @@ public:
         : W(gtk_entry_new())
     {
         gtk_entry_set_text(GTK_ENTRY(w_), s.text.c_str());
+        // Enter presses the dialog's default button (OK), as on Windows,
+        // unless the app handles Enter itself (a find box).
+        gtk_entry_set_activates_default(GTK_ENTRY(w_), true);
         if (!s.placeholder.empty()) setPlaceholder(s.placeholder);
         connect(
             w_, "changed",
@@ -913,7 +916,11 @@ public:
         gtk_entry_set_placeholder_text(GTK_ENTRY(w_), t.c_str());
     }
     void onChanged(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
-    void onActivate(std::function<void()> f) override { activate_ = std::move(f); }
+    void onActivate(std::function<void()> f) override
+    {
+        activate_ = std::move(f);
+        gtk_entry_set_activates_default(GTK_ENTRY(w_), !activate_);
+    }
 
 private:
     std::function<void(const std::string&)> changed_;

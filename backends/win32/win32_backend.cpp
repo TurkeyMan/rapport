@@ -532,7 +532,16 @@ public:
         win_.relayout();
     }
     void setTooltip(const std::string& t) override { setTooltipText(h_, t); }
-    void focus() override { SetFocus(h_); }
+    // Before the window shows, SetFocus can't land: the window keeps the
+    // request and focuses it when it activates.
+    void focus() override
+    {
+        HWND root = GetAncestor(h_, GA_ROOT);
+        if (IsWindowVisible(root))
+            SetFocus(h_);
+        else
+            SetPropW(root, L"anyui-focus", h_);
+    }
 
     void place(RECT r) override
     {
@@ -3632,6 +3641,7 @@ public:
             SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
             if (modal_ && parent_) EnableWindow(parent_->hwnd_, TRUE);
             if (menuBar_ && GetMenu(hwnd_) != menuBar_) DestroyMenu(menuBar_);  // detached: ours to free
+            RemovePropW(hwnd_, L"anyui-focus");
             DestroyWindow(hwnd_);
         }
     }
@@ -4047,6 +4057,23 @@ private:
                 return 0;
             }
             case WM_CLOSE: self->closeRequested(); return 0;
+            // Keyboard focus belongs on a control: the one that had it when
+            // the window was last left (or asked for before it showed), else
+            // the first Tab stop (a dialog's first field).
+            case WM_ACTIVATE:
+                if (LOWORD(wp) == WA_INACTIVE)
+                {
+                    if (HWND f = GetFocus(); f && IsChild(h, f)) SetPropW(h, L"anyui-focus", f);
+                }
+                else if (!HIWORD(wp))  // not minimised
+                {
+                    auto f = static_cast<HWND>(GetPropW(h, L"anyui-focus"));
+                    if (!f || !IsWindow(f) || !IsChild(h, f) || !IsWindowVisible(f) || !IsWindowEnabled(f))
+                        f = GetNextDlgTabItem(h, nullptr, FALSE);
+                    if (f) SetFocus(f);
+                    return 0;
+                }
+                break;
             case WM_INITMENUPOPUP:
                 if (self->menuOpening(reinterpret_cast<HMENU>(wp))) return 0;
                 break;
