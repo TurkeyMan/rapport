@@ -318,7 +318,7 @@ std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
             auto* create = lib->function<CreateBackendFn>(createBackendSymbol(name).c_str());
             if (!create)
             {
-                errors += "  " + name + ": " + sys::pathToUtf8(path) + " is not an rapport backend\n";
+                errors += "  " + name + ": " + sys::pathToUtf8(path) + " is not a rapport backend\n";
                 break;
             }
             // Never unload: toolkits register atexit handlers and TLS.

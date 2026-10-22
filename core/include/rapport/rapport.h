@@ -100,7 +100,7 @@ private:
 }  // namespace rap
 
 // RAPPORT_BUILTIN_BACKEND(gtk3) registers the statically linked gtk3 backend.
-#define RAPPORT_BUILTIN_BACKEND(name)                                                                \
+#define RAPPORT_BUILTIN_BACKEND(name)                                                              \
     extern "C" rap::Backend* rapport_create_backend_##name(int, int*, char**);                     \
-    static const bool rapport_builtin_backend_##name =                                               \
+    static const bool rapport_builtin_backend_##name =                                             \
         (rap::registerBuiltinBackend(#name, &rapport_create_backend_##name), true)

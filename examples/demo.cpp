@@ -1,4 +1,4 @@
-// The rebase dialog from pengit's design notes, as an rapport smoke test.
+// The rebase dialog from pengit's design notes, as a rapport smoke test.
 //   RAPPORT_BACKEND=null ./rapport-demo   prints the tree without a display
 #include <rapport/rapport.h>
 
