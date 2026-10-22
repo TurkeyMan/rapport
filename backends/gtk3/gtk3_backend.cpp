@@ -2339,7 +2339,7 @@ public:
             { return e->keyval == GDK_KEY_Escape && WList::cancelActiveDrag(); }, this);
         if (dialog_)
         {
-            gtk_window_set_modal(win, parent != nullptr);
+            gtk_window_set_modal(win, parent != nullptr && spec.modal);
             gtk_window_set_type_hint(win, GDK_WINDOW_TYPE_HINT_DIALOG);
             connect(
                 win_, "key-press-event",

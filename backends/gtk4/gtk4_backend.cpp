@@ -1395,7 +1395,7 @@ public:
         if (parent) gtk_window_set_transient_for(win, GTK_WINDOW(parent->win_));
         if (dialog_)
         {
-            gtk_window_set_modal(win, parent != nullptr);
+            gtk_window_set_modal(win, parent != nullptr && spec.modal);
             GtkEventController* keys = gtk_shortcut_controller_new();
             gtk_shortcut_controller_add_shortcut(
                 GTK_SHORTCUT_CONTROLLER(keys),

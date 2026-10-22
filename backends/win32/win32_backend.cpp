@@ -3372,6 +3372,7 @@ public:
         : parent_(parent)
         , dialog_(spec.dialog)
         , margins_(spec.margins)
+        , modalSpec_(spec.modal)
     {
         static bool registered = false;
         if (!registered)
@@ -3490,7 +3491,7 @@ public:
             SetWindowPos(hwnd_, nullptr, x, y, r.right - r.left, r.bottom - r.top, flags);
             layoutNow();
         }
-        if (dialog_ && parent_)
+        if (dialog_ && parent_ && modalSpec_)
         {
             modal_ = true;
             EnableWindow(parent_->hwnd_, FALSE);
@@ -3873,7 +3874,7 @@ public:
 
 private:
     HWND hwnd_ = nullptr;
-    bool dialog_, margins_;
+    bool dialog_, margins_, modalSpec_;
     bool modal_ = false, finished_ = false, shownOnce_ = false, fullscreen_ = false, relayoutPending_ = false;
     std::optional<SIZE> requested_;  // client size from resize() before the first show
     struct BarMenu

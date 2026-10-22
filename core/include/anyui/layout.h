@@ -297,7 +297,10 @@ struct Node
 struct WindowSpec
 {
     std::string title;
-    bool dialog = false;  // modal to its parent, has dialog buttons
+    bool dialog = false;  // has dialog buttons; modal to its parent unless `modal` is false
+    // A dialog that leaves its parent usable (a find bar, a tool palette, a
+    // save dialog previewing into the main view). It still stays above it.
+    bool modal = true;
     Node content;
     Extent width, height;
     // The usual space between the window edge and its content; off for
@@ -1082,6 +1085,11 @@ public:
     Dialog& size(Extent w, Extent h)
     {
         Window::size(w, h);
+        return *this;
+    }
+    Dialog& modeless()
+    {
+        w_.modal = false;
         return *this;
     }
 };
