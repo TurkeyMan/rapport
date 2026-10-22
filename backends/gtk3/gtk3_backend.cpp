@@ -1150,7 +1150,12 @@ public:
         }
     }
 
-    // Overrides the first layout from stretch factors.
+    // Overrides the first layout from stretch factors. GtkPaned clamps a
+    // position to its current length, so one asked for before the window
+    // has grown to fit (a pane opening and the window widening for it, a
+    // layout restored before the window reaches its saved size) would come
+    // out short; each divider is set again as the splitter grows, until its
+    // position fits.
     void setSizes(const std::vector<float>& s) override
     {
         g_object_set_data(G_OBJECT(w_), "anyui-user-sized", GINT_TO_POINTER(1));
@@ -1158,10 +1163,41 @@ public:
         for (size_t i = 0; i + 1 < s.size() && w; ++i)
         {
             auto* p = GTK_PANED(w);
-            if (s[i] > 0) gtk_paned_set_position(p, int(s[i]));
+            if (s[i] > 0) placeDivider(p, int(s[i]));
             GtkWidget* next = gtk_paned_get_child2(p);
             w = next && g_object_get_data(G_OBJECT(next), "anyui-split-chain") ? next : nullptr;
         }
+    }
+
+private:
+    static void placeDivider(GtkPaned* p, int position)
+    {
+        gtk_paned_set_position(p, position);
+        int maxPos = 0;
+        g_object_get(p, "max-position", &maxPos, nullptr);
+        // G_MAXINT: not laid out with both panes yet (one was hidden), so not
+        // known to fit either.
+        if (maxPos >= position && maxPos != G_MAXINT) return;
+        // Too long for now: again when the splitter grows (once it fits).
+        auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(p), "anyui-want-position"));
+        if (!want)
+        {
+            want = new int(position);
+            g_object_set_data_full(G_OBJECT(p), "anyui-want-position", want, +[](gpointer d) { delete static_cast<int*>(d); });
+            g_signal_connect(p, "notify::max-position",
+                             G_CALLBACK(+[](GObject* obj, GParamSpec*, gpointer)
+                                        {
+                                            auto* want = static_cast<int*>(g_object_get_data(obj, "anyui-want-position"));
+                                            if (!want || *want < 0) return;
+                                            int maxPos = 0;
+                                            g_object_get(obj, "max-position", &maxPos, nullptr);
+                                            if (maxPos == G_MAXINT) return;
+                                            gtk_paned_set_position(GTK_PANED(obj), std::min(*want, maxPos));
+                                            if (maxPos >= *want) *want = -1;  // there: the user's from here on
+                                        }),
+                             nullptr);
+        }
+        *want = position;
     }
 };
 
