@@ -51,6 +51,7 @@ std::wstring mnemonic(const std::string& s)
 constexpr UINT wm_rapport_frame = WM_APP + 2;
 constexpr UINT wm_rapport_relayout = WM_APP + 3;
 constexpr UINT wm_rapport_selection = WM_APP + 4;  // a list's coalesced selection change
+constexpr UINT wm_rapport_fill_last = WM_APP + 5;  // a list's last column refits, once a header drag lands
 
 HINSTANCE instance()
 {
@@ -2083,6 +2084,7 @@ public:
         if (!is_column_order(order, columns_.size())) return;
         std::vector<int> o(order.begin(), order.end());
         ListView_SetColumnOrderArray(h_, int(o.size()), o.data());
+        fill_last();
         InvalidateRect(h_, nullptr, FALSE);
     }
     void set_column_widths(const std::vector<float>& w) override
@@ -2142,6 +2144,12 @@ public:
         case HDN_ITEMCHANGEDA:
             // A column before the last resized (live while dragged).
             if (reinterpret_cast<NMHEADERW*>(n)->iItem != last_visible_column()) fill_last();
+            handled = false;
+            return 0;
+        case HDN_ENDDRAG:
+            // A header dragged to a new place: the order is applied after this
+            // returns, and it can change which column fills.
+            PostMessageW(h_, wm_rapport_fill_last, 0, 0);
             handled = false;
             return 0;
         case LVN_GETDISPINFOW:
@@ -2262,10 +2270,14 @@ public:
     // the others leave as the list resizes (on its own WM_SIZE: placing is
     // deferred, and a scroll bar coming or going changes the client width
     // too) and as they're dragged wider.
+    // The last as shown, which a dragged header order can make any of them.
     int last_visible_column() const
     {
-        for (int i = int(columns_.size()) - 1; i >= 0; --i)
-            if (visible_[size_t(i)]) return i;
+        std::vector<int> order(columns_.size());
+        if (order.empty() || !ListView_GetColumnOrderArray(h_, int(order.size()), order.data()))
+            return -1;
+        for (auto it = order.rbegin(); it != order.rend(); ++it)
+            if (*it >= 0 && size_t(*it) < visible_.size() && visible_[size_t(*it)]) return *it;
         return -1;
     }
     int filled_column() const
@@ -2281,8 +2293,8 @@ public:
         GetClientRect(h_, &c);
         if (c.right <= 0) return;
         long others = 0;
-        for (int i = 0; i < last; ++i)
-            if (visible_[size_t(i)]) others += ListView_GetColumnWidth(h_, i);
+        for (size_t i = 0; i < columns_.size(); ++i)
+            if (visible_[i] && int(i) != last) others += ListView_GetColumnWidth(h_, int(i));
         const int w = int(std::max<long>(px(40), c.right - others));
         if (ListView_GetColumnWidth(h_, last) != w) ListView_SetColumnWidth(h_, last, w);
     }
@@ -2910,7 +2922,7 @@ private:
     static LRESULT CALLBACK size_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
         const LRESULT r = DefSubclassProc(h, msg, wp, lp);
-        if (msg == WM_SIZE) reinterpret_cast<list_impl*>(data)->fill_last();
+        if (msg == WM_SIZE || msg == wm_rapport_fill_last) reinterpret_cast<list_impl*>(data)->fill_last();
         return r;
     }
     static LRESULT CALLBACK auto_scroll_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)

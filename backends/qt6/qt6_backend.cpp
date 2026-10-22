@@ -1824,6 +1824,8 @@ public:
             view_->setColumnHidden(int(i), !c.visible);
         }
         stretch_last();
+        // A column dragged to the end (or away from it) changes which fills.
+        QObject::connect(h, &QHeaderView::sectionMoved, h, [this] { stretch_last(); });
         h->setContextMenuPolicy(Qt::CustomContextMenu);
         QObject::connect(h, &QHeaderView::customContextMenuRequested, h,
                          [this](QPoint pos)
@@ -2106,10 +2108,12 @@ public:
         const int last = last_visible_column();
         view_->header()->setStretchLastSection(last >= 0 && cols_[size_t(last)].stretch);
     }
+    // The last as shown, which a dragged header order can make any of them.
     int last_visible_column() const
     {
-        for (int i = int(cols_.size()) - 1; i >= 0; --i)
-            if (!view_->header()->isSectionHidden(i)) return i;
+        const QHeaderView* h = view_->header();
+        for (int v = h->count() - 1; v >= 0; --v)
+            if (const int i = h->logicalIndex(v); i >= 0 && !h->isSectionHidden(i)) return i;
         return -1;
     }
 
