@@ -1365,6 +1365,9 @@ public:
             w_, "motion-notify-event", +[](GtkWidget*, GdkEventMotion* e, gpointer p) -> gboolean
             { return static_cast<WList*>(p)->dragMotion(e); }, this);
         connect(
+            w_, "leave-notify-event", +[](GtkWidget*, GdkEventCrossing*, gpointer p) -> gboolean
+            { static_cast<WList*>(p)->setHot(std::nullopt); return false; }, this);
+        connect(
             w_, "button-release-event", +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
             { return static_cast<WList*>(p)->dragReleased(e); }, this);
         connect(
@@ -1691,9 +1694,11 @@ private:
         // glyphs; selected rows keep the selection colour.
         std::optional<Paint> bg;
         std::swap(bg, style.bg);
-        if (bg && !gtk_tree_selection_iter_is_selected(ctx->list->sel_, iter))
+        const bool selected = gtk_tree_selection_iter_is_selected(ctx->list->sel_, iter);
+        std::optional<Color> hover = !selected && ctx->list->hot_ == row ? ctx->list->hoverColor() : std::nullopt;
+        if ((bg && !selected) || hover)
         {
-            Color c = resolve(ctx->list->w_, *bg);
+            Color c = bg && !selected ? resolve(ctx->list->w_, *bg) : *hover;
             GdkRGBA rgba{c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0};
             g_object_set(r, "cell-background-rgba", &rgba, nullptr);
         }
@@ -1717,9 +1722,10 @@ private:
         cairo_rectangle(cr, area->x, area->y, area->width, area->height);
         cairo_clip(cr);
         cairo_translate(cr, area->x, area->y);
-        if (auto bg = model->style(row, ctx->column).bg; bg && !selected)
+        std::optional<Color> hover = !selected && ctx->list->hot_ == row ? ctx->list->hoverColor() : std::nullopt;
+        if (auto bg = model->style(row, ctx->column).bg; (bg && !selected) || hover)
         {
-            Color c = resolve(widget, *bg);
+            Color c = bg && !selected ? resolve(widget, *bg) : *hover;
             cairo_set_source_rgba(cr, c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0);
             cairo_paint(cr);
         }
@@ -1885,8 +1891,49 @@ private:
         return false;
     }
 
+    // Soft-selection lists tint the row under the pointer (as on win32,
+    // and Explorer's and TortoiseGit's lists): just the two rows involved
+    // repaint as it moves.
+    std::optional<Color> hoverColor() const
+    {
+        if (!soft_) return std::nullopt;
+        Color base = themeColor(w_, ThemeColor::Base), accent = themeColor(w_, ThemeColor::Accent);
+        bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
+        return mixColors(base, accent, dark ? 0.16f : 0.09f);
+    }
+    void setHot(std::optional<size_t> row)
+    {
+        if (row == hot_) return;
+        for (std::optional<size_t> r : {hot_, row})
+        {
+            if (!r) continue;
+            GtkTreePath* path = gtk_tree_path_new_from_indices(int(*r), -1);
+            GdkRectangle a;
+            gtk_tree_view_get_background_area(GTK_TREE_VIEW(w_), path, nullptr, &a);
+            gtk_tree_path_free(path);
+            int x, y;
+            gtk_tree_view_convert_bin_window_to_widget_coords(GTK_TREE_VIEW(w_), 0, a.y, &x, &y);
+            gtk_widget_queue_draw_area(w_, 0, y, gtk_widget_get_allocated_width(w_), a.height);
+        }
+        hot_ = row;
+    }
+    void trackHover(GdkEventMotion* e)
+    {
+        if (!soft_ || drag_.dragging || cell_.dragging) return setHot(std::nullopt);
+        GtkTreePath* path = nullptr;
+        std::optional<size_t> row;
+        if (onBinWindow(reinterpret_cast<GdkEvent*>(e)) &&
+            gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(w_), int(e->x), int(e->y), &path, nullptr, nullptr, nullptr))
+        {
+            row = size_t(gtk_tree_path_get_indices(path)[0]);
+            gtk_tree_path_free(path);
+        }
+        setHot(row);
+    }
+
     gboolean dragMotion(GdkEventMotion* e)
     {
+        trackHover(e);
         if (cell_.pressed) return cellMotion(e);
         if (!drag_.pressed || !(e->state & GDK_BUTTON1_MASK)) return false;
         if (!drag_.dragging)
@@ -2077,6 +2124,7 @@ private:
     Drag drag_;
     CellDrag cellDrag_;
     CellDragState cell_;
+    std::optional<size_t> hot_;  // the row under the pointer
 };
 
 // ---------------------------------------------------------------- window
