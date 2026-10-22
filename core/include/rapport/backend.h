@@ -16,7 +16,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 27;
+inline constexpr int abi_version = 28;
 
 // For list::set_column_order: whether `order` names each of `n` columns once.
 inline bool is_column_order(const std::vector<size_t>& order, size_t n)
@@ -103,6 +103,9 @@ public:
     // An image on the clipboard (copied now; the caller keeps its pixels).
     virtual void set_clipboard_image(int width, int height, pixel_format, const uint8_t* pixels,
                                    size_t stride) = 0;
+    // The window shown last (a dialog over the main window, say) as a PNG, as
+    // drawn now; false if there's none or it couldn't be written. For tests.
+    virtual bool save_snapshot(const std::string& png_path) = 0;
 
     // Pixels for painter::image; `pixels` is copied (or uploaded).
     virtual std::unique_ptr<image> create_image(int width, int height, pixel_format,

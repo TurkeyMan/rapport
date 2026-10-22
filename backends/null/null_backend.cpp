@@ -22,6 +22,7 @@ public:
     void set_visible(bool) override {}
     void set_tooltip(const std::string&) override {}
     void focus() override {}
+    bool has_focus() const override { return false; }
 };
 
 class null_label : public stub<rap::label>
@@ -157,6 +158,7 @@ class null_splitter : public stub<rap::splitter>
 {
 public:
     std::vector<float> sizes() const override { return {}; }
+    void on_moved(std::function<void()>) override {}
     void set_sizes(const std::vector<float>&) override {}
 };
 
@@ -271,6 +273,7 @@ public:
     void move(point_f) override {}
     rect_f work_area() const override { return {0, 0, 1920, 1080}; }
     bool fullscreen() const override { return fullscreen_; }
+    bool maximized() const override { return false; }
     void set_fullscreen(bool on) override { fullscreen_ = on; }
     void on_fullscreen_changed(std::function<void(bool)>) override {}
     void set_icon(const icon&) override {}
@@ -596,6 +599,7 @@ public:
 
     void set_clipboard(const std::string&) override {}
     void set_clipboard_image(int, int, pixel_format, const uint8_t*, size_t) override {}
+    bool save_snapshot(const std::string&) override { return false; }
 
     std::unique_ptr<rap::image> create_image(int w, int h, pixel_format, const uint8_t*,
                                               size_t) override

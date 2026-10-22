@@ -586,6 +586,17 @@ public:
     void set_visible(bool v) override { gtk_widget_set_visible(outer_, v); }
     void set_tooltip(const std::string& t) override { gtk_widget_set_tooltip_text(w_, t.c_str()); }
     void focus() override { gtk_widget_grab_focus(w_); }
+    bool has_focus() const override
+    {
+#if GTK_MAJOR_VERSION >= 4
+        GtkRoot* root = gtk_widget_get_root(outer_);
+        GtkWidget* f = root ? gtk_root_get_focus(root) : nullptr;
+#else
+        GtkWidget* top = gtk_widget_get_toplevel(outer_);
+        GtkWidget* f = GTK_IS_WINDOW(top) ? gtk_window_get_focus(GTK_WINDOW(top)) : nullptr;
+#endif
+        return f && (f == outer_ || gtk_widget_is_ancestor(f, outer_));
+    }
 
     GtkWidget* outer() const { return outer_; }
 

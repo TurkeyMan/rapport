@@ -1125,6 +1125,40 @@ public:
     {
     }
 
+    // GtkPaned reports a drag no differently from layout, so a drag is a
+    // press and release on a divider with the position changed in between.
+    void on_moved(std::function<void()> f) override
+    {
+        const bool first = !moved_;
+        moved_ = std::move(f);
+        if (!first) return;
+        for (GtkWidget* w = w_; w;)
+        {
+            connect(
+                w, "button-press-event",
+                +[](GtkWidget*, GdkEventButton*, gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<splitter_impl*>(p);
+                    self->pressed_ = self->sizes();
+                    return false;
+                },
+                this);
+            connect(
+                w, "button-release-event",
+                +[](GtkWidget*, GdkEventButton*, gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<splitter_impl*>(p);
+                    if (!self->pressed_.empty() && self->sizes() != self->pressed_ && self->moved_)
+                        self->moved_();
+                    self->pressed_.clear();
+                    return false;
+                },
+                this);
+            GtkWidget* next = gtk_paned_get_child2(GTK_PANED(w));
+            w = next && g_object_get_data(G_OBJECT(next), "rapport-split-chain") ? next : nullptr;
+        }
+    }
+
     std::vector<float> sizes() const override
     {
         bool vertical =
@@ -1170,6 +1204,9 @@ public:
     }
 
 private:
+    std::function<void()> moved_;
+    std::vector<float> pressed_;  // the sizes when a button went down on it
+
     static void place_divider(GtkPaned* p, int position)
     {
         gtk_paned_set_position(p, position);
@@ -2607,19 +2644,8 @@ class window_impl : public rap::window, public part
             delay ? guint(std::atoi(delay)) : 500u,
             +[](gpointer) -> gboolean
             {
-                GtkWidget* win = last_shown();
-                if (!win) return G_SOURCE_REMOVE;
-                const int scale = gtk_widget_get_scale_factor(win);
-                const int w = gtk_widget_get_allocated_width(win);
-                const int h = gtk_widget_get_allocated_height(win);
-                cairo_surface_t* surface =
-                    cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w * scale, h * scale);
-                cairo_surface_set_device_scale(surface, scale, scale);
-                cairo_t* cr = cairo_create(surface);
-                gtk_widget_draw(win, cr);
-                cairo_destroy(cr);
-                cairo_surface_write_to_png(surface, std::getenv("RAPPORT_SNAPSHOT"));
-                cairo_surface_destroy(surface);
+                if (!last_shown()) return G_SOURCE_REMOVE;
+                save_last_shown(std::getenv("RAPPORT_SNAPSHOT"));
                 gtk_main_quit();
                 return G_SOURCE_REMOVE;
             },
@@ -2627,6 +2653,25 @@ class window_impl : public rap::window, public part
     }
 
 public:
+    // The window shown last, as drawn now, to a PNG.
+    static bool save_last_shown(const std::string& path)
+    {
+        GtkWidget* win = last_shown();
+        if (!win) return false;
+        const int scale = gtk_widget_get_scale_factor(win);
+        const int w = gtk_widget_get_allocated_width(win);
+        const int h = gtk_widget_get_allocated_height(win);
+        cairo_surface_t* surface =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w * scale, h * scale);
+        cairo_surface_set_device_scale(surface, scale, scale);
+        cairo_t* cr = cairo_create(surface);
+        gtk_widget_draw(win, cr);
+        cairo_destroy(cr);
+        const bool ok = cairo_surface_write_to_png(surface, path.c_str()) == CAIRO_STATUS_SUCCESS;
+        cairo_surface_destroy(surface);
+        return ok;
+    }
+
     window_impl(const window_spec& spec, window_impl* parent)
         : win_(gtk_window_new(GTK_WINDOW_TOPLEVEL))
         , dialog_(spec.dialog)
@@ -2673,6 +2718,8 @@ public:
             +[](GtkWidget*, GdkEventWindowState* e, gpointer p) -> gboolean
             {
                 auto* self = static_cast<window_impl*>(p);
+                self->maximized_ = e->new_window_state & (GDK_WINDOW_STATE_MAXIMIZED |
+                                                          GDK_WINDOW_STATE_TILED);
                 const bool fs = e->new_window_state & GDK_WINDOW_STATE_FULLSCREEN;
                 if (fs != self->fullscreen_)
                 {
@@ -2836,6 +2883,7 @@ public:
     }
 
     bool fullscreen() const override { return fullscreen_; }
+    bool maximized() const override { return maximized_; }
     void set_fullscreen(bool on) override
     {
         if (on)
@@ -3024,6 +3072,7 @@ private:
     std::function<void(bool)> on_fullscreen_;
     std::function<bool(const key_event&)> on_key_;
     bool fullscreen_ = false;
+    bool maximized_ = false;
 };
 
 // -- builder ------------------------------------------------------------------
@@ -3743,6 +3792,8 @@ public:
         gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), s.c_str(),
                                int(s.size()));
     }
+
+    bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
 
     void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels,
                            size_t stride) override

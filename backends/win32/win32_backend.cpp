@@ -535,6 +535,11 @@ public:
     void set_tooltip(const std::string& t) override { set_tooltip_text(h_, t); }
     // Before the window shows, SetFocus can't land: the window keeps the
     // request and focuses it when it activates.
+    bool has_focus() const override
+    {
+        const HWND f = GetFocus();
+        return f && (f == h_ || IsChild(h_, f));
+    }
     void focus() override
     {
         HWND root = GetAncestor(h_, GA_ROOT);
@@ -583,6 +588,7 @@ public:
     }
     void set_tooltip(const std::string&) override {}
     void focus() override {}
+    bool has_focus() const override { return false; }
 
 private:
     item& item_;
@@ -3274,6 +3280,8 @@ public:
     }
     void set_tooltip(const std::string&) override {}
     void focus() override {}
+    bool has_focus() const override { return false; }
+    void on_moved(std::function<void()> f) override { moved_ = std::move(f); }
     std::vector<float> sizes() const override
     {
         std::vector<float> out;
@@ -3380,10 +3388,12 @@ private:
         case WM_LBUTTONDOWN:
             SetCapture(h);
             dragging_ = true;
+            pressed_ = sizes_;
             return 0;
         case WM_LBUTTONUP:
             ReleaseCapture();
             dragging_ = false;
+            if (sizes_ != pressed_ && moved_) moved_();
             return 0;
         case WM_MOUSEMOVE:
         {
@@ -3447,6 +3457,8 @@ private:
     std::vector<long> sizes_, placed_;
     RECT rect_{};
     bool dragging_ = false;
+    std::vector<long> pressed_;  // the sizes when the drag began
+    std::function<void()> moved_;
 };
 
 // -- scroll -------------------------------------------------------------------
@@ -4117,6 +4129,17 @@ public:
                 (mi.rcWork.bottom - mi.rcWork.top) / s};
     }
     bool fullscreen() const override { return fullscreen_; }
+    // Snapped (Aero Snap) shows as a size other than the restored one.
+    bool maximized() const override
+    {
+        if (IsZoomed(hwnd_)) return true;
+        WINDOWPLACEMENT wp{sizeof wp};
+        RECT r;
+        if (fullscreen_ || IsIconic(hwnd_) || !GetWindowPlacement(hwnd_, &wp) || !GetWindowRect(hwnd_, &r))
+            return false;
+        const RECT& n = wp.rcNormalPosition;
+        return r.right - r.left != n.right - n.left || r.bottom - r.top != n.bottom - n.top;
+    }
     void set_fullscreen(bool on) override
     {
         if (on == fullscreen_) return;
@@ -4286,9 +4309,19 @@ private:
     }
     static void take_snapshot()
     {
-        window_impl* w = last_shown();
         const char* path = std::getenv("RAPPORT_SNAPSHOT");
-        if (!w || !path) return;
+        if (!path) return;
+        save_last_shown(path);
+        PostQuitMessage(0);
+    }
+
+public:
+    // The window shown last, as drawn now, to a PNG.
+    static bool save_last_shown(const std::string& path)
+    {
+        window_impl* w = last_shown();
+        if (!w) return false;
+        bool ok = false;
         RECT r;
         GetWindowRect(w->hwnd_, &r);
         const int width = r.right - r.left, height = r.bottom - r.top;
@@ -4317,17 +4350,17 @@ private:
                 frame->SetSize(UINT(width), UINT(height));
                 WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
                 frame->SetPixelFormat(&fmt);
-                frame->WritePixels(UINT(height), UINT(width) * 4, UINT(width * height * 4), px);
-                frame->Commit();
-                enc->Commit();
+                ok = SUCCEEDED(frame->WritePixels(UINT(height), UINT(width) * 4, UINT(width * height * 4), px)) &&
+                     SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit());
             }
         }
         DeleteObject(bmp);
         DeleteDC(dc);
         ReleaseDC(nullptr, screen);
-        std::fprintf(stderr, "snapshot %s: %dx%d\n", path, width, height);
-        PostQuitMessage(0);
+        return ok;
     }
+
+private:
 
     static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     {
@@ -4945,6 +4978,8 @@ public:
         SetClipboardData(CF_UNICODETEXT, mem);
         CloseClipboard();
     }
+
+    bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
 
     void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels, size_t stride) override
     {

@@ -406,6 +406,8 @@ public:
     virtual void set_visible(bool) = 0;
     virtual void set_tooltip(const std::string&) = 0;
     virtual void focus() = 0;
+    // True while it, or a control inside it, has the keyboard focus.
+    virtual bool has_focus() const = 0;
 };
 
 class label : public widget
@@ -640,6 +642,9 @@ public:
     // before the window first shows, it replaces the stretch-based layout.
     virtual std::vector<float> sizes() const = 0;
     virtual void set_sizes(const std::vector<float>&) = 0;
+    // A divider dragged by the user, once the drag ends; not layout, the
+    // window resizing or set_sizes(). For saving a size the user chose.
+    virtual void on_moved(std::function<void()>) = 0;
 };
 
 class tabs : public widget
@@ -806,6 +811,9 @@ public:
     virtual rect_f work_area() const = 0;
 
     virtual bool fullscreen() const = 0;
+    // Maximized, or tiled (snapped to half the screen) where the platform
+    // says so: a size the user gave it, which an app shouldn't resize.
+    virtual bool maximized() const = 0;
     virtual void set_fullscreen(bool) = 0;
     virtual void on_fullscreen_changed(std::function<void(bool)>) = 0;
     virtual void set_icon(const icon&) = 0;

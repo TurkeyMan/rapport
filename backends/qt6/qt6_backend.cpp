@@ -523,6 +523,11 @@ public:
     }
     void set_tooltip(const std::string& t) override { w_->setToolTip(qs(t)); }
     void focus() override { w_->setFocus(Qt::OtherFocusReason); }
+    bool has_focus() const override
+    {
+        const QWidget* f = QApplication::focusWidget();
+        return f && (f == w_ || w_->isAncestorOf(f));
+    }
     QWidget* widget() const { return w_; }
 
 protected:
@@ -1006,7 +1011,32 @@ public:
                  }
                  return false;
              });
-        QObject::connect(s, &QSplitter::splitterMoved, s, [this] { wanted_.reset(); });
+        // Only a drag moves a handle (set_sizes doesn't): it's reported when
+        // the button comes up.
+        QObject::connect(s, &QSplitter::splitterMoved, s,
+                         [this]
+                         {
+                             wanted_.reset();
+                             dragged_ = true;
+                         });
+    }
+
+    void on_moved(std::function<void()> f) override
+    {
+        const bool first = !moved_;
+        moved_ = std::move(f);
+        if (!first) return;
+        for (int i = 1; i < splitter()->count(); ++i)  // handle(0) is never shown
+            hook(splitter()->handle(i),
+                 [this](QEvent* e)
+                 {
+                     if (e->type() == QEvent::MouseButtonRelease && dragged_)
+                     {
+                         dragged_ = false;
+                         if (moved_) moved_();
+                     }
+                     return false;
+                 });
     }
 
     std::vector<float> sizes() const override
@@ -1093,6 +1123,8 @@ private:
 
     std::vector<int> stretch_;
     std::optional<std::vector<float>> wanted_;
+    std::function<void()> moved_;
+    bool dragged_ = false;
     std::optional<std::vector<float>> pending_;
     bool laid_out_ = false;
 };
@@ -2852,6 +2884,7 @@ public:
     }
 
     bool fullscreen() const override { return frame_->isFullScreen(); }
+    bool maximized() const override { return frame_->isMaximized(); }
     void set_fullscreen(bool on) override
     {
         if (on == frame_->isFullScreen()) return;
@@ -2951,6 +2984,13 @@ public:
         return on_key_(ev);
     }
 
+    // The window shown last, as drawn now, to a PNG.
+    static bool save_last_shown(const std::string& path)
+    {
+        QWidget* w = last_shown();
+        return w && w->grab().save(qs(path));
+    }
+
 private:
     // Development aid: RAPPORT_SNAPSHOT=file.png saves the window shown last,
     // RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears, then quits.
@@ -2971,8 +3011,7 @@ private:
         QTimer::singleShot(delay ? std::atoi(delay) : 500, qApp,
                            []
                            {
-                               if (QWidget* w = last_shown())
-                                   w->grab().save(qs(std::getenv("RAPPORT_SNAPSHOT")));
+                               save_last_shown(std::getenv("RAPPORT_SNAPSHOT"));
                                QCoreApplication::exit(0);
                            });
     }
@@ -3684,6 +3723,8 @@ public:
         dlg->setWindowModality(parent ? Qt::WindowModal : Qt::ApplicationModal);
         dlg->show();
     }
+
+    bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
 
     void set_clipboard(const std::string& s) override
     {

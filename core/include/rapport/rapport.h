@@ -78,6 +78,7 @@ public:
     {
         backend_->set_clipboard_image(width, height, format, pixels, stride);
     }
+    bool save_snapshot(const std::string& png_path) { return backend_->save_snapshot(png_path); }
 
     std::unique_ptr<image> create_image(int width, int height, pixel_format format,
                                        const uint8_t* pixels, size_t stride)

@@ -783,6 +783,42 @@ public:
     {
     }
 
+    // GtkPaned reports a drag no differently from layout, so a drag is a
+    // press and release on a divider with the position changed in between,
+    // seen in the capture phase before the paned's own gesture takes them.
+    void on_moved(std::function<void()> f) override
+    {
+        const bool first = !moved_;
+        moved_ = std::move(f);
+        if (!first) return;
+        for (GtkWidget* w = w_; w;)
+        {
+            GtkEventController* watch = gtk_event_controller_legacy_new();
+            gtk_event_controller_set_propagation_phase(watch, GTK_PHASE_CAPTURE);
+            connect(
+                watch, "event",
+                +[](GtkEventControllerLegacy*, GdkEvent* e, gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<splitter_impl*>(p);
+                    const GdkEventType type = gdk_event_get_event_type(e);
+                    if (type == GDK_BUTTON_PRESS)
+                        self->pressed_ = self->sizes();
+                    else if (type == GDK_BUTTON_RELEASE)
+                    {
+                        if (!self->pressed_.empty() && self->sizes() != self->pressed_ &&
+                            self->moved_)
+                            self->moved_();
+                        self->pressed_.clear();
+                    }
+                    return false;
+                },
+                this);
+            gtk_widget_add_controller(w, watch);
+            GtkWidget* next = gtk_paned_get_end_child(GTK_PANED(w));
+            w = next && g_object_get_data(G_OBJECT(next), "rapport-split-chain") ? next : nullptr;
+        }
+    }
+
     std::vector<float> sizes() const override
     {
         bool vertical =
@@ -825,6 +861,9 @@ public:
     }
 
 private:
+    std::function<void()> moved_;
+    std::vector<float> pressed_;  // the sizes when a button went down on it
+
     static void place_divider(GtkPaned* p, int position)
     {
         gtk_paned_set_position(p, position);
@@ -1939,6 +1978,26 @@ public:
         static GMainLoop* loop = nullptr;
         return loop;
     }
+    // The window shown last, as GTK last drew it, rendered to a PNG.
+    static bool save_last_shown(const std::string& path)
+    {
+        GtkWidget* win = last_shown();
+        if (!win) return false;
+        bool ok = false;
+        GdkPaintable* paintable = gtk_widget_paintable_new(win);
+        GtkSnapshot* snap = gtk_snapshot_new();
+        gdk_paintable_snapshot(paintable, snap, gtk_widget_get_width(win), gtk_widget_get_height(win));
+        if (GskRenderNode* node = gtk_snapshot_free_to_node(snap))
+        {
+            GskRenderer* renderer = gtk_native_get_renderer(GTK_NATIVE(win));
+            GdkTexture* tex = gsk_renderer_render_texture(renderer, node, nullptr);
+            ok = gdk_texture_save_to_png(tex, path.c_str());
+            g_object_unref(tex);
+            gsk_render_node_unref(node);
+        }
+        g_object_unref(paintable);
+        return ok;
+    }
     void snapshot_if_asked()
     {
         last_shown() = win_;
@@ -1951,23 +2010,7 @@ public:
             delay ? guint(std::atoi(delay)) : 500u,
             +[](gpointer) -> gboolean
             {
-                if (GtkWidget* win = last_shown())
-                {
-                    // The window as GTK last drew it, rendered to a texture.
-                    GdkPaintable* paintable = gtk_widget_paintable_new(win);
-                    GtkSnapshot* snap = gtk_snapshot_new();
-                    gdk_paintable_snapshot(paintable, snap, gtk_widget_get_width(win),
-                                           gtk_widget_get_height(win));
-                    if (GskRenderNode* node = gtk_snapshot_free_to_node(snap))
-                    {
-                        GskRenderer* renderer = gtk_native_get_renderer(GTK_NATIVE(win));
-                        GdkTexture* tex = gsk_renderer_render_texture(renderer, node, nullptr);
-                        gdk_texture_save_to_png(tex, std::getenv("RAPPORT_SNAPSHOT"));
-                        g_object_unref(tex);
-                        gsk_render_node_unref(node);
-                    }
-                    g_object_unref(paintable);
-                }
+                save_last_shown(std::getenv("RAPPORT_SNAPSHOT"));
                 if (main_loop()) g_main_loop_quit(main_loop());
                 return G_SOURCE_REMOVE;
             },
@@ -2050,6 +2093,13 @@ public:
         return without_windows_taskbar({float(r.x), float(r.y), float(r.width), float(r.height)});
     }
     bool fullscreen() const override { return gtk_window_is_fullscreen(GTK_WINDOW(win_)); }
+    bool maximized() const override
+    {
+        if (gtk_window_is_maximized(GTK_WINDOW(win_))) return true;
+        GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(win_));
+        return surface && GDK_IS_TOPLEVEL(surface) &&
+               (gdk_toplevel_get_state(GDK_TOPLEVEL(surface)) & GDK_TOPLEVEL_STATE_TILED);
+    }
     void set_fullscreen(bool on) override
     {
         if (on)
@@ -2853,6 +2903,8 @@ public:
     }
 
     // TODO(tortilla): a GdkTexture on the clipboard.
+    bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
+
     void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels,
                              size_t stride) override
     {
