@@ -1521,6 +1521,28 @@ public:
         return out;
     }
 
+    std::vector<size_t> column_order() const override
+    {
+        std::vector<size_t> out;
+        GList* shown = gtk_tree_view_get_columns(GTK_TREE_VIEW(w_));
+        for (GList* l = shown; l; l = l->next)
+            if (auto it = std::ranges::find(cols_, GTK_TREE_VIEW_COLUMN(l->data));
+                it != cols_.end())
+                out.push_back(size_t(it - cols_.begin()));
+        g_list_free(shown);
+        return out;
+    }
+    void set_column_order(const std::vector<size_t>& order) override
+    {
+        if (!is_column_order(order, cols_.size())) return;
+        GtkTreeViewColumn* prev = nullptr;
+        for (size_t i : order)
+        {
+            gtk_tree_view_move_column_after(GTK_TREE_VIEW(w_), cols_[i], prev);
+            prev = cols_[i];
+        }
+    }
+
     void set_column_widths(const std::vector<float>& widths) override
     {
         for (size_t i = 0; i < widths.size() && i < cols_.size(); ++i)
@@ -1712,6 +1734,7 @@ private:
                 ctx.get());
         }
         gtk_tree_view_column_set_visible(col, c.visible);
+        gtk_tree_view_column_set_reorderable(col, true);  // column_order()
         gtk_tree_view_append_column(GTK_TREE_VIEW(w_), col);
         cols_.push_back(col);
 

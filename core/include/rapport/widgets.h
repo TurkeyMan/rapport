@@ -584,6 +584,11 @@ public:
     virtual void set_column_widths(const std::vector<float>&) = 0;
     virtual bool column_visible(size_t column) const = 0;
     virtual void set_column_visible(size_t column, bool) = 0;
+    // The columns in display order, as indices into the declared columns, for
+    // saving state: users reorder them by dragging the headers. An order that
+    // isn't a permutation of all the columns is ignored.
+    virtual std::vector<size_t> column_order() const = 0;
+    virtual void set_column_order(const std::vector<size_t>&) = 0;
 
     virtual void on_selection_changed(std::function<void()>) = 0;
     virtual void on_activate(std::function<void(size_t row)>) = 0;  // double-click / enter

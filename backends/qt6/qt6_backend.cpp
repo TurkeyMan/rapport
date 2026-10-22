@@ -1807,7 +1807,7 @@ public:
 
         QHeaderView* h = view_->header();
         h->setStretchLastSection(false);
-        h->setSectionsMovable(false);
+        h->setSectionsMovable(true);  // the user's column order: column_order()
         h->setMinimumSectionSize(8);
         h->setSectionResizeMode(QHeaderView::Interactive);
         h->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -1923,6 +1923,21 @@ public:
         for (size_t i = 0; i < cols_.size(); ++i)
             out.push_back(float(view_->header()->sectionSize(int(i))));
         return out;
+    }
+
+    std::vector<size_t> column_order() const override
+    {
+        std::vector<size_t> out;
+        for (int v = 0; v < int(cols_.size()); ++v)
+            out.push_back(size_t(view_->header()->logicalIndex(v)));
+        return out;
+    }
+    void set_column_order(const std::vector<size_t>& order) override
+    {
+        if (!is_column_order(order, cols_.size())) return;
+        QHeaderView* h = view_->header();
+        for (size_t v = 0; v < order.size(); ++v)
+            h->moveSection(h->visualIndex(int(order[v])), int(v));
     }
 
     void set_column_widths(const std::vector<float>& widths) override

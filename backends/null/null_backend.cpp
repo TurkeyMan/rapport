@@ -140,6 +140,9 @@ public:
     void set_column_widths(const std::vector<float>&) override {}
     bool column_visible(size_t) const override { return true; }
     void set_column_visible(size_t, bool) override {}
+    std::vector<size_t> column_order() const override { return order_; }
+    void set_column_order(const std::vector<size_t>& order) override { order_ = order; }
+    std::vector<size_t> order_;
     void on_selection_changed(std::function<void()>) override {}
     void on_activate(std::function<void(size_t)>) override {}
     void on_sort_requested(std::function<void(size_t, sort_order)>) override {}

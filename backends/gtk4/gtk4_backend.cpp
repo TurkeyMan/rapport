@@ -1152,6 +1152,27 @@ public:
         return out;
     }
 
+    std::vector<size_t> column_order() const override
+    {
+        std::vector<size_t> out;
+        GListModel* shown = gtk_column_view_get_columns(GTK_COLUMN_VIEW(w_));
+        for (guint i = 0; i < g_list_model_get_n_items(shown); ++i)
+        {
+            auto* c = static_cast<GtkColumnViewColumn*>(g_list_model_get_item(shown, i));
+            if (auto it = std::ranges::find(cols_, c); it != cols_.end())
+                out.push_back(size_t(it - cols_.begin()));
+            g_object_unref(c);
+        }
+        return out;
+    }
+    void set_column_order(const std::vector<size_t>& order) override
+    {
+        if (!is_column_order(order, cols_.size())) return;
+        // Inserting a column the view already has moves it.
+        for (size_t pos = 0; pos < order.size(); ++pos)
+            gtk_column_view_insert_column(GTK_COLUMN_VIEW(w_), guint(pos), cols_[order[pos]]);
+    }
+
     void set_column_widths(const std::vector<float>& widths) override
     {
         for (size_t i = 0; i < widths.size() && i < cols_.size(); ++i)
@@ -1450,6 +1471,7 @@ private:
         }
         gtk_column_view_column_set_visible(col, c.visible);
         gtk_column_view_append_column(GTK_COLUMN_VIEW(w_), col);
+        gtk_column_view_set_reorderable(GTK_COLUMN_VIEW(w_), true);  // column_order()
         cols_.push_back(col);
         g_object_unref(col);
     }

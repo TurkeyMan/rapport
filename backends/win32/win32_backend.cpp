@@ -2072,6 +2072,19 @@ public:
             out.push_back((visible_[i] ? ListView_GetColumnWidth(h_, int(i)) : widths_[i]) / win_.scale());
         return out;
     }
+    std::vector<size_t> column_order() const override
+    {
+        std::vector<int> order(columns_.size());
+        ListView_GetColumnOrderArray(h_, int(order.size()), order.data());
+        return {order.begin(), order.end()};
+    }
+    void set_column_order(const std::vector<size_t>& order) override
+    {
+        if (!is_column_order(order, columns_.size())) return;
+        std::vector<int> o(order.begin(), order.end());
+        ListView_SetColumnOrderArray(h_, int(o.size()), o.data());
+        InvalidateRect(h_, nullptr, FALSE);
+    }
     void set_column_widths(const std::vector<float>& w) override
     {
         for (size_t i = 0; i < w.size() && i < columns_.size(); ++i)
