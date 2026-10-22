@@ -9,6 +9,8 @@
 #include <gtk/gtk.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -609,6 +611,34 @@ public:
 private:
     std::vector<std::pair<std::string, GtkTextTag*>> tags_;
 };
+
+// Running under WSL, where WSLg shows the windows on the Windows desktop:
+// the monitor GDK reports is the whole desktop (it doesn't know the Windows
+// taskbar), and its Wayland can't place windows.
+inline bool underWsl()
+{
+    static const bool wsl = []
+    {
+        if (std::getenv("WSL_DISTRO_NAME")) return true;
+        char buf[256] = {};
+        if (FILE* f = std::fopen("/proc/sys/kernel/osrelease", "r"))
+        {
+            const size_t n = std::fread(buf, 1, sizeof buf - 1, f);
+            buf[n] = 0;
+            std::fclose(f);
+        }
+        return std::strstr(buf, "microsoft") || std::strstr(buf, "Microsoft");
+    }();
+    return wsl;
+}
+
+// What WSLg leaves out of the work area: Windows' taskbar along the bottom,
+// at Windows 11's height, which covers Windows 10's.
+inline RectF withoutWindowsTaskbar(RectF area)
+{
+    if (underWsl()) area.h = std::max(0.f, area.h - 48);
+    return area;
+}
 
 // The anyui key for a GDK keyval (the same in GTK 3 and 4).
 inline Key keyFor(guint keyval)

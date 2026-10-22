@@ -2573,7 +2573,35 @@ public:
     }
     void resize(SizeF s) override
     {
-        gtk_window_resize(GTK_WINDOW(win_), std::max(1, int(s.w)), std::max(1, int(s.h)));
+        int w = std::max(1, int(s.w)), h = std::max(1, int(s.h));
+        int x = 0, y = 0;
+        const bool place = frameOnScreen(w, h, x, y);
+        gtk_window_resize(GTK_WINDOW(win_), w, h);
+        if (place) gtk_window_move(GTK_WINDOW(win_), x, y);
+    }
+    // Keeps the whole frame (title bar, shadows) in the work area: the size
+    // shrinks to fit, and the position slides back inside, as on win32.
+    // Only where windows can be placed (X11), once shown.
+    bool frameOnScreen(int& w, int& h, int& x, int& y) const
+    {
+        GdkWindow* gw = gtk_widget_get_window(win_);
+        if (!placeable() || !gw || !gtk_widget_get_visible(win_)) return false;
+        GdkRectangle frame;
+        gdk_window_get_frame_extents(gw, &frame);
+        int cw = 0, ch = 0, px = 0, py = 0;
+        gtk_window_get_size(GTK_WINDOW(win_), &cw, &ch);
+        gtk_window_get_position(GTK_WINDOW(win_), &px, &py);
+        const int extraW = std::max(0, frame.width - cw), extraH = std::max(0, frame.height - ch);
+        const RectF wa = workArea();
+        if (wa.w <= 0 || wa.h <= 0) return false;
+        w = std::max(1, std::min(w, int(wa.w) - extraW));
+        h = std::max(1, std::min(h, int(wa.h) - extraH));
+        int fx = frame.x, fy = frame.y;
+        fx = std::max(int(wa.x), std::min(fx, int(wa.x + wa.w) - (w + extraW)));
+        fy = std::max(int(wa.y), std::min(fy, int(wa.y + wa.h) - (h + extraH)));
+        x = px + (fx - frame.x);
+        y = py + (fy - frame.y);
+        return true;
     }
     void setMinSize(SizeF s) override
     {
@@ -2591,7 +2619,11 @@ public:
     }
     void move(PointF p) override
     {
-        if (placeable()) gtk_window_move(GTK_WINDOW(win_), int(p.x), int(p.y));
+        if (!placeable()) return;
+        gtk_window_move(GTK_WINDOW(win_), int(p.x), int(p.y));
+        int w = 0, h = 0, x = 0, y = 0;
+        gtk_window_get_size(GTK_WINDOW(win_), &w, &h);
+        if (frameOnScreen(w, h, x, y)) gtk_window_move(GTK_WINDOW(win_), x, y);
     }
     RectF workArea() const override
     {
@@ -2603,7 +2635,7 @@ public:
         if (!m) return {};
         GdkRectangle r;
         gdk_monitor_get_workarea(m, &r);
-        return {float(r.x), float(r.y), float(r.width), float(r.height)};
+        return withoutWindowsTaskbar({float(r.x), float(r.y), float(r.width), float(r.height)});
     }
 
     bool fullscreen() const override { return fullscreen_; }
@@ -3295,6 +3327,9 @@ class Gtk3Backend : public Backend
 public:
     static Backend* create(int* argc, char** argv)
     {
+        // Under WSLg, Wayland gives an app no window positions, so nothing
+        // could keep a window on screen; its X server does.
+        if (underWsl() && !std::getenv("GDK_BACKEND")) gdk_set_allowed_backends("x11,*");
         if (!gtk_init_check(argc, &argv)) return nullptr;
         initMetrics();
         return new Gtk3Backend;

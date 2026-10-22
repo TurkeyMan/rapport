@@ -1847,21 +1847,41 @@ public:
     }
     void resize(SizeF s) override
     {
-        gtk_window_set_default_size(GTK_WINDOW(win_), int(s.w), int(s.h));
+        // GTK 4 can't place windows, but at least the frame fits the work
+        // area (its shadows are what the surface has beyond the window).
+        int w = int(s.w), h = int(s.h);
+        const RectF wa = workArea();
+        if (GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(win_)); surface && wa.w > 0 && wa.h > 0)
+        {
+            const int extraW = std::max(0, gdk_surface_get_width(surface) - gtk_widget_get_width(win_));
+            const int extraH = std::max(0, gdk_surface_get_height(surface) - gtk_widget_get_height(win_));
+            w = std::min(w, int(wa.w) - extraW);
+            h = std::min(h, int(wa.h) - extraH);
+        }
+        gtk_window_set_default_size(GTK_WINDOW(win_), std::max(1, w), std::max(1, h));
     }
     void setMinSize(SizeF s) override { gtk_widget_set_size_request(win_, int(s.w), int(s.h)); }
     std::optional<PointF> position() const override { return std::nullopt; }  // GTK 4: never
     void move(PointF) override {}
     RectF workArea() const override
     {
+        // GTK 4 has no work area: the monitor's geometry, less what WSLg
+        // can't see (the Windows taskbar).
         GdkDisplay* d = gtk_widget_get_display(win_);
-        GListModel* monitors = gdk_display_get_monitors(d);
-        auto* m = GDK_MONITOR(g_list_model_get_item(monitors, 0));
-        if (!m) return {};
-        GdkRectangle r;
-        gdk_monitor_get_geometry(m, &r);
-        g_object_unref(m);
-        return {float(r.x), float(r.y), float(r.width), float(r.height)};
+        GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(win_));
+        GdkMonitor* m = surface ? gdk_display_get_monitor_at_surface(d, surface) : nullptr;
+        GdkRectangle r{};
+        if (m)
+            gdk_monitor_get_geometry(m, &r);
+        else
+        {
+            GListModel* monitors = gdk_display_get_monitors(d);
+            auto* first = GDK_MONITOR(g_list_model_get_item(monitors, 0));
+            if (!first) return {};
+            gdk_monitor_get_geometry(first, &r);
+            g_object_unref(first);
+        }
+        return withoutWindowsTaskbar({float(r.x), float(r.y), float(r.width), float(r.height)});
     }
     bool fullscreen() const override { return gtk_window_is_fullscreen(GTK_WINDOW(win_)); }
     void setFullscreen(bool on) override
