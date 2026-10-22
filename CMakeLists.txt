@@ -8,6 +8,7 @@
 #   backends/qt6/     libanyui-qt6            (Depends: libanyui, Qt 6 Widgets)
 #   backends/null/    not packaged; headless backend for tests
 #   backends/gtk-common/  shared source compiled into both GTK backends
+#   backends/common/      shared source for any backend (drawn icons)
 cmake_minimum_required(VERSION 3.25)
 project(anyui VERSION 0.1 LANGUAGES CXX)
 

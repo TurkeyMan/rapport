@@ -7,6 +7,8 @@
 #include "anyui/backend.h"
 #include "qt_painter.h"
 
+#include "builtin_icons.h"
+
 #include <QAbstractTableModel>
 #include <QAction>
 #include <QActionGroup>
@@ -70,6 +72,7 @@
 #include <cstring>
 #include <map>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 
 namespace anyui::qt6
@@ -404,7 +407,22 @@ QIcon drawnIcon(const std::function<void(Painter&, SizeF)>& draw, int size, cons
 QIcon toQIcon(const Icon& icon, int size, const QWidget* w)
 {
     if (!icon.name.empty())
+    {
         if (QIcon named = themeIcon(icon.name); !named.isNull()) return named;
+        // The theme may lack it (WSL's has no view-fullscreen or edit-copy).
+        // Lists ask per cell per paint, so each is drawn once.
+        static std::map<std::tuple<std::string, int, qreal>, QIcon> drawn;
+        const qreal dpr = w ? w->devicePixelRatioF() : qApp->devicePixelRatio();
+        auto [it, added] = drawn.try_emplace({icon.name, size, dpr});
+        if (added)
+        {
+            bool known = false;
+            QIcon i = drawnIcon([&](Painter& p, SizeF s) { known = common::drawBuiltinIcon(icon.name, p, s); },
+                                size, w);
+            if (known) it->second = i;
+        }
+        if (!it->second.isNull()) return it->second;
+    }
     if (!icon.file.empty()) return fileTypeIcon(icon.file);
     if (icon.draw) return drawnIcon(icon.draw, size, w);
     return {};
@@ -1368,7 +1386,8 @@ protected:
     void paintEvent(QPaintEvent*) override;
     void resizeEvent(QResizeEvent*) override;
     void mousePressEvent(QMouseEvent* e) override { press(e); }
-    void mouseDoubleClickEvent(QMouseEvent* e) override { press(e); }  // Qt's second press of a double click
+    // Qt's second press of a double click.
+    void mouseDoubleClickEvent(QMouseEvent* e) override { press(e); }
     void mouseReleaseEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void enterEvent(QEnterEvent* e) override;

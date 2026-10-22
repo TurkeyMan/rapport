@@ -26,6 +26,7 @@ else()
 endif()
 add_library(anyui::backend_qt6 ALIAS anyui_qt6)
 target_link_libraries(anyui_qt6 PRIVATE anyui::headers Qt6::Widgets)
+target_include_directories(anyui_qt6 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 set_target_properties(anyui_qt6 PROPERTIES
     PREFIX ""
     CXX_VISIBILITY_PRESET hidden
