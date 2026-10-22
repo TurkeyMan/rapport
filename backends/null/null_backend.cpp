@@ -15,106 +15,106 @@ namespace
 {
 
 template <class Base>
-class Stub : public Base
+class stub : public Base
 {
 public:
-    void setEnabled(bool) override {}
-    void setVisible(bool) override {}
-    void setTooltip(const std::string&) override {}
+    void set_enabled(bool) override {}
+    void set_visible(bool) override {}
+    void set_tooltip(const std::string&) override {}
     void focus() override {}
 };
 
-class NLabel : public Stub<rap::Label>
+class null_label : public stub<rap::label>
 {
 public:
-    void setText(const std::string&) override {}
+    void set_text(const std::string&) override {}
 };
 
-class NButton : public Stub<rap::Button>
+class null_button : public stub<rap::button>
 {
 public:
-    void setText(const std::string&) override {}
-    void setIcon(const Icon&) override {}
-    void onClick(std::function<void()> f) override { click = std::move(f); }
+    void set_text(const std::string&) override {}
+    void set_icon(const icon&) override {}
+    void on_click(std::function<void()> f) override { click = std::move(f); }
     std::function<void()> click;
 };
 
-class NCheck : public Stub<rap::Check>
+class null_check : public stub<rap::check>
 {
 public:
-    bool checked() const override { return value == CheckState::Checked; }
-    void setChecked(bool v) override { value = v ? CheckState::Checked : CheckState::Unchecked; }
-    CheckState state() const override { return value; }
-    void setState(CheckState s) override { value = s; }
-    void onToggled(std::function<void(bool)>) override {}
-    CheckState value = CheckState::Unchecked;
+    bool checked() const override { return value == check_state::checked; }
+    void set_checked(bool v) override { value = v ? check_state::checked : check_state::unchecked; }
+    check_state state() const override { return value; }
+    void set_state(check_state s) override { value = s; }
+    void on_toggled(std::function<void(bool)>) override {}
+    check_state value = check_state::unchecked;
 };
 
-class NMenuButton : public Stub<rap::MenuButton>
+class null_menu_button : public stub<rap::menu_button>
 {
 public:
-    void setText(const std::string&) override {}
-    void setIcon(const Icon&) override {}
-    void setPushed(bool) override {}
-    void onMenu(std::function<Menu()>) override {}
+    void set_text(const std::string&) override {}
+    void set_icon(const icon&) override {}
+    void set_pushed(bool) override {}
+    void on_menu(std::function<menu()>) override {}
 };
 
-class NProgressBar : public Stub<rap::ProgressBar>
+class null_progress_bar : public stub<rap::progress_bar>
 {
 public:
-    void setFraction(float) override {}
+    void set_fraction(float) override {}
     void pulse() override {}
 };
 
-class NDatePicker : public Stub<rap::DatePicker>
+class null_date_picker : public stub<rap::date_picker>
 {
 public:
-    Date date() const override { return value; }
-    void setDate(Date d) override { value = d; }
-    void onChanged(std::function<void(Date)>) override {}
-    Date value;
+    rap::date date() const override { return value; }
+    void set_date(rap::date d) override { value = d; }
+    void on_changed(std::function<void(rap::date)>) override {}
+    rap::date value;
 };
 
-class NEntry : public Stub<rap::Entry>
+class null_entry : public stub<rap::entry>
 {
 public:
     std::string text() const override { return value; }
-    void setText(const std::string& t) override { value = t; }
-    void setPlaceholder(const std::string&) override {}
-    void onChanged(std::function<void(const std::string&)>) override {}
-    void onActivate(std::function<void()>) override {}
+    void set_text(const std::string& t) override { value = t; }
+    void set_placeholder(const std::string&) override {}
+    void on_changed(std::function<void(const std::string&)>) override {}
+    void on_activate(std::function<void()>) override {}
     std::string value;
 };
 
-class NSelect : public Stub<rap::Select>
+class null_drop_down : public stub<rap::drop_down>
 {
 public:
-    void setItems(std::vector<std::string>) override {}
+    void set_items(std::vector<std::string>) override {}
     int current() const override { return value; }
-    void setCurrent(int i) override { value = i; }
-    void onChanged(std::function<void(int)>) override {}
+    void set_current(int i) override { value = i; }
+    void on_changed(std::function<void(int)>) override {}
     int value = -1;
 };
 
-class NCombo : public Stub<rap::Combo>
+class null_combo : public stub<rap::combo>
 {
 public:
-    void setItems(std::vector<std::string>) override {}
+    void set_items(std::vector<std::string>) override {}
     std::string text() const override { return value; }
-    void setText(const std::string& t) override { value = t; }
-    void onChanged(std::function<void(const std::string&)>) override {}
-    void onActivate(std::function<void()>) override {}
+    void set_text(const std::string& t) override { value = t; }
+    void on_changed(std::function<void(const std::string&)>) override {}
+    void on_activate(std::function<void()>) override {}
     std::string value;
 };
 
-class NTextView : public Stub<rap::TextView>
+class null_text_view : public stub<rap::text_view>
 {
 public:
     std::string text() const override { return value; }
-    void setText(const std::string& t, std::vector<Span>) override { value = t; }
-    void append(const std::string& t, const TextStyle&) override { value += t; }
-    void setReadOnly(bool) override {}
-    void onChanged(std::function<void()>) override {}
+    void set_text(const std::string& t, std::vector<span>) override { value = t; }
+    void append(const std::string& t, const text_style&) override { value += t; }
+    void set_read_only(bool) override {}
+    void on_changed(std::function<void()>) override {}
     std::pair<size_t, size_t> selection() const override { return selected; }
     void select(size_t begin, size_t end) override
     {
@@ -124,71 +124,71 @@ public:
     std::pair<size_t, size_t> selected{0, 0};
 };
 
-class NList : public Stub<rap::List>
+class null_list : public stub<rap::list>
 {
 public:
-    void setModel(ListModel* m) override { model = m; }
+    void set_model(list_model* m) override { model = m; }
     std::vector<size_t> selection() const override { return {}; }
     std::optional<size_t> current() const override { return {}; }
     void select(const std::vector<size_t>&) override {}
-    void setCurrent(size_t) override {}
-    void scrollTo(size_t) override {}
-    void onCellDrag(CellDrag) override {}
-    void onCellContextMenu(std::function<Menu(size_t, size_t, PointF)>) override {}
-    void setSortIndicator(std::optional<size_t>, SortOrder) override {}
-    std::vector<float> columnWidths() const override { return {}; }
-    void setColumnWidths(const std::vector<float>&) override {}
-    bool columnVisible(size_t) const override { return true; }
-    void setColumnVisible(size_t, bool) override {}
-    void onSelectionChanged(std::function<void()>) override {}
-    void onActivate(std::function<void(size_t)>) override {}
-    void onSortRequested(std::function<void(size_t, SortOrder)>) override {}
-    void onContextMenu(std::function<Menu(std::optional<size_t>)>) override {}
-    void onHeaderMenu(std::function<Menu(size_t)>) override {}
-    void onReorder(ReorderFn) override {}
-    void setReorderable(bool) override {}
-    ListModel* model = nullptr;
+    void set_current(size_t) override {}
+    void scroll_to(size_t) override {}
+    void on_cell_drag(cell_drag) override {}
+    void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)>) override {}
+    void set_sort_indicator(std::optional<size_t>, sort_order) override {}
+    std::vector<float> column_widths() const override { return {}; }
+    void set_column_widths(const std::vector<float>&) override {}
+    bool column_visible(size_t) const override { return true; }
+    void set_column_visible(size_t, bool) override {}
+    void on_selection_changed(std::function<void()>) override {}
+    void on_activate(std::function<void(size_t)>) override {}
+    void on_sort_requested(std::function<void(size_t, sort_order)>) override {}
+    void on_context_menu(std::function<menu(std::optional<size_t>)>) override {}
+    void on_header_menu(std::function<menu(size_t)>) override {}
+    void on_reorder(reorder_fn) override {}
+    void set_reorderable(bool) override {}
+    list_model* model = nullptr;
 };
 
-class NSplitter : public Stub<rap::Splitter>
+class null_splitter : public stub<rap::splitter>
 {
 public:
     std::vector<float> sizes() const override { return {}; }
-    void setSizes(const std::vector<float>&) override {}
+    void set_sizes(const std::vector<float>&) override {}
 };
 
-class NTabs : public Stub<rap::Tabs>
+class null_tabs : public stub<rap::tabs>
 {
 public:
     int current() const override { return current_; }
-    void setCurrent(int i) override
+    void set_current(int i) override
     {
         current_ = i;
         if (i >= 0 && size_t(i) < lazy.size() && lazy[size_t(i)])
         {
             const auto build = std::move(lazy[size_t(i)]);
             lazy[size_t(i)] = nullptr;
-            buildPage(build(), size_t(i));
+            build_page(build(), size_t(i));
         }
     }
-    void onChanged(std::function<void(int)>) override {}
+    void on_changed(std::function<void(int)>) override {}
 
     // Lazy pages: built (and printed) when first made current.
-    std::vector<std::function<Node()>> lazy;
-    std::function<void(const Node&, size_t)> buildPage;
+    std::vector<std::function<node()>> lazy;
+    std::function<void(const node&, size_t)> build_page;
 
 private:
     int current_ = 0;
 };
 
-class NToolButton : public Stub<rap::ToolButton>
+class null_tool_button : public stub<rap::tool_button>
 {
 public:
-    void setIcon(const Icon&) override {}
+    void set_icon(const icon&) override {}
     bool checked() const override { return checked_; }
-    void setChecked(bool c) override { checked_ = c; }
-    void onClick(std::function<void()>) override {}
-    void onToggled(std::function<void(bool)>) override {}
+    void set_checked(bool c) override { checked_ = c; }
+    void on_click(std::function<void()>) override {}
+    void on_toggled(std::function<void(bool)>) override {}
 
 private:
     bool checked_ = false;
@@ -196,49 +196,49 @@ private:
 
 // Slider and Spin: hold the value.
 template <class Base>
-class NValue : public Stub<Base>
+class null_value : public stub<Base>
 {
 public:
     double value() const override { return value_; }
-    void setValue(double v) override { value_ = v; }
-    void setRange(double, double) override {}
-    void onChanged(std::function<void(double)>) override {}
+    void set_value(double v) override { value_ = v; }
+    void set_range(double, double) override {}
+    void on_changed(std::function<void(double)>) override {}
 
 private:
     double value_ = 0;
 };
 
-class NColorButton : public Stub<rap::ColorButton>
+class null_color_button : public stub<rap::color_button>
 {
 public:
-    Color color() const override { return color_; }
-    void setColor(Color c) override { color_ = c; }
-    void onChanged(std::function<void(Color)>) override {}
+    rap::color color() const override { return color_; }
+    void set_color(rap::color c) override { color_ = c; }
+    void on_changed(std::function<void(rap::color)>) override {}
 
 private:
-    Color color_;
+    rap::color color_;
 };
 
-class NCanvas : public Stub<rap::Canvas>
+class null_canvas : public stub<rap::canvas>
 {
 public:
     void invalidate() override {}
-    SizeF size() const override { return {}; }
-    float deviceScale() const override { return 1; }
-    void setCursor(Cursor) override {}
-    void onPaint(std::function<void(Painter&, SizeF)>) override {}
-    void onResize(std::function<void(SizeF)>) override {}
-    void onPointer(std::function<bool(const PointerEvent&)>) override {}
-    void onScroll(std::function<bool(const ScrollEvent&)>) override {}
-    void onKey(std::function<bool(const KeyEvent&)>) override {}
-    Subscription onFrame(std::function<void(double)>) override { return {}; }
+    size_f size() const override { return {}; }
+    float device_scale() const override { return 1; }
+    void set_cursor(cursor) override {}
+    void on_paint(std::function<void(rap::painter&, rap::size_f)>) override {}
+    void on_resize(std::function<void(size_f)>) override {}
+    void on_pointer(std::function<bool(const pointer_event&)>) override {}
+    void on_scroll(std::function<bool(const scroll_event&)>) override {}
+    void on_key(std::function<bool(const key_event&)>) override {}
+    subscription on_frame(std::function<void(double)>) override { return {}; }
 };
 
 // Keeps its size; there is nothing to draw on.
-class NImage : public rap::Image
+class null_image : public rap::image
 {
 public:
-    NImage(int w, int h)
+    null_image(int w, int h)
         : w_(w)
         , h_(h)
     {
@@ -251,78 +251,78 @@ private:
     int w_, h_;
 };
 
-class NWindow : public rap::Window
+class null_window : public rap::window
 {
 public:
-    void setTitle(const std::string&) override {}
+    void set_title(const std::string&) override {}
     void show() override {}
     void close() override {}
-    void onFinished(std::function<void(DialogRole)>) override {}
-    void onCloseRequest(std::function<bool()>) override {}
+    void on_finished(std::function<void(dialog_role)>) override {}
+    void on_close_request(std::function<bool()>) override {}
 
-    SizeF size() const override { return size_; }
-    void resize(SizeF s) override { size_ = s; }
-    void setMinSize(SizeF) override {}
-    std::optional<PointF> position() const override { return std::nullopt; }
-    void move(PointF) override {}
-    RectF workArea() const override { return {0, 0, 1920, 1080}; }
+    size_f size() const override { return size_; }
+    void resize(size_f s) override { size_ = s; }
+    void set_min_size(size_f) override {}
+    std::optional<point_f> position() const override { return std::nullopt; }
+    void move(point_f) override {}
+    rect_f work_area() const override { return {0, 0, 1920, 1080}; }
     bool fullscreen() const override { return fullscreen_; }
-    void setFullscreen(bool on) override { fullscreen_ = on; }
-    void onFullscreenChanged(std::function<void(bool)>) override {}
-    void setIcon(const Icon&) override {}
-    void setMenuBarVisible(bool) override {}
-    void onKey(std::function<bool(const KeyEvent&)>) override {}
+    void set_fullscreen(bool on) override { fullscreen_ = on; }
+    void on_fullscreen_changed(std::function<void(bool)>) override {}
+    void set_icon(const icon&) override {}
+    void set_menu_bar_visible(bool) override {}
+    void on_key(std::function<bool(const key_event&)>) override {}
 
-    std::vector<std::unique_ptr<Widget>> widgets;
+    std::vector<std::unique_ptr<widget>> widgets;
 
 private:
-    SizeF size_{640, 480};
+    size_f size_{640, 480};
     bool fullscreen_ = false;
 };
 
-const char* roleName(DialogRole r)
+const char* role_name(dialog_role r)
 {
     switch (r)
     {
-    case DialogRole::Ok: return "Ok";
-    case DialogRole::Cancel: return "Cancel";
-    case DialogRole::Apply: return "Apply";
-    case DialogRole::Close: return "Close";
-    case DialogRole::Yes: return "Yes";
-    case DialogRole::No: return "No";
-    case DialogRole::Help: return "Help";
-    case DialogRole::Reset: return "Reset";
-    case DialogRole::None: break;
+    case dialog_role::ok: return "Ok";
+    case dialog_role::cancel: return "Cancel";
+    case dialog_role::apply: return "Apply";
+    case dialog_role::close: return "Close";
+    case dialog_role::yes: return "Yes";
+    case dialog_role::no: return "No";
+    case dialog_role::help: return "Help";
+    case dialog_role::reset: return "Reset";
+    case dialog_role::none: break;
     }
     return "None";
 }
 
 // Builds stubs depth-first and prints one line per node.
-class Builder
+class builder
 {
 public:
-    Builder(NWindow& w, BuildSink& sink)
+    builder(null_window& w, build_sink& sink)
         : win_(w)
         , sink_(sink)
     {
     }
 
-    void build(const Node& n, int depth, const std::string& formLabel = {})
+    void build(const node& n, int depth, const std::string& form_label = {})
     {
         std::printf("%*s", depth * 2, "");
-        if (!formLabel.empty()) std::printf("[%s] ", formLabel.c_str());
+        if (!form_label.empty()) std::printf("[%s] ", form_label.c_str());
         std::visit([&](const auto& s) { visit(n, s, depth); }, n.spec);
-        const bool container = std::holds_alternative<spec::Box>(n.spec) ||
-                               std::holds_alternative<spec::Form>(n.spec) ||
-                               std::holds_alternative<spec::Group>(n.spec) ||
-                               std::holds_alternative<spec::Scroll>(n.spec) ||
-                               std::holds_alternative<spec::Toolbar>(n.spec);
-        if (container && n.common.handle) make<Stub<rap::Widget>>(n);
+        const bool container = std::holds_alternative<spec::box>(n.spec) ||
+                               std::holds_alternative<spec::form>(n.spec) ||
+                               std::holds_alternative<spec::group>(n.spec) ||
+                               std::holds_alternative<spec::scroll>(n.spec) ||
+                               std::holds_alternative<spec::toolbar>(n.spec);
+        if (container && n.common.handle) make<stub<rap::widget>>(n);
     }
 
 private:
     template <class W>
-    W* make(const Node& n)
+    W* make(const node& n)
     {
         auto w = std::make_unique<W>();
         W* raw = w.get();
@@ -331,53 +331,53 @@ private:
         return raw;
     }
 
-    void suffix(const Node& n)
+    void suffix(const node& n)
     {
         if (n.common.stretch) std::printf(" stretch=%d", n.common.stretch);
         std::printf("\n");
     }
 
-    void children(const Nodes& ns, int depth)
+    void children(const nodes& ns, int depth)
     {
         for (auto& c : ns) build(c, depth + 1);
     }
 
-    void visit(const Node& n, const spec::Box& s, int d)
+    void visit(const node& n, const spec::box& s, int d)
     {
-        std::printf("%s", s.dir == Orientation::Vertical ? "VBox" : "HBox");
+        std::printf("%s", s.dir == orientation::vertical ? "vbox" : "hbox");
         suffix(n);
         children(s.items, d);
     }
-    void visit(const Node& n, const spec::Form& s, int d)
+    void visit(const node& n, const spec::form& s, int d)
     {
-        std::printf("Form");
+        std::printf("form");
         suffix(n);
         for (size_t i = 0; i < s.fields.size(); ++i) build(s.fields[i], d + 1, s.labels[i]);
     }
-    void visit(const Node& n, const spec::Splitter& s, int d)
+    void visit(const node& n, const spec::splitter& s, int d)
     {
-        std::printf("Splitter %s", s.dir == Orientation::Vertical ? "vertical" : "horizontal");
+        std::printf("splitter %s", s.dir == orientation::vertical ? "vertical" : "horizontal");
         suffix(n);
-        make<NSplitter>(n);
+        make<null_splitter>(n);
         children(s.panes, d);
     }
-    void visit(const Node& n, const spec::Scroll& s, int d)
+    void visit(const node& n, const spec::scroll& s, int d)
     {
-        std::printf("Scroll%s", s.horizontal ? " both" : "");
+        std::printf("scroll%s", s.horizontal ? " both" : "");
         suffix(n);
         children(s.content, d);
     }
-    void visit(const Node& n, const spec::Group& s, int d)
+    void visit(const node& n, const spec::group& s, int d)
     {
-        std::printf("Group \"%s\"", s.title.c_str());
+        std::printf("group \"%s\"", s.title.c_str());
         suffix(n);
         children(s.content, d);
     }
-    void visit(const Node& n, const spec::Tabs& s, int d)
+    void visit(const node& n, const spec::tabs& s, int d)
     {
-        std::printf(s.sidebar ? "Tabs (sidebar)" : "Tabs");
+        std::printf(s.sidebar ? "tabs (sidebar)" : "tabs");
         suffix(n);
-        auto* tabs = make<NTabs>(n);
+        auto* tabs = make<null_tabs>(n);
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             if (i < s.lazy.size() && s.lazy[i])
@@ -388,163 +388,163 @@ private:
         if (!s.lazy.empty())
         {
             tabs->lazy = s.lazy;
-            tabs->buildPage =
-                [&win = win_, &sink = sink_, d, titles = s.titles](const Node& page, size_t i)
-            { Builder(win, sink).build(page, d + 1, titles[i]); };
-            tabs->setCurrent(0);
+            tabs->build_page =
+                [&win = win_, &sink = sink_, d, titles = s.titles](const node& page, size_t i)
+            { builder(win, sink).build(page, d + 1, titles[i]); };
+            tabs->set_current(0);
         }
     }
-    void visit(const Node& n, const spec::Spacer&, int)
+    void visit(const node& n, const spec::spacer&, int)
     {
-        std::printf("Spacer");
+        std::printf("spacer");
         suffix(n);
     }
-    void visit(const Node& n, const spec::Separator&, int)
+    void visit(const node& n, const spec::separator&, int)
     {
-        std::printf("Separator");
+        std::printf("separator");
         suffix(n);
     }
-    void visit(const Node& n, const spec::Label& s, int)
+    void visit(const node& n, const spec::label& s, int)
     {
-        std::printf("Label \"%s\"", s.text.c_str());
+        std::printf("label \"%s\"", s.text.c_str());
         suffix(n);
-        make<NLabel>(n);
+        make<null_label>(n);
     }
-    void visit(const Node& n, const spec::Button& s, int)
+    void visit(const node& n, const spec::button& s, int)
     {
-        std::printf("Button \"%s\"", s.text.c_str());
+        std::printf("button \"%s\"", s.text.c_str());
         suffix(n);
-        make<NButton>(n);
+        make<null_button>(n);
     }
-    void visit(const Node& n, const spec::Check& s, int)
+    void visit(const node& n, const spec::check& s, int)
     {
-        std::printf("Check \"%s\" %s", s.text.c_str(),
-                    s.state == CheckState::Checked         ? "on"
-                    : s.state == CheckState::Indeterminate ? "mixed"
+        std::printf("check \"%s\" %s", s.text.c_str(),
+                    s.state == check_state::checked         ? "on"
+                    : s.state == check_state::indeterminate ? "mixed"
                                                            : "off");
         suffix(n);
-        make<NCheck>(n);
+        make<null_check>(n);
     }
-    void visit(const Node& n, const spec::Entry& s, int)
+    void visit(const node& n, const spec::entry& s, int)
     {
-        std::printf("Entry \"%s\"", s.text.c_str());
+        std::printf("entry \"%s\"", s.text.c_str());
         suffix(n);
-        make<NEntry>(n);
+        make<null_entry>(n);
     }
-    void visit(const Node& n, const spec::Select& s, int)
+    void visit(const node& n, const spec::drop_down& s, int)
     {
-        std::printf("Select (%zu items)", s.items.size());
+        std::printf("drop_down (%zu items)", s.items.size());
         suffix(n);
-        make<NSelect>(n);
+        make<null_drop_down>(n);
     }
-    void visit(const Node& n, const spec::Combo& s, int)
+    void visit(const node& n, const spec::combo& s, int)
     {
-        std::printf("Combo \"%s\" (%zu items)", s.text.c_str(), s.items.size());
+        std::printf("combo \"%s\" (%zu items)", s.text.c_str(), s.items.size());
         suffix(n);
-        make<NCombo>(n);
+        make<null_combo>(n);
     }
-    void visit(const Node& n, const spec::TextView& s, int)
+    void visit(const node& n, const spec::text_view& s, int)
     {
-        std::printf("TextView%s%s", s.readOnly ? " readonly" : "", s.monospace ? " mono" : "");
+        std::printf("text_view%s%s", s.read_only ? " readonly" : "", s.monospace ? " mono" : "");
         suffix(n);
-        make<NTextView>(n);
+        make<null_text_view>(n);
     }
-    void visit(const Node& n, const spec::List& s, int)
+    void visit(const node& n, const spec::list& s, int)
     {
-        std::printf("List [");
+        std::printf("list [");
         for (size_t i = 0; i < s.columns.size(); ++i)
             std::printf("%s%s%s", i ? ", " : "", s.columns[i].title.c_str(),
                         s.columns[i].painted ? "*" : "");
-        std::printf("] rows=%zu", s.model ? s.model->rowCount() : 0);
+        std::printf("] rows=%zu", s.model ? s.model->row_count() : 0);
         suffix(n);
-        make<NList>(n);
+        make<null_list>(n);
     }
-    void visit(const Node& n, const spec::Toolbar& s, int d)
+    void visit(const node& n, const spec::toolbar& s, int d)
     {
-        std::printf("Toolbar");
+        std::printf("toolbar");
         suffix(n);
         children(s.items, d);
     }
-    void visit(const Node& n, const spec::ToolButton& s, int)
+    void visit(const node& n, const spec::tool_button& s, int)
     {
-        std::printf("ToolButton \"%s\"%s", s.label.c_str(), s.toggle ? " toggle" : "");
+        std::printf("tool_button \"%s\"%s", s.label.c_str(), s.toggle ? " toggle" : "");
         suffix(n);
-        make<NToolButton>(n);
+        make<null_tool_button>(n);
     }
-    void visit(const Node& n, const spec::Slider& s, int)
+    void visit(const node& n, const spec::slider& s, int)
     {
-        std::printf("Slider %g..%g = %g", s.min, s.max, s.value);
+        std::printf("slider %g..%g = %g", s.min, s.max, s.value);
         suffix(n);
-        make<NValue<rap::Slider>>(n);
+        make<null_value<rap::slider>>(n);
     }
-    void visit(const Node& n, const spec::Spin& s, int)
+    void visit(const node& n, const spec::spin& s, int)
     {
-        std::printf("Spin %g..%g = %g", s.min, s.max, s.value);
+        std::printf("spin %g..%g = %g", s.min, s.max, s.value);
         suffix(n);
-        make<NValue<rap::Spin>>(n);
+        make<null_value<rap::spin>>(n);
     }
-    void visit(const Node& n, const spec::ColorButton&, int)
+    void visit(const node& n, const spec::color_button&, int)
     {
-        std::printf("ColorButton");
+        std::printf("color_button");
         suffix(n);
-        make<NColorButton>(n);
+        make<null_color_button>(n);
     }
-    void visit(const Node& n, const spec::Canvas& s, int)
+    void visit(const node& n, const spec::canvas& s, int)
     {
-        std::printf("Canvas%s", s.focusable ? " focusable" : "");
+        std::printf("canvas%s", s.focusable ? " focusable" : "");
         suffix(n);
-        make<NCanvas>(n);
+        make<null_canvas>(n);
     }
-    void visit(const Node& n, const spec::MenuButton& s, int)
+    void visit(const node& n, const spec::menu_button& s, int)
     {
-        std::printf("MenuButton \"%s\"", s.text.c_str());
+        std::printf("menu_button \"%s\"", s.text.c_str());
         suffix(n);
-        make<NMenuButton>(n);
+        make<null_menu_button>(n);
     }
-    void visit(const Node& n, const spec::ProgressBar&, int)
+    void visit(const node& n, const spec::progress_bar&, int)
     {
-        std::printf("ProgressBar");
+        std::printf("progress_bar");
         suffix(n);
-        make<NProgressBar>(n);
+        make<null_progress_bar>(n);
     }
-    void visit(const Node& n, const spec::DatePicker& s, int)
+    void visit(const node& n, const spec::date_picker& s, int)
     {
-        std::printf("DatePicker %04d-%02d-%02d", s.date.year, s.date.month, s.date.day);
+        std::printf("date_picker %04d-%02d-%02d", s.date.year, s.date.month, s.date.day);
         suffix(n);
-        make<NDatePicker>(n);
+        make<null_date_picker>(n);
     }
-    void visit(const Node& n, const spec::Buttons& s, int)
+    void visit(const node& n, const spec::buttons& s, int)
     {
-        std::printf("Buttons");
+        std::printf("buttons");
         for (auto& b : s.buttons)
-            std::printf(" %s%s%s%s", roleName(b.role), b.text.empty() ? "" : "(\"", b.text.c_str(),
+            std::printf(" %s%s%s%s", role_name(b.role), b.text.empty() ? "" : "(\"", b.text.c_str(),
                         b.text.empty() ? "" : "\")");
         suffix(n);
         for (auto& b : s.buttons)
         {
-            auto w = std::make_unique<NButton>();
+            auto w = std::make_unique<null_button>();
             sink_.created(b, *w);
             win_.widgets.push_back(std::move(w));
         }
     }
 
-    NWindow& win_;
-    BuildSink& sink_;
+    null_window& win_;
+    build_sink& sink_;
 };
 
-class NullBackend : public Backend
+class null_backend : public backend
 {
 public:
-    static Backend* create(int*, char**) { return new NullBackend; }
+    static backend* create(int*, char**) { return new null_backend; }
 
     std::string_view name() const override { return "null"; }
 
-    std::unique_ptr<rap::Window> createWindow(const WindowSpec& spec, rap::Window*,
-                                                BuildSink& sink) override
+    std::unique_ptr<rap::window> create_window(const window_spec& spec, rap::window*,
+                                                build_sink& sink) override
     {
-        auto w = std::make_unique<NWindow>();
-        std::printf("%s \"%s\"\n", spec.dialog ? "Dialog" : "Window", spec.title.c_str());
-        Builder(*w, sink).build(spec.content, 1);
+        auto w = std::make_unique<null_window>();
+        std::printf("%s \"%s\"\n", spec.dialog ? "dialog" : "window", spec.title.c_str());
+        builder(*w, sink).build(spec.content, 1);
         return w;
     }
 
@@ -577,31 +577,31 @@ public:
         queue_.push_back(std::move(f));
     }
 
-    void message(rap::Window*, const MessageSpec& m,
-                 std::function<void(DialogRole)> done) override
+    void message(rap::window*, const message_spec& m,
+                 std::function<void(dialog_role)> done) override
     {
         std::printf("message: %s: %s\n", m.title.c_str(), m.text.c_str());
-        if (done) done(m.buttons.empty() ? DialogRole::Ok : m.buttons.front());
+        if (done) done(m.buttons.empty() ? dialog_role::ok : m.buttons.front());
     }
 
-    void chooseFiles(rap::Window*, const FileDialogSpec&,
+    void choose_files(rap::window*, const file_dialog_spec&,
                      std::function<void(std::vector<std::string>)> done) override
     {
         if (done) done({});
     }
 
-    void setClipboard(const std::string&) override {}
-    void setClipboardImage(int, int, PixelFormat, const uint8_t*, size_t) override {}
+    void set_clipboard(const std::string&) override {}
+    void set_clipboard_image(int, int, pixel_format, const uint8_t*, size_t) override {}
 
-    std::unique_ptr<rap::Image> createImage(int w, int h, PixelFormat, const uint8_t*,
+    std::unique_ptr<rap::image> create_image(int w, int h, pixel_format, const uint8_t*,
                                               size_t) override
     {
-        return std::make_unique<NImage>(w, h);
+        return std::make_unique<null_image>(w, h);
     }
 
     // No clock here: a timer fires once, as soon as the queue reaches it
     // (repeating ones too, so headless runs terminate).
-    Subscription timer(int, bool, std::function<void()> fn) override
+    subscription timer(int, bool, std::function<void()> fn) override
     {
         auto alive = std::make_shared<bool>(true);
         post(
@@ -609,7 +609,7 @@ public:
             {
                 if (*alive) fn();
             });
-        return Subscription([alive] { *alive = false; });
+        return subscription([alive] { *alive = false; });
     }
 
 private:
@@ -622,4 +622,4 @@ private:
 }  // namespace
 }  // namespace rap::null
 
-RAPPORT_BACKEND_ENTRY(null, rap::null::NullBackend)
+RAPPORT_BACKEND_ENTRY(null, rap::null::null_backend)

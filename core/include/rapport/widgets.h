@@ -2,7 +2,7 @@
 //
 // Backends (rapport_qt.so, rapport_gtk.so, ...) implement these with native
 // widgets. Apps only ever see these abstract types. All calls happen on the
-// UI thread; worker threads hand results back with Backend::post().
+// UI thread; worker threads hand results back with backend::post().
 //
 // Strings are UTF-8. Coordinates and sizes are logical pixels; backends
 // handle device scale.
@@ -24,149 +24,149 @@ namespace rap
 
 // ---------------------------------------------------------------- basics
 
-enum class Orientation
+enum class orientation
 {
-    Horizontal,
-    Vertical
+    horizontal,
+    vertical
 };
-enum class Align
+enum class align
 {
-    Start,
-    Center,
-    End
+    start,
+    center,
+    end
 };
 
-struct PointF
+struct point_f
 {
     float x = 0, y = 0;
 };
-struct SizeF
+struct size_f
 {
     float w = 0, h = 0;
 };
-struct RectF
+struct rect_f
 {
     float x = 0, y = 0, w = 0, h = 0;
 };
 
-struct Color
+struct color
 {
     uint8_t r = 0, g = 0, b = 0, a = 255;
 };
 
 // Colours taken from the desktop theme (portal accent, dark mode, ...).
-enum class ThemeColor
+enum class theme_color
 {
-    Window,
-    WindowText,
-    Base,
-    AlternateBase,
-    Text,
-    PlaceholderText,
-    Highlight,
-    HighlightText,
-    Mid,
-    Accent,
-    Link,
+    window,
+    window_text,
+    base,
+    alternate_base,
+    text,
+    placeholder_text,
+    highlight,
+    highlight_text,
+    mid,
+    accent,
+    link,
     // diff add / remove / context, status pills
-    Positive,
-    Negative,
-    Neutral,
+    positive,
+    negative,
+    neutral,
 };
 
 // Either a fixed colour or a theme role resolved at paint time.
-using Paint = std::variant<ThemeColor, Color>;
+using paint = std::variant<theme_color, color>;
 
-struct TextStyle
+struct text_style
 {
-    std::optional<Paint> fg, bg;
+    std::optional<paint> fg, bg;
     bool bold = false;
     bool italic = false;
     bool monospace = false;
     float size = 0;  // points; 0 = the toolkit's normal size
 };
 
-enum class LineCap
+enum class line_cap
 {
-    Butt,   // ends exactly at the end points
-    Round,  // a half-disc past each end
+    butt,   // ends exactly at the end points
+    round,  // a half-disc past each end
 };
 
 // Semantic size: converted by the backend with real font metrics.
-struct Extent
+struct extent
 {
-    enum class Unit
+    enum class unit
     {
-        Auto,
-        Chars,
-        Lines,
-        Px
+        auto_,
+        chars,
+        lines,
+        px
     };
     float value = 0;
-    Unit unit = Unit::Auto;
+    unit unit = unit::auto_;
 };
 
 inline namespace literals
 {
-constexpr Extent operator""_ch(unsigned long long v)
+constexpr extent operator""_ch(unsigned long long v)
 {
-    return {float(v), Extent::Unit::Chars};
+    return {float(v), extent::unit::chars};
 }
-constexpr Extent operator""_lines(unsigned long long v)
+constexpr extent operator""_lines(unsigned long long v)
 {
-    return {float(v), Extent::Unit::Lines};
+    return {float(v), extent::unit::lines};
 }
-constexpr Extent operator""_px(unsigned long long v)
+constexpr extent operator""_px(unsigned long long v)
 {
-    return {float(v), Extent::Unit::Px};
+    return {float(v), extent::unit::px};
 }
 }  // namespace literals
 
 // ---------------------------------------------------------------- menus
 
-struct MenuItem
+struct menu_item
 {
     // "_" marks the access key ("_Copy"); write "__" for a literal underscore
     // (escape user text such as branch names). Empty label and no children
     // = separator.
     std::string label;
     std::function<void()> action;
-    std::vector<MenuItem> children;  // non-empty = submenu
+    std::vector<menu_item> children;  // non-empty = submenu
     std::string shortcut;            // display hint, e.g. "Ctrl+C"
     bool enabled = true;
     std::optional<bool> checked;  // set = checkable item
     bool radio = false;           // a checkable item drawn as one of a group
 
-    static MenuItem separator() { return {}; }
-    bool isSeparator() const { return label.empty() && children.empty(); }
+    static menu_item separator() { return {}; }
+    bool is_separator() const { return label.empty() && children.empty(); }
 };
-using Menu = std::vector<MenuItem>;
+using menu = std::vector<menu_item>;
 
 // One menu of a window's menu bar: "_File", and its items, built each time
 // it opens so they can show the app's current state.
-struct MenuBarItem
+struct menu_bar_item
 {
-    std::string title;  // '_' marks the access key, as in MenuItem::label
-    std::function<Menu()> menu;
+    std::string title;  // '_' marks the access key, as in menu_item::label
+    std::function<rap::menu()> menu;
 };
 
 // ---------------------------------------------------------------- subscriptions
 
 // Keeps a callback registered (a timer, a per-frame callback) for as long as
 // it lives; destroying or reset()ting it cancels. Move-only.
-class Subscription
+class subscription
 {
 public:
-    Subscription() = default;
-    explicit Subscription(std::function<void()> cancel)
+    subscription() = default;
+    explicit subscription(std::function<void()> cancel)
         : cancel_(std::move(cancel))
     {
     }
-    Subscription(Subscription&& o) noexcept
+    subscription(subscription&& o) noexcept
         : cancel_(std::exchange(o.cancel_, nullptr))
     {
     }
-    Subscription& operator=(Subscription&& o) noexcept
+    subscription& operator=(subscription&& o) noexcept
     {
         if (this != &o)
         {
@@ -175,9 +175,9 @@ public:
         }
         return *this;
     }
-    Subscription(const Subscription&) = delete;
-    Subscription& operator=(const Subscription&) = delete;
-    ~Subscription() { reset(); }
+    subscription(const subscription&) = delete;
+    subscription& operator=(const subscription&) = delete;
+    ~subscription() { reset(); }
 
     void reset()
     {
@@ -194,25 +194,25 @@ private:
 // Pixel layouts an Image can be created from. Bgra8Premultiplied (bytes
 // B,G,R,A; colour premultiplied by alpha) is what Cairo, Direct2D, GDK and
 // Qt (ARGB32_Premultiplied) draw natively, so it uploads without conversion.
-enum class PixelFormat
+enum class pixel_format
 {
-    Bgra8Premultiplied,
-    Rgba8,  // straight alpha; converted on upload
+    bgra8_premultiplied,
+    rgba8,  // straight alpha; converted on upload
 };
 
-enum class Filter
+enum class filter
 {
-    Nearest,  // hard pixel edges (zoomed-in inspection)
-    Linear,   // smooth
+    nearest,  // hard pixel edges (zoomed-in inspection)
+    linear,   // smooth
 };
 
 // Pixels uploaded to the backend once and drawn many times with
-// Painter::image (a cairo surface, GdkTexture, QImage, D2D bitmap).
-// Created by Ui::createImage; usable from the UI thread only.
-class Image
+// painter::image (a cairo surface, GdkTexture, QImage, D2D bitmap).
+// Created by ui::create_image; usable from the UI thread only.
+class image
 {
 public:
-    virtual ~Image() = default;
+    virtual ~image() = default;
     virtual int width() const = 0;
     virtual int height() const = 0;
     // Replace all pixels (same size and format as created).
@@ -224,53 +224,53 @@ public:
 // Tiny drawing API for custom-painted list cells (commit graph, ref pills)
 // and Canvas widgets. Origin is the cell's / canvas's top-left corner, in
 // logical pixels. Maps to QPainter / Cairo / GtkSnapshot / Direct2D.
-class Painter
+class painter
 {
 public:
-    virtual ~Painter() = default;
+    virtual ~painter() = default;
 
-    virtual Color resolve(const Paint&) const = 0;
+    virtual color resolve(const paint&) const = 0;
 
-    virtual void line(PointF a, PointF b, const Paint&, float width = 1,
-                      LineCap cap = LineCap::Butt) = 0;
-    virtual void curve(PointF a, PointF c1, PointF c2, PointF b, const Paint&,
+    virtual void line(point_f a, point_f b, const paint&, float width = 1,
+                      line_cap cap = line_cap::butt) = 0;
+    virtual void curve(point_f a, point_f c1, point_f c2, point_f b, const paint&,
                        float width = 1) = 0;  // cubic bezier
-    virtual void circle(PointF centre, float radius, std::optional<Paint> fill,
-                        std::optional<Paint> stroke) = 0;
-    virtual void rect(RectF, float cornerRadius, std::optional<Paint> fill,
-                      std::optional<Paint> stroke) = 0;
+    virtual void circle(point_f centre, float radius, std::optional<paint> fill,
+                        std::optional<paint> stroke) = 0;
+    virtual void rect(rect_f, float corner_radius, std::optional<paint> fill,
+                      std::optional<paint> stroke) = 0;
     // Closed polygon (a play triangle, an arrow head).
-    virtual void polygon(const std::vector<PointF>& points, std::optional<Paint> fill,
-                         std::optional<Paint> stroke, float width = 1) = 0;
+    virtual void polygon(const std::vector<point_f>& points, std::optional<paint> fill,
+                         std::optional<paint> stroke, float width = 1) = 0;
     // Circular arc, angles in radians clockwise from 3 o'clock.
-    virtual void arc(PointF centre, float radius, float start, float end, const Paint&,
-                     float width = 1, LineCap cap = LineCap::Butt) = 0;
+    virtual void arc(point_f centre, float radius, float start, float end, const paint&,
+                     float width = 1, line_cap cap = line_cap::butt) = 0;
     // Draws `src` (in image pixels) into `dst` (logical pixels), scaled with
-    // `filter`. For 1:1 device pixels, make dst = src size / deviceScale().
-    virtual void image(const Image&, RectF src, RectF dst, Filter = Filter::Linear,
+    // `filter`. For 1:1 device pixels, make dst = src size / device_scale().
+    virtual void image(const rap::image&, rect_f src, rect_f dst, filter = filter::linear,
                        float alpha = 1) = 0;
     // Device pixels per logical pixel (2 on a 200% display).
-    virtual float deviceScale() const = 0;
+    virtual float device_scale() const = 0;
     // Restrict drawing to `r` until the matching pop (nestable).
-    virtual void pushClip(RectF r) = 0;
-    virtual void popClip() = 0;
+    virtual void push_clip(rect_f r) = 0;
+    virtual void pop_clip() = 0;
     // Draws text with its top-left at `at`, clipped to the cell.
-    virtual void text(PointF at, const std::string&, const TextStyle&) = 0;
-    virtual SizeF measure(const std::string&, const TextStyle&) const = 0;
+    virtual void text(point_f at, const std::string&, const text_style&) = 0;
+    virtual size_f measure(const std::string&, const text_style&) const = 0;
 };
 
 // Device-pixel snapping for crisp painting at any scale: boxes and bars on
 // whole device pixels, thin strokes centred so their edges fall on pixels.
 // Everything stays in logical pixels; only the rounding uses the scale.
-//     PixelGrid g(painter);
+//     pixel_grid g(painter);
 //     p.rect({g.snap(x), g.snap(y), g.size(w), g.size(h)}, ...);
-//     float y = g.stroke(lineY, 1); p.line({x0, y}, {x1, y}, c, g.strokeWidth(1));
-struct PixelGrid
+//     float y = g.stroke(lineY, 1); p.line({x0, y}, {x1, y}, c, g.stroke_width(1));
+struct pixel_grid
 {
     float k;  // device pixels per logical pixel
 
-    explicit PixelGrid(const Painter& p)
-        : k(std::max(1.f, p.deviceScale()))
+    explicit pixel_grid(const painter& p)
+        : k(std::max(1.f, p.device_scale()))
     {
     }
 
@@ -284,12 +284,12 @@ struct PixelGrid
         int w = std::max(1, int(std::round(width * k)));
         return (w % 2 ? std::floor(v * k) + 0.5f : std::round(v * k)) / k;
     }
-    float strokeWidth(float width) const { return std::max(1.f, std::round(width * k)) / k; }
+    float stroke_width(float width) const { return std::max(1.f, std::round(width * k)) / k; }
 };
 
-struct CellInfo
+struct cell_info
 {
-    SizeF size;
+    size_f size;
     bool selected = false;
     bool focused = false;
 };
@@ -299,266 +299,266 @@ struct CellInfo
 // An icon for a button or toolbar item: a named theme icon, an app-drawn
 // one, or both (the drawing is the fallback where the name isn't found,
 // and is always used where there is no icon theme, e.g. Win32).
-struct Icon
+struct icon
 {
     // freedesktop icon name, e.g. "go-up", "document-save".
     std::string name;
     // The desktop's icon for this kind of file, as its file manager shows
-    // it (forFile). Only the name matters (its extension or MIME type); the
+    // it (for_file). Only the name matters (its extension or MIME type); the
     // file needn't exist. A name ending in '/' is a folder.
     std::string file;
     // Draws the icon into `size` (logical px) on a Painter with the right
-    // deviceScale. Draw with theme colours (ThemeColor::WindowText) so it
+    // device_scale. Draw with theme colours (theme_color::window_text) so it
     // follows dark mode; backends redraw it when the theme or scale changes.
-    std::function<void(Painter&, SizeF)> draw;
+    std::function<void(rap::painter&, rap::size_f)> draw;
 
-    static Icon named(std::string n) { return {std::move(n), {}, {}}; }
-    static Icon forFile(std::string fileName) { return {{}, std::move(fileName), {}}; }
-    static Icon drawn(std::function<void(Painter&, SizeF)> f) { return {{}, {}, std::move(f)}; }
+    static icon named(std::string n) { return {std::move(n), {}, {}}; }
+    static icon for_file(std::string file_name) { return {{}, std::move(file_name), {}}; }
+    static icon drawn(std::function<void(rap::painter&, rap::size_f)> f) { return {{}, {}, std::move(f)}; }
     explicit operator bool() const { return !name.empty() || !file.empty() || bool(draw); }
 };
 
 // ---------------------------------------------------------------- list model
 
-class ListObserver
+class list_observer
 {
 public:
-    virtual ~ListObserver() = default;
-    virtual void modelReset() = 0;
-    virtual void rowsChanged(size_t first, size_t count) = 0;
-    virtual void rowsInserted(size_t first, size_t count) = 0;
-    virtual void rowsRemoved(size_t first, size_t count) = 0;
+    virtual ~list_observer() = default;
+    virtual void model_reset() = 0;
+    virtual void rows_changed(size_t first, size_t count) = 0;
+    virtual void rows_inserted(size_t first, size_t count) = 0;
+    virtual void rows_removed(size_t first, size_t count) = 0;
 };
 
 // Virtual list model: the view pulls only what is visible.
 // Rows have uniform height so backends can use fixed-height fast paths.
-class ListModel
+class list_model
 {
 public:
-    virtual ~ListModel() = default;
+    virtual ~list_model() = default;
 
-    virtual size_t rowCount() const = 0;
+    virtual size_t row_count() const = 0;
     virtual std::string text(size_t row, size_t column) const = 0;
     // A background (bg) colours the whole cell, except on selected rows.
-    virtual TextStyle style(size_t /*row*/, size_t /*column*/) const { return {}; }
+    virtual text_style style(size_t /*row*/, size_t /*column*/) const { return {}; }
     // A small icon before a text cell's text (a file's type); painted cells
     // ignore it.
-    virtual Icon icon(size_t /*row*/, size_t /*column*/) const { return {}; }
+    virtual rap::icon icon(size_t /*row*/, size_t /*column*/) const { return {}; }
     // Called for columns declared `painted`; text() is still used for
     // accessibility, type-ahead and copy.
-    virtual void paint(size_t /*row*/, size_t /*column*/, Painter&, const CellInfo&) const {}
+    virtual void paint(size_t /*row*/, size_t /*column*/, painter&, const cell_info&) const {}
 
-    void addObserver(ListObserver* o) { observers_.push_back(o); }
-    void removeObserver(ListObserver* o) { std::erase(observers_, o); }
+    void add_observer(list_observer* o) { observers_.push_back(o); }
+    void remove_observer(list_observer* o) { std::erase(observers_, o); }
 
 protected:
-    void notifyReset()
+    void notify_reset()
     {
-        for (auto* o : observers_) o->modelReset();
+        for (auto* o : observers_) o->model_reset();
     }
-    void notifyChanged(size_t first, size_t n)
+    void notify_changed(size_t first, size_t n)
     {
-        for (auto* o : observers_) o->rowsChanged(first, n);
+        for (auto* o : observers_) o->rows_changed(first, n);
     }
-    void notifyInserted(size_t first, size_t n)
+    void notify_inserted(size_t first, size_t n)
     {
-        for (auto* o : observers_) o->rowsInserted(first, n);
+        for (auto* o : observers_) o->rows_inserted(first, n);
     }
-    void notifyRemoved(size_t first, size_t n)
+    void notify_removed(size_t first, size_t n)
     {
-        for (auto* o : observers_) o->rowsRemoved(first, n);
+        for (auto* o : observers_) o->rows_removed(first, n);
     }
 
 private:
-    std::vector<ListObserver*> observers_;
+    std::vector<list_observer*> observers_;
 };
 
-struct Column
+struct column
 {
     std::string title;
-    Extent width;          // initial width; Auto = fit header
+    extent width;          // initial width; auto_ = fit header
     bool stretch = false;  // takes spare width
-    bool painted = false;  // drawn through ListModel::paint
+    bool painted = false;  // drawn through list_model::paint
     bool sortable = false;
     bool visible = true;  // hidden columns can be shown from a header menu
-    Align align = Align::Start;
+    rap::align align = rap::align::start;
 };
 
-enum class SelectionMode
+enum class selection_mode
 {
-    None,
-    Single,
-    Multi
+    none,
+    single,
+    multi
 };
-enum class SortOrder
+enum class sort_order
 {
-    Ascending,
-    Descending
+    ascending,
+    descending
 };
 
 // ---------------------------------------------------------------- widgets
 
-class Widget
+class widget
 {
 public:
-    virtual ~Widget() = default;
-    virtual void setEnabled(bool) = 0;
-    virtual void setVisible(bool) = 0;
-    virtual void setTooltip(const std::string&) = 0;
+    virtual ~widget() = default;
+    virtual void set_enabled(bool) = 0;
+    virtual void set_visible(bool) = 0;
+    virtual void set_tooltip(const std::string&) = 0;
     virtual void focus() = 0;
 };
 
-class Label : public Widget
+class label : public widget
 {
 public:
-    virtual void setText(const std::string&) = 0;
+    virtual void set_text(const std::string&) = 0;
 };
 
-class Button : public Widget
+class button : public widget
 {
 public:
-    virtual void setText(const std::string&) = 0;
-    virtual void setIcon(const Icon&) = 0;
-    virtual void onClick(std::function<void()>) = 0;
+    virtual void set_text(const std::string&) = 0;
+    virtual void set_icon(const icon&) = 0;
+    virtual void on_click(std::function<void()>) = 0;
 };
 
 // Toolbar item: icon (and/or label) button, optionally a toggle.
-class ToolButton : public Widget
+class tool_button : public widget
 {
 public:
-    virtual void setIcon(const Icon&) = 0;
+    virtual void set_icon(const icon&) = 0;
     virtual bool checked() const = 0;   // toggles only
-    virtual void setChecked(bool) = 0;  // doesn't fire onToggled
-    virtual void onClick(std::function<void()>) = 0;
-    virtual void onToggled(std::function<void(bool)>) = 0;
+    virtual void set_checked(bool) = 0;  // doesn't fire on_toggled
+    virtual void on_click(std::function<void()>) = 0;
+    virtual void on_toggled(std::function<void(bool)>) = 0;
 };
 
 // A value on a continuous range: horizontal track with a knob.
-class Slider : public Widget
+class slider : public widget
 {
 public:
     virtual double value() const = 0;
-    virtual void setValue(double) = 0;  // doesn't fire onChanged
-    virtual void setRange(double min, double max) = 0;
-    virtual void onChanged(std::function<void(double)>) = 0;
+    virtual void set_value(double) = 0;  // doesn't fire on_changed
+    virtual void set_range(double min, double max) = 0;
+    virtual void on_changed(std::function<void(double)>) = 0;
 };
 
 // A number with up/down steppers.
-class Spin : public Widget
+class spin : public widget
 {
 public:
     virtual double value() const = 0;
-    virtual void setValue(double) = 0;  // doesn't fire onChanged
-    virtual void setRange(double min, double max) = 0;
-    virtual void onChanged(std::function<void(double)>) = 0;
+    virtual void set_value(double) = 0;  // doesn't fire on_changed
+    virtual void set_range(double min, double max) = 0;
+    virtual void on_changed(std::function<void(double)>) = 0;
 };
 
 // Shows a colour; clicking opens the platform's colour chooser.
-class ColorButton : public Widget
+class color_button : public widget
 {
 public:
-    virtual Color color() const = 0;
-    virtual void setColor(Color) = 0;  // doesn't fire onChanged
-    virtual void onChanged(std::function<void(Color)>) = 0;
+    virtual rap::color color() const = 0;
+    virtual void set_color(rap::color) = 0;  // doesn't fire on_changed
+    virtual void on_changed(std::function<void(rap::color)>) = 0;
 };
 
-enum class CheckState
+enum class check_state
 {
-    Unchecked,
-    Checked,
-    Indeterminate,  // the "mixed" mark; set by the app, clicks only toggle on/off
+    unchecked,
+    checked,
+    indeterminate,  // the "mixed" mark; set by the app, clicks only toggle on/off
 };
 
-class Check : public Widget
+class check : public widget
 {
 public:
-    virtual bool checked() const = 0;  // false while Indeterminate
-    virtual void setChecked(bool) = 0;
-    virtual CheckState state() const = 0;
-    virtual void setState(CheckState) = 0;
-    virtual void onToggled(std::function<void(bool)>) = 0;  // user clicks only
+    virtual bool checked() const = 0;  // false while indeterminate
+    virtual void set_checked(bool) = 0;
+    virtual check_state state() const = 0;
+    virtual void set_state(check_state) = 0;
+    virtual void on_toggled(std::function<void(bool)>) = 0;  // user clicks only
 };
 
 // Button that drops down a menu below itself (TortoiseGit's "Walk
 // Behavior" and "View"), with a drop-down arrow.
-class MenuButton : public Widget
+class menu_button : public widget
 {
 public:
-    virtual void setText(const std::string&) = 0;
-    virtual void setIcon(const Icon&) = 0;  // before the text (a magnifier, an arrow)
+    virtual void set_text(const std::string&) = 0;
+    virtual void set_icon(const icon&) = 0;  // before the text (a magnifier, an arrow)
     // Drawn pressed while true, e.g. while any of its options is active.
-    virtual void setPushed(bool) = 0;
+    virtual void set_pushed(bool) = 0;
     // Called each time the menu opens, so check marks are current.
-    virtual void onMenu(std::function<Menu()>) = 0;
+    virtual void on_menu(std::function<menu()>) = 0;
 };
 
-class ProgressBar : public Widget
+class progress_bar : public widget
 {
 public:
-    virtual void setFraction(float) = 0;  // 0..1
+    virtual void set_fraction(float) = 0;  // 0..1
     virtual void pulse() = 0;             // activity of unknown length
 };
 
-struct Date
+struct date
 {
     int year = 1970, month = 1, day = 1;  // month and day are 1-based
-    auto operator<=>(const Date&) const = default;
+    auto operator<=>(const date&) const = default;
 };
 
-class DatePicker : public Widget
+class date_picker : public widget
 {
 public:
-    virtual Date date() const = 0;
-    virtual void setDate(Date) = 0;
-    virtual void onChanged(std::function<void(Date)>) = 0;  // user changes only
+    virtual rap::date date() const = 0;
+    virtual void set_date(rap::date) = 0;
+    virtual void on_changed(std::function<void(rap::date)>) = 0;  // user changes only
 };
 
 // Single-line text entry.
-class Entry : public Widget
+class entry : public widget
 {
 public:
     virtual std::string text() const = 0;
-    virtual void setText(const std::string&) = 0;
-    virtual void setPlaceholder(const std::string&) = 0;
-    virtual void onChanged(std::function<void(const std::string&)>) = 0;
-    virtual void onActivate(std::function<void()>) = 0;  // Enter pressed
+    virtual void set_text(const std::string&) = 0;
+    virtual void set_placeholder(const std::string&) = 0;
+    virtual void on_changed(std::function<void(const std::string&)>) = 0;
+    virtual void on_activate(std::function<void()>) = 0;  // Enter pressed
 };
 
 // Drop-down with a fixed set of choices (QComboBox / GtkDropDown).
-class Select : public Widget
+class drop_down : public widget
 {
 public:
-    virtual void setItems(std::vector<std::string>) = 0;
+    virtual void set_items(std::vector<std::string>) = 0;
     virtual int current() const = 0;  // -1 = none
-    virtual void setCurrent(int) = 0;
-    virtual void onChanged(std::function<void(int)>) = 0;
+    virtual void set_current(int) = 0;
+    virtual void on_changed(std::function<void(int)>) = 0;
 };
 
 // Editable drop-down: free text plus suggestions.
-class Combo : public Widget
+class combo : public widget
 {
 public:
-    virtual void setItems(std::vector<std::string>) = 0;
+    virtual void set_items(std::vector<std::string>) = 0;
     virtual std::string text() const = 0;
-    virtual void setText(const std::string&) = 0;
-    virtual void onChanged(std::function<void(const std::string&)>) = 0;
-    virtual void onActivate(std::function<void()>) = 0;
+    virtual void set_text(const std::string&) = 0;
+    virtual void on_changed(std::function<void(const std::string&)>) = 0;
+    virtual void on_activate(std::function<void()>) = 0;
 };
 
 // Multi-line text: read-only with styled spans (diffs, details) or editable.
-class TextView : public Widget
+class text_view : public widget
 {
 public:
-    struct Span
+    struct span
     {
         size_t begin, end;  // byte offsets into the text
-        TextStyle style;
+        text_style style;
     };
     virtual std::string text() const = 0;
-    virtual void setText(const std::string&, std::vector<Span> spans = {}) = 0;
-    virtual void append(const std::string&, const TextStyle& = {}) = 0;
-    virtual void setReadOnly(bool) = 0;
-    virtual void onChanged(std::function<void()>) = 0;
+    virtual void set_text(const std::string&, std::vector<span> spans = {}) = 0;
+    virtual void append(const std::string&, const text_style& = {}) = 0;
+    virtual void set_read_only(bool) = 0;
+    virtual void on_changed(std::function<void()>) = 0;
     // The selected range as byte offsets [begin, end) into text(), like
     // Span's; begin == end is the caret.
     virtual std::pair<size_t, size_t> selection() const = 0;
@@ -566,115 +566,116 @@ public:
     virtual void select(size_t begin, size_t end) = 0;
 };
 
-class List : public Widget
+class list : public widget
 {
 public:
-    virtual void setModel(ListModel*) = 0;              // not owned; must outlive the list
+    virtual void set_model(list_model*) = 0;              // not owned; must outlive the list
     virtual std::vector<size_t> selection() const = 0;  // ascending
     virtual std::optional<size_t> current() const = 0;
     virtual void select(const std::vector<size_t>& rows) = 0;
-    virtual void setCurrent(size_t row) = 0;
-    virtual void scrollTo(size_t row) = 0;
+    virtual void set_current(size_t row) = 0;
+    virtual void scroll_to(size_t row) = 0;
 
     // The model is virtual, so sorting is the app's job: the list reports
     // header clicks and shows the indicator it is told to.
-    virtual void setSortIndicator(std::optional<size_t> column, SortOrder) = 0;
+    virtual void set_sort_indicator(std::optional<size_t> column, sort_order) = 0;
 
-    virtual std::vector<float> columnWidths() const = 0;  // for saving state
-    virtual void setColumnWidths(const std::vector<float>&) = 0;
-    virtual bool columnVisible(size_t column) const = 0;
-    virtual void setColumnVisible(size_t column, bool) = 0;
+    virtual std::vector<float> column_widths() const = 0;  // for saving state
+    virtual void set_column_widths(const std::vector<float>&) = 0;
+    virtual bool column_visible(size_t column) const = 0;
+    virtual void set_column_visible(size_t column, bool) = 0;
 
-    virtual void onSelectionChanged(std::function<void()>) = 0;
-    virtual void onActivate(std::function<void(size_t row)>) = 0;  // double-click / Enter
-    virtual void onSortRequested(std::function<void(size_t column, SortOrder)>) = 0;
+    virtual void on_selection_changed(std::function<void()>) = 0;
+    virtual void on_activate(std::function<void(size_t row)>) = 0;  // double-click / enter
+    virtual void on_sort_requested(std::function<void(size_t column, sort_order)>) = 0;
     // Right-click / menu key; return an empty menu for none.
-    virtual void onContextMenu(std::function<Menu(std::optional<size_t> row)>) = 0;
+    virtual void on_context_menu(std::function<menu(std::optional<size_t> row)>) = 0;
     // Right-click on a column header (e.g. a menu of columns to show).
-    virtual void onHeaderMenu(std::function<Menu(size_t column)>) = 0;
+    virtual void on_header_menu(std::function<menu(size_t column)>) = 0;
     // A context menu that also knows where a right-click on a row landed:
     // its column and the point in that cell (a label within it), as
-    // CellDrag::begin gets them. When set, right-clicks on rows use it; the
-    // menu key and clicks outside the rows still use onContextMenu.
-    virtual void onCellContextMenu(std::function<Menu(size_t row, size_t column, PointF inCell)>) = 0;
+    // cell_drag::begin gets them. When set, right-clicks on rows use it; the
+    // menu key and clicks outside the rows still use on_context_menu.
+    virtual void on_cell_context_menu(std::function<menu(size_t row, size_t column, point_f in_cell)>) = 0;
 
     // Drag-reordering. With a handler set, the user can drag the selected
     // rows to a new place. `destination` is the row they go in front of, in
-    // the order before the move (rowCount() = the end). The app moves its
+    // the order before the move (row_count() = the end). The app moves its
     // data and sets the new selection; return false to refuse the drop.
-    using ReorderFn = std::function<bool(const std::vector<size_t>& rows, size_t destination)>;
-    virtual void onReorder(ReorderFn) = 0;
-    virtual void setReorderable(bool) = 0;  // on once onReorder is set
+    using reorder_fn = std::function<bool(const std::vector<size_t>& rows, size_t destination)>;
+    virtual void on_reorder(reorder_fn) = 0;
+    virtual void set_reorderable(bool) = 0;  // on once on_reorder is set
 
     // Dragging something out of a cell (not the row itself) onto another
     // row: a branch label onto a commit. `begin` decides from where a press
     // landed whether a drag starts there; past the drag threshold the label
-    // follows the pointer, rows `canDrop` accepts highlight, and a release
+    // follows the pointer, rows `can_drop` accepts highlight, and a release
     // over one calls `drop`. Esc, or a release anywhere else, cancels. A
-    // press `begin` declines works as usual (selection, onReorder).
-    struct CellDragStart
+    // press `begin` declines works as usual (selection, on_reorder).
+    struct cell_drag_start
     {
         std::string label;  // shown under the pointer
-        std::string data;   // the app's own: handed back to canDrop and drop
+        std::string data;   // the app's own: handed back to can_drop and drop
     };
-    struct CellDrag
+    struct cell_drag
     {
-        std::function<std::optional<CellDragStart>(size_t row, size_t column, PointF inCell)> begin;
-        std::function<bool(size_t from, size_t to, const std::string& data)> canDrop;
+        std::function<std::optional<cell_drag_start>(size_t row, size_t column, point_f in_cell)> begin;
+        std::function<bool(size_t from, size_t to, const std::string& data)> can_drop;
         std::function<void(size_t from, size_t to, const std::string& data)> drop;
     };
-    virtual void onCellDrag(CellDrag) = 0;
+    virtual void on_cell_drag(cell_drag) = 0;
 };
 
 // Draggable divider between panes.
-class Splitter : public Widget
+class splitter : public widget
 {
 public:
     // One size per pane along the split, in logical pixels, for saving
-    // layout. setSizes() restores them (sizes of 0 are left alone); called
+    // layout. set_sizes() restores them (sizes of 0 are left alone); called
     // before the window first shows, it replaces the stretch-based layout.
     virtual std::vector<float> sizes() const = 0;
-    virtual void setSizes(const std::vector<float>&) = 0;
+    virtual void set_sizes(const std::vector<float>&) = 0;
 };
 
-class Tabs : public Widget
+class tabs : public widget
 {
 public:
     virtual int current() const = 0;
-    virtual void setCurrent(int) = 0;
-    virtual void onChanged(std::function<void(int)>) = 0;
+    virtual void set_current(int) = 0;
+    virtual void on_changed(std::function<void(int)>) = 0;
 };
 
 // ---------------------------------------------------------------- canvas
 
-enum Modifier : unsigned
+enum modifier : unsigned
 {
-    ModShift = 1,
-    ModCtrl = 2,
-    ModAlt = 4,
-    ModMeta = 8,  // Super / Windows / Command
+    mod_shift = 1,
+    mod_ctrl = 2,
+    mod_alt = 4,
+    mod_meta = 8,  // Super / Windows / Command
 };
 
-struct PointerEvent
+enum class pointer_event_type
 {
-    enum class Type
-    {
-        Press,
-        Release,
-        Move,
-        Enter,
-        Leave,
-    };
-    Type type = Type::Move;
-    PointF pos;      // logical pixels, canvas-relative
+    press,
+    release,
+    move,
+    enter,
+    leave,
+};
+
+struct pointer_event
+{
+    pointer_event_type type = pointer_event_type::move;
+    point_f pos;      // logical pixels, canvas-relative
     int button = 0;  // Press/Release: 1 left, 2 middle, 3 right, 4/5 back/forward
     int clicks = 1;  // Press: 2 for the second press of a double click
     unsigned modifiers = 0;
 };
 
-struct ScrollEvent
+struct scroll_event
 {
-    PointF pos;
+    point_f pos;
     // Wheel notches (+1 = one notch down/right), or pixel-precise deltas
     // from a touchpad when `precise` is set.
     float dx = 0, dy = 0;
@@ -682,142 +683,142 @@ struct ScrollEvent
     unsigned modifiers = 0;
 };
 
-// Keys that have no text. Others arrive as Key::Character with `codepoint`.
-enum class Key
+// Keys that have no text. Others arrive as key::character with `codepoint`.
+enum class key
 {
-    Character,
-    Escape,
-    Enter,
-    Tab,
-    Backspace,
-    Delete,
-    Insert,
-    Space,
-    Left,
-    Right,
-    Up,
-    Down,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    F1,
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
-    F9,
-    F10,
-    F11,
-    F12,
-    Other,
+    character,
+    escape,
+    enter,
+    tab,
+    backspace,
+    delete_,
+    insert,
+    space,
+    left,
+    right,
+    up,
+    down,
+    home,
+    end,
+    page_up,
+    page_down,
+    f1,
+    f2,
+    f3,
+    f4,
+    f5,
+    f6,
+    f7,
+    f8,
+    f9,
+    f10,
+    f11,
+    f12,
+    other,
 };
 
-struct KeyEvent
+struct key_event
 {
     bool press = true;  // false: release
-    Key key = Key::Other;
-    char32_t codepoint = 0;  // Key::Character: lowercase/unshifted where it has one
+    rap::key key = rap::key::other;
+    char32_t codepoint = 0;  // key::character: lowercase/unshifted where it has one
     unsigned modifiers = 0;
     bool repeat = false;
 };
 
-enum class Cursor
+enum class cursor
 {
-    Default,
-    Pointer,  // a link / clickable thing
-    Text,
-    Crosshair,
-    Grab,
-    Grabbing,
-    ZoomIn,
-    ZoomOut,
-    Move,
-    Wait,
-    Hidden,
+    default_,
+    pointer,  // a link / clickable thing
+    text,
+    crosshair,
+    grab,
+    grabbing,
+    zoom_in,
+    zoom_out,
+    move,
+    wait,
+    hidden,
 };
 
 // A surface the app draws itself (an image view, a chart). Everything else
 // in a window should stay a native widget.
-class Canvas : public Widget
+class canvas : public widget
 {
 public:
     virtual void invalidate() = 0;  // repaint soon
-    virtual SizeF size() const = 0;
-    virtual float deviceScale() const = 0;
-    virtual void setCursor(Cursor) = 0;
+    virtual size_f size() const = 0;
+    virtual float device_scale() const = 0;
+    virtual void set_cursor(cursor) = 0;
 
     // Paint handler: draws the whole canvas.
-    virtual void onPaint(std::function<void(Painter&, SizeF)>) = 0;
+    virtual void on_paint(std::function<void(rap::painter&, rap::size_f)>) = 0;
     // Size changed, or the device scale did (moved to another monitor).
-    virtual void onResize(std::function<void(SizeF)>) = 0;
+    virtual void on_resize(std::function<void(size_f)>) = 0;
     // Input handlers return true when they used the event.
-    virtual void onPointer(std::function<bool(const PointerEvent&)>) = 0;
-    virtual void onScroll(std::function<bool(const ScrollEvent&)>) = 0;
-    virtual void onKey(std::function<bool(const KeyEvent&)>) = 0;
+    virtual void on_pointer(std::function<bool(const pointer_event&)>) = 0;
+    virtual void on_scroll(std::function<bool(const scroll_event&)>) = 0;
+    virtual void on_key(std::function<bool(const key_event&)>) = 0;
 
     // Called once per displayed frame (paced by the display) with the frame
     // time in seconds, until the subscription is dropped. For animation.
-    [[nodiscard]] virtual Subscription onFrame(std::function<void(double)>) = 0;
+    [[nodiscard]] virtual subscription on_frame(std::function<void(double)>) = 0;
 };
 
 // ---------------------------------------------------------------- windows
 
-enum class DialogRole
+enum class dialog_role
 {
-    None,
-    Ok,
-    Cancel,
-    Apply,
-    Close,
-    Yes,
-    No,
-    Help,
-    Reset
+    none,
+    ok,
+    cancel,
+    apply,
+    close,
+    yes,
+    no,
+    help,
+    reset
 };
 
-class Window
+class window
 {
 public:
-    virtual ~Window() = default;  // destroys all widgets in the window
-    virtual void setTitle(const std::string&) = 0;
+    virtual ~window() = default;  // destroys all widgets in the window
+    virtual void set_title(const std::string&) = 0;
     virtual void show() = 0;
     virtual void close() = 0;
 
     // Size of the window's content in logical px, and resizing it.
-    virtual SizeF size() const = 0;
-    virtual void resize(SizeF) = 0;
-    virtual void setMinSize(SizeF) = 0;
+    virtual size_f size() const = 0;
+    virtual void resize(size_f) = 0;
+    virtual void set_min_size(size_f) = 0;
     // Position in logical px of the frame's top-left. Where the platform
     // doesn't let apps place windows (Wayland), move() does nothing and
     // position() is unknown (nullopt).
-    virtual std::optional<PointF> position() const = 0;
-    virtual void move(PointF) = 0;
+    virtual std::optional<point_f> position() const = 0;
+    virtual void move(point_f) = 0;
     // Usable area of the monitor the window is on (minus panels/taskbar).
-    virtual RectF workArea() const = 0;
+    virtual rect_f work_area() const = 0;
 
     virtual bool fullscreen() const = 0;
-    virtual void setFullscreen(bool) = 0;
-    virtual void onFullscreenChanged(std::function<void(bool)>) = 0;
-    virtual void setIcon(const Icon&) = 0;
+    virtual void set_fullscreen(bool) = 0;
+    virtual void on_fullscreen_changed(std::function<void(bool)>) = 0;
+    virtual void set_icon(const icon&) = 0;
     // Shows or hides the menu bar (fullscreen views hide their chrome).
-    virtual void setMenuBarVisible(bool) = 0;
+    virtual void set_menu_bar_visible(bool) = 0;
 
     // Keys reach this before the focused widget; return true to consume. For
     // app-wide keys (navigation, fullscreen, find) that must work whatever
     // has focus. While an editable text field has focus only Escape and the
     // function keys come here; the rest are typing. Read-only text views
     // don't count as editable.
-    virtual void onKey(std::function<bool(const KeyEvent&)>) = 0;
+    virtual void on_key(std::function<bool(const key_event&)>) = 0;
     // Dialogs: fired once with the role of the button that ended it
     // (Cancel for Esc / close box). There is no blocking exec(): GTK4
     // has no nested main loops, so everything is callback-driven.
-    virtual void onFinished(std::function<void(DialogRole)>) = 0;
+    virtual void on_finished(std::function<void(dialog_role)>) = 0;
     // Return false to veto closing (e.g. unsaved commit message).
-    virtual void onCloseRequest(std::function<bool()>) = 0;
+    virtual void on_close_request(std::function<bool()>) = 0;
 };
 
 }  // namespace rap

@@ -2,7 +2,7 @@
 //
 // Apps don't use this directly; see rapport.h. Backends and the core are
 // built by the same compiler against the same headers - this is a C++
-// interface, not a stable C ABI. Bump kAbiVersion on any change here or
+// interface, not a stable C ABI. Bump abi_version on any change here or
 // in widgets.h / layout.h.
 #pragma once
 
@@ -16,56 +16,56 @@
 namespace rap
 {
 
-inline constexpr int kAbiVersion = 24;
+inline constexpr int abi_version = 25;
 
-struct MessageSpec
+struct message_spec
 {
-    enum class Icon
+    enum class icon
     {
-        Info,
-        Warning,
-        Error,
-        Question
+        info,
+        warning,
+        error,
+        question
     };
-    Icon icon = Icon::Info;
+    icon icon = icon::info;
     std::string title, text, detail;
-    std::vector<DialogRole> buttons{DialogRole::Ok};
+    std::vector<dialog_role> buttons{dialog_role::ok};
 };
 
-struct FileDialogSpec
+struct file_dialog_spec
 {
-    enum class Mode
+    enum class mode
     {
-        Open,
-        OpenMany,
-        Save,
-        Folder
+        open,
+        open_many,
+        save,
+        folder
     };
-    Mode mode = Mode::Open;
-    std::string title, initialPath;
-    struct Filter  // {"Patches", "*.patch;*.diff"}
+    mode mode = mode::open;
+    std::string title, initial_path;
+    struct filter  // {"Patches", "*.patch;*.diff"}
     {
         std::string name;
         std::string pattern;  // one or more globs, separated by ';'
     };
-    std::vector<Filter> filters;
+    std::vector<filter> filters;
 };
 
 // Backend reports each widget it creates so the core can apply callbacks,
 // binds and common state. The sink outlives every window, so a backend may
 // keep it to build content later (lazy tab pages).
-class BuildSink
+class build_sink
 {
 public:
-    virtual ~BuildSink() = default;
-    virtual void created(const Node&, Widget&) = 0;
-    virtual void created(const spec::DialogButton&, Button&) = 0;
+    virtual ~build_sink() = default;
+    virtual void created(const node&, widget&) = 0;
+    virtual void created(const spec::dialog_button&, button&) = 0;
 };
 
-class Backend
+class backend
 {
 public:
-    virtual ~Backend() = default;
+    virtual ~backend() = default;
 
     virtual std::string_view name() const = 0;
 
@@ -76,27 +76,27 @@ public:
     // The spec is only valid during the call, except that a Tabs' lazy page
     // builders may be kept and called (on the UI thread) when a page is
     // first shown; the Nodes they return go through the sink the same way.
-    virtual std::unique_ptr<Window> createWindow(const WindowSpec&, Window* parent, BuildSink&) = 0;
+    virtual std::unique_ptr<window> create_window(const window_spec&, window* parent, build_sink&) = 0;
 
     virtual int run() = 0;  // main loop; returns the quit() code
     virtual void quit(int code) = 0;
     virtual void post(std::function<void()>) = 0;  // thread-safe
 
     // Native dialogs (xdg-desktop-portal where available). Async.
-    virtual void message(Window* parent, const MessageSpec&, std::function<void(DialogRole)>) = 0;
-    virtual void chooseFiles(Window* parent, const FileDialogSpec&,
+    virtual void message(window* parent, const message_spec&, std::function<void(dialog_role)>) = 0;
+    virtual void choose_files(window* parent, const file_dialog_spec&,
                              std::function<void(std::vector<std::string>)>) = 0;
-    virtual void setClipboard(const std::string&) = 0;
+    virtual void set_clipboard(const std::string&) = 0;
     // An image on the clipboard (copied now; the caller keeps its pixels).
-    virtual void setClipboardImage(int width, int height, PixelFormat, const uint8_t* pixels,
+    virtual void set_clipboard_image(int width, int height, pixel_format, const uint8_t* pixels,
                                    size_t stride) = 0;
 
-    // Pixels for Painter::image; `pixels` is copied (or uploaded).
-    virtual std::unique_ptr<Image> createImage(int width, int height, PixelFormat,
+    // Pixels for painter::image; `pixels` is copied (or uploaded).
+    virtual std::unique_ptr<image> create_image(int width, int height, pixel_format,
                                                const uint8_t* pixels, size_t stride) = 0;
     // Calls `fn` after `ms` milliseconds, then every `ms` if `repeat`, on
     // the UI thread, until the subscription is dropped.
-    [[nodiscard]] virtual Subscription timer(int ms, bool repeat, std::function<void()> fn) = 0;
+    [[nodiscard]] virtual subscription timer(int ms, bool repeat, std::function<void()> fn) = 0;
 };
 
 // Backend entry point. Returns nullptr if the ABI doesn't match or the
@@ -106,8 +106,8 @@ public:
 // RAPPORT_BACKEND_ENTRY), so several can be linked into one program: as
 // plugins they are dlopened by name, and statically linked ones are
 // registered with RAPPORT_BUILTIN_BACKEND (rapport.h).
-using CreateBackendFn = Backend*(int abi, int* argc, char** argv);
-inline std::string createBackendSymbol(std::string_view name)
+using create_backend_fn = backend*(int abi, int* argc, char** argv);
+inline std::string create_backend_symbol(std::string_view name)
 {
     return "rapport_create_backend_" + std::string(name);
 }
@@ -120,11 +120,11 @@ inline std::string createBackendSymbol(std::string_view name)
 #define RAPPORT_EXPORT __attribute__((visibility("default")))
 #endif
 
-// In the backend: RAPPORT_BACKEND_ENTRY(gtk3, rap::gtk3::Gtk3Backend)
+// In the backend: RAPPORT_BACKEND_ENTRY(gtk3, rap::gtk3::gtk3_backend)
 #define RAPPORT_BACKEND_ENTRY(name, ...)                                                             \
-    extern "C" RAPPORT_EXPORT rap::Backend* rapport_create_backend_##name(int abi, int* argc,        \
+    extern "C" RAPPORT_EXPORT rap::backend* rapport_create_backend_##name(int abi, int* argc,        \
                                                                         char** argv)               \
     {                                                                                              \
-        if (abi != rap::kAbiVersion) return nullptr;                                             \
+        if (abi != rap::abi_version) return nullptr;                                             \
         return __VA_ARGS__::create(argc, argv);                                                    \
     }

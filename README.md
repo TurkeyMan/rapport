@@ -8,12 +8,39 @@ to match the desktop it runs on. Your users get the real thing: native
 controls, menus, dialogs, keyboard handling and accessibility, looking and
 behaving exactly as they expect. You get one clean API.
 
+```cpp
+#include <rapport/rapport.h>
+
+int main(int argc, char** argv)
+{
+    auto ui = rap::ui::load(argc, argv);  // the toolkit for this desktop
+    if (!ui) return 1;
+
+    rap::label* greeting = nullptr;
+    using namespace rap::layout;
+    auto win = (*ui)->create(dialog{"Hello", {
+        vbox{
+            label{"What's your name?"},
+            entry{}.placeholder("Name").on_changed(
+                [&](const std::string& name) { greeting->set_text("Hello, " + name + "!"); }),
+            label{}.bind(greeting),
+            buttons{ok, cancel},
+        }}});
+    win->on_finished([&](rap::dialog_role) { (*ui)->quit(); });
+    win->show();
+    return (*ui)->run();
+}
+```
+
 ## Principles
 
+- **Lightning fast.** No web runtime, no garbage collector, no layers of
+  emulation: just your code and the platform's own toolkit. Apps start in an
+  instant, stay small, and every scroll, drag and keystroke keeps pace with
+  the display, at 60 Hz or 240 Hz and beyond. Responsiveness isn't an
+  afterthought; it's the point.
 - **Native, never imitation.** rapport drives each platform's real widgets.
   No web views, no custom-drawn lookalikes.
-- **Fast.** Built to keep pace with the display, so interaction stays
-  smooth at any refresh rate.
 - **Declarative.** You describe what the interface is; rapport takes care of
   each platform's conventions for spacing, alignment and dialog layout.
 - **More than UI.** The platform services a desktop app needs, behind the

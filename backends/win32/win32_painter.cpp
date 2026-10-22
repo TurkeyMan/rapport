@@ -37,7 +37,7 @@ std::string narrow(const std::wstring& w)
     return narrow(w.data(), int(w.size()));
 }
 
-std::wstring windowText(HWND h)
+std::wstring window_text(HWND h)
 {
     const int n = GetWindowTextLengthW(h);
     std::wstring w(size_t(n) + 1, L'\0');
@@ -46,7 +46,7 @@ std::wstring windowText(HWND h)
     return w;
 }
 
-std::wstring toCrlf(const std::wstring& s)
+std::wstring to_crlf(const std::wstring& s)
 {
     std::wstring out;
     out.reserve(s.size());
@@ -58,7 +58,7 @@ std::wstring toCrlf(const std::wstring& s)
     return out;
 }
 
-std::wstring fromCrlf(const std::wstring& s)
+std::wstring from_crlf(const std::wstring& s)
 {
     std::wstring out;
     out.reserve(s.size());
@@ -69,7 +69,7 @@ std::wstring fromCrlf(const std::wstring& s)
 
 // ---------------------------------------------------------------- factories
 
-ID2D1Factory* d2dFactory()
+ID2D1Factory* d2d_factory()
 {
     static ID2D1Factory* f = []
     {
@@ -81,7 +81,7 @@ ID2D1Factory* d2dFactory()
     return f;
 }
 
-IDWriteFactory* dwriteFactory()
+IDWriteFactory* dwrite_factory()
 {
     static IDWriteFactory* f = []
     {
@@ -93,7 +93,7 @@ IDWriteFactory* dwriteFactory()
     return f;
 }
 
-IWICImagingFactory* wicFactory()
+IWICImagingFactory* wic_factory()
 {
     static IWICImagingFactory* f = []
     {
@@ -107,10 +107,10 @@ IWICImagingFactory* wicFactory()
 
 // ---------------------------------------------------------------- DPI, fonts
 
-UINT dpiOf(HWND h)
+UINT dpi_of(HWND h)
 {
-    using Fn = UINT(WINAPI*)(HWND);
-    static Fn fn = reinterpret_cast<Fn>(
+    using fn_t = UINT(WINAPI*)(HWND);
+    static fn_t fn = reinterpret_cast<fn_t>(
         reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow")));
     if (fn && h) return fn(h);
     HDC dc = GetDC(nullptr);
@@ -119,20 +119,20 @@ UINT dpiOf(HWND h)
     return dpi;
 }
 
-float scaleOf(HWND h)
+float scale_of(HWND h)
 {
-    return dpiOf(h) / 96.f;
+    return dpi_of(h) / 96.f;
 }
 
 namespace
 {
 
-NONCLIENTMETRICSW metricsFor(UINT dpi)
+NONCLIENTMETRICSW metrics_for(UINT dpi)
 {
     NONCLIENTMETRICSW ncm{};
     ncm.cbSize = sizeof ncm;
-    using Fn = BOOL(WINAPI*)(UINT, UINT, PVOID, UINT, UINT);
-    static Fn fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(
+    using fn_t = BOOL(WINAPI*)(UINT, UINT, PVOID, UINT, UINT);
+    static fn_t fn = reinterpret_cast<fn_t>(reinterpret_cast<void*>(
         GetProcAddress(GetModuleHandleW(L"user32.dll"), "SystemParametersInfoForDpi")));
     if (fn)
         fn(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, dpi);
@@ -146,12 +146,12 @@ NONCLIENTMETRICSW metricsFor(UINT dpi)
 
 }  // namespace
 
-HFONT uiFont(UINT dpi, bool bold, bool mono, float scale)
+HFONT ui_font(UINT dpi, bool bold, bool mono, float scale)
 {
     static std::map<std::tuple<UINT, bool, bool, int>, HFONT> cache;
     const auto key = std::make_tuple(dpi, bold, mono, int(scale * 100));
     if (auto it = cache.find(key); it != cache.end()) return it->second;
-    LOGFONTW lf = metricsFor(dpi).lfMessageFont;
+    LOGFONTW lf = metrics_for(dpi).lfMessageFont;
     if (bold) lf.lfWeight = FW_BOLD;
     if (mono) wcscpy(lf.lfFaceName, L"Consolas");
     if (scale != 1.f) lf.lfHeight = LONG(std::lround(lf.lfHeight * scale));
@@ -160,12 +160,12 @@ HFONT uiFont(UINT dpi, bool bold, bool mono, float scale)
     return f;
 }
 
-SIZE fontMetrics(UINT dpi)
+SIZE font_metrics(UINT dpi)
 {
     static std::map<UINT, SIZE> cache;
     if (auto it = cache.find(dpi); it != cache.end()) return it->second;
     HDC dc = GetDC(nullptr);
-    HGDIOBJ old = SelectObject(dc, uiFont(dpi));
+    HGDIOBJ old = SelectObject(dc, ui_font(dpi));
     TEXTMETRICW tm{};
     GetTextMetricsW(dc, &tm);
     SIZE sz{};
@@ -177,70 +177,70 @@ SIZE fontMetrics(UINT dpi)
     return out;
 }
 
-std::wstring uiFontFamily()
+std::wstring ui_font_family()
 {
-    return metricsFor(96).lfMessageFont.lfFaceName;
+    return metrics_for(96).lfMessageFont.lfFaceName;
 }
 
-float uiFontSizeDip()
+float ui_font_size_dip()
 {
     // lfHeight is negative character height in px at 96 dpi = DIPs.
-    const LONG h = metricsFor(96).lfMessageFont.lfHeight;
+    const LONG h = metrics_for(96).lfMessageFont.lfHeight;
     return h < 0 ? float(-h) : float(h) * 0.8f;
 }
 
-int extentPx(HWND h, Extent e, bool vertical)
+int extent_px(HWND h, extent e, bool vertical)
 {
-    const UINT dpi = dpiOf(h);
+    const UINT dpi = dpi_of(h);
     switch (e.unit)
     {
-    case Extent::Unit::Auto: return 0;
-    case Extent::Unit::Px: return int(std::lround(e.value * dpi / 96.f));
-    case Extent::Unit::Chars:
-        return int(std::lround(e.value * fontMetrics(dpi).cx)) + (vertical ? 0 : int(8 * dpi / 96));
-    case Extent::Unit::Lines: return int(std::lround(e.value * fontMetrics(dpi).cy));
+    case extent::unit::auto_: return 0;
+    case extent::unit::px: return int(std::lround(e.value * dpi / 96.f));
+    case extent::unit::chars:
+        return int(std::lround(e.value * font_metrics(dpi).cx)) + (vertical ? 0 : int(8 * dpi / 96));
+    case extent::unit::lines: return int(std::lround(e.value * font_metrics(dpi).cy));
     }
     return 0;
 }
 
 // ---------------------------------------------------------------- colours
 
-Color sysColor(int index)
+color sys_color(int index)
 {
     const COLORREF c = GetSysColor(index);
-    return Color{GetRValue(c), GetGValue(c), GetBValue(c), 255};
+    return color{GetRValue(c), GetGValue(c), GetBValue(c), 255};
 }
 
-Color themeColor(ThemeColor role)
+color theme_color_of(theme_color role)
 {
     switch (role)
     {
-    case ThemeColor::Window: return sysColor(COLOR_BTNFACE);
-    case ThemeColor::WindowText: return sysColor(COLOR_BTNTEXT);
-    case ThemeColor::Base: return sysColor(COLOR_WINDOW);
-    case ThemeColor::AlternateBase:
+    case theme_color::window: return sys_color(COLOR_BTNFACE);
+    case theme_color::window_text: return sys_color(COLOR_BTNTEXT);
+    case theme_color::base: return sys_color(COLOR_WINDOW);
+    case theme_color::alternate_base:
     {
-        Color b = sysColor(COLOR_WINDOW);
+        color b = sys_color(COLOR_WINDOW);
         auto d = [](uint8_t v) { return uint8_t(v > 128 ? v - 8 : v + 8); };
-        return Color{d(b.r), d(b.g), d(b.b), 255};
+        return color{d(b.r), d(b.g), d(b.b), 255};
     }
-    case ThemeColor::Text: return sysColor(COLOR_WINDOWTEXT);
-    case ThemeColor::PlaceholderText: return sysColor(COLOR_GRAYTEXT);
-    case ThemeColor::Highlight: return sysColor(COLOR_HIGHLIGHT);
-    case ThemeColor::HighlightText: return sysColor(COLOR_HIGHLIGHTTEXT);
-    case ThemeColor::Mid: return sysColor(COLOR_BTNSHADOW);
-    case ThemeColor::Accent: return sysColor(COLOR_HOTLIGHT);
-    case ThemeColor::Link: return sysColor(COLOR_HOTLIGHT);
-    case ThemeColor::Positive: return Color{0x26, 0x8a, 0x3c, 255};
-    case ThemeColor::Negative: return Color{0xc0, 0x1c, 0x28, 255};
-    case ThemeColor::Neutral: return sysColor(COLOR_GRAYTEXT);
+    case theme_color::text: return sys_color(COLOR_WINDOWTEXT);
+    case theme_color::placeholder_text: return sys_color(COLOR_GRAYTEXT);
+    case theme_color::highlight: return sys_color(COLOR_HIGHLIGHT);
+    case theme_color::highlight_text: return sys_color(COLOR_HIGHLIGHTTEXT);
+    case theme_color::mid: return sys_color(COLOR_BTNSHADOW);
+    case theme_color::accent: return sys_color(COLOR_HOTLIGHT);
+    case theme_color::link: return sys_color(COLOR_HOTLIGHT);
+    case theme_color::positive: return color{0x26, 0x8a, 0x3c, 255};
+    case theme_color::negative: return color{0xc0, 0x1c, 0x28, 255};
+    case theme_color::neutral: return sys_color(COLOR_GRAYTEXT);
     }
-    return Color{0, 0, 0, 255};
+    return color{0, 0, 0, 255};
 }
 
 // ---------------------------------------------------------------- images
 
-D2DImage::D2DImage(int w, int h, PixelFormat format, const uint8_t* pixels, size_t stride)
+d2d_image::d2d_image(int w, int h, pixel_format format, const uint8_t* pixels, size_t stride)
     : w_(w)
     , h_(h)
     , format_(format)
@@ -249,14 +249,14 @@ D2DImage::D2DImage(int w, int h, PixelFormat format, const uint8_t* pixels, size
     update(pixels, stride);
 }
 
-void D2DImage::update(const uint8_t* pixels, size_t stride)
+void d2d_image::update(const uint8_t* pixels, size_t stride)
 {
     if (!pixels) return;
     for (int y = 0; y < h_; ++y)
     {
         const uint8_t* src = pixels + size_t(y) * stride;
         uint8_t* row = px_.data() + size_t(y) * w_ * 4;
-        if (format_ == PixelFormat::Bgra8Premultiplied)
+        if (format_ == pixel_format::bgra8_premultiplied)
         {
             std::memcpy(row, src, size_t(w_) * 4);
             continue;
@@ -273,7 +273,7 @@ void D2DImage::update(const uint8_t* pixels, size_t stride)
     for (auto& [rt, stale] : stale_) stale = true;
 }
 
-ID2D1Bitmap* D2DImage::bitmapFor(ID2D1RenderTarget* rt) const
+ID2D1Bitmap* d2d_image::bitmap_for(ID2D1RenderTarget* rt) const
 {
     auto& bmp = bitmaps_[rt];
     if (!bmp)
@@ -293,7 +293,7 @@ ID2D1Bitmap* D2DImage::bitmapFor(ID2D1RenderTarget* rt) const
 
 // ---------------------------------------------------------------- painter
 
-D2DPainter::D2DPainter(ID2D1RenderTarget* rt, float scale)
+d2d_painter::d2d_painter(ID2D1RenderTarget* rt, float scale)
     : rt_(rt)
     , scale_(scale)
 {
@@ -301,47 +301,47 @@ D2DPainter::D2DPainter(ID2D1RenderTarget* rt, float scale)
     rt_->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0), brush_.put());
 }
 
-D2DPainter::~D2DPainter()
+d2d_painter::~d2d_painter()
 {
     while (clips_-- > 0) rt_->PopAxisAlignedClip();
 }
 
-Color D2DPainter::resolve(const Paint& p) const
+color d2d_painter::resolve(const paint& p) const
 {
-    if (const Color* c = std::get_if<Color>(&p)) return *c;
-    const ThemeColor role = std::get<ThemeColor>(p);
+    if (const color* c = std::get_if<color>(&p)) return *c;
+    const theme_color role = std::get<theme_color>(p);
     if (auto it = overrides_.find(int(role)); it != overrides_.end()) return it->second;
-    return themeColor(role);
+    return theme_color_of(role);
 }
 
-ID2D1SolidColorBrush* D2DPainter::brush(const Paint& p)
+ID2D1SolidColorBrush* d2d_painter::brush(const paint& p)
 {
-    brush_->SetColor(d2dColor(resolve(p)));
+    brush_->SetColor(d2d_color(resolve(p)));
     return brush_.get();
 }
 
-ID2D1StrokeStyle* D2DPainter::stroke(LineCap cap)
+ID2D1StrokeStyle* d2d_painter::stroke(line_cap cap)
 {
-    if (cap == LineCap::Butt) return nullptr;
+    if (cap == line_cap::butt) return nullptr;
     if (!round_)
     {
         const D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(
             D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND);
-        d2dFactory()->CreateStrokeStyle(props, nullptr, 0, round_.put());
+        d2d_factory()->CreateStrokeStyle(props, nullptr, 0, round_.put());
     }
     return round_.get();
 }
 
-void D2DPainter::line(PointF a, PointF b, const Paint& p, float width, LineCap cap)
+void d2d_painter::line(point_f a, point_f b, const paint& p, float width, line_cap cap)
 {
     rt_->DrawLine(D2D1::Point2F(a.x, a.y), D2D1::Point2F(b.x, b.y), brush(p), width, stroke(cap));
 }
 
-void D2DPainter::curve(PointF a, PointF c1, PointF c2, PointF b, const Paint& p, float width)
+void d2d_painter::curve(point_f a, point_f c1, point_f c2, point_f b, const paint& p, float width)
 {
-    Com<ID2D1PathGeometry> g;
-    d2dFactory()->CreatePathGeometry(g.put());
-    Com<ID2D1GeometrySink> sink;
+    com<ID2D1PathGeometry> g;
+    d2d_factory()->CreatePathGeometry(g.put());
+    com<ID2D1GeometrySink> sink;
     g->Open(sink.put());
     sink->BeginFigure(D2D1::Point2F(a.x, a.y), D2D1_FIGURE_BEGIN_HOLLOW);
     sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(c1.x, c1.y), D2D1::Point2F(c2.x, c2.y),
@@ -351,14 +351,14 @@ void D2DPainter::curve(PointF a, PointF c1, PointF c2, PointF b, const Paint& p,
     rt_->DrawGeometry(g.get(), brush(p), width);
 }
 
-void D2DPainter::circle(PointF c, float r, std::optional<Paint> fill, std::optional<Paint> stroke)
+void d2d_painter::circle(point_f c, float r, std::optional<paint> fill, std::optional<paint> stroke)
 {
     const D2D1_ELLIPSE e = D2D1::Ellipse(D2D1::Point2F(c.x, c.y), r, r);
     if (fill) rt_->FillEllipse(e, brush(*fill));
     if (stroke) rt_->DrawEllipse(e, brush(*stroke), 1.f);
 }
 
-void D2DPainter::rect(RectF r, float radius, std::optional<Paint> fill, std::optional<Paint> stroke)
+void d2d_painter::rect(rect_f r, float radius, std::optional<paint> fill, std::optional<paint> stroke)
 {
     const D2D1_RECT_F rc = D2D1::RectF(r.x, r.y, r.x + r.w, r.y + r.h);
     if (radius > 0)
@@ -372,20 +372,20 @@ void D2DPainter::rect(RectF r, float radius, std::optional<Paint> fill, std::opt
     if (stroke) rt_->DrawRectangle(rc, brush(*stroke), 1.f);
 }
 
-void D2DPainter::finish(ID2D1Geometry* g, const std::optional<Paint>& fill, const std::optional<Paint>& stroke,
+void d2d_painter::finish(ID2D1Geometry* g, const std::optional<paint>& fill, const std::optional<paint>& stroke,
                         float width)
 {
     if (fill) rt_->FillGeometry(g, brush(*fill));
     if (stroke) rt_->DrawGeometry(g, brush(*stroke), width);
 }
 
-void D2DPainter::polygon(const std::vector<PointF>& pts, std::optional<Paint> fill, std::optional<Paint> stroke,
+void d2d_painter::polygon(const std::vector<point_f>& pts, std::optional<paint> fill, std::optional<paint> stroke,
                          float width)
 {
     if (pts.empty()) return;
-    Com<ID2D1PathGeometry> g;
-    d2dFactory()->CreatePathGeometry(g.put());
-    Com<ID2D1GeometrySink> sink;
+    com<ID2D1PathGeometry> g;
+    d2d_factory()->CreatePathGeometry(g.put());
+    com<ID2D1GeometrySink> sink;
     g->Open(sink.put());
     sink->BeginFigure(D2D1::Point2F(pts[0].x, pts[0].y), D2D1_FIGURE_BEGIN_FILLED);
     for (size_t i = 1; i < pts.size(); ++i) sink->AddLine(D2D1::Point2F(pts[i].x, pts[i].y));
@@ -394,16 +394,16 @@ void D2DPainter::polygon(const std::vector<PointF>& pts, std::optional<Paint> fi
     finish(g.get(), fill, stroke, width);
 }
 
-void D2DPainter::arc(PointF c, float r, float start, float end, const Paint& p, float width, LineCap cap)
+void d2d_painter::arc(point_f c, float r, float start, float end, const paint& p, float width, line_cap cap)
 {
     if (end - start >= 2 * 3.14159265f - 1e-4f)
     {
         rt_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(c.x, c.y), r, r), brush(p), width, stroke(cap));
         return;
     }
-    Com<ID2D1PathGeometry> g;
-    d2dFactory()->CreatePathGeometry(g.put());
-    Com<ID2D1GeometrySink> sink;
+    com<ID2D1PathGeometry> g;
+    d2d_factory()->CreatePathGeometry(g.put());
+    com<ID2D1GeometrySink> sink;
     g->Open(sink.put());
     const D2D1_POINT_2F p0 = D2D1::Point2F(c.x + r * std::cos(start), c.y + r * std::sin(start));
     const D2D1_POINT_2F p1 = D2D1::Point2F(c.x + r * std::cos(end), c.y + r * std::sin(end));
@@ -415,54 +415,54 @@ void D2DPainter::arc(PointF c, float r, float start, float end, const Paint& p, 
     rt_->DrawGeometry(g.get(), brush(p), width, stroke(cap));
 }
 
-void D2DPainter::image(const Image& img, RectF src, RectF dst, Filter filter, float alpha)
+void d2d_painter::image(const rap::image& img, rect_f src, rect_f dst, filter filter, float alpha)
 {
     if (src.w <= 0 || src.h <= 0 || dst.w <= 0 || dst.h <= 0) return;
-    ID2D1Bitmap* bmp = static_cast<const D2DImage&>(img).bitmapFor(rt_);
+    ID2D1Bitmap* bmp = static_cast<const d2d_image&>(img).bitmap_for(rt_);
     if (!bmp) return;
     rt_->DrawBitmap(bmp, D2D1::RectF(dst.x, dst.y, dst.x + dst.w, dst.y + dst.h), alpha,
-                    filter == Filter::Nearest ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+                    filter == filter::nearest ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
                                               : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                     D2D1::RectF(src.x, src.y, src.x + src.w, src.y + src.h));
 }
 
-void D2DPainter::pushClip(RectF r)
+void d2d_painter::push_clip(rect_f r)
 {
     rt_->PushAxisAlignedClip(D2D1::RectF(r.x, r.y, r.x + r.w, r.y + r.h), D2D1_ANTIALIAS_MODE_ALIASED);
     ++clips_;
 }
 
-void D2DPainter::popClip()
+void d2d_painter::pop_clip()
 {
     if (clips_ <= 0) return;
     rt_->PopAxisAlignedClip();
     --clips_;
 }
 
-Com<IDWriteTextLayout> D2DPainter::layout(const std::string& s, const TextStyle& style, float maxWidth) const
+com<IDWriteTextLayout> d2d_painter::layout(const std::string& s, const text_style& style, float max_width) const
 {
     // Formats are immutable and few (a handful of styles), so they're made
     // once each; creating one per call cost more than the drawing. UI thread
     // only, like all painting.
-    const float size = style.size > 0 ? style.size * 96.f / 72.f : uiFontSizeDip();
-    static std::map<std::tuple<float, bool, bool, bool>, Com<IDWriteTextFormat>> formats;
-    Com<IDWriteTextFormat>& format = formats[{size, style.bold, style.italic, style.monospace}];
+    const float size = style.size > 0 ? style.size * 96.f / 72.f : ui_font_size_dip();
+    static std::map<std::tuple<float, bool, bool, bool>, com<IDWriteTextFormat>> formats;
+    com<IDWriteTextFormat>& format = formats[{size, style.bold, style.italic, style.monospace}];
     if (!format)
-        dwriteFactory()->CreateTextFormat(style.monospace ? L"Consolas" : uiFontFamily().c_str(), nullptr,
+        dwrite_factory()->CreateTextFormat(style.monospace ? L"Consolas" : ui_font_family().c_str(), nullptr,
                                           style.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
                                           style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                                           DWRITE_FONT_STRETCH_NORMAL, size, L"", format.put());
-    Com<IDWriteTextLayout> layout;
+    com<IDWriteTextLayout> layout;
     const std::wstring w = wide(s);
     if (format)
-        dwriteFactory()->CreateTextLayout(w.c_str(), UINT32(w.size()), format.get(), maxWidth, 100000,
+        dwrite_factory()->CreateTextLayout(w.c_str(), UINT32(w.size()), format.get(), max_width, 100000,
                                           layout.put());
     return layout;
 }
 
-void D2DPainter::text(PointF at, const std::string& s, const TextStyle& style)
+void d2d_painter::text(point_f at, const std::string& s, const text_style& style)
 {
-    Com<IDWriteTextLayout> l = layout(s, style);
+    com<IDWriteTextLayout> l = layout(s, style);
     if (!l) return;
     if (style.bg)
     {
@@ -470,12 +470,12 @@ void D2DPainter::text(PointF at, const std::string& s, const TextStyle& style)
         l->GetMetrics(&m);
         rt_->FillRectangle(D2D1::RectF(at.x, at.y, at.x + m.width, at.y + m.height), brush(*style.bg));
     }
-    rt_->DrawTextLayout(D2D1::Point2F(at.x, at.y), l.get(), brush(style.fg ? *style.fg : Paint{ThemeColor::Text}));
+    rt_->DrawTextLayout(D2D1::Point2F(at.x, at.y), l.get(), brush(style.fg ? *style.fg : paint{theme_color::text}));
 }
 
-SizeF D2DPainter::measure(const std::string& s, const TextStyle& style) const
+size_f d2d_painter::measure(const std::string& s, const text_style& style) const
 {
-    Com<IDWriteTextLayout> l = layout(s, style);
+    com<IDWriteTextLayout> l = layout(s, style);
     if (!l) return {};
     DWRITE_TEXT_METRICS m{};
     l->GetMetrics(&m);
@@ -489,28 +489,28 @@ namespace
 
 // A WIC bitmap render target of `px` square, cleared to transparent, with
 // the icon drawn through a D2DPainter at `scale`.
-Com<IWICBitmap> iconBitmap(const Icon& icon, int px, float scale, Color ink)
+com<IWICBitmap> icon_bitmap(const icon& icon, int px, float scale, color ink)
 {
-    Com<IWICBitmap> wic;
-    if (!wicFactory() ||
-        FAILED(wicFactory()->CreateBitmap(UINT(px), UINT(px), GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad,
+    com<IWICBitmap> wic;
+    if (!wic_factory() ||
+        FAILED(wic_factory()->CreateBitmap(UINT(px), UINT(px), GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad,
                                           wic.put())))
         return {};
-    Com<ID2D1RenderTarget> rt;
+    com<ID2D1RenderTarget> rt;
     const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_DEFAULT,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
-    if (FAILED(d2dFactory()->CreateWicBitmapRenderTarget(wic.get(), props, rt.put()))) return {};
+    if (FAILED(d2d_factory()->CreateWicBitmapRenderTarget(wic.get(), props, rt.put()))) return {};
     rt->BeginDraw();
     rt->Clear(D2D1::ColorF(0, 0, 0, 0));
     {
-        D2DPainter p(rt.get(), scale);
-        p.overrideColor(ThemeColor::WindowText, ink);
-        p.overrideColor(ThemeColor::Text, ink);
+        d2d_painter p(rt.get(), scale);
+        p.override_color(theme_color::window_text, ink);
+        p.override_color(theme_color::text, ink);
         if (icon.draw)
             icon.draw(p, {px / scale, px / scale});
         else
-            common::drawBuiltinIcon(icon.name, p, {px / scale, px / scale});
+            builtin::draw_builtin_icon(icon.name, p, {px / scale, px / scale});
     }
     rt->EndDraw();
     return wic;
@@ -518,9 +518,9 @@ Com<IWICBitmap> iconBitmap(const Icon& icon, int px, float scale, Color ink)
 
 }  // namespace
 
-HBITMAP renderIcon(const Icon& icon, int px, float scale)
+HBITMAP render_icon(const icon& icon, int px, float scale)
 {
-    Com<IWICBitmap> wic = iconBitmap(icon, px, scale, themeColor(ThemeColor::WindowText));
+    com<IWICBitmap> wic = icon_bitmap(icon, px, scale, theme_color_of(theme_color::window_text));
     if (!wic) return nullptr;
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof bi.bmiHeader;
@@ -543,9 +543,9 @@ HBITMAP renderIcon(const Icon& icon, int px, float scale)
     return bmp;
 }
 
-HICON renderIconHandle(const Icon& icon, int px, float scale)
+HICON render_icon_handle(const icon& icon, int px, float scale)
 {
-    HBITMAP color = renderIcon(icon, px, scale);
+    HBITMAP color = render_icon(icon, px, scale);
     if (!color) return nullptr;
     HBITMAP mask = CreateBitmap(px, px, 1, 1, nullptr);
     ICONINFO ii{TRUE, 0, 0, mask, color};
@@ -555,25 +555,25 @@ HICON renderIconHandle(const Icon& icon, int px, float scale)
     return h;
 }
 
-void drawIconOnDC(HDC dc, RECT r, const Icon& icon, float scale, Color ink)
+void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink)
 {
     if (!icon) return;
     const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
         96, 96);
-    Com<ID2D1DCRenderTarget> rt;
-    if (FAILED(d2dFactory()->CreateDCRenderTarget(&props, rt.put()))) return;
+    com<ID2D1DCRenderTarget> rt;
+    if (FAILED(d2d_factory()->CreateDCRenderTarget(&props, rt.put()))) return;
     if (FAILED(rt->BindDC(dc, &r))) return;
     rt->BeginDraw();
     {
-        D2DPainter p(rt.get(), scale);
-        p.overrideColor(ThemeColor::WindowText, ink);
-        p.overrideColor(ThemeColor::Text, ink);
-        const SizeF size{(r.right - r.left) / scale, (r.bottom - r.top) / scale};
+        d2d_painter p(rt.get(), scale);
+        p.override_color(theme_color::window_text, ink);
+        p.override_color(theme_color::text, ink);
+        const size_f size{(r.right - r.left) / scale, (r.bottom - r.top) / scale};
         if (icon.draw)
             icon.draw(p, size);
         else
-            common::drawBuiltinIcon(icon.name, p, size);
+            builtin::draw_builtin_icon(icon.name, p, size);
     }
     rt->EndDraw();
 }

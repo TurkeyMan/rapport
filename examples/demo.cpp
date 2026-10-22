@@ -7,21 +7,21 @@
 namespace
 {
 
-class TodoModel : public rap::ListModel
+class todo_model : public rap::list_model
 {
 public:
-    size_t rowCount() const override { return rows_.size(); }
+    size_t row_count() const override { return rows_.size(); }
     std::string text(size_t row, size_t col) const override
     {
         return col == 0 ? rows_[row].action : rows_[row].subject;
     }
 
 private:
-    struct Row
+    struct row
     {
         std::string action, subject;
     };
-    std::vector<Row> rows_{
+    std::vector<row> rows_{
         {"pick", "Add rapport layout builders"},
         {"squash", "fixup: form labels"},
         {"pick", "Null backend"},
@@ -32,48 +32,48 @@ private:
 
 int main(int argc, char** argv)
 {
-    auto ui = rap::Ui::load(argc, argv);
+    auto ui = rap::ui::load(argc, argv);
     if (!ui)
     {
         std::fprintf(stderr, "%s", ui.error().c_str());
         return 1;
     }
-    std::printf("backend: %.*s\n", int((*ui)->backendName().size()), (*ui)->backendName().data());
+    std::printf("backend: %.*s\n", int((*ui)->backend_name().size()), (*ui)->backend_name().data());
 
-    TodoModel model;
-    rap::Label* branchName = nullptr;
-    rap::Combo* upstream = nullptr;
-    rap::List* commitList = nullptr;
-    rap::TextView* commitMessage = nullptr;
-    rap::Check* preserveMerges = nullptr;
+    todo_model model;
+    rap::label* branch_name = nullptr;
+    rap::combo* upstream = nullptr;
+    rap::list* commit_list = nullptr;
+    rap::text_view* commit_message = nullptr;
+    rap::check* preserve_merges = nullptr;
 
     using namespace rap::layout;
-    auto dlg = (*ui)->create(Dialog{
+    auto dlg = (*ui)->create(dialog{
         "Rebase",
-        {VBox{
-            Form{
-                {"Branch", Label{"main"}.bind(branchName)},
-                {"Upstream", Combo{{"origin/main", "origin/next"}, "origin/main"}.bind(upstream)},
+        {vbox{
+            form{
+                {"Branch", label{"main"}.bind(branch_name)},
+                {"Upstream", combo{{"origin/main", "origin/next"}, "origin/main"}.bind(upstream)},
             },
-            Splitter{
-                Vertical,
-                List{{{"Action", 8_ch}, {"Subject", {}, true}}, &model}.bind(commitList).stretch(),
-                TextView{}.readOnly().monospace().height(6_lines).bind(commitMessage),
+            splitter{
+                vertical,
+                list{{{"Action", 8_ch}, {"Subject", {}, true}}, &model}.bind(commit_list).stretch(),
+                text_view{}.read_only().monospace().height(6_lines).bind(commit_message),
             }
                 .stretch(),
-            HBox{
-                Check{"Preserve merges"}.bind(preserveMerges),
-                Spacer{},
-                Button{"Up"}.onClick([] {}),
-                Button{"Down"}.onClick([] {}),
+            hbox{
+                check{"Preserve merges"}.bind(preserve_merges),
+                spacer{},
+                button{"Up"}.on_click([] {}),
+                button{"Down"}.on_click([] {}),
             },
-            Buttons{Ok("Start rebase"), Cancel},
+            buttons{ok("Start rebase"), cancel},
         }}}.size(80_ch, 30_lines));
 
-    bool bound = branchName && upstream && commitList && commitMessage && preserveMerges;
+    bool bound = branch_name && upstream && commit_list && commit_message && preserve_merges;
     std::printf("binds: %s\n", bound ? "all filled" : "MISSING");
 
-    dlg->onFinished([&](rap::DialogRole) { (*ui)->quit(); });
+    dlg->on_finished([&](rap::dialog_role) { (*ui)->quit(); });
     dlg->show();
     (*ui)->post([&] { std::printf("posted task ran\n"); });
     return (*ui)->run();

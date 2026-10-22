@@ -8,20 +8,20 @@
 //     auto dlg = ui.create(Dialog{"Rebase", {
 //         VBox{
 //             Form{
-//                 {"Branch",   Label{}.bind(branchName)},
+//                 {"Branch",   Label{}.bind(branch_name)},
 //                 {"Upstream", Combo{}.bind(upstream)},
 //             },
 //             Splitter{Vertical,
-//                 List{columns, &model}.bind(commitList).stretch(),
-//                 TextView{}.readOnly().monospace().bind(message),
+//                 List{columns, &model}.bind(commit_list).stretch(),
+//                 text_view{}.read_only().monospace().bind(message),
 //             }.stretch(),
 //             HBox{
-//                 Check{"Preserve merges"}.bind(preserveMerges),
+//                 Check{"Preserve merges"}.bind(preserve_merges),
 //                 Spacer{},
-//                 Button{"Up"}.onClick(moveUp),
-//                 Button{"Down"}.onClick(moveDown),
+//                 Button{"Up"}.on_click(moveUp),
+//                 Button{"Down"}.on_click(moveDown),
 //             },
-//             Buttons{Ok("Start rebase"), Cancel},
+//             Buttons{ok("Start rebase"), Cancel},
 //         }
 //     }});
 //
@@ -44,27 +44,27 @@
 namespace rap
 {
 
-struct Node;
-using Nodes = std::vector<Node>;
+struct node;
+using nodes = std::vector<node>;
 
-struct Common
+struct common
 {
     int stretch = 0;  // share of spare space along the parent box/splitter
-    Extent width, height;
+    extent width, height;
     bool enabled = true;
     std::string tooltip;
     // Filled with the node's widget, for hiding/disabling any node, boxes
     // and toolbars included (they have no interface of their own).
-    Widget** handle = nullptr;
+    widget** handle = nullptr;
 };
 
 namespace spec
 {
 
-struct Box
+struct box
 {
-    Orientation dir;
-    Nodes items;
+    orientation dir;
+    nodes items;
     // The usual window margin around the items, for a bar along the edge of
     // a window that has margins off (a status line): the full margin at its
     // ends and half of it along its sides.
@@ -72,236 +72,236 @@ struct Box
 };
 // Label/field pairs; the backend applies its own label alignment rules.
 // An empty label makes the field span both columns.
-struct Form
+struct form
 {
     std::vector<std::string> labels;
-    Nodes fields;
+    nodes fields;
 };
-struct Splitter
+struct splitter
 {
-    Orientation dir;  // direction the panes are laid out in
-    Nodes panes;
-    rap::Splitter** bind = nullptr;
+    orientation dir;  // direction the panes are laid out in
+    nodes panes;
+    rap::splitter** bind = nullptr;
 };
-struct Group
+struct group
 {
     std::string title;
-    Nodes content;  // exactly one
+    nodes content;  // exactly one
 };
 // Scrolls its content when it doesn't fit (a long settings page).
-struct Scroll
+struct scroll
 {
-    Nodes content;            // exactly one
+    nodes content;            // exactly one
     bool horizontal = false;  // also scroll sideways; otherwise the content's width is kept
 };
-struct Tabs
+struct tabs
 {
     std::vector<std::string> titles;
-    Nodes pages;  // a lazy page's entry is an empty Box
-    // Per page: how to build it the first time it's shown (layout::Lazy),
+    nodes pages;  // a lazy page's entry is an empty box
+    // Per page: how to build it the first time it's shown (layout::lazy),
     // or empty for one built with the window. Empty if no page is lazy.
-    std::vector<std::function<Node()>> lazy;
+    std::vector<std::function<node()>> lazy;
     // The page names as a list down the left with the page beside it (a
     // settings dialog) rather than tabs along the top.
     bool sidebar = false;
-    std::function<void(int)> onChanged;
-    rap::Tabs** bind = nullptr;
+    std::function<void(int)> on_changed;
+    rap::tabs** bind = nullptr;
 };
-struct Spacer
+struct spacer
 {
 };
-struct Separator
+struct separator
 {
 };  // line across the parent box's direction
 
-struct Label
+struct label
 {
     std::string text;
     bool selectable = false;
     // Cut long text with "..." instead of widening the window to fit it
     // (status lines).
     bool ellipsize = false;
-    rap::Label** bind = nullptr;
+    rap::label** bind = nullptr;
 };
-struct Button
+struct button
 {
     std::string text;
     bool flat = false;  // no border until hovered (a link-like button)
-    Icon icon;
-    bool iconOnly = false;  // show the icon; the text becomes the tooltip/accessible name
-    std::function<void()> onClick;
-    rap::Button** bind = nullptr;
+    rap::icon icon;
+    bool icon_only = false;  // show the icon; the text becomes the tooltip/accessible name
+    std::function<void()> on_click;
+    rap::button** bind = nullptr;
 };
-// Row of tool items: ToolButton nodes, Separator and Spacer.
-struct Toolbar
+// Row of tool items: tool_button nodes, Separator and Spacer.
+struct toolbar
 {
-    Nodes items;
+    nodes items;
 };
-struct ToolButton
+struct tool_button
 {
-    Icon icon;
+    rap::icon icon;
     std::string
         label;  // shown beside/under the icon only if the toolkit does; always the accessible name
     bool toggle = false;
     bool checked = false;
-    std::function<void()> onClick;
-    std::function<void(bool)> onToggled;
-    rap::ToolButton** bind = nullptr;
+    std::function<void()> on_click;
+    std::function<void(bool)> on_toggled;
+    rap::tool_button** bind = nullptr;
 };
-struct Slider
+struct slider
 {
     double min = 0, max = 1, value = 0;
     double step = 0.01, page = 0.1;  // arrow keys / page keys and wheel
     int digits = 2;                  // shown value's decimals (if shown)
-    bool showValue = false;
+    bool show_value = false;
     std::vector<std::pair<double, std::string>> marks;  // ticks, optional labels
-    std::function<void(double)> onChanged;
-    rap::Slider** bind = nullptr;
+    std::function<void(double)> on_changed;
+    rap::slider** bind = nullptr;
 };
-struct Spin
+struct spin
 {
     double min = 0, max = 100, value = 0, step = 1;
     int digits = 0;
-    std::function<void(double)> onChanged;
-    rap::Spin** bind = nullptr;
+    std::function<void(double)> on_changed;
+    rap::spin** bind = nullptr;
 };
-struct ColorButton
+struct color_button
 {
-    Color color;
+    rap::color color;
     bool alpha = false;  // let the chooser edit alpha
     std::string title;   // chooser dialog title
-    std::function<void(Color)> onChanged;
-    rap::ColorButton** bind = nullptr;
+    std::function<void(rap::color)> on_changed;
+    rap::color_button** bind = nullptr;
 };
-struct Check
+struct check
 {
     std::string text;
-    CheckState state = CheckState::Unchecked;
-    std::function<void(bool)> onToggled;
-    rap::Check** bind = nullptr;
+    check_state state = check_state::unchecked;
+    std::function<void(bool)> on_toggled;
+    rap::check** bind = nullptr;
 };
-struct Entry
+struct entry
 {
     std::string text, placeholder;
-    std::function<void(const std::string&)> onChanged;
-    std::function<void()> onActivate;
-    rap::Entry** bind = nullptr;
+    std::function<void(const std::string&)> on_changed;
+    std::function<void()> on_activate;
+    rap::entry** bind = nullptr;
 };
-struct Select
+struct drop_down
 {
     std::vector<std::string> items;
     int current = 0;
-    std::function<void(int)> onChanged;
-    rap::Select** bind = nullptr;
+    std::function<void(int)> on_changed;
+    rap::drop_down** bind = nullptr;
 };
-struct Combo
+struct combo
 {
     std::vector<std::string> items;
     std::string text;
-    std::function<void(const std::string&)> onChanged;
-    std::function<void()> onActivate;
-    rap::Combo** bind = nullptr;
+    std::function<void(const std::string&)> on_changed;
+    std::function<void()> on_activate;
+    rap::combo** bind = nullptr;
 };
-struct TextView
+struct text_view
 {
     std::string text;
-    bool readOnly = false;
+    bool read_only = false;
     bool monospace = false;
     bool wrap = true;
     bool compact = false;  // the same denser font as compact lists
-    std::function<void()> onChanged;
-    rap::TextView** bind = nullptr;
+    std::function<void()> on_changed;
+    rap::text_view** bind = nullptr;
 };
-struct List
+struct list
 {
-    std::vector<Column> columns;
-    ListModel* model = nullptr;
-    SelectionMode selection = SelectionMode::Multi;
+    std::vector<column> columns;
+    list_model* model = nullptr;
+    selection_mode selection = selection_mode::multi;
     bool headers = true;
     // Denser rows: a slightly smaller font and less cell padding, closer
     // to Windows list views than the toolkit default.
     bool compact = false;
     // Selected rows in a light tint of the accent colour with normal text
     // (as Windows list views do) instead of the toolkit's solid highlight.
-    // Painted cells see the same colours through ThemeColor::Highlight and
-    // ThemeColor::HighlightText.
-    bool softSelection = false;
+    // Painted cells see the same colours through theme_color::highlight and
+    // theme_color::highlight_text.
+    bool soft_selection = false;
     // Hold the middle button and move away from where it was pressed: the
     // list scrolls up or down at a speed that grows with the distance (a
     // small dead zone around the anchor, which is marked while held).
     // Release, or Esc, stops. Opt-in, for long lists (a history).
-    bool autoScroll = false;
-    std::function<void()> onSelectionChanged;
-    std::function<void(size_t)> onActivate;
-    std::function<void(size_t, SortOrder)> onSortRequested;
-    std::function<Menu(std::optional<size_t>)> onContextMenu;
-    std::function<Menu(size_t)> onHeaderMenu;
-    rap::List::ReorderFn onReorder;
-    rap::List::CellDrag onCellDrag;
-    std::function<Menu(size_t, size_t, PointF)> onCellContextMenu;
-    rap::List** bind = nullptr;
+    bool auto_scroll = false;
+    std::function<void()> on_selection_changed;
+    std::function<void(size_t)> on_activate;
+    std::function<void(size_t, sort_order)> on_sort_requested;
+    std::function<menu(std::optional<size_t>)> on_context_menu;
+    std::function<menu(size_t)> on_header_menu;
+    rap::list::reorder_fn on_reorder;
+    rap::list::cell_drag on_cell_drag;
+    std::function<menu(size_t, size_t, point_f)> on_cell_context_menu;
+    rap::list** bind = nullptr;
 };
-struct MenuButton
+struct menu_button
 {
     std::string text;
-    Icon icon;
+    rap::icon icon;
     bool pushed = false;
-    std::function<Menu()> onMenu;
-    rap::MenuButton** bind = nullptr;
+    std::function<menu()> on_menu;
+    rap::menu_button** bind = nullptr;
 };
-struct ProgressBar
+struct progress_bar
 {
-    rap::ProgressBar** bind = nullptr;
+    rap::progress_bar** bind = nullptr;
 };
-struct DatePicker
+struct date_picker
 {
-    Date date;
-    std::function<void(Date)> onChanged;
-    rap::DatePicker** bind = nullptr;
-};
-
-// App-drawn surface; see rap::Canvas.
-struct Canvas
-{
-    bool focusable = true;  // takes keyboard focus on click (needed for onKey)
-    std::function<void(Painter&, SizeF)> onPaint;
-    std::function<void(SizeF)> onResize;
-    std::function<bool(const PointerEvent&)> onPointer;
-    std::function<bool(const ScrollEvent&)> onScroll;
-    std::function<bool(const KeyEvent&)> onKey;
-    rap::Canvas** bind = nullptr;
+    rap::date date;
+    std::function<void(rap::date)> on_changed;
+    rap::date_picker** bind = nullptr;
 };
 
-// Without onClick, a dialog button ends the dialog with its role.
-struct DialogButton
+// App-drawn surface; see rap::canvas.
+struct canvas
 {
-    DialogRole role = DialogRole::None;
+    bool focusable = true;  // takes keyboard focus on click (needed for on_key)
+    std::function<void(rap::painter&, rap::size_f)> on_paint;
+    std::function<void(size_f)> on_resize;
+    std::function<bool(const pointer_event&)> on_pointer;
+    std::function<bool(const scroll_event&)> on_scroll;
+    std::function<bool(const key_event&)> on_key;
+    rap::canvas** bind = nullptr;
+};
+
+// Without on_click, a dialog button ends the dialog with its role.
+struct dialog_button
+{
+    dialog_role role = dialog_role::none;
     std::string text;  // empty = the toolkit's stock label for the role
-    std::function<void()> onClick;
-    rap::Button** bind = nullptr;
+    std::function<void()> on_click;
+    rap::button** bind = nullptr;
 };
 // Row of dialog buttons; the backend orders them by platform convention.
-struct Buttons
+struct buttons
 {
-    std::vector<DialogButton> buttons;
+    std::vector<dialog_button> buttons;
 };
 
 }  // namespace spec
 
-using Spec =
-    std::variant<spec::Box, spec::Form, spec::Splitter, spec::Group, spec::Scroll, spec::Tabs,
-                 spec::Spacer, spec::Separator, spec::Label, spec::Button, spec::Check, spec::Entry,
-                 spec::Select, spec::Combo, spec::TextView, spec::List, spec::Canvas,
-                 spec::MenuButton, spec::ProgressBar, spec::DatePicker, spec::Toolbar,
-                 spec::ToolButton, spec::Slider, spec::Spin, spec::ColorButton, spec::Buttons>;
+using node_spec =
+    std::variant<spec::box, spec::form, spec::splitter, spec::group, spec::scroll, spec::tabs,
+                 spec::spacer, spec::separator, spec::label, spec::button, spec::check, spec::entry,
+                 spec::drop_down, spec::combo, spec::text_view, spec::list, spec::canvas,
+                 spec::menu_button, spec::progress_bar, spec::date_picker, spec::toolbar,
+                 spec::tool_button, spec::slider, spec::spin, spec::color_button, spec::buttons>;
 
-struct Node
+struct node
 {
-    Spec spec;
-    Common common;
+    node_spec spec;
+    rap::common common;
 };
 
-struct WindowSpec
+struct window_spec
 {
     std::string title;
     bool dialog = false;  // has dialog buttons; modal to its parent unless `modal` is false
@@ -311,14 +311,14 @@ struct WindowSpec
     // Off for a window whose content has one right size (a small dialog):
     // no resize border, no maximise.
     bool resizable = true;
-    Node content;
-    Extent width, height;
+    node content;
+    extent width, height;
     // The usual space between the window edge and its content; off for
     // edge-to-edge content (an image viewer, a canvas-only window).
     bool margins = true;
     // Menus across the top, outside the margins. Item shortcuts are display
-    // hints: the window's onKey handles the keys.
-    std::vector<MenuBarItem> menuBar;
+    // hints: the window's on_key handles the keys.
+    std::vector<menu_bar_item> menu_bar;
 };
 
 // ---------------------------------------------------------------- builders
@@ -326,13 +326,13 @@ struct WindowSpec
 namespace layout
 {
 
-using rap::Orientation;
-inline constexpr Orientation Horizontal = Orientation::Horizontal;
-inline constexpr Orientation Vertical = Orientation::Vertical;
+using rap::orientation;
+inline constexpr orientation horizontal = orientation::horizontal;
+inline constexpr orientation vertical = orientation::vertical;
 using namespace rap::literals;
 
 template <class Self, class S>
-class Builder
+class builder
 {
 public:
     Self& stretch(int factor = 1)
@@ -340,12 +340,12 @@ public:
         node_.common.stretch = factor;
         return self();
     }
-    Self& width(Extent w)
+    Self& width(extent w)
     {
         node_.common.width = w;
         return self();
     }
-    Self& height(Extent h)
+    Self& height(extent h)
     {
         node_.common.height = h;
         return self();
@@ -360,18 +360,18 @@ public:
         node_.common.tooltip = std::move(t);
         return self();
     }
-    // The node as a plain Widget (setVisible, setEnabled...), whatever it is.
-    Self& handle(Widget*& h)
+    // The node as a plain Widget (set_visible, set_enabled...), whatever it is.
+    Self& handle(widget*& h)
     {
         node_.common.handle = &h;
         return self();
     }
 
-    operator Node() const& { return node_; }
-    operator Node() && { return std::move(node_); }
+    operator node() const& { return node_; }
+    operator node() && { return std::move(node_); }
 
 protected:
-    Builder()
+    builder()
         : node_{S{}, {}}
     {
     }
@@ -379,41 +379,41 @@ protected:
     Self& self() { return static_cast<Self&>(*this); }
 
 private:
-    Node node_;
+    node node_;
 };
 
-class VBox : public Builder<VBox, spec::Box>
+class vbox : public builder<vbox, spec::box>
 {
 public:
-    VBox(std::initializer_list<Node> items) { s() = {Vertical, items}; }
-    VBox& margins(bool on = true)
+    vbox(std::initializer_list<node> items) { s() = {vertical, items}; }
+    vbox& margins(bool on = true)
     {
         s().margins = on;
         return *this;
     }
 };
 
-class HBox : public Builder<HBox, spec::Box>
+class hbox : public builder<hbox, spec::box>
 {
 public:
-    HBox(std::initializer_list<Node> items) { s() = {Horizontal, items}; }
-    HBox& margins(bool on = true)
+    hbox(std::initializer_list<node> items) { s() = {horizontal, items}; }
+    hbox& margins(bool on = true)
     {
         s().margins = on;
         return *this;
     }
 };
 
-struct FormRow
+struct form_row
 {
     std::string label;
-    Node field;
+    node field;
 };
 
-class Form : public Builder<Form, spec::Form>
+class form : public builder<form, spec::form>
 {
 public:
-    Form(std::initializer_list<FormRow> rows)
+    form(std::initializer_list<form_row> rows)
     {
         for (auto& r : rows)
         {
@@ -423,37 +423,37 @@ public:
     }
 };
 
-class Splitter : public Builder<Splitter, spec::Splitter>
+class splitter : public builder<splitter, spec::splitter>
 {
 public:
     template <class... Panes>
-    Splitter(Orientation dir, Panes&&... panes)
+    splitter(orientation dir, Panes&&... panes)
     {
         s().dir = dir;
-        (s().panes.push_back(Node(std::forward<Panes>(panes))), ...);
+        (s().panes.push_back(node(std::forward<Panes>(panes))), ...);
     }
-    Splitter& bind(rap::Splitter*& h)
+    splitter& bind(rap::splitter*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Group : public Builder<Group, spec::Group>
+class group : public builder<group, spec::group>
 {
 public:
-    Group(std::string title, Node content)
+    group(std::string title, node content)
     {
         s().title = std::move(title);
         s().content.push_back(std::move(content));
     }
 };
 
-class Scroll : public Builder<Scroll, spec::Scroll>
+class scroll : public builder<scroll, spec::scroll>
 {
 public:
-    explicit Scroll(Node content) { s().content.push_back(std::move(content)); }
-    Scroll& horizontal(bool v = true)
+    explicit scroll(node content) { s().content.push_back(std::move(content)); }
+    scroll& horizontal(bool v = true)
     {
         s().horizontal = v;
         return *this;
@@ -467,510 +467,510 @@ public:
 // - It doesn't count toward the window's natural size: it gets the tab
 //   area that the window's size and the other pages give it. Size the window
 //   (or the Tabs), and put content that might not fit in a Scroll.
-struct Lazy
+struct lazy
 {
-    std::function<Node()> build;
+    std::function<node()> build;
 };
 
-struct Page
+struct page
 {
-    Page(std::string title, Node content)
+    page(std::string title, node content)
         : title(std::move(title))
         , content(std::move(content))
     {
     }
-    Page(std::string title, Lazy lazy)
+    page(std::string title, lazy lazy)
         : title(std::move(title))
         , build(std::move(lazy.build))
     {
     }
     std::string title;
-    Node content;
-    std::function<Node()> build;
+    node content;
+    std::function<node()> build;
 };
 
-class Tabs : public Builder<Tabs, spec::Tabs>
+class tabs : public builder<tabs, spec::tabs>
 {
 public:
-    Tabs(std::initializer_list<Page> pages)
+    tabs(std::initializer_list<page> pages)
     {
-        bool anyLazy = false;
-        for (auto& p : pages) anyLazy |= bool(p.build);
+        bool any_lazy = false;
+        for (auto& p : pages) any_lazy |= bool(p.build);
         for (auto& p : pages)
         {
             s().titles.push_back(p.title);
-            s().pages.push_back(p.build ? Node{spec::Box{Vertical, {}}, {}} : p.content);
-            if (anyLazy) s().lazy.push_back(p.build);
+            s().pages.push_back(p.build ? node{spec::box{vertical, {}}, {}} : p.content);
+            if (any_lazy) s().lazy.push_back(p.build);
         }
     }
-    Tabs& onChanged(std::function<void(int)> f)
+    tabs& on_changed(std::function<void(int)> f)
     {
-        s().onChanged = std::move(f);
+        s().on_changed = std::move(f);
         return *this;
     }
-    Tabs& sidebar(bool on = true)
+    tabs& sidebar(bool on = true)
     {
         s().sidebar = on;
         return *this;
     }
-    Tabs& bind(rap::Tabs*& h)
+    tabs& bind(rap::tabs*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Spacer : public Builder<Spacer, spec::Spacer>
+class spacer : public builder<spacer, spec::spacer>
 {
 public:
-    Spacer() { stretch(); }
+    spacer() { stretch(); }
 };
 
-class Separator : public Builder<Separator, spec::Separator>
+class separator : public builder<separator, spec::separator>
 {
 public:
-    Separator() = default;
+    separator() = default;
 };
 
-class Label : public Builder<Label, spec::Label>
+class label : public builder<label, spec::label>
 {
 public:
-    explicit Label(std::string text = {}) { s().text = std::move(text); }
-    Label& selectable(bool v = true)
+    explicit label(std::string text = {}) { s().text = std::move(text); }
+    label& selectable(bool v = true)
     {
         s().selectable = v;
         return *this;
     }
-    Label& ellipsize(bool v = true)
+    label& ellipsize(bool v = true)
     {
         s().ellipsize = v;
         return *this;
     }
-    Label& bind(rap::Label*& h)
+    label& bind(rap::label*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Button : public Builder<Button, spec::Button>
+class button : public builder<button, spec::button>
 {
 public:
-    explicit Button(std::string text) { s().text = std::move(text); }
-    Button& flat(bool v = true)
+    explicit button(std::string text) { s().text = std::move(text); }
+    button& flat(bool v = true)
     {
         s().flat = v;
         return *this;
     }
-    Button& icon(Icon i)
+    button& icon(icon i)
     {
         s().icon = std::move(i);
         return *this;
     }
     // Icon only; the text stays as tooltip and accessible name.
-    Button& iconOnly(bool v = true)
+    button& icon_only(bool v = true)
     {
-        s().iconOnly = v;
+        s().icon_only = v;
         return *this;
     }
-    Button& onClick(std::function<void()> f)
+    button& on_click(std::function<void()> f)
     {
-        s().onClick = std::move(f);
+        s().on_click = std::move(f);
         return *this;
     }
-    Button& bind(rap::Button*& h)
+    button& bind(rap::button*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Check : public Builder<Check, spec::Check>
+class check : public builder<check, spec::check>
 {
 public:
-    explicit Check(std::string text, bool checked = false)
+    explicit check(std::string text, bool checked = false)
     {
         s().text = std::move(text);
-        s().state = checked ? CheckState::Checked : CheckState::Unchecked;
+        s().state = checked ? check_state::checked : check_state::unchecked;
     }
-    Check(std::string text, CheckState state)
+    check(std::string text, check_state state)
     {
         s().text = std::move(text);
         s().state = state;
     }
-    Check& onToggled(std::function<void(bool)> f)
+    check& on_toggled(std::function<void(bool)> f)
     {
-        s().onToggled = std::move(f);
+        s().on_toggled = std::move(f);
         return *this;
     }
-    Check& bind(rap::Check*& h)
+    check& bind(rap::check*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Entry : public Builder<Entry, spec::Entry>
+class entry : public builder<entry, spec::entry>
 {
 public:
-    explicit Entry(std::string text = {}) { s().text = std::move(text); }
-    Entry& placeholder(std::string p)
+    explicit entry(std::string text = {}) { s().text = std::move(text); }
+    entry& placeholder(std::string p)
     {
         s().placeholder = std::move(p);
         return *this;
     }
-    Entry& onChanged(std::function<void(const std::string&)> f)
+    entry& on_changed(std::function<void(const std::string&)> f)
     {
-        s().onChanged = std::move(f);
+        s().on_changed = std::move(f);
         return *this;
     }
-    Entry& onActivate(std::function<void()> f)
+    entry& on_activate(std::function<void()> f)
     {
-        s().onActivate = std::move(f);
+        s().on_activate = std::move(f);
         return *this;
     }
-    Entry& bind(rap::Entry*& h)
+    entry& bind(rap::entry*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Select : public Builder<Select, spec::Select>
+class drop_down : public builder<drop_down, spec::drop_down>
 {
 public:
-    explicit Select(std::vector<std::string> items = {}, int current = 0)
+    explicit drop_down(std::vector<std::string> items = {}, int current = 0)
     {
         s().items = std::move(items);
         s().current = current;
     }
-    Select& onChanged(std::function<void(int)> f)
+    drop_down& on_changed(std::function<void(int)> f)
     {
-        s().onChanged = std::move(f);
+        s().on_changed = std::move(f);
         return *this;
     }
-    Select& bind(rap::Select*& h)
+    drop_down& bind(rap::drop_down*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Combo : public Builder<Combo, spec::Combo>
+class combo : public builder<combo, spec::combo>
 {
 public:
-    explicit Combo(std::vector<std::string> items = {}, std::string text = {})
+    explicit combo(std::vector<std::string> items = {}, std::string text = {})
     {
         s().items = std::move(items);
         s().text = std::move(text);
     }
-    Combo& onChanged(std::function<void(const std::string&)> f)
+    combo& on_changed(std::function<void(const std::string&)> f)
     {
-        s().onChanged = std::move(f);
+        s().on_changed = std::move(f);
         return *this;
     }
-    Combo& onActivate(std::function<void()> f)
+    combo& on_activate(std::function<void()> f)
     {
-        s().onActivate = std::move(f);
+        s().on_activate = std::move(f);
         return *this;
     }
-    Combo& bind(rap::Combo*& h)
+    combo& bind(rap::combo*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class TextView : public Builder<TextView, spec::TextView>
+class text_view : public builder<text_view, spec::text_view>
 {
 public:
-    explicit TextView(std::string text = {}) { s().text = std::move(text); }
-    TextView& readOnly(bool v = true)
+    explicit text_view(std::string text = {}) { s().text = std::move(text); }
+    text_view& read_only(bool v = true)
     {
-        s().readOnly = v;
+        s().read_only = v;
         return *this;
     }
-    TextView& compact(bool v = true)
+    text_view& compact(bool v = true)
     {
         s().compact = v;
         return *this;
     }
-    TextView& monospace(bool v = true)
+    text_view& monospace(bool v = true)
     {
         s().monospace = v;
         return *this;
     }
-    TextView& wrap(bool v)
+    text_view& wrap(bool v)
     {
         s().wrap = v;
         return *this;
     }
-    TextView& onChanged(std::function<void()> f)
+    text_view& on_changed(std::function<void()> f)
     {
-        s().onChanged = std::move(f);
+        s().on_changed = std::move(f);
         return *this;
     }
-    TextView& bind(rap::TextView*& h)
+    text_view& bind(rap::text_view*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class List : public Builder<List, spec::List>
+class list : public builder<list, spec::list>
 {
 public:
-    List(std::vector<Column> columns, ListModel* model)
+    list(std::vector<column> columns, list_model* model)
     {
         s().columns = std::move(columns);
         s().model = model;
     }
-    List& selection(SelectionMode m)
+    list& selection(selection_mode m)
     {
         s().selection = m;
         return *this;
     }
-    List& softSelection(bool v = true)
+    list& soft_selection(bool v = true)
     {
-        s().softSelection = v;
+        s().soft_selection = v;
         return *this;
     }
-    List& autoScroll(bool v = true)
+    list& auto_scroll(bool v = true)
     {
-        s().autoScroll = v;
+        s().auto_scroll = v;
         return *this;
     }
-    List& compact(bool v = true)
+    list& compact(bool v = true)
     {
         s().compact = v;
         return *this;
     }
-    List& headers(bool v)
+    list& headers(bool v)
     {
         s().headers = v;
         return *this;
     }
-    List& onSelectionChanged(std::function<void()> f)
+    list& on_selection_changed(std::function<void()> f)
     {
-        s().onSelectionChanged = std::move(f);
+        s().on_selection_changed = std::move(f);
         return *this;
     }
-    List& onActivate(std::function<void(size_t)> f)
+    list& on_activate(std::function<void(size_t)> f)
     {
-        s().onActivate = std::move(f);
+        s().on_activate = std::move(f);
         return *this;
     }
-    List& onSortRequested(std::function<void(size_t, SortOrder)> f)
+    list& on_sort_requested(std::function<void(size_t, sort_order)> f)
     {
-        s().onSortRequested = std::move(f);
+        s().on_sort_requested = std::move(f);
         return *this;
     }
-    List& onContextMenu(std::function<Menu(std::optional<size_t>)> f)
+    list& on_context_menu(std::function<menu(std::optional<size_t>)> f)
     {
-        s().onContextMenu = std::move(f);
+        s().on_context_menu = std::move(f);
         return *this;
     }
-    List& onReorder(rap::List::ReorderFn f)
+    list& on_reorder(rap::list::reorder_fn f)
     {
-        s().onReorder = std::move(f);
+        s().on_reorder = std::move(f);
         return *this;
     }
-    List& onCellDrag(rap::List::CellDrag d)
+    list& on_cell_drag(rap::list::cell_drag d)
     {
-        s().onCellDrag = std::move(d);
+        s().on_cell_drag = std::move(d);
         return *this;
     }
-    List& onCellContextMenu(std::function<Menu(size_t, size_t, PointF)> f)
+    list& on_cell_context_menu(std::function<menu(size_t, size_t, point_f)> f)
     {
-        s().onCellContextMenu = std::move(f);
+        s().on_cell_context_menu = std::move(f);
         return *this;
     }
-    List& onHeaderMenu(std::function<Menu(size_t)> f)
+    list& on_header_menu(std::function<menu(size_t)> f)
     {
-        s().onHeaderMenu = std::move(f);
+        s().on_header_menu = std::move(f);
         return *this;
     }
-    List& bind(rap::List*& h)
+    list& bind(rap::list*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class MenuButton : public Builder<MenuButton, spec::MenuButton>
+class menu_button : public builder<menu_button, spec::menu_button>
 {
 public:
-    explicit MenuButton(std::string text) { s().text = std::move(text); }
-    MenuButton& icon(Icon i)
+    explicit menu_button(std::string text) { s().text = std::move(text); }
+    menu_button& icon(icon i)
     {
         s().icon = std::move(i);
         return *this;
     }
-    MenuButton& pushed(bool v = true)
+    menu_button& pushed(bool v = true)
     {
         s().pushed = v;
         return *this;
     }
-    MenuButton& onMenu(std::function<Menu()> f)
+    menu_button& on_menu(std::function<menu()> f)
     {
-        s().onMenu = std::move(f);
+        s().on_menu = std::move(f);
         return *this;
     }
-    MenuButton& bind(rap::MenuButton*& h)
-    {
-        s().bind = &h;
-        return *this;
-    }
-};
-
-class ProgressBar : public Builder<ProgressBar, spec::ProgressBar>
-{
-public:
-    ProgressBar() = default;
-    ProgressBar& bind(rap::ProgressBar*& h)
+    menu_button& bind(rap::menu_button*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class DatePicker : public Builder<DatePicker, spec::DatePicker>
+class progress_bar : public builder<progress_bar, spec::progress_bar>
 {
 public:
-    explicit DatePicker(Date date = {}) { s().date = date; }
-    DatePicker& onChanged(std::function<void(Date)> f)
-    {
-        s().onChanged = std::move(f);
-        return *this;
-    }
-    DatePicker& bind(rap::DatePicker*& h)
+    progress_bar() = default;
+    progress_bar& bind(rap::progress_bar*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Canvas : public Builder<Canvas, spec::Canvas>
+class date_picker : public builder<date_picker, spec::date_picker>
 {
 public:
-    Canvas() = default;
-    Canvas& focusable(bool v)
+    explicit date_picker(date date = {}) { s().date = date; }
+    date_picker& on_changed(std::function<void(date)> f)
+    {
+        s().on_changed = std::move(f);
+        return *this;
+    }
+    date_picker& bind(rap::date_picker*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class canvas : public builder<canvas, spec::canvas>
+{
+public:
+    canvas() = default;
+    canvas& focusable(bool v)
     {
         s().focusable = v;
         return *this;
     }
-    Canvas& onPaint(std::function<void(Painter&, SizeF)> f)
+    canvas& on_paint(std::function<void(rap::painter&, rap::size_f)> f)
     {
-        s().onPaint = std::move(f);
+        s().on_paint = std::move(f);
         return *this;
     }
-    Canvas& onResize(std::function<void(SizeF)> f)
+    canvas& on_resize(std::function<void(size_f)> f)
     {
-        s().onResize = std::move(f);
+        s().on_resize = std::move(f);
         return *this;
     }
-    Canvas& onPointer(std::function<bool(const PointerEvent&)> f)
+    canvas& on_pointer(std::function<bool(const pointer_event&)> f)
     {
-        s().onPointer = std::move(f);
+        s().on_pointer = std::move(f);
         return *this;
     }
-    Canvas& onScroll(std::function<bool(const ScrollEvent&)> f)
+    canvas& on_scroll(std::function<bool(const scroll_event&)> f)
     {
-        s().onScroll = std::move(f);
+        s().on_scroll = std::move(f);
         return *this;
     }
-    Canvas& onKey(std::function<bool(const KeyEvent&)> f)
+    canvas& on_key(std::function<bool(const key_event&)> f)
     {
-        s().onKey = std::move(f);
+        s().on_key = std::move(f);
         return *this;
     }
-    Canvas& bind(rap::Canvas*& h)
+    canvas& bind(rap::canvas*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Toolbar : public Builder<Toolbar, spec::Toolbar>
+class toolbar : public builder<toolbar, spec::toolbar>
 {
 public:
-    Toolbar(std::initializer_list<Node> items) { s().items = items; }
+    toolbar(std::initializer_list<node> items) { s().items = items; }
 };
 
-class ToolButton : public Builder<ToolButton, spec::ToolButton>
+class tool_button : public builder<tool_button, spec::tool_button>
 {
 public:
-    ToolButton(Icon icon, std::string label)
+    tool_button(icon icon, std::string label)
     {
         s().icon = std::move(icon);
         s().label = std::move(label);
     }
     // A toggle: stays pressed while checked.
-    ToolButton& toggle(bool checked = false)
+    tool_button& toggle(bool checked = false)
     {
         s().toggle = true;
         s().checked = checked;
         return *this;
     }
-    ToolButton& onClick(std::function<void()> f)
+    tool_button& on_click(std::function<void()> f)
     {
-        s().onClick = std::move(f);
+        s().on_click = std::move(f);
         return *this;
     }
-    ToolButton& onToggled(std::function<void(bool)> f)
+    tool_button& on_toggled(std::function<void(bool)> f)
     {
-        s().onToggled = std::move(f);
+        s().on_toggled = std::move(f);
         return *this;
     }
-    ToolButton& bind(rap::ToolButton*& h)
+    tool_button& bind(rap::tool_button*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Slider : public Builder<Slider, spec::Slider>
+class slider : public builder<slider, spec::slider>
 {
 public:
-    Slider(double min, double max, double value)
+    slider(double min, double max, double value)
     {
         s().min = min;
         s().max = max;
         s().value = value;
     }
-    Slider& step(double step, double page)
+    slider& step(double step, double page)
     {
         s().step = step;
         s().page = page;
         return *this;
     }
-    Slider& showValue(int digits)
+    slider& show_value(int digits)
     {
-        s().showValue = true;
+        s().show_value = true;
         s().digits = digits;
         return *this;
     }
-    Slider& mark(double at, std::string label = {})
+    slider& mark(double at, std::string label = {})
     {
         s().marks.emplace_back(at, std::move(label));
         return *this;
     }
-    Slider& onChanged(std::function<void(double)> f)
+    slider& on_changed(std::function<void(double)> f)
     {
-        s().onChanged = std::move(f);
+        s().on_changed = std::move(f);
         return *this;
     }
-    Slider& bind(rap::Slider*& h)
+    slider& bind(rap::slider*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class Spin : public Builder<Spin, spec::Spin>
+class spin : public builder<spin, spec::spin>
 {
 public:
-    Spin(double min, double max, double value, double step = 1, int digits = 0)
+    spin(double min, double max, double value, double step = 1, int digits = 0)
     {
         s().min = min;
         s().max = max;
@@ -978,153 +978,153 @@ public:
         s().step = step;
         s().digits = digits;
     }
-    Spin& onChanged(std::function<void(double)> f)
+    spin& on_changed(std::function<void(double)> f)
     {
-        s().onChanged = std::move(f);
+        s().on_changed = std::move(f);
         return *this;
     }
-    Spin& bind(rap::Spin*& h)
+    spin& bind(rap::spin*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class ColorButton : public Builder<ColorButton, spec::ColorButton>
+class color_button : public builder<color_button, spec::color_button>
 {
 public:
-    explicit ColorButton(Color c, std::string title = {})
+    explicit color_button(color c, std::string title = {})
     {
         s().color = c;
         s().title = std::move(title);
     }
-    ColorButton& alpha(bool v = true)
+    color_button& alpha(bool v = true)
     {
         s().alpha = v;
         return *this;
     }
-    ColorButton& onChanged(std::function<void(Color)> f)
+    color_button& on_changed(std::function<void(color)> f)
     {
-        s().onChanged = std::move(f);
+        s().on_changed = std::move(f);
         return *this;
     }
-    ColorButton& bind(rap::ColorButton*& h)
+    color_button& bind(rap::color_button*& h)
     {
         s().bind = &h;
         return *this;
     }
 };
 
-class DialogButton
+class dialog_button
 {
 public:
-    explicit DialogButton(DialogRole role, std::string text = {})
+    explicit dialog_button(dialog_role role, std::string text = {})
     {
         b_.role = role;
         b_.text = std::move(text);
     }
-    DialogButton& onClick(std::function<void()> f)
+    dialog_button& on_click(std::function<void()> f)
     {
-        b_.onClick = std::move(f);
+        b_.on_click = std::move(f);
         return *this;
     }
-    DialogButton& bind(rap::Button*& h)
+    dialog_button& bind(rap::button*& h)
     {
         b_.bind = &h;
         return *this;
     }
-    operator spec::DialogButton() const { return b_; }
+    operator spec::dialog_button() const { return b_; }
 
 private:
-    spec::DialogButton b_;
+    spec::dialog_button b_;
 };
 
-// `Ok` on its own, or `Ok("Start rebase")` for a custom label.
-struct RoleTag
+// `Ok` on its own, or `ok("Start rebase")` for a custom label.
+struct role_tag
 {
-    DialogRole role;
-    DialogButton operator()(std::string text = {}) const
+    dialog_role role;
+    dialog_button operator()(std::string text = {}) const
     {
-        return DialogButton{role, std::move(text)};
+        return dialog_button{role, std::move(text)};
     }
-    operator spec::DialogButton() const { return DialogButton{role}; }
+    operator spec::dialog_button() const { return dialog_button{role}; }
 };
-inline constexpr RoleTag Ok{DialogRole::Ok}, Cancel{DialogRole::Cancel}, Apply{DialogRole::Apply},
-    Close{DialogRole::Close}, Yes{DialogRole::Yes}, No{DialogRole::No}, Help{DialogRole::Help},
-    Reset{DialogRole::Reset};
+inline constexpr role_tag ok{dialog_role::ok}, cancel{dialog_role::cancel}, apply{dialog_role::apply},
+    close{dialog_role::close}, yes{dialog_role::yes}, no{dialog_role::no}, help{dialog_role::help},
+    reset{dialog_role::reset};
 
-class Buttons : public Builder<Buttons, spec::Buttons>
+class buttons : public builder<buttons, spec::buttons>
 {
 public:
-    Buttons(std::initializer_list<spec::DialogButton> buttons) { s().buttons = buttons; }
+    buttons(std::initializer_list<spec::dialog_button> buttons) { s().buttons = buttons; }
 };
 
 namespace detail
 {
-inline Node single(std::initializer_list<Node> content)
+inline node single(std::initializer_list<node> content)
 {
     if (content.size() == 1) return *content.begin();
-    return VBox(content);
+    return vbox(content);
 }
 }  // namespace detail
 
-class Window
+class window
 {
 public:
-    Window(std::string title, std::initializer_list<Node> content)
+    window(std::string title, std::initializer_list<node> content)
     {
         w_.title = std::move(title);
         w_.content = detail::single(content);
     }
-    Window& size(Extent w, Extent h)
+    window& size(extent w, extent h)
     {
         w_.width = w;
         w_.height = h;
         return *this;
     }
-    Window& resizable(bool on)
+    window& resizable(bool on)
     {
         w_.resizable = on;
         return *this;
     }
-    Window& margins(bool on)
+    window& margins(bool on)
     {
         w_.margins = on;
         return *this;
     }
-    Window& menuBar(std::vector<MenuBarItem> menus)
+    window& menu_bar(std::vector<menu_bar_item> menus)
     {
-        w_.menuBar = std::move(menus);
+        w_.menu_bar = std::move(menus);
         return *this;
     }
-    operator WindowSpec() const& { return w_; }
-    operator WindowSpec() && { return std::move(w_); }
+    operator window_spec() const& { return w_; }
+    operator window_spec() && { return std::move(w_); }
 
 protected:
-    WindowSpec w_;
+    window_spec w_;
 };
 
-class Dialog : public Window
+class dialog : public window
 {
 public:
-    Dialog(std::string title, std::initializer_list<Node> content)
-        : Window(std::move(title), content)
+    dialog(std::string title, std::initializer_list<node> content)
+        : window(std::move(title), content)
     {
         w_.dialog = true;
     }
-    Dialog& size(Extent w, Extent h)
+    dialog& size(extent w, extent h)
     {
-        Window::size(w, h);
+        window::size(w, h);
         return *this;
     }
-    Dialog& modeless()
+    dialog& modeless()
     {
         w_.modal = false;
         return *this;
     }
-    Dialog& resizable(bool on)
+    dialog& resizable(bool on)
     {
-        Window::resizable(on);
+        window::resizable(on);
         return *this;
     }
 };

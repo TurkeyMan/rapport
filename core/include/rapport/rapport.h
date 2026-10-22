@@ -1,9 +1,9 @@
 // rapport: native widgets from whichever toolkit the desktop uses, picked at
 // runtime.
 //
-//     auto ui = rap::Ui::load(argc, argv);
+//     auto ui = rap::ui::load(argc, argv);
 //     if (!ui) { fprintf(stderr, "%s\n", ui.error().c_str()); return 1; }
-//     auto win = ui->create(rap::layout::Window{"Hello", {...}});
+//     auto win = ui->create(rap::layout::window{"Hello", {...}});
 //     win->show();
 //     return ui->run();
 #pragma once
@@ -18,7 +18,7 @@
 namespace rap
 {
 
-struct LoadOptions
+struct load_options
 {
     // Force a backend ("qt6", "gtk4", "gtk3", "null"). Empty = detect. The
     // RAPPORT_BACKEND environment variable overrides detection too.
@@ -26,10 +26,10 @@ struct LoadOptions
     // Extra plugin directories, searched first. RAPPORT_PLUGIN_PATH
     // (colon-separated) is searched next, then next to the executable,
     // then the install directory.
-    std::vector<std::string> searchPaths;
+    std::vector<std::string> search_paths;
 };
 
-struct Detection
+struct detection
 {
     std::string desktop;                  // e.g. "KDE", "GNOME", "" if unknown
     std::vector<std::string> preference;  // backends to try, in order
@@ -37,70 +37,70 @@ struct Detection
 
 // What the running desktop is and which backends suit it. Exposed for
 // diagnostics (`--version`-style output, bug reports).
-Detection detect(const LoadOptions& = {});
+detection detect(const load_options& = {});
 
 // A backend linked into the program (RAPPORT_STATIC builds, e.g. one
 // self-contained .exe). Builtins are tried before plugins of the same name.
 // Use the macro below, at namespace scope in one of the app's own source
 // files: a registration inside a static library would be dropped by the
 // linker as unreferenced.
-void registerBuiltinBackend(std::string name, CreateBackendFn* create);
+void register_builtin_backend(std::string name, create_backend_fn* create);
 
-class Ui
+class ui
 {
 public:
-    static std::expected<std::unique_ptr<Ui>, std::string> load(int& argc, char** argv,
-                                                                const LoadOptions& = {});
+    static std::expected<std::unique_ptr<ui>, std::string> load(int& argc, char** argv,
+                                                                const load_options& = {});
 
-    ~Ui();
+    ~ui();
 
-    std::string_view backendName() const { return backend_->name(); }
-    Backend& backend() { return *backend_; }
+    std::string_view backend_name() const { return backend_->name(); }
+    rap::backend& backend() { return *backend_; }
 
-    std::unique_ptr<Window> create(const WindowSpec&, Window* parent = nullptr);
+    std::unique_ptr<window> create(const window_spec&, window* parent = nullptr);
 
     int run() { return backend_->run(); }
     void quit(int code = 0) { backend_->quit(code); }
     void post(std::function<void()> f) { backend_->post(std::move(f)); }
 
-    void message(Window* parent, const MessageSpec& m, std::function<void(DialogRole)> done = {})
+    void message(window* parent, const message_spec& m, std::function<void(dialog_role)> done = {})
     {
         backend_->message(parent, m, std::move(done));
     }
-    void chooseFiles(Window* parent, const FileDialogSpec& f,
+    void choose_files(window* parent, const file_dialog_spec& f,
                      std::function<void(std::vector<std::string>)> done)
     {
-        backend_->chooseFiles(parent, f, std::move(done));
+        backend_->choose_files(parent, f, std::move(done));
     }
-    void setClipboard(const std::string& s) { backend_->setClipboard(s); }
-    void setClipboardImage(int width, int height, PixelFormat format, const uint8_t* pixels,
+    void set_clipboard(const std::string& s) { backend_->set_clipboard(s); }
+    void set_clipboard_image(int width, int height, pixel_format format, const uint8_t* pixels,
                            size_t stride)
     {
-        backend_->setClipboardImage(width, height, format, pixels, stride);
+        backend_->set_clipboard_image(width, height, format, pixels, stride);
     }
 
-    std::unique_ptr<Image> createImage(int width, int height, PixelFormat format,
+    std::unique_ptr<image> create_image(int width, int height, pixel_format format,
                                        const uint8_t* pixels, size_t stride)
     {
-        return backend_->createImage(width, height, format, pixels, stride);
+        return backend_->create_image(width, height, format, pixels, stride);
     }
-    [[nodiscard]] Subscription timer(int ms, bool repeat, std::function<void()> fn)
+    [[nodiscard]] subscription timer(int ms, bool repeat, std::function<void()> fn)
     {
         return backend_->timer(ms, repeat, std::move(fn));
     }
 
 private:
-    explicit Ui(std::unique_ptr<Backend> b)
+    explicit ui(std::unique_ptr<rap::backend> b)
         : backend_(std::move(b))
     {
     }
-    std::unique_ptr<Backend> backend_;
+    std::unique_ptr<rap::backend> backend_;
 };
 
 }  // namespace rap
 
 // RAPPORT_BUILTIN_BACKEND(gtk3) registers the statically linked gtk3 backend.
 #define RAPPORT_BUILTIN_BACKEND(name)                                                              \
-    extern "C" rap::Backend* rapport_create_backend_##name(int, int*, char**);                     \
+    extern "C" rap::backend* rapport_create_backend_##name(int, int*, char**);                     \
     static const bool rapport_builtin_backend_##name =                                             \
-        (rap::registerBuiltinBackend(#name, &rapport_create_backend_##name), true)
+        (rap::register_builtin_backend(#name, &rapport_create_backend_##name), true)

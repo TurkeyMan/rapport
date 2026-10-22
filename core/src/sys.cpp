@@ -34,12 +34,12 @@ namespace rap::sys
 
 // ---------------------------------------------------------------- strings, paths
 
-fs::path pathFromUtf8(std::string_view utf8)
+fs::path path_from_utf8(std::string_view utf8)
 {
     return fs::path(std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
 }
 
-std::string pathToUtf8(const fs::path& p)
+std::string path_to_utf8(const fs::path& p)
 {
     const std::u8string s = p.u8string();
     return std::string(reinterpret_cast<const char*>(s.data()), s.size());
@@ -48,12 +48,12 @@ std::string pathToUtf8(const fs::path& p)
 std::optional<std::string> env(const char* name)
 {
 #ifdef _WIN32
-    const std::wstring wname = pathFromUtf8(name).wstring();
+    const std::wstring wname = path_from_utf8(name).wstring();
     const DWORD n = GetEnvironmentVariableW(wname.c_str(), nullptr, 0);
     if (n == 0) return std::nullopt;
     std::wstring value(n, L'\0');
     value.resize(GetEnvironmentVariableW(wname.c_str(), value.data(), n));
-    return pathToUtf8(fs::path(value));
+    return path_to_utf8(fs::path(value));
 #else
     if (const char* v = std::getenv(name)) return std::string(v);
     return std::nullopt;
@@ -74,7 +74,7 @@ std::FILE* fopen(const fs::path& path, const char* mode)
 
 // ---------------------------------------------------------------- locations
 
-fs::path executablePath()
+fs::path executable_path()
 {
 #ifdef _WIN32
     std::wstring buf(MAX_PATH, L'\0');
@@ -106,7 +106,7 @@ fs::path ensure(fs::path p)
 }
 
 #ifdef _WIN32
-fs::path knownFolder(const KNOWNFOLDERID& id)
+fs::path known_folder(const KNOWNFOLDERID& id)
 {
     PWSTR raw = nullptr;
     fs::path p;
@@ -124,36 +124,36 @@ fs::path xdg(const char* var, const char* fallback)
 
 }  // namespace
 
-fs::path configDir(std::string_view app)
+fs::path config_dir(std::string_view app)
 {
 #ifdef _WIN32
-    return ensure(knownFolder(FOLDERID_RoamingAppData) / pathFromUtf8(app));
+    return ensure(known_folder(FOLDERID_RoamingAppData) / path_from_utf8(app));
 #else
-    return ensure(xdg("XDG_CONFIG_HOME", ".config") / pathFromUtf8(app));
+    return ensure(xdg("XDG_CONFIG_HOME", ".config") / path_from_utf8(app));
 #endif
 }
 
-fs::path cacheDir(std::string_view app)
+fs::path cache_dir(std::string_view app)
 {
 #ifdef _WIN32
-    return ensure(knownFolder(FOLDERID_LocalAppData) / pathFromUtf8(app) / "cache");
+    return ensure(known_folder(FOLDERID_LocalAppData) / path_from_utf8(app) / "cache");
 #else
-    return ensure(xdg("XDG_CACHE_HOME", ".cache") / pathFromUtf8(app));
+    return ensure(xdg("XDG_CACHE_HOME", ".cache") / path_from_utf8(app));
 #endif
 }
 
-fs::path dataDir(std::string_view app)
+fs::path data_dir(std::string_view app)
 {
 #ifdef _WIN32
-    return ensure(knownFolder(FOLDERID_LocalAppData) / pathFromUtf8(app));
+    return ensure(known_folder(FOLDERID_LocalAppData) / path_from_utf8(app));
 #else
-    return ensure(xdg("XDG_DATA_HOME", ".local/share") / pathFromUtf8(app));
+    return ensure(xdg("XDG_DATA_HOME", ".local/share") / path_from_utf8(app));
 #endif
 }
 
 // ---------------------------------------------------------------- shared libraries
 
-std::expected<Library, std::string> Library::open(const fs::path& name)
+std::expected<library, std::string> library::open(const fs::path& name)
 {
 #ifdef _WIN32
     // A bare name searches the application directory and System32 (not the
@@ -163,27 +163,27 @@ std::expected<Library, std::string> Library::open(const fs::path& name)
                             ? LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
                             : LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
     if (HMODULE h = LoadLibraryExW(name.c_str(), nullptr, flags))
-        return Library(reinterpret_cast<void*>(h));
-    return std::unexpected(pathToUtf8(name) + ": " +
+        return library(reinterpret_cast<void*>(h));
+    return std::unexpected(path_to_utf8(name) + ": " +
                            std::system_category().message(int(GetLastError())));
 #else
-    if (void* h = dlopen(name.c_str(), RTLD_NOW | RTLD_LOCAL)) return Library(h);
+    if (void* h = dlopen(name.c_str(), RTLD_NOW | RTLD_LOCAL)) return library(h);
     const char* err = dlerror();
     return std::unexpected(std::string(err ? err : "dlopen failed"));
 #endif
 }
 
-Library& Library::operator=(Library&& other) noexcept
+library& library::operator=(library&& other) noexcept
 {
     if (this != &other)
     {
-        this->~Library();
+        this->~library();
         handle_ = std::exchange(other.handle_, nullptr);
     }
     return *this;
 }
 
-Library::~Library()
+library::~library()
 {
     if (!handle_) return;
 #ifdef _WIN32
@@ -194,7 +194,7 @@ Library::~Library()
     handle_ = nullptr;
 }
 
-void* Library::symbol(const char* name) const
+void* library::symbol(const char* name) const
 {
     if (!handle_) return nullptr;
 #ifdef _WIN32
@@ -208,10 +208,10 @@ namespace
 {
 
 // Where the loader looks, in its order.
-std::vector<fs::path> librarySearchPath()
+std::vector<fs::path> library_search_path()
 {
     std::vector<fs::path> dirs;
-    dirs.push_back(executablePath().parent_path());
+    dirs.push_back(executable_path().parent_path());
 #ifdef _WIN32
     wchar_t sys[MAX_PATH];
     if (UINT n = GetSystemDirectoryW(sys, MAX_PATH); n && n < MAX_PATH)
@@ -251,10 +251,10 @@ std::vector<fs::path> librarySearchPath()
 
 }  // namespace
 
-bool libraryInstalled(std::string_view name)
+bool library_installed(std::string_view name)
 {
-    static const std::vector<fs::path> dirs = librarySearchPath();
-    const fs::path file = pathFromUtf8(name);
+    static const std::vector<fs::path> dirs = library_search_path();
+    const fs::path file = path_from_utf8(name);
     std::error_code ec;
     if (file.has_parent_path()) return fs::exists(file, ec);
     for (const fs::path& d : dirs)
@@ -267,7 +267,7 @@ bool libraryInstalled(std::string_view name)
 namespace
 {
 
-std::string lastError(const char* what)
+std::string last_error(const char* what)
 {
 #ifdef _WIN32
     const int code = int(GetLastError());
@@ -281,7 +281,7 @@ std::string lastError(const char* what)
 
 #ifdef _WIN32
 
-struct Process::Impl
+struct process::impl
 {
     HANDLE process = nullptr;  // valid until destruction, so kill() is always safe
     HANDLE job = nullptr;      // the child and everything it starts; null if unavailable
@@ -294,11 +294,11 @@ namespace
 
 std::wstring widen(std::string_view s)
 {
-    return pathFromUtf8(s).wstring();
+    return path_from_utf8(s).wstring();
 }
 
 // Quotes one argument the way the MSVC runtime parses a command line.
-void appendArg(std::wstring& cmd, const std::wstring& a)
+void append_arg(std::wstring& cmd, const std::wstring& a)
 {
     if (!cmd.empty()) cmd += L' ';
     if (!a.empty() && a.find_first_of(L" \t\"") == std::wstring::npos)
@@ -325,7 +325,7 @@ void appendArg(std::wstring& cmd, const std::wstring& a)
 }
 
 // The caller's environment with `overrides` applied, as a CreateProcess block.
-std::wstring environmentBlock(const std::vector<std::pair<std::string, std::string>>& overrides)
+std::wstring environment_block(const std::vector<std::pair<std::string, std::string>>& overrides)
 {
     std::vector<std::wstring> names;
     for (auto& [name, value] : overrides) names.push_back(widen(name) + L'=');
@@ -351,42 +351,42 @@ std::wstring environmentBlock(const std::vector<std::pair<std::string, std::stri
 
 }  // namespace
 
-std::expected<std::unique_ptr<Process>, std::string>
-Process::start(std::string_view program, std::span<const std::string> args, const Options& opt)
+std::expected<std::unique_ptr<process>, std::string>
+process::start(std::string_view program, std::span<const std::string> args, const options& opt)
 {
     SECURITY_ATTRIBUTES inherit{sizeof inherit, nullptr, TRUE};
     HANDLE read = nullptr, write = nullptr;
-    if (!CreatePipe(&read, &write, &inherit, 0)) return std::unexpected(lastError("pipe"));
+    if (!CreatePipe(&read, &write, &inherit, 0)) return std::unexpected(last_error("pipe"));
     SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0);
     HANDLE null =
         CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     &inherit, OPEN_EXISTING, 0, nullptr);
 
     std::wstring cmd;
-    appendArg(cmd, widen(program));
-    for (auto& a : args) appendArg(cmd, widen(a));
-    std::wstring env = environmentBlock(opt.env);
+    append_arg(cmd, widen(program));
+    for (auto& a : args) append_arg(cmd, widen(a));
+    std::wstring env = environment_block(opt.env);
 
     // The child inherits only these handles: with plain inheritance, two
     // processes started at once would hold each other's pipe ends open and
     // neither reader would see the end of its output.
     HANDLE handles[2] = {write, null};
-    const DWORD handleCount = null != INVALID_HANDLE_VALUE ? 2 : 1;
-    SIZE_T attrSize = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
-    std::vector<std::byte> attrBuf(attrSize);
-    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrBuf.data());
+    const DWORD handle_count = null != INVALID_HANDLE_VALUE ? 2 : 1;
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<std::byte> attr_buf(attr_size);
+    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
     const bool listed =
-        InitializeProcThreadAttributeList(attrs, 1, 0, &attrSize) &&
+        InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
         UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles,
-                                  handleCount * sizeof(HANDLE), nullptr, nullptr);
+                                  handle_count * sizeof(HANDLE), nullptr, nullptr);
 
     STARTUPINFOEXW si{};
     si.StartupInfo.cb = sizeof si;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     si.StartupInfo.hStdInput = null;
     si.StartupInfo.hStdOutput = write;
-    si.StartupInfo.hStdError = opt.mergeStderr || null == INVALID_HANDLE_VALUE ? write : null;
+    si.StartupInfo.hStdError = opt.merge_stderr || null == INVALID_HANDLE_VALUE ? write : null;
     si.lpAttributeList = listed ? attrs : nullptr;
     PROCESS_INFORMATION pi{};
     // Suspended until it is in the job, so nothing it starts escapes. With
@@ -396,7 +396,7 @@ Process::start(std::string_view program, std::span<const std::string> args, cons
         CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED |
             (listed ? EXTENDED_STARTUPINFO_PRESENT : 0),
         env.data(), opt.dir.empty() ? nullptr : opt.dir.c_str(), &si.StartupInfo, &pi);
-    std::string error = ok ? std::string() : lastError(std::string(program).c_str());
+    std::string error = ok ? std::string() : last_error(std::string(program).c_str());
     if (listed) DeleteProcThreadAttributeList(attrs);
     CloseHandle(write);
     if (null != INVALID_HANDLE_VALUE) CloseHandle(null);
@@ -408,7 +408,7 @@ Process::start(std::string_view program, std::span<const std::string> args, cons
 
     // Killing the job kills git's own children too (TerminateProcess alone
     // leaves them running), and closing it kills whatever is left.
-    auto impl = std::make_unique<Impl>();
+    auto impl = std::make_unique<process::impl>();
     impl->job = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -423,17 +423,17 @@ Process::start(std::string_view program, std::span<const std::string> args, cons
     CloseHandle(pi.hThread);
     impl->process = pi.hProcess;
     impl->out = read;
-    return std::unique_ptr<Process>(new Process(std::move(impl)));
+    return std::unique_ptr<process>(new process(std::move(impl)));
 }
 
-std::size_t Process::read(char* buf, std::size_t size)
+std::size_t process::read(char* buf, std::size_t size)
 {
     DWORD n = 0;
     return ReadFile(impl_->out, buf, DWORD(std::min<std::size_t>(size, MAXDWORD)), &n, nullptr) ? n
                                                                                                 : 0;
 }
 
-int Process::wait()
+int process::wait()
 {
     if (!impl_->code)
     {
@@ -445,7 +445,7 @@ int Process::wait()
     return *impl_->code;
 }
 
-void Process::kill()
+void process::kill()
 {
     // Both fail harmlessly once everything has exited.
     if (impl_->job)
@@ -454,7 +454,7 @@ void Process::kill()
         TerminateProcess(impl_->process, 1);
 }
 
-Process::~Process()
+process::~process()
 {
     if (!impl_->code)
     {
@@ -468,7 +468,7 @@ Process::~Process()
 
 #else
 
-struct Process::Impl
+struct process::impl
 {
     pid_t pid = -1;
     int out = -1;  // read end of the merged stdout/stderr pipe
@@ -487,11 +487,11 @@ struct Process::Impl
     }
 };
 
-std::expected<std::unique_ptr<Process>, std::string>
-Process::start(std::string_view program, std::span<const std::string> args, const Options& opt)
+std::expected<std::unique_ptr<process>, std::string>
+process::start(std::string_view program, std::span<const std::string> args, const options& opt)
 {
     int fds[2];
-    if (pipe2(fds, O_CLOEXEC) != 0) return std::unexpected(lastError("pipe"));
+    if (pipe2(fds, O_CLOEXEC) != 0) return std::unexpected(last_error("pipe"));
 
     std::vector<std::string> argv{std::string(program)};
     argv.insert(argv.end(), args.begin(), args.end());
@@ -518,7 +518,7 @@ Process::start(std::string_view program, std::span<const std::string> args, cons
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
     posix_spawn_file_actions_adddup2(&fa, fds[1], 1);
-    if (opt.mergeStderr)
+    if (opt.merge_stderr)
         posix_spawn_file_actions_adddup2(&fa, fds[1], 2);
     else
         posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
@@ -537,13 +537,13 @@ Process::start(std::string_view program, std::span<const std::string> args, cons
         close(fds[0]);
         return std::unexpected(argv[0] + ": " + std::system_category().message(rc));
     }
-    auto impl = std::make_unique<Impl>();
+    auto impl = std::make_unique<process::impl>();
     impl->pid = pid;
     impl->out = fds[0];
-    return std::unique_ptr<Process>(new Process(std::move(impl)));
+    return std::unique_ptr<process>(new process(std::move(impl)));
 }
 
-std::size_t Process::read(char* buf, std::size_t size)
+std::size_t process::read(char* buf, std::size_t size)
 {
     for (;;)
     {
@@ -553,7 +553,7 @@ std::size_t Process::read(char* buf, std::size_t size)
     }
 }
 
-int Process::wait()
+int process::wait()
 {
     {
         std::lock_guard lock(impl_->mutex);
@@ -575,12 +575,12 @@ int Process::wait()
     return impl_->code;
 }
 
-void Process::kill()
+void process::kill()
 {
     impl_->signal(SIGTERM);
 }
 
-Process::~Process()
+process::~process()
 {
     // SIGKILL: destruction must not hang on a child that ignores SIGTERM.
     impl_->signal(SIGKILL);
@@ -590,62 +590,62 @@ Process::~Process()
 
 #endif
 
-Process::Process(std::unique_ptr<Impl> impl)
+process::process(std::unique_ptr<impl> impl)
     : impl_(std::move(impl))
 {
 }
 
-std::expected<Process::Result, std::string>
-Process::run(std::string_view program, std::span<const std::string> args, const Options& opt)
+std::expected<process::result, std::string>
+process::run(std::string_view program, std::span<const std::string> args, const options& opt)
 {
     auto p = start(program, args, opt);
     if (!p) return std::unexpected(p.error());
-    Result r;
+    result r;
     char buf[4096];
     while (std::size_t n = (*p)->read(buf, sizeof buf)) r.output.append(buf, n);
-    r.exitCode = (*p)->wait();
+    r.exit_code = (*p)->wait();
     return r;
 }
 
 // ---------------------------------------------------------------- mapped files
 
-std::expected<MappedFile, std::string> MappedFile::open(const fs::path& path, Mode mode)
+std::expected<mapped_file, std::string> mapped_file::open(const fs::path& path, mode mode)
 {
-    MappedFile f;
+    mapped_file f;
     f.mode_ = mode;
-    const bool rw = mode == Mode::ReadWrite;
+    const bool rw = mode == mode::read_write;
 #ifdef _WIN32
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | (rw ? GENERIC_WRITE : 0),
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            rw ? OPEN_ALWAYS : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return std::unexpected(lastError(pathToUtf8(path).c_str()));
+    if (h == INVALID_HANDLE_VALUE) return std::unexpected(last_error(path_to_utf8(path).c_str()));
     f.file_ = reinterpret_cast<std::intptr_t>(h);
     LARGE_INTEGER size{};
-    if (!GetFileSizeEx(h, &size)) return std::unexpected(lastError("size"));
+    if (!GetFileSizeEx(h, &size)) return std::unexpected(last_error("size"));
     f.size_ = std::size_t(size.QuadPart);
 #else
     const int fd = ::open(path.c_str(), (rw ? O_RDWR | O_CREAT : O_RDONLY) | O_CLOEXEC, 0644);
-    if (fd < 0) return std::unexpected(lastError(path.c_str()));
+    if (fd < 0) return std::unexpected(last_error(path.c_str()));
     f.file_ = fd;
     struct stat st{};
-    if (fstat(fd, &st) != 0) return std::unexpected(lastError("size"));
+    if (fstat(fd, &st) != 0) return std::unexpected(last_error("size"));
     f.size_ = std::size_t(st.st_size);
 #endif
     if (auto m = f.map(); !m) return std::unexpected(m.error());
     return f;
 }
 
-MappedFile::MappedFile(MappedFile&& other) noexcept
+mapped_file::mapped_file(mapped_file&& other) noexcept
 {
     *this = std::move(other);
 }
 
-MappedFile& MappedFile::operator=(MappedFile&& other) noexcept
+mapped_file& mapped_file::operator=(mapped_file&& other) noexcept
 {
     if (this != &other)
     {
-        this->~MappedFile();
-        file_ = std::exchange(other.file_, kNoFile);
+        this->~mapped_file();
+        file_ = std::exchange(other.file_, no_file);
 #ifdef _WIN32
         mapping_ = std::exchange(other.mapping_, nullptr);
 #endif
@@ -656,45 +656,45 @@ MappedFile& MappedFile::operator=(MappedFile&& other) noexcept
     return *this;
 }
 
-MappedFile::~MappedFile()
+mapped_file::~mapped_file()
 {
     unmap();
-    if (file_ == kNoFile) return;
+    if (file_ == no_file) return;
 #ifdef _WIN32
     CloseHandle(reinterpret_cast<HANDLE>(file_));
 #else
     close(int(file_));  // also drops a flock
 #endif
-    file_ = kNoFile;
+    file_ = no_file;
 }
 
 // An empty file has no mapping: data() is null.
-std::expected<void, std::string> MappedFile::map()
+std::expected<void, std::string> mapped_file::map()
 {
     if (size_ == 0) return {};
-    const bool rw = mode_ == Mode::ReadWrite;
+    const bool rw = mode_ == mode::read_write;
 #ifdef _WIN32
     mapping_ = CreateFileMappingW(reinterpret_cast<HANDLE>(file_), nullptr,
                                   rw ? PAGE_READWRITE : PAGE_READONLY, 0, 0, nullptr);
-    if (!mapping_) return std::unexpected(lastError("map"));
+    if (!mapping_) return std::unexpected(last_error("map"));
     data_ = static_cast<std::byte*>(
         MapViewOfFile(mapping_, rw ? FILE_MAP_WRITE : FILE_MAP_READ, 0, 0, 0));
     if (!data_)
     {
-        std::string error = lastError("map");
+        std::string error = last_error("map");
         CloseHandle(mapping_);
         mapping_ = nullptr;
         return std::unexpected(error);
     }
 #else
     void* p = mmap(nullptr, size_, PROT_READ | (rw ? PROT_WRITE : 0), MAP_SHARED, int(file_), 0);
-    if (p == MAP_FAILED) return std::unexpected(lastError("map"));
+    if (p == MAP_FAILED) return std::unexpected(last_error("map"));
     data_ = static_cast<std::byte*>(p);
 #endif
     return {};
 }
 
-void MappedFile::unmap()
+void mapped_file::unmap()
 {
     if (!data_) return;
 #ifdef _WIN32
@@ -707,9 +707,9 @@ void MappedFile::unmap()
     data_ = nullptr;
 }
 
-std::expected<void, std::string> MappedFile::resize(std::size_t size)
+std::expected<void, std::string> mapped_file::resize(std::size_t size)
 {
-    if (file_ == kNoFile || mode_ != Mode::ReadWrite)
+    if (file_ == no_file || mode_ != mode::read_write)
         return std::unexpected(std::string("resize: not open for writing"));
     unmap();
 #ifdef _WIN32
@@ -718,14 +718,14 @@ std::expected<void, std::string> MappedFile::resize(std::size_t size)
     const auto h = reinterpret_cast<HANDLE>(file_);
     if (!SetFilePointerEx(h, at, nullptr, FILE_BEGIN) || !SetEndOfFile(h))
     {
-        std::string error = lastError("resize");
+        std::string error = last_error("resize");
         (void)map();  // keep the old mapping usable
         return std::unexpected(error);
     }
 #else
     if (ftruncate(int(file_), off_t(size)) != 0)
     {
-        std::string error = lastError("resize");
+        std::string error = last_error("resize");
         (void)map();
         return std::unexpected(error);
     }
@@ -734,14 +734,14 @@ std::expected<void, std::string> MappedFile::resize(std::size_t size)
     return map();
 }
 
-std::expected<void, std::string> MappedFile::flush()
+std::expected<void, std::string> mapped_file::flush()
 {
     if (!data_) return {};
 #ifdef _WIN32
     if (!FlushViewOfFile(data_, 0) || !FlushFileBuffers(reinterpret_cast<HANDLE>(file_)))
-        return std::unexpected(lastError("flush"));
+        return std::unexpected(last_error("flush"));
 #else
-    if (msync(data_, size_, MS_SYNC) != 0) return std::unexpected(lastError("flush"));
+    if (msync(data_, size_, MS_SYNC) != 0) return std::unexpected(last_error("flush"));
 #endif
     return {};
 }
@@ -751,7 +751,7 @@ namespace
 {
 // Windows locks byte ranges, and a locked range blocks ReadFile/WriteFile
 // from other processes, so lock one byte far past any real data instead.
-OVERLAPPED lockRange()
+OVERLAPPED lock_range()
 {
     OVERLAPPED ov{};
     ov.Offset = 0;
@@ -761,11 +761,11 @@ OVERLAPPED lockRange()
 }  // namespace
 #endif
 
-bool MappedFile::tryLock()
+bool mapped_file::try_lock()
 {
-    if (file_ == kNoFile) return false;
+    if (file_ == no_file) return false;
 #ifdef _WIN32
-    OVERLAPPED ov = lockRange();
+    OVERLAPPED ov = lock_range();
     return LockFileEx(reinterpret_cast<HANDLE>(file_),
                       LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov);
 #else
@@ -773,11 +773,11 @@ bool MappedFile::tryLock()
 #endif
 }
 
-void MappedFile::unlock()
+void mapped_file::unlock()
 {
-    if (file_ == kNoFile) return;
+    if (file_ == no_file) return;
 #ifdef _WIN32
-    OVERLAPPED ov = lockRange();
+    OVERLAPPED ov = lock_range();
     UnlockFileEx(reinterpret_cast<HANDLE>(file_), 0, 1, 0, &ov);
 #else
     flock(int(file_), LOCK_UN);
@@ -786,7 +786,7 @@ void MappedFile::unlock()
 
 // ---------------------------------------------------------------- threads, memory
 
-void lowerThreadPriority()
+void lower_thread_priority()
 {
 #ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -795,7 +795,7 @@ void lowerThreadPriority()
 #endif
 }
 
-std::size_t availableMemory()
+std::size_t available_memory()
 {
 #ifdef _WIN32
     MEMORYSTATUSEX status{};

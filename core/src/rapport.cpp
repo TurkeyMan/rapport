@@ -25,11 +25,11 @@ std::string env(const char* name)
 }
 
 #ifdef _WIN32
-constexpr char kPathSeparator = ';';
-constexpr const char* kPluginSuffix = ".dll";
+constexpr char path_separator = ';';
+constexpr const char* plugin_suffix = ".dll";
 #else
-constexpr char kPathSeparator = ':';
-constexpr const char* kPluginSuffix = ".so";
+constexpr char path_separator = ':';
+constexpr const char* plugin_suffix = ".so";
 #endif
 
 std::string lower(std::string s)
@@ -48,13 +48,13 @@ std::vector<std::string> split(const std::string& s, char sep)
 }
 
 // Desktops whose native toolkit is Qt; everything else known is GTK-based.
-bool isQtDesktop(const std::string& d)
+bool is_qt_desktop(const std::string& d)
 {
     static const char* qt[] = {"kde", "plasma", "lxqt", "deepin", "dde", "ukui", "lomiri"};
     return std::ranges::any_of(qt, [&](const char* q) { return d == q; });
 }
 
-bool isGtkDesktop(const std::string& d)
+bool is_gtk_desktop(const std::string& d)
 {
     static const char* gtk[] = {
         "gnome",  "unity", "xfce",   "x-cinnamon",      "cinnamon", "mate",   "pantheon",
@@ -62,18 +62,18 @@ bool isGtkDesktop(const std::string& d)
     return std::ranges::any_of(gtk, [&](const char* g) { return d == g; });
 }
 
-fs::path exeDir()
+fs::path exe_dir()
 {
-    return sys::executablePath().parent_path();
+    return sys::executable_path().parent_path();
 }
 
-std::vector<fs::path> pluginDirs(const LoadOptions& opts)
+std::vector<fs::path> plugin_dirs(const load_options& opts)
 {
     std::vector<fs::path> dirs;
-    for (auto& p : opts.searchPaths) dirs.push_back(sys::pathFromUtf8(p));
-    for (auto& p : split(env("RAPPORT_PLUGIN_PATH"), kPathSeparator))
-        dirs.push_back(sys::pathFromUtf8(p));
-    if (auto d = exeDir(); !d.empty())
+    for (auto& p : opts.search_paths) dirs.push_back(sys::path_from_utf8(p));
+    for (auto& p : split(env("RAPPORT_PLUGIN_PATH"), path_separator))
+        dirs.push_back(sys::path_from_utf8(p));
+    if (auto d = exe_dir(); !d.empty())
     {
         dirs.push_back(d);
         dirs.push_back(d / "rapport");
@@ -83,160 +83,160 @@ std::vector<fs::path> pluginDirs(const LoadOptions& opts)
     return dirs;
 }
 
-std::map<std::string, CreateBackendFn*>& builtins()
+std::map<std::string, create_backend_fn*>& builtins()
 {
-    static std::map<std::string, CreateBackendFn*> registry;
+    static std::map<std::string, create_backend_fn*> registry;
     return registry;
 }
 
 // Applies everything the backend leaves to the core: callbacks, binds,
 // list models and common state.
-class Applier : public BuildSink
+class applier : public build_sink
 {
 public:
-    void created(const Node& n, Widget& w) override
+    void created(const node& n, widget& w) override
     {
-        if (!n.common.enabled) w.setEnabled(false);
-        if (!n.common.tooltip.empty()) w.setTooltip(n.common.tooltip);
+        if (!n.common.enabled) w.set_enabled(false);
+        if (!n.common.tooltip.empty()) w.set_tooltip(n.common.tooltip);
         if (n.common.handle) *n.common.handle = &w;
         std::visit([&](const auto& s) { apply(s, w); }, n.spec);
     }
 
-    void created(const spec::DialogButton& b, Button& w) override
+    void created(const spec::dialog_button& b, button& w) override
     {
-        if (b.onClick) w.onClick(b.onClick);
+        if (b.on_click) w.on_click(b.on_click);
         if (b.bind) *b.bind = &w;
     }
 
 private:
     template <class T>
-    static void bind(T** handle, Widget& w)
+    static void bind(T** handle, widget& w)
     {
         if (handle) *handle = &static_cast<T&>(w);
     }
 
-    static void apply(const spec::Splitter& s, Widget& w) { bind(s.bind, w); }
-    static void apply(const spec::Tabs& s, Widget& w)
+    static void apply(const spec::splitter& s, widget& w) { bind(s.bind, w); }
+    static void apply(const spec::tabs& s, widget& w)
     {
-        auto& t = static_cast<Tabs&>(w);
-        if (s.onChanged) t.onChanged(s.onChanged);
+        auto& t = static_cast<tabs&>(w);
+        if (s.on_changed) t.on_changed(s.on_changed);
         bind(s.bind, w);
     }
-    static void apply(const spec::Label& s, Widget& w) { bind(s.bind, w); }
-    static void apply(const spec::Button& s, Widget& w)
+    static void apply(const spec::label& s, widget& w) { bind(s.bind, w); }
+    static void apply(const spec::button& s, widget& w)
     {
-        auto& b = static_cast<Button&>(w);
-        if (s.onClick) b.onClick(s.onClick);
+        auto& b = static_cast<button&>(w);
+        if (s.on_click) b.on_click(s.on_click);
         bind(s.bind, w);
     }
-    static void apply(const spec::ToolButton& s, Widget& w)
+    static void apply(const spec::tool_button& s, widget& w)
     {
-        auto& b = static_cast<ToolButton&>(w);
-        if (s.onClick) b.onClick(s.onClick);
-        if (s.onToggled) b.onToggled(s.onToggled);
+        auto& b = static_cast<tool_button&>(w);
+        if (s.on_click) b.on_click(s.on_click);
+        if (s.on_toggled) b.on_toggled(s.on_toggled);
         bind(s.bind, w);
     }
-    static void apply(const spec::Slider& s, Widget& w)
+    static void apply(const spec::slider& s, widget& w)
     {
-        auto& c = static_cast<Slider&>(w);
-        if (s.onChanged) c.onChanged(s.onChanged);
+        auto& c = static_cast<slider&>(w);
+        if (s.on_changed) c.on_changed(s.on_changed);
         bind(s.bind, w);
     }
-    static void apply(const spec::Spin& s, Widget& w)
+    static void apply(const spec::spin& s, widget& w)
     {
-        auto& c = static_cast<Spin&>(w);
-        if (s.onChanged) c.onChanged(s.onChanged);
+        auto& c = static_cast<spin&>(w);
+        if (s.on_changed) c.on_changed(s.on_changed);
         bind(s.bind, w);
     }
-    static void apply(const spec::ColorButton& s, Widget& w)
+    static void apply(const spec::color_button& s, widget& w)
     {
-        auto& c = static_cast<ColorButton&>(w);
-        if (s.onChanged) c.onChanged(s.onChanged);
+        auto& c = static_cast<color_button&>(w);
+        if (s.on_changed) c.on_changed(s.on_changed);
         bind(s.bind, w);
     }
-    static void apply(const spec::Check& s, Widget& w)
+    static void apply(const spec::check& s, widget& w)
     {
-        auto& c = static_cast<Check&>(w);
-        if (s.onToggled) c.onToggled(s.onToggled);
+        auto& c = static_cast<check&>(w);
+        if (s.on_toggled) c.on_toggled(s.on_toggled);
         bind(s.bind, w);
     }
-    static void apply(const spec::Entry& s, Widget& w)
+    static void apply(const spec::entry& s, widget& w)
     {
-        auto& e = static_cast<Entry&>(w);
-        if (s.onChanged) e.onChanged(s.onChanged);
-        if (s.onActivate) e.onActivate(s.onActivate);
+        auto& e = static_cast<entry&>(w);
+        if (s.on_changed) e.on_changed(s.on_changed);
+        if (s.on_activate) e.on_activate(s.on_activate);
         bind(s.bind, w);
     }
-    static void apply(const spec::Select& s, Widget& w)
+    static void apply(const spec::drop_down& s, widget& w)
     {
-        auto& c = static_cast<Select&>(w);
-        if (s.onChanged) c.onChanged(s.onChanged);
+        auto& c = static_cast<drop_down&>(w);
+        if (s.on_changed) c.on_changed(s.on_changed);
         bind(s.bind, w);
     }
-    static void apply(const spec::Combo& s, Widget& w)
+    static void apply(const spec::combo& s, widget& w)
     {
-        auto& c = static_cast<Combo&>(w);
-        if (s.onChanged) c.onChanged(s.onChanged);
-        if (s.onActivate) c.onActivate(s.onActivate);
+        auto& c = static_cast<combo&>(w);
+        if (s.on_changed) c.on_changed(s.on_changed);
+        if (s.on_activate) c.on_activate(s.on_activate);
         bind(s.bind, w);
     }
-    static void apply(const spec::TextView& s, Widget& w)
+    static void apply(const spec::text_view& s, widget& w)
     {
-        auto& t = static_cast<TextView&>(w);
-        if (s.onChanged) t.onChanged(s.onChanged);
+        auto& t = static_cast<text_view&>(w);
+        if (s.on_changed) t.on_changed(s.on_changed);
         bind(s.bind, w);
     }
-    static void apply(const spec::List& s, Widget& w)
+    static void apply(const spec::list& s, widget& w)
     {
-        auto& l = static_cast<List&>(w);
-        if (s.model) l.setModel(s.model);
-        if (s.onSelectionChanged) l.onSelectionChanged(s.onSelectionChanged);
-        if (s.onActivate) l.onActivate(s.onActivate);
-        if (s.onSortRequested) l.onSortRequested(s.onSortRequested);
-        if (s.onContextMenu) l.onContextMenu(s.onContextMenu);
-        if (s.onHeaderMenu) l.onHeaderMenu(s.onHeaderMenu);
-        if (s.onReorder) l.onReorder(s.onReorder);
-        if (s.onCellDrag.begin) l.onCellDrag(s.onCellDrag);
-        if (s.onCellContextMenu) l.onCellContextMenu(s.onCellContextMenu);
+        auto& l = static_cast<list&>(w);
+        if (s.model) l.set_model(s.model);
+        if (s.on_selection_changed) l.on_selection_changed(s.on_selection_changed);
+        if (s.on_activate) l.on_activate(s.on_activate);
+        if (s.on_sort_requested) l.on_sort_requested(s.on_sort_requested);
+        if (s.on_context_menu) l.on_context_menu(s.on_context_menu);
+        if (s.on_header_menu) l.on_header_menu(s.on_header_menu);
+        if (s.on_reorder) l.on_reorder(s.on_reorder);
+        if (s.on_cell_drag.begin) l.on_cell_drag(s.on_cell_drag);
+        if (s.on_cell_context_menu) l.on_cell_context_menu(s.on_cell_context_menu);
         bind(s.bind, w);
     }
-    static void apply(const spec::MenuButton& s, Widget& w)
+    static void apply(const spec::menu_button& s, widget& w)
     {
-        auto& b = static_cast<MenuButton&>(w);
-        if (s.onMenu) b.onMenu(s.onMenu);
+        auto& b = static_cast<menu_button&>(w);
+        if (s.on_menu) b.on_menu(s.on_menu);
         bind(s.bind, w);
     }
-    static void apply(const spec::ProgressBar& s, Widget& w) { bind(s.bind, w); }
-    static void apply(const spec::DatePicker& s, Widget& w)
+    static void apply(const spec::progress_bar& s, widget& w) { bind(s.bind, w); }
+    static void apply(const spec::date_picker& s, widget& w)
     {
-        auto& d = static_cast<DatePicker&>(w);
-        if (s.onChanged) d.onChanged(s.onChanged);
+        auto& d = static_cast<date_picker&>(w);
+        if (s.on_changed) d.on_changed(s.on_changed);
         bind(s.bind, w);
     }
-    static void apply(const spec::Canvas& s, Widget& w)
+    static void apply(const spec::canvas& s, widget& w)
     {
-        auto& c = static_cast<Canvas&>(w);
-        if (s.onPaint) c.onPaint(s.onPaint);
-        if (s.onResize) c.onResize(s.onResize);
-        if (s.onPointer) c.onPointer(s.onPointer);
-        if (s.onScroll) c.onScroll(s.onScroll);
-        if (s.onKey) c.onKey(s.onKey);
+        auto& c = static_cast<canvas&>(w);
+        if (s.on_paint) c.on_paint(s.on_paint);
+        if (s.on_resize) c.on_resize(s.on_resize);
+        if (s.on_pointer) c.on_pointer(s.on_pointer);
+        if (s.on_scroll) c.on_scroll(s.on_scroll);
+        if (s.on_key) c.on_key(s.on_key);
         bind(s.bind, w);
     }
     // Containers with no widget interface of their own.
-    static void apply(const auto&, Widget&) {}
+    static void apply(const auto&, widget&) {}
 };
 
 }  // namespace
 
-void registerBuiltinBackend(std::string name, CreateBackendFn* create)
+void register_builtin_backend(std::string name, create_backend_fn* create)
 {
     builtins()[std::move(name)] = create;
 }
 
-Detection detect(const LoadOptions& opts)
+detection detect(const load_options& opts)
 {
-    Detection d;
+    detection d;
 
     std::string forced = !opts.backend.empty() ? opts.backend : env("RAPPORT_BACKEND");
     if (!forced.empty())
@@ -261,13 +261,13 @@ Detection detect(const LoadOptions& opts)
     for (auto& n : names)
     {
         auto l = lower(n);
-        if (isQtDesktop(l))
+        if (is_qt_desktop(l))
         {
             d.desktop = n;
             d.preference = {"qt6", "gtk4", "gtk3"};
             break;
         }
-        if (isGtkDesktop(l))
+        if (is_gtk_desktop(l))
         {
             d.desktop = n;
             d.preference = {"gtk4", "gtk3", "qt6"};
@@ -284,23 +284,23 @@ Detection detect(const LoadOptions& opts)
     return d;
 }
 
-std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
-                                                         const LoadOptions& opts)
+std::expected<std::unique_ptr<ui>, std::string> ui::load(int& argc, char** argv,
+                                                         const load_options& opts)
 {
     auto det = detect(opts);
-    auto dirs = pluginDirs(opts);
+    auto dirs = plugin_dirs(opts);
     std::string errors;
 
     for (auto& name : det.preference)
     {
         if (auto it = builtins().find(name); it != builtins().end())
         {
-            if (Backend* b = it->second(kAbiVersion, &argc, argv))
-                return std::unique_ptr<Ui>(new Ui(std::unique_ptr<Backend>(b)));
+            if (rap::backend* b = it->second(abi_version, &argc, argv))
+                return std::unique_ptr<ui>(new ui(std::unique_ptr<rap::backend>(b)));
             errors += "  " + name + ": built in, but failed to start (no display?)\n";
             continue;
         }
-        std::string file = "rapport_" + name + kPluginSuffix;
+        std::string file = "rapport_" + name + plugin_suffix;
         bool found = false;
         for (auto& dir : dirs)
         {
@@ -309,22 +309,22 @@ std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
             if (!fs::exists(path, ec)) continue;
             found = true;
 
-            auto lib = sys::Library::open(path);
+            auto lib = sys::library::open(path);
             if (!lib)
             {
                 errors += "  " + name + ": " + lib.error() + "\n";
                 break;
             }
-            auto* create = lib->function<CreateBackendFn>(createBackendSymbol(name).c_str());
+            auto* create = lib->function<create_backend_fn>(create_backend_symbol(name).c_str());
             if (!create)
             {
-                errors += "  " + name + ": " + sys::pathToUtf8(path) + " is not a rapport backend\n";
+                errors += "  " + name + ": " + sys::path_to_utf8(path) + " is not a rapport backend\n";
                 break;
             }
             // Never unload: toolkits register atexit handlers and TLS.
             lib->release();
-            if (Backend* b = create(kAbiVersion, &argc, argv))
-                return std::unique_ptr<Ui>(new Ui(std::unique_ptr<Backend>(b)));
+            if (rap::backend* b = create(abi_version, &argc, argv))
+                return std::unique_ptr<ui>(new ui(std::unique_ptr<rap::backend>(b)));
             errors += "  " + name + ": failed to start (ABI mismatch or no display)\n";
             break;
         }
@@ -335,12 +335,12 @@ std::expected<std::unique_ptr<Ui>, std::string> Ui::load(int& argc, char** argv,
     return std::unexpected("rapport: no usable UI backend (desktop: " + desktop + ")\n" + errors);
 }
 
-Ui::~Ui() = default;
+ui::~ui() = default;
 
-std::unique_ptr<Window> Ui::create(const WindowSpec& spec, Window* parent)
+std::unique_ptr<window> ui::create(const window_spec& spec, window* parent)
 {
-    static Applier sink;  // stateless; backends may keep it (BuildSink)
-    return backend_->createWindow(spec, parent, sink);
+    static applier sink;  // stateless; backends may keep it (build_sink)
+    return backend_->create_window(spec, parent, sink);
 }
 
 }  // namespace rap

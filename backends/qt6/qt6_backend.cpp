@@ -1,5 +1,5 @@
 // Qt 6 backend: Qt Widgets for every control, lists as a QTreeView whose
-// rows are painted here (as the win32 backend paints its ListView), text
+// rows are painted here (as the win32 backend paints its list_view), text
 // views as QPlainTextEdit, and windows as QDialogs (Enter presses the
 // default button, Esc ends a dialog).
 //
@@ -82,32 +82,32 @@ namespace
 
 // ---------------------------------------------------------------- helpers
 
-struct Metrics
+struct metrics
 {
-    float charWidth = 8;
-    float lineHeight = 17;
+    float char_width = 8;
+    float line_height = 17;
 };
-Metrics g_metrics;
+metrics g_metrics;
 
-void initMetrics()
+void init_metrics()
 {
     const QFontMetricsF fm(QApplication::font());
     // The alphabet's mean, as Windows' dialog units and Pango's approximate
     // width have it; the font's own average is about a fifth narrower than
     // text, so fields sized in characters cut their text off.
-    g_metrics.charWidth =
+    g_metrics.char_width =
         float(fm.horizontalAdvance("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") / 52);
-    g_metrics.lineHeight = float(fm.lineSpacing());
+    g_metrics.line_height = float(fm.lineSpacing());
 }
 
-int px(Extent e)
+int px(extent e)
 {
     switch (e.unit)
     {
-    case Extent::Unit::Chars: return int(e.value * g_metrics.charWidth + 0.5f);
-    case Extent::Unit::Lines: return int(e.value * g_metrics.lineHeight + 0.5f);
-    case Extent::Unit::Px: return int(e.value);
-    case Extent::Unit::Auto: break;
+    case extent::unit::chars: return int(e.value * g_metrics.char_width + 0.5f);
+    case extent::unit::lines: return int(e.value * g_metrics.line_height + 0.5f);
+    case extent::unit::px: return int(e.value);
+    case extent::unit::auto_: break;
     }
     return -1;
 }
@@ -142,13 +142,13 @@ QString literal(const std::string& s)
     return qs(s).replace("&", "&&");
 }
 
-Qt::Alignment qtAlign(Align a)
+Qt::Alignment qt_align(align a)
 {
     switch (a)
     {
-    case Align::Center: return Qt::AlignHCenter;
-    case Align::End: return Qt::AlignRight;
-    case Align::Start: break;
+    case align::center: return Qt::AlignHCenter;
+    case align::end: return Qt::AlignRight;
+    case align::start: break;
     }
     return Qt::AlignLeft;
 }
@@ -156,7 +156,7 @@ Qt::Alignment qtAlign(Align a)
 // Running under WSL, where WSLg shows windows on the Windows desktop: its
 // Wayland can't place windows, and the screen it reports includes the
 // Windows taskbar.
-bool underWsl()
+bool under_wsl()
 {
     static const bool wsl = []
     {
@@ -175,22 +175,22 @@ bool underWsl()
 
 // What WSLg leaves out of the work area: Windows' taskbar along the bottom,
 // at Windows 11's height, which covers Windows 10's.
-RectF withoutWindowsTaskbar(RectF area)
+rect_f without_windows_taskbar(rect_f area)
 {
-    if (underWsl()) area.h = std::max(0.f, area.h - 48);
+    if (under_wsl()) area.h = std::max(0.f, area.h - 48);
     return area;
 }
 
 // The font for compact lists and text views: 90% of `f`, rounded to whole
 // pixels so glyphs sit on the pixel grid.
-QFont compactFont(const QFont& f)
+QFont compact_font(const QFont& f)
 {
     QFont c = f;
     c.setPixelSize(std::max(1, int(std::lround(QFontInfo(f).pixelSize() * 0.9))));
     return c;
 }
 
-QFont styledFont(QFont f, const TextStyle& s)
+QFont styled_font(QFont f, const text_style& s)
 {
     if (s.monospace)
     {
@@ -207,7 +207,7 @@ QFont styledFont(QFont f, const TextStyle& s)
     return f;
 }
 
-QTextCharFormat charFormat(const QWidget* w, const TextStyle& s)
+QTextCharFormat char_format(const QWidget* w, const text_style& s)
 {
     QTextCharFormat f;
     if (s.fg) f.setForeground(qcolor(resolve(w, *s.fg)));
@@ -225,11 +225,11 @@ QTextCharFormat charFormat(const QWidget* w, const TextStyle& s)
 }
 
 // Byte offsets into a UTF-8 string and UTF-16 positions in its QString.
-qsizetype utf16At(const std::string& s, size_t byte)
+qsizetype utf16_at(const std::string& s, size_t byte)
 {
     return qs(s.substr(0, std::min(byte, s.size()))).size();
 }
-size_t utf8At(const QString& s, qsizetype pos)
+size_t utf8_at(const QString& s, qsizetype pos)
 {
     return size_t(QStringView(s).left(std::clamp<qsizetype>(pos, 0, s.size())).toUtf8().size());
 }
@@ -237,12 +237,12 @@ size_t utf8At(const QString& s, qsizetype pos)
 // Selected rows in a light tint of the accent, with normal text: on light
 // themes the accent's hue at Explorer's lightness, as on win32 (#0078D7
 // becomes #CCE8FF); on dark ones a mix into the base colour, as on GTK.
-struct SoftColors
+struct soft_colors
 {
-    QColor selected, hover, hoverSelected;
+    QColor selected, hover, hover_selected;
 };
 
-SoftColors softColors(const QWidget* w)
+soft_colors soft_colors_for(const QWidget* w)
 {
     const QPalette pal = w->palette();
     const QColor base = pal.color(QPalette::Active, QPalette::Base);
@@ -265,7 +265,7 @@ SoftColors softColors(const QWidget* w)
 // List autoscroll: px/s for the pointer `offset` px above (negative) or
 // below the anchor. A dead zone, then speed growing faster than the
 // distance, so a nudge creeps and a long reach races. (As gtk_common's.)
-float autoScrollSpeed(float offset)
+float auto_scroll_speed(float offset)
 {
     const float dead = 8, d = std::abs(offset) - dead;
     if (d <= 0) return 0;
@@ -273,69 +273,69 @@ float autoScrollSpeed(float offset)
 }
 
 // The autoscroll anchor: a ring with up and down arrows, centred at (x, y).
-void paintAutoScrollAnchor(Painter& p, float x, float y)
+void paint_auto_scroll_anchor(painter& p, float x, float y)
 {
-    p.circle({x, y}, 11, Paint{ThemeColor::Base}, Paint{ThemeColor::Mid});
-    p.polygon({{x - 4, y - 3}, {x + 4, y - 3}, {x, y - 8}}, Paint{ThemeColor::Text}, std::nullopt,
+    p.circle({x, y}, 11, paint{theme_color::base}, paint{theme_color::mid});
+    p.polygon({{x - 4, y - 3}, {x + 4, y - 3}, {x, y - 8}}, paint{theme_color::text}, std::nullopt,
               1);
-    p.polygon({{x - 4, y + 3}, {x + 4, y + 3}, {x, y + 8}}, Paint{ThemeColor::Text}, std::nullopt,
+    p.polygon({{x - 4, y + 3}, {x + 4, y + 3}, {x, y + 8}}, paint{theme_color::text}, std::nullopt,
               1);
-    p.circle({x, y}, 1.5f, Paint{ThemeColor::Text}, std::nullopt);
+    p.circle({x, y}, 1.5f, paint{theme_color::text}, std::nullopt);
 }
 
 // A file filter's extension for saving: the first glob's, if it's a plain
 // "*.ext" ("*.patch;*.diff" -> "patch"; "*" -> none).
-QString defaultExtension(const std::string& pattern)
+QString default_extension(const std::string& pattern)
 {
     const std::string first = pattern.substr(0, pattern.find(';'));
     if (!first.starts_with("*.") || first.find_first_of("*?[", 2) != std::string::npos) return {};
     return qs(first.substr(2));
 }
 
-Key keyFor(int k)
+key key_for(int k)
 {
     switch (k)
     {
-    case Qt::Key_Escape: return Key::Escape;
+    case Qt::Key_Escape: return key::escape;
     case Qt::Key_Return:
-    case Qt::Key_Enter: return Key::Enter;
+    case Qt::Key_Enter: return key::enter;
     case Qt::Key_Tab:
-    case Qt::Key_Backtab: return Key::Tab;
-    case Qt::Key_Backspace: return Key::Backspace;
-    case Qt::Key_Delete: return Key::Delete;
-    case Qt::Key_Insert: return Key::Insert;
-    case Qt::Key_Space: return Key::Space;
-    case Qt::Key_Left: return Key::Left;
-    case Qt::Key_Right: return Key::Right;
-    case Qt::Key_Up: return Key::Up;
-    case Qt::Key_Down: return Key::Down;
-    case Qt::Key_Home: return Key::Home;
-    case Qt::Key_End: return Key::End;
-    case Qt::Key_PageUp: return Key::PageUp;
-    case Qt::Key_PageDown: return Key::PageDown;
+    case Qt::Key_Backtab: return key::tab;
+    case Qt::Key_Backspace: return key::backspace;
+    case Qt::Key_Delete: return key::delete_;
+    case Qt::Key_Insert: return key::insert;
+    case Qt::Key_Space: return key::space;
+    case Qt::Key_Left: return key::left;
+    case Qt::Key_Right: return key::right;
+    case Qt::Key_Up: return key::up;
+    case Qt::Key_Down: return key::down;
+    case Qt::Key_Home: return key::home;
+    case Qt::Key_End: return key::end;
+    case Qt::Key_PageUp: return key::page_up;
+    case Qt::Key_PageDown: return key::page_down;
     default: break;
     }
-    if (k >= Qt::Key_F1 && k <= Qt::Key_F12) return Key(int(Key::F1) + (k - Qt::Key_F1));
-    return k > 0x20 && k < 0x01000000 ? Key::Character : Key::Other;
+    if (k >= Qt::Key_F1 && k <= Qt::Key_F12) return key(int(key::f1) + (k - Qt::Key_F1));
+    return k > 0x20 && k < 0x01000000 ? key::character : key::other;
 }
 
-unsigned modifiersOf(Qt::KeyboardModifiers m)
+unsigned modifiers_of(Qt::KeyboardModifiers m)
 {
     unsigned out = 0;
-    if (m & Qt::ShiftModifier) out |= ModShift;
-    if (m & Qt::ControlModifier) out |= ModCtrl;
-    if (m & Qt::AltModifier) out |= ModAlt;
-    if (m & Qt::MetaModifier) out |= ModMeta;
+    if (m & Qt::ShiftModifier) out |= mod_shift;
+    if (m & Qt::ControlModifier) out |= mod_ctrl;
+    if (m & Qt::AltModifier) out |= mod_alt;
+    if (m & Qt::MetaModifier) out |= mod_meta;
     return out;
 }
 
 // Runs `fn` for each event `target` receives, ahead of the target; true
 // consumes the event. Lives as long as the target, or until disarmed.
-class EventHook : public QObject
+class event_hook : public QObject
 {
 public:
-    using Fn = std::function<bool(QEvent*)>;
-    EventHook(QObject* target, Fn fn)
+    using fn = std::function<bool(QEvent*)>;
+    event_hook(QObject* target, fn fn)
         : QObject(target)
         , fn_(std::move(fn))
     {
@@ -345,19 +345,19 @@ public:
     void disarm() { fn_ = nullptr; }
 
 private:
-    Fn fn_;
+    fn fn_;
 };
 
-void hook(QObject* target, EventHook::Fn fn)
+void hook(QObject* target, event_hook::fn fn)
 {
-    new EventHook(target, std::move(fn));
+    new event_hook(target, std::move(fn));
 }
 
 // ---------------------------------------------------------------- icons
 
 // The desktop's icon for a kind of file: the name's MIME type (a trailing
 // '/' is a folder) and the icon theme's icon for it. Cached per extension.
-QIcon fileTypeIcon(const std::string& name)
+QIcon file_type_icon(const std::string& name)
 {
     static std::unordered_map<std::string, QIcon> cache;
     const bool folder = !name.empty() && name.back() == '/';
@@ -384,7 +384,7 @@ QIcon fileTypeIcon(const std::string& name)
     return cache[key] = icon;
 }
 
-QIcon themeIcon(const std::string& name)
+QIcon theme_icon(const std::string& name)
 {
     static std::unordered_map<std::string, QIcon> cache;
     auto it = cache.find(name);
@@ -393,7 +393,7 @@ QIcon themeIcon(const std::string& name)
 }
 
 // An app-drawn icon, painted at `w`'s device scale in its theme colours.
-QIcon drawnIcon(const std::function<void(Painter&, SizeF)>& draw, int size, const QWidget* w)
+QIcon drawn_icon(const std::function<void(rap::painter&, rap::size_f)>& draw, int size, const QWidget* w)
 {
     const qreal dpr = w ? w->devicePixelRatioF() : qApp->devicePixelRatio();
     QPixmap pm(QSize(size, size) * dpr);
@@ -401,18 +401,18 @@ QIcon drawnIcon(const std::function<void(Painter&, SizeF)>& draw, int size, cons
     pm.fill(Qt::transparent);
     {
         QPainter p(&pm);
-        QtPainter painter(p, w);
+        qt_painter painter(p, w);
         draw(painter, {float(size), float(size)});
     }
     return QIcon(pm);
 }
 
 // A named icon the theme has, else the file type's, else the drawing.
-QIcon toQIcon(const Icon& icon, int size, const QWidget* w)
+QIcon to_q_icon(const icon& icon, int size, const QWidget* w)
 {
     if (!icon.name.empty())
     {
-        if (QIcon named = themeIcon(icon.name); !named.isNull()) return named;
+        if (QIcon named = theme_icon(icon.name); !named.isNull()) return named;
         // The theme may lack it (WSL's has no view-fullscreen or edit-copy).
         // Lists ask per cell per paint, so each is drawn once.
         static std::map<std::tuple<std::string, int, qreal>, QIcon> drawn;
@@ -421,14 +421,14 @@ QIcon toQIcon(const Icon& icon, int size, const QWidget* w)
         if (added)
         {
             bool known = false;
-            QIcon i = drawnIcon([&](Painter& p, SizeF s) { known = common::drawBuiltinIcon(icon.name, p, s); },
+            QIcon i = drawn_icon([&](painter& p, size_f s) { known = builtin::draw_builtin_icon(icon.name, p, s); },
                                 size, w);
             if (known) it->second = i;
         }
         if (!it->second.isNull()) return it->second;
     }
-    if (!icon.file.empty()) return fileTypeIcon(icon.file);
-    if (icon.draw) return drawnIcon(icon.draw, size, w);
+    if (!icon.file.empty()) return file_type_icon(icon.file);
+    if (icon.draw) return drawn_icon(icon.draw, size, w);
     return {};
 }
 
@@ -436,14 +436,14 @@ QIcon toQIcon(const Icon& icon, int size, const QWidget* w)
 
 // Appends `items` to `menu`. Each action keeps its own copy of what it runs,
 // so the Menu needn't outlive the QMenu. Shortcuts are display hints (the
-// window's onKey handles the keys), so they only work inside the menu.
-void fillMenu(QMenu* menu, const Menu& items)
+// window's on_key handles the keys), so they only work inside the menu.
+void fill_menu(QMenu* menu, const rap::menu& items)
 {
     QActionGroup* radios = nullptr;
-    for (const MenuItem& item : items)
+    for (const menu_item& item : items)
     {
         if (!item.radio) radios = nullptr;
-        if (item.isSeparator())
+        if (item.is_separator())
         {
             menu->addSeparator();
             continue;
@@ -452,7 +452,7 @@ void fillMenu(QMenu* menu, const Menu& items)
         {
             QMenu* sub = menu->addMenu(mnemonic(item.label));
             sub->setEnabled(item.enabled);
-            fillMenu(sub, item.children);
+            fill_menu(sub, item.children);
             continue;
         }
         QAction* a = menu->addAction(mnemonic(item.label));
@@ -479,36 +479,36 @@ void fillMenu(QMenu* menu, const Menu& items)
 
 // A context menu at `global`, deleted once it closes (after its action ran:
 // Qt hides a menu before triggering the chosen action).
-void popupMenu(Menu items, QWidget* parent, QPoint global)
+void show_popup_menu(menu items, QWidget* parent, QPoint global)
 {
     if (items.empty()) return;
     auto* m = new QMenu(parent);
-    fillMenu(m, items);
+    fill_menu(m, items);
     QObject::connect(m, &QMenu::aboutToHide, m, &QObject::deleteLater);
     m->popup(global);
 }
 
 // ---------------------------------------------------------------- widgets
 
-class Part
+class part
 {
 public:
-    virtual ~Part() = default;
+    virtual ~part() = default;
 };
 
 // A widget's rapport interface over its Qt widget. The window deletes its Qt
 // widgets later (deleteLater) than these, so Qt-side code that calls back
 // into a part checks that it's still there.
 template <class Base>
-class W : public Base, public Part
+class widget_base : public Base, public part
 {
 public:
-    explicit W(QWidget* w)
+    explicit widget_base(QWidget* w)
         : w_(w)
     {
     }
-    void setEnabled(bool e) override { w_->setEnabled(e); }
-    void setVisible(bool v) override
+    void set_enabled(bool e) override { w_->setEnabled(e); }
+    void set_visible(bool v) override
     {
         // In a toolbar, its action shows and hides it.
         if (auto* action = qobject_cast<QAction*>(w_->property("rapport-toolbar-action").value<QObject*>()))
@@ -518,7 +518,7 @@ public:
         if (v && !w_->parentWidget()) return;
         w_->setVisible(v);
     }
-    void setTooltip(const std::string& t) override { w_->setToolTip(qs(t)); }
+    void set_tooltip(const std::string& t) override { w_->setToolTip(qs(t)); }
     void focus() override { w_->setFocus(Qt::OtherFocusReason); }
     QWidget* widget() const { return w_; }
 
@@ -526,23 +526,23 @@ protected:
     QWidget* w_;
 };
 
-class WPlain : public W<rap::Widget>
+class plain_impl : public widget_base<rap::widget>
 {
 public:
-    using W::W;
+    using widget_base::widget_base;
 };
 
-// A label that can cut its text short with "..." (Label::ellipsize):
+// A label that can cut its text short with "..." (label::ellipsize):
 // then it asks for no minimum width, and shows as much as fits.
-class ElidedLabel : public QLabel
+class elided_label : public QLabel
 {
 public:
-    explicit ElidedLabel(bool elide)
+    explicit elided_label(bool elide)
         : elide_(elide)
     {
         setTextFormat(Qt::PlainText);
     }
-    void setFullText(const QString& t)
+    void set_full_text(const QString& t)
     {
         full_ = t;
         refit();
@@ -578,11 +578,11 @@ private:
     bool elide_;
 };
 
-class WLabel : public W<rap::Label>
+class label_impl : public widget_base<rap::label>
 {
 public:
-    explicit WLabel(const spec::Label& s)
-        : W(new ElidedLabel(s.ellipsize))
+    explicit label_impl(const spec::label& s)
+        : widget_base(new elided_label(s.ellipsize))
     {
         if (s.selectable)
         {
@@ -590,19 +590,19 @@ public:
                                              Qt::TextSelectableByKeyboard);
             label()->setCursor(Qt::IBeamCursor);
         }
-        label()->setFullText(qs(s.text));
+        label()->set_full_text(qs(s.text));
     }
-    void setText(const std::string& t) override { label()->setFullText(qs(t)); }
+    void set_text(const std::string& t) override { label()->set_full_text(qs(t)); }
 
 private:
-    ElidedLabel* label() const { return static_cast<ElidedLabel*>(w_); }
+    elided_label* label() const { return static_cast<elided_label*>(w_); }
 };
 
-class WButton : public W<rap::Button>
+class button_impl : public widget_base<rap::button>
 {
 public:
-    explicit WButton(QPushButton* b)
-        : W(b)
+    explicit button_impl(QPushButton* b)
+        : widget_base(b)
     {
         QObject::connect(b, &QPushButton::clicked, b,
                          [this]
@@ -610,9 +610,9 @@ public:
                              if (click_) click_();
                          });
     }
-    void setText(const std::string& t) override { button()->setText(mnemonic(t)); }
-    void setIcon(const Icon& icon) override { button()->setIcon(toQIcon(icon, 16, w_)); }
-    void onClick(std::function<void()> f) override { click_ = std::move(f); }
+    void set_text(const std::string& t) override { button()->setText(mnemonic(t)); }
+    void set_icon(const icon& icon) override { button()->setIcon(to_q_icon(icon, 16, w_)); }
+    void on_click(std::function<void()> f) override { click_ = std::move(f); }
 
 private:
     QPushButton* button() const { return static_cast<QPushButton*>(w_); }
@@ -621,7 +621,7 @@ private:
 
 // A click on the mixed state lands on checked (TortoiseGit's tri-state All
 // Branches toggles between on and off); only the app sets it mixed.
-class TriCheckBox : public QCheckBox
+class tri_check_box : public QCheckBox
 {
 public:
     using QCheckBox::QCheckBox;
@@ -634,13 +634,13 @@ protected:
     }
 };
 
-class WCheck : public W<rap::Check>
+class check_impl : public widget_base<rap::check>
 {
 public:
-    explicit WCheck(const spec::Check& s)
-        : W(new TriCheckBox(mnemonic(s.text)))
+    explicit check_impl(const spec::check& s)
+        : widget_base(new tri_check_box(mnemonic(s.text)))
     {
-        setState(s.state);
+        set_state(s.state);
         // clicked: the user's changes only.
         QObject::connect(box(), &QCheckBox::clicked, box(),
                          [this]
@@ -648,25 +648,25 @@ public:
                              if (toggled_) toggled_(box()->isChecked());
                          });
     }
-    bool checked() const override { return state() == CheckState::Checked; }
-    void setChecked(bool v) override { setState(v ? CheckState::Checked : CheckState::Unchecked); }
-    CheckState state() const override
+    bool checked() const override { return state() == check_state::checked; }
+    void set_checked(bool v) override { set_state(v ? check_state::checked : check_state::unchecked); }
+    check_state state() const override
     {
         switch (box()->checkState())
         {
-        case Qt::Checked: return CheckState::Checked;
-        case Qt::PartiallyChecked: return CheckState::Indeterminate;
+        case Qt::Checked: return check_state::checked;
+        case Qt::PartiallyChecked: return check_state::indeterminate;
         case Qt::Unchecked: break;
         }
-        return CheckState::Unchecked;
+        return check_state::unchecked;
     }
-    void setState(CheckState s) override
+    void set_state(check_state s) override
     {
-        box()->setCheckState(s == CheckState::Indeterminate ? Qt::PartiallyChecked
-                             : s == CheckState::Checked     ? Qt::Checked
+        box()->setCheckState(s == check_state::indeterminate ? Qt::PartiallyChecked
+                             : s == check_state::checked     ? Qt::Checked
                                                             : Qt::Unchecked);
     }
-    void onToggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
+    void on_toggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
 
 private:
     QCheckBox* box() const { return static_cast<QCheckBox*>(w_); }
@@ -675,47 +675,47 @@ private:
 
 // A push button with a drop-down menu, rebuilt each time it opens. Pushed
 // is drawn as checked.
-class WMenuButton : public W<rap::MenuButton>
+class menu_button_impl : public widget_base<rap::menu_button>
 {
 public:
-    explicit WMenuButton(const spec::MenuButton& s)
-        : W(new QPushButton(mnemonic(s.text)))
+    explicit menu_button_impl(const spec::menu_button& s)
+        : widget_base(new QPushButton(mnemonic(s.text)))
     {
         auto* b = button();
         menu_ = new QMenu(b);
         b->setMenu(menu_);
         b->setCheckable(true);
         b->setChecked(s.pushed);
-        if (s.icon) setIcon(s.icon);
+        if (s.icon) set_icon(s.icon);
         QObject::connect(menu_, &QMenu::aboutToShow, menu_,
                          [this]
                          {
                              menu_->clear();
-                             if (menuFn_) fillMenu(menu_, menuFn_());
+                             if (menu_fn_) fill_menu(menu_, menu_fn_());
                          });
     }
-    void setText(const std::string& t) override { button()->setText(mnemonic(t)); }
-    void setIcon(const Icon& icon) override { button()->setIcon(toQIcon(icon, 16, w_)); }
-    void setPushed(bool v) override { button()->setChecked(v); }
-    void onMenu(std::function<Menu()> f) override { menuFn_ = std::move(f); }
+    void set_text(const std::string& t) override { button()->setText(mnemonic(t)); }
+    void set_icon(const icon& icon) override { button()->setIcon(to_q_icon(icon, 16, w_)); }
+    void set_pushed(bool v) override { button()->setChecked(v); }
+    void on_menu(std::function<menu()> f) override { menu_fn_ = std::move(f); }
 
 private:
     QPushButton* button() const { return static_cast<QPushButton*>(w_); }
     QMenu* menu_;
-    std::function<Menu()> menuFn_;
+    std::function<menu()> menu_fn_;
 };
 
-class WProgressBar : public W<rap::ProgressBar>
+class progress_bar_impl : public widget_base<rap::progress_bar>
 {
 public:
-    WProgressBar()
-        : W(new QProgressBar)
+    progress_bar_impl()
+        : widget_base(new QProgressBar)
     {
         bar()->setRange(0, 1000);
         bar()->setValue(0);
         bar()->setTextVisible(false);
     }
-    void setFraction(float f) override
+    void set_fraction(float f) override
     {
         if (bar()->maximum() == 0) bar()->setRange(0, 1000);
         bar()->setValue(int(std::clamp(f, 0.f, 1.f) * 1000));
@@ -727,43 +727,43 @@ private:
     QProgressBar* bar() const { return static_cast<QProgressBar*>(w_); }
 };
 
-class WDatePicker : public W<rap::DatePicker>
+class date_picker_impl : public widget_base<rap::date_picker>
 {
 public:
-    explicit WDatePicker(const spec::DatePicker& s)
-        : W(new QDateEdit)
+    explicit date_picker_impl(const spec::date_picker& s)
+        : widget_base(new QDateEdit)
     {
         edit()->setCalendarPopup(true);
-        setDate(s.date);
+        set_date(s.date);
         QObject::connect(edit(), &QDateEdit::dateChanged, edit(),
                          [this](QDate d)
                          {
                              if (!quiet_ && changed_) changed_({d.year(), d.month(), d.day()});
                          });
     }
-    Date date() const override
+    rap::date date() const override
     {
         const QDate d = edit()->date();
         return {d.year(), d.month(), d.day()};
     }
-    void setDate(Date d) override
+    void set_date(rap::date d) override
     {
         quiet_ = true;
         edit()->setDate(QDate(d.year, d.month, d.day));
         quiet_ = false;
     }
-    void onChanged(std::function<void(Date)> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void(rap::date)> f) override { changed_ = std::move(f); }
 
 private:
     QDateEdit* edit() const { return static_cast<QDateEdit*>(w_); }
-    std::function<void(Date)> changed_;
+    std::function<void(rap::date)> changed_;
     bool quiet_ = false;
 };
 
 // Enter in a line edit presses the dialog's default button (OK), as on
 // Windows, unless the app handles Enter itself (a find box): then the
 // key stops here.
-void handleEnter(QLineEdit* edit, const std::function<void()>* activate)
+void handle_enter(QLineEdit* edit, const std::function<void()>* activate)
 {
     hook(edit,
          [activate](QEvent* e)
@@ -776,11 +776,11 @@ void handleEnter(QLineEdit* edit, const std::function<void()>* activate)
          });
 }
 
-class WEntry : public W<rap::Entry>
+class entry_impl : public widget_base<rap::entry>
 {
 public:
-    explicit WEntry(const spec::Entry& s)
-        : W(new QLineEdit(qs(s.text)))
+    explicit entry_impl(const spec::entry& s)
+        : widget_base(new QLineEdit(qs(s.text)))
     {
         edit()->setPlaceholderText(qs(s.placeholder));
         QObject::connect(edit(), &QLineEdit::textChanged, edit(),
@@ -788,13 +788,13 @@ public:
                          {
                              if (changed_) changed_(t.toStdString());
                          });
-        handleEnter(edit(), &activate_);
+        handle_enter(edit(), &activate_);
     }
     std::string text() const override { return edit()->text().toStdString(); }
-    void setText(const std::string& t) override { edit()->setText(qs(t)); }
-    void setPlaceholder(const std::string& t) override { edit()->setPlaceholderText(qs(t)); }
-    void onChanged(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
-    void onActivate(std::function<void()> f) override { activate_ = std::move(f); }
+    void set_text(const std::string& t) override { edit()->setText(qs(t)); }
+    void set_placeholder(const std::string& t) override { edit()->setPlaceholderText(qs(t)); }
+    void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
+    void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
 
 private:
     QLineEdit* edit() const { return static_cast<QLineEdit*>(w_); }
@@ -802,21 +802,21 @@ private:
     std::function<void()> activate_;
 };
 
-class WSelect : public W<rap::Select>
+class drop_down_impl : public widget_base<rap::drop_down>
 {
 public:
-    explicit WSelect(const spec::Select& s)
-        : W(new QComboBox)
+    explicit drop_down_impl(const spec::drop_down& s)
+        : widget_base(new QComboBox)
     {
-        setItems(s.items);
-        setCurrent(s.current);
+        set_items(s.items);
+        set_current(s.current);
         QObject::connect(combo(), &QComboBox::currentIndexChanged, combo(),
                          [this](int i)
                          {
                              if (!quiet_ && changed_) changed_(i);
                          });
     }
-    void setItems(std::vector<std::string> items) override
+    void set_items(std::vector<std::string> items) override
     {
         quiet_ = true;
         combo()->clear();
@@ -824,8 +824,8 @@ public:
         quiet_ = false;
     }
     int current() const override { return combo()->currentIndex(); }
-    void setCurrent(int i) override { combo()->setCurrentIndex(i); }
-    void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void set_current(int i) override { combo()->setCurrentIndex(i); }
+    void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
 private:
     QComboBox* combo() const { return static_cast<QComboBox*>(w_); }
@@ -833,24 +833,24 @@ private:
     bool quiet_ = false;
 };
 
-class WCombo : public W<rap::Combo>
+class combo_impl : public widget_base<rap::combo>
 {
 public:
-    explicit WCombo(const spec::Combo& s)
-        : W(new QComboBox)
+    explicit combo_impl(const spec::combo& s)
+        : widget_base(new QComboBox)
     {
         combo()->setEditable(true);
         combo()->setInsertPolicy(QComboBox::NoInsert);
-        setItems(s.items);
-        setText(s.text);
+        set_items(s.items);
+        set_text(s.text);
         QObject::connect(combo()->lineEdit(), &QLineEdit::textChanged, combo(),
                          [this](const QString& t)
                          {
                              if (changed_) changed_(t.toStdString());
                          });
-        handleEnter(combo()->lineEdit(), &activate_);
+        handle_enter(combo()->lineEdit(), &activate_);
     }
-    void setItems(std::vector<std::string> items) override
+    void set_items(std::vector<std::string> items) override
     {
         const QString text = combo()->currentText();
         combo()->clear();
@@ -858,9 +858,9 @@ public:
         combo()->setEditText(text);
     }
     std::string text() const override { return combo()->currentText().toStdString(); }
-    void setText(const std::string& t) override { combo()->setEditText(qs(t)); }
-    void onChanged(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
-    void onActivate(std::function<void()> f) override { activate_ = std::move(f); }
+    void set_text(const std::string& t) override { combo()->setEditText(qs(t)); }
+    void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
+    void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
 
 private:
     QComboBox* combo() const { return static_cast<QComboBox*>(w_); }
@@ -870,20 +870,20 @@ private:
 
 // QPlainTextEdit: lays out lazily, so long diffs open at once. Styled spans
 // go in as one pass of inserts, each run with its format.
-class WTextView : public W<rap::TextView>
+class text_view_impl : public widget_base<rap::text_view>
 {
 public:
-    explicit WTextView(const spec::TextView& s)
-        : W(new QPlainTextEdit)
+    explicit text_view_impl(const spec::text_view& s)
+        : widget_base(new QPlainTextEdit)
     {
         auto* e = edit();
-        QFont f = s.compact ? compactFont(e->font()) : e->font();
-        if (s.monospace) f = styledFont(f, TextStyle{.monospace = true});
+        QFont f = s.compact ? compact_font(e->font()) : e->font();
+        if (s.monospace) f = styled_font(f, text_style{.monospace = true});
         e->setFont(f);
         e->setLineWrapMode(s.wrap ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
         e->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-        setReadOnly(s.readOnly);
-        setText(s.text);
+        set_read_only(s.read_only);
+        set_text(s.text);
         QObject::connect(e, &QPlainTextEdit::textChanged, e,
                          [this]
                          {
@@ -893,7 +893,7 @@ public:
 
     std::string text() const override { return edit()->toPlainText().toStdString(); }
 
-    void setText(const std::string& t, std::vector<Span> spans = {}) override
+    void set_text(const std::string& t, std::vector<span> spans = {}) override
     {
         auto* doc = edit()->document();
         const bool undo = doc->isUndoRedoEnabled();
@@ -903,16 +903,16 @@ public:
         else
         {
             edit()->clear();
-            std::ranges::stable_sort(spans, {}, &Span::begin);
+            std::ranges::stable_sort(spans, {}, &span::begin);
             QTextCursor c(doc);
             c.beginEditBlock();
             size_t at = 0;
-            for (const Span& sp : spans)
+            for (const span& sp : spans)
             {
                 const size_t b = std::clamp(sp.begin, at, t.size()),
                              e = std::clamp(sp.end, b, t.size());
                 if (b > at) c.insertText(qs(t.substr(at, b - at)), QTextCharFormat());
-                if (e > b) c.insertText(qs(t.substr(b, e - b)), charFormat(w_, sp.style));
+                if (e > b) c.insertText(qs(t.substr(b, e - b)), char_format(w_, sp.style));
                 at = std::max(at, e);
             }
             if (at < t.size()) c.insertText(qs(t.substr(at)), QTextCharFormat());
@@ -922,14 +922,14 @@ public:
         doc->setUndoRedoEnabled(undo);
     }
 
-    void append(const std::string& t, const TextStyle& style) override
+    void append(const std::string& t, const text_style& style) override
     {
         QTextCursor c(edit()->document());
         c.movePosition(QTextCursor::End);
-        c.insertText(qs(t), charFormat(w_, style));
+        c.insertText(qs(t), char_format(w_, style));
     }
 
-    void setReadOnly(bool ro) override
+    void set_read_only(bool ro) override
     {
         edit()->setReadOnly(ro);
         // Read-only text is still selectable from the keyboard (Ctrl+A,
@@ -940,7 +940,7 @@ public:
         edit()->setCursorWidth(ro ? 0 : 1);
     }
 
-    void onChanged(std::function<void()> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void()> f) override { changed_ = std::move(f); }
 
     // Document positions count UTF-16 units (and one per line break), as
     // toPlainText() does; the API counts UTF-8 bytes.
@@ -948,15 +948,15 @@ public:
     {
         const QTextCursor c = edit()->textCursor();
         const QString t = edit()->toPlainText();
-        return {utf8At(t, c.selectionStart()), utf8At(t, c.selectionEnd())};
+        return {utf8_at(t, c.selectionStart()), utf8_at(t, c.selectionEnd())};
     }
 
     void select(size_t begin, size_t end) override
     {
         const std::string t = text();
         QTextCursor c(edit()->document());
-        c.setPosition(int(utf16At(t, begin)));
-        c.setPosition(int(utf16At(t, end)), QTextCursor::KeepAnchor);
+        c.setPosition(int(utf16_at(t, begin)));
+        c.setPosition(int(utf16_at(t, end)), QTextCursor::KeepAnchor);
         edit()->setTextCursor(c);
         edit()->ensureCursorVisible();
     }
@@ -971,11 +971,11 @@ private:
 // Splitter panes: the first layout follows stretch factors (panes without
 // stretch at their natural size), or the sizes given before it; after
 // that, spare space goes to the stretching panes only.
-class WSplitter : public W<rap::Splitter>
+class splitter_impl : public widget_base<rap::splitter>
 {
 public:
-    WSplitter(QSplitter* s, std::vector<int> stretch)
-        : W(s)
+    splitter_impl(QSplitter* s, std::vector<int> stretch)
+        : widget_base(s)
         , stretch_(std::move(stretch))
     {
         // At Show the splitter has had its first size (a top level's layout
@@ -989,17 +989,17 @@ public:
                  // has; QSplitter would give the growth to the stretching pane.
                  // The new size is in place before the event, so this frame
                  // is laid out with them.
-                 if (laidOut_ && wanted_ && e->type() == QEvent::Resize) apply(*wanted_);
-                 if (laidOut_ || length() <= 1) return false;
+                 if (laid_out_ && wanted_ && e->type() == QEvent::Resize) apply(*wanted_);
+                 if (laid_out_ || length() <= 1) return false;
                  if (e->type() == QEvent::Show)
                  {
-                     laidOut_ = true;
-                     firstLayout();
+                     laid_out_ = true;
+                     first_layout();
                  }
                  else if (e->type() == QEvent::Resize && splitter()->isVisible())
                  {
-                     laidOut_ = true;
-                     QTimer::singleShot(0, splitter(), [this] { firstLayout(); });
+                     laid_out_ = true;
+                     QTimer::singleShot(0, splitter(), [this] { first_layout(); });
                  }
                  return false;
              });
@@ -1015,9 +1015,9 @@ public:
 
     // Each divider goes at sizes[i] (0: left as it is); the last pane gets
     // the rest.
-    void setSizes(const std::vector<float>& s) override
+    void set_sizes(const std::vector<float>& s) override
     {
-        if (laidOut_)
+        if (laid_out_)
             apply(s);
         else
             pending_ = s;
@@ -1029,39 +1029,39 @@ private:
     {
         return splitter()->orientation() == Qt::Vertical ? w_->height() : w_->width();
     }
-    int paneLength() const
+    int pane_length() const
     {
         return length() - splitter()->handleWidth() * std::max(0, splitter()->count() - 1);
     }
 
-    void firstLayout()
+    void first_layout()
     {
         if (pending_)
             apply(*pending_);
         else
-            initialSplit();
+            initial_split();
     }
 
-    void initialSplit()
+    void initial_split()
     {
         const int n = splitter()->count();
-        int fixed = 0, stretchSum = 0;
+        int fixed = 0, stretch_sum = 0;
         QList<int> sizes(n, 0);
         for (int i = 0; i < n && size_t(i) < stretch_.size(); ++i)
         {
             if (stretch_[size_t(i)] > 0)
             {
-                stretchSum += stretch_[size_t(i)];
+                stretch_sum += stretch_[size_t(i)];
                 continue;
             }
             const QSize hint = splitter()->widget(i)->sizeHint();
             sizes[i] = splitter()->orientation() == Qt::Vertical ? hint.height() : hint.width();
             fixed += sizes[i];
         }
-        const int avail = paneLength() - fixed;
-        if (avail <= 0 || stretchSum == 0) return;
+        const int avail = pane_length() - fixed;
+        if (avail <= 0 || stretch_sum == 0) return;
         for (int i = 0; i < n && size_t(i) < stretch_.size(); ++i)
-            if (stretch_[size_t(i)] > 0) sizes[i] = avail * stretch_[size_t(i)] / stretchSum;
+            if (stretch_[size_t(i)] > 0) sizes[i] = avail * stretch_[size_t(i)] / stretch_sum;
         splitter()->setSizes(sizes);
     }
 
@@ -1075,7 +1075,7 @@ private:
             if (size_t(i) < s.size() && s[size_t(i)] > 0) sizes[i] = int(s[size_t(i)]);
             used += sizes[i];
         }
-        const int rest = paneLength() - used;
+        const int rest = pane_length() - used;
         if (n) sizes[n - 1] = std::max(0, rest);
         // Kept until the last pane has room for at least its minimum.
         const QWidget* last = n ? splitter()->widget(n - 1) : nullptr;
@@ -1091,18 +1091,18 @@ private:
     std::vector<int> stretch_;
     std::optional<std::vector<float>> wanted_;
     std::optional<std::vector<float>> pending_;
-    bool laidOut_ = false;
+    bool laid_out_ = false;
 };
 
-// Tab pages built the first time they're shown (layout::Lazy): each starts
+// Tab pages built the first time they're shown (layout::lazy): each starts
 // as an empty page with a layout, filled then.
-struct LazyPages
+struct lazy_pages
 {
-    std::vector<std::function<Node()>> lazy;
+    std::vector<std::function<node()>> lazy;
     std::vector<QWidget*> pages;
-    std::function<QWidget*(const Node&)> build;
+    std::function<QWidget*(const node&)> build;
 
-    void ensureBuilt(int i)
+    void ensure_built(int i)
     {
         if (i < 0 || size_t(i) >= lazy.size() || !lazy[size_t(i)]) return;
         const auto make = std::move(lazy[size_t(i)]);
@@ -1111,44 +1111,44 @@ struct LazyPages
     }
 };
 
-class WTabs : public W<rap::Tabs>
+class tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    explicit WTabs(QTabWidget* t)
-        : W(t)
+    explicit tabs_impl(QTabWidget* t)
+        : widget_base(t)
     {
         QObject::connect(t, &QTabWidget::currentChanged, t,
                          [this](int i)
                          {
-                             lazy_.ensureBuilt(i);
+                             lazy_.ensure_built(i);
                              if (changed_) changed_(i);
                          });
     }
     int current() const override { return tabs()->currentIndex(); }
-    void setCurrent(int i) override
+    void set_current(int i) override
     {
         tabs()->setCurrentIndex(i);
-        lazy_.ensureBuilt(i);
+        lazy_.ensure_built(i);
     }
-    void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
-    void setLazy(LazyPages pages)
+    void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void set_lazy(lazy_pages pages)
     {
         lazy_ = std::move(pages);
-        lazy_.ensureBuilt(current());
+        lazy_.ensure_built(current());
     }
 
 private:
     QTabWidget* tabs() const { return static_cast<QTabWidget*>(w_); }
     std::function<void(int)> changed_;
-    LazyPages lazy_;
+    lazy_pages lazy_;
 };
 
 // Tabs as a list of page names down the left, the page beside it.
-class WSideTabs : public W<rap::Tabs>
+class side_tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    WSideTabs(QWidget* box, QListWidget* list, QStackedWidget* stack)
-        : W(box)
+    side_tabs_impl(QWidget* box, QListWidget* list, QStackedWidget* stack)
+        : widget_base(box)
         , list_(list)
         , stack_(stack)
     {
@@ -1156,38 +1156,38 @@ public:
                          [this](int i)
                          {
                              if (i < 0) return;
-                             lazy_.ensureBuilt(i);
+                             lazy_.ensure_built(i);
                              stack_->setCurrentIndex(i);
                              if (changed_) changed_(i);
                          });
     }
     int current() const override { return std::max(0, list_->currentRow()); }
-    void setCurrent(int i) override
+    void set_current(int i) override
     {
         list_->setCurrentRow(i);
-        lazy_.ensureBuilt(i);
+        lazy_.ensure_built(i);
     }
-    void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
-    void setLazy(LazyPages pages)
+    void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void set_lazy(lazy_pages pages)
     {
         lazy_ = std::move(pages);
-        lazy_.ensureBuilt(current());
+        lazy_.ensure_built(current());
     }
 
 private:
     QListWidget* list_;
     QStackedWidget* stack_;
     std::function<void(int)> changed_;
-    LazyPages lazy_;
+    lazy_pages lazy_;
 };
 
 // ---------------------------------------------------------------- toolbar, values, canvas
 
-class WToolButton : public W<rap::ToolButton>
+class tool_button_impl : public widget_base<rap::tool_button>
 {
 public:
-    explicit WToolButton(const spec::ToolButton& s)
-        : W(new QToolButton)
+    explicit tool_button_impl(const spec::tool_button& s)
+        : widget_base(new QToolButton)
     {
         auto* b = button();
         b->setAutoRaise(true);
@@ -1196,7 +1196,7 @@ public:
         if (!s.label.empty()) b->setToolTip(qs(s.label));
         b->setCheckable(s.toggle);
         b->setChecked(s.checked);
-        if (s.icon) setIcon(s.icon);
+        if (s.icon) set_icon(s.icon);
         QObject::connect(b, &QToolButton::clicked, b, [this] { if (click_) click_(); });
         QObject::connect(b, &QToolButton::toggled, b,
                          [this](bool on)
@@ -1204,16 +1204,16 @@ public:
                              if (!quiet_ && toggled_) toggled_(on);
                          });
     }
-    void setIcon(const Icon& icon) override { button()->setIcon(toQIcon(icon, 16, w_)); }
+    void set_icon(const icon& icon) override { button()->setIcon(to_q_icon(icon, 16, w_)); }
     bool checked() const override { return button()->isChecked(); }
-    void setChecked(bool c) override
+    void set_checked(bool c) override
     {
-        quiet_ = true;  // set from code: no onToggled
+        quiet_ = true;  // set from code: no on_toggled
         button()->setChecked(c);
         quiet_ = false;
     }
-    void onClick(std::function<void()> f) override { click_ = std::move(f); }
-    void onToggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
+    void on_click(std::function<void()> f) override { click_ = std::move(f); }
+    void on_toggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
 
 private:
     QToolButton* button() const { return static_cast<QToolButton*>(w_); }
@@ -1224,11 +1224,11 @@ private:
 
 // A slider over doubles: QSlider counts whole steps from `min`, and an
 // optional label shows the value.
-class WSlider : public W<rap::Slider>
+class slider_impl : public widget_base<rap::slider>
 {
 public:
-    explicit WSlider(const spec::Slider& s)
-        : W(new QWidget)
+    explicit slider_impl(const spec::slider& s)
+        : widget_base(new QWidget)
         , slider_(new QSlider(Qt::Horizontal))
         , min_(s.min)
         , max_(s.max)
@@ -1238,7 +1238,7 @@ public:
         auto* row = new QHBoxLayout(w_);
         row->setContentsMargins(0, 0, 0, 0);
         row->addWidget(slider_, 1);
-        if (s.showValue)
+        if (s.show_value)
         {
             label_ = new QLabel;
             label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -1253,41 +1253,41 @@ public:
             slider_->setTickPosition(QSlider::TicksBelow);
             slider_->setTickInterval(std::max(1, int(std::lround((s.marks[1].first - s.marks[0].first) / step_))));
         }
-        applyRange();
-        setValue(s.value);
+        apply_range();
+        set_value(s.value);
         QObject::connect(slider_, &QSlider::valueChanged, slider_,
                          [this](int)
                          {
-                             showValue();
+                             show_value();
                              if (!quiet_ && changed_) changed_(value());
                          });
     }
     double value() const override { return min_ + slider_->value() * step_; }
-    void setValue(double v) override
+    void set_value(double v) override
     {
         quiet_ = true;
         slider_->setValue(int(std::lround((std::clamp(v, min_, max_) - min_) / step_)));
         quiet_ = false;
-        showValue();
+        show_value();
     }
-    void setRange(double mn, double mx) override
+    void set_range(double mn, double mx) override
     {
         const double v = value();
         min_ = mn;
         max_ = mx;
-        applyRange();
-        setValue(v);
+        apply_range();
+        set_value(v);
     }
-    void onChanged(std::function<void(double)> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
 
 private:
-    void applyRange()
+    void apply_range()
     {
         quiet_ = true;
         slider_->setRange(0, std::max(0, int(std::lround((max_ - min_) / step_))));
         quiet_ = false;
     }
-    void showValue()
+    void show_value()
     {
         if (label_) label_->setText(QString::number(value(), 'f', digits_));
     }
@@ -1300,11 +1300,11 @@ private:
     std::function<void(double)> changed_;
 };
 
-class WSpin : public W<rap::Spin>
+class spin_impl : public widget_base<rap::spin>
 {
 public:
-    explicit WSpin(const spec::Spin& s)
-        : W(new QDoubleSpinBox)
+    explicit spin_impl(const spec::spin& s)
+        : widget_base(new QDoubleSpinBox)
     {
         auto* b = box();
         b->setDecimals(s.digits);
@@ -1319,19 +1319,19 @@ public:
                          });
     }
     double value() const override { return box()->value(); }
-    void setValue(double v) override
+    void set_value(double v) override
     {
         quiet_ = true;
         box()->setValue(v);
         quiet_ = false;
     }
-    void setRange(double mn, double mx) override
+    void set_range(double mn, double mx) override
     {
         quiet_ = true;
         box()->setRange(mn, mx);
         quiet_ = false;
     }
-    void onChanged(std::function<void(double)> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
 
 private:
     QDoubleSpinBox* box() const { return static_cast<QDoubleSpinBox*>(w_); }
@@ -1340,11 +1340,11 @@ private:
 };
 
 // A button showing the colour; clicking opens Qt's colour chooser.
-class WColorButton : public W<rap::ColorButton>
+class color_button_impl : public widget_base<rap::color_button>
 {
 public:
-    explicit WColorButton(const spec::ColorButton& s)
-        : W(new QPushButton)
+    explicit color_button_impl(const spec::color_button& s)
+        : widget_base(new QPushButton)
         , color_(s.color)
         , alpha_(s.alpha)
         , title_(qs(s.title))
@@ -1359,18 +1359,18 @@ public:
                              if (alpha_) opts |= QColorDialog::ShowAlphaChannel;
                              const QColor c = QColorDialog::getColor(qcolor(color_), w_->window(), title_, opts);
                              if (!c.isValid()) return;  // cancelled
-                             color_ = fromQColor(c);
+                             color_ = from_q_color(c);
                              swatch();
                              if (changed_) changed_(color_);
                          });
     }
-    Color color() const override { return color_; }
-    void setColor(Color c) override
+    rap::color color() const override { return color_; }
+    void set_color(rap::color c) override
     {
         color_ = c;
         swatch();
     }
-    void onChanged(std::function<void(Color)> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void(rap::color)> f) override { changed_ = std::move(f); }
 
 private:
     void swatch()
@@ -1388,20 +1388,20 @@ private:
         b->setIcon(QIcon(pm));
     }
 
-    Color color_;
+    rap::color color_;
     bool alpha_;
     QString title_;
-    std::function<void(Color)> changed_;
+    std::function<void(rap::color)> changed_;
 };
 
-class WCanvas;
+class canvas_impl;
 
 // The Qt side of a canvas: painting and input handed to its WCanvas while
 // it's there (the window deletes Qt widgets after the parts).
-class CanvasWidget : public QWidget
+class canvas_widget : public QWidget
 {
 public:
-    WCanvas* owner = nullptr;
+    canvas_impl* owner = nullptr;
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -1422,7 +1422,7 @@ private:
     void key(QKeyEvent* e, bool press);
 };
 
-int buttonNumber(Qt::MouseButton b)
+int button_number(Qt::MouseButton b)
 {
     switch (b)
     {
@@ -1435,11 +1435,11 @@ int buttonNumber(Qt::MouseButton b)
     }
 }
 
-class WCanvas : public W<rap::Canvas>
+class canvas_impl : public widget_base<rap::canvas>
 {
 public:
-    explicit WCanvas(const spec::Canvas& s)
-        : W(new CanvasWidget)
+    explicit canvas_impl(const spec::canvas& s)
+        : widget_base(new canvas_widget)
     {
         auto* c = canvas();
         c->owner = this;
@@ -1452,7 +1452,7 @@ public:
         frames_->setTimerType(Qt::PreciseTimer);
         QObject::connect(frames_, &QTimer::timeout, c, [this] { tick(); });
     }
-    ~WCanvas() override
+    ~canvas_impl() override
     {
         *alive_ = false;
         canvas()->owner = nullptr;
@@ -1460,159 +1460,159 @@ public:
     }
 
     void invalidate() override { w_->update(); }
-    SizeF size() const override { return {float(w_->width()), float(w_->height())}; }
-    float deviceScale() const override { return float(w_->devicePixelRatioF()); }
-    void setCursor(Cursor c) override
+    size_f size() const override { return {float(w_->width()), float(w_->height())}; }
+    float device_scale() const override { return float(w_->devicePixelRatioF()); }
+    void set_cursor(cursor c) override
     {
         switch (c)
         {
-        case Cursor::Default: w_->unsetCursor(); break;
-        case Cursor::Pointer: w_->setCursor(Qt::PointingHandCursor); break;
-        case Cursor::Text: w_->setCursor(Qt::IBeamCursor); break;
-        case Cursor::Crosshair: w_->setCursor(Qt::CrossCursor); break;
-        case Cursor::Grab: w_->setCursor(Qt::OpenHandCursor); break;
-        case Cursor::Grabbing: w_->setCursor(Qt::ClosedHandCursor); break;
-        case Cursor::ZoomIn:
-        case Cursor::ZoomOut: w_->setCursor(Qt::CrossCursor); break;  // Qt has no zoom cursors
-        case Cursor::Move: w_->setCursor(Qt::SizeAllCursor); break;
-        case Cursor::Wait: w_->setCursor(Qt::WaitCursor); break;
-        case Cursor::Hidden: w_->setCursor(Qt::BlankCursor); break;
+        case cursor::default_: w_->unsetCursor(); break;
+        case cursor::pointer: w_->setCursor(Qt::PointingHandCursor); break;
+        case cursor::text: w_->setCursor(Qt::IBeamCursor); break;
+        case cursor::crosshair: w_->setCursor(Qt::CrossCursor); break;
+        case cursor::grab: w_->setCursor(Qt::OpenHandCursor); break;
+        case cursor::grabbing: w_->setCursor(Qt::ClosedHandCursor); break;
+        case cursor::zoom_in:
+        case cursor::zoom_out: w_->setCursor(Qt::CrossCursor); break;  // Qt has no zoom cursors
+        case cursor::move: w_->setCursor(Qt::SizeAllCursor); break;
+        case cursor::wait: w_->setCursor(Qt::WaitCursor); break;
+        case cursor::hidden: w_->setCursor(Qt::BlankCursor); break;
         }
     }
-    void onPaint(std::function<void(Painter&, SizeF)> f) override { paint_ = std::move(f); }
-    void onResize(std::function<void(SizeF)> f) override { resize_ = std::move(f); }
-    void onPointer(std::function<bool(const PointerEvent&)> f) override { pointer_ = std::move(f); }
-    void onScroll(std::function<bool(const ScrollEvent&)> f) override { scroll_ = std::move(f); }
-    void onKey(std::function<bool(const KeyEvent&)> f) override { key_ = std::move(f); }
+    void on_paint(std::function<void(rap::painter&, rap::size_f)> f) override { paint_ = std::move(f); }
+    void on_resize(std::function<void(size_f)> f) override { resize_ = std::move(f); }
+    void on_pointer(std::function<bool(const pointer_event&)> f) override { pointer_ = std::move(f); }
+    void on_scroll(std::function<bool(const scroll_event&)> f) override { scroll_ = std::move(f); }
+    void on_key(std::function<bool(const key_event&)> f) override { key_ = std::move(f); }
 
     // Frames at the screen's refresh rate while anyone's subscribed.
-    Subscription onFrame(std::function<void(double)> f) override
+    subscription on_frame(std::function<void(double)> f) override
     {
-        const int id = ++nextFrame_;
-        frameFns_.push_back({id, std::move(f)});
+        const int id = ++next_frame_;
+        frame_fns_.push_back({id, std::move(f)});
         if (!frames_->isActive())
         {
             const QScreen* screen = w_->screen();
             const double hz = screen && screen->refreshRate() > 1 ? screen->refreshRate() : 60;
             frames_->start(std::max(1, int(1000 / hz)));
         }
-        return Subscription(
+        return subscription(
             [this, alive = alive_, id]
             {
                 if (!*alive) return;
-                std::erase_if(frameFns_, [id](auto& e) { return e.first == id; });
-                if (frameFns_.empty()) frames_->stop();
+                std::erase_if(frame_fns_, [id](auto& e) { return e.first == id; });
+                if (frame_fns_.empty()) frames_->stop();
             });
     }
 
-    // From CanvasWidget.
+    // From canvas_widget.
     void paint(QPainter& qp)
     {
         if (!paint_) return;
-        QtPainter p(qp, w_);
+        qt_painter p(qp, w_);
         paint_(p, size());
     }
     void resized()
     {
         if (resize_) resize_(size());
     }
-    bool pointer(const PointerEvent& e) { return pointer_ && pointer_(e); }
-    bool scroll(const ScrollEvent& e) { return scroll_ && scroll_(e); }
-    bool key(const KeyEvent& e) { return key_ && key_(e); }
+    bool pointer(const pointer_event& e) { return pointer_ && pointer_(e); }
+    bool scroll(const scroll_event& e) { return scroll_ && scroll_(e); }
+    bool key(const key_event& e) { return key_ && key_(e); }
 
     // Presses counted as gtk3 does: each press arrives once, with how many
     // came in quick succession at much the same place.
     int clicks(int button, QPointF pos, quint64 time)
     {
-        const bool again = button == lastButton_ && time - lastTime_ <= quint64(QApplication::doubleClickInterval()) &&
-                           std::abs(pos.x() - lastPos_.x()) <= QApplication::startDragDistance() &&
-                           std::abs(pos.y() - lastPos_.y()) <= QApplication::startDragDistance();
+        const bool again = button == last_button_ && time - last_time_ <= quint64(QApplication::doubleClickInterval()) &&
+                           std::abs(pos.x() - last_pos_.x()) <= QApplication::startDragDistance() &&
+                           std::abs(pos.y() - last_pos_.y()) <= QApplication::startDragDistance();
         clicks_ = again ? clicks_ + 1 : 1;
-        lastButton_ = button;
-        lastTime_ = time;
-        lastPos_ = pos;
+        last_button_ = button;
+        last_time_ = time;
+        last_pos_ = pos;
         return clicks_;
     }
 
 private:
-    CanvasWidget* canvas() const { return static_cast<CanvasWidget*>(w_); }
+    canvas_widget* canvas() const { return static_cast<canvas_widget*>(w_); }
     void tick()
     {
         const double t = double(QDateTime::currentMSecsSinceEpoch()) / 1000.0;
-        auto fns = frameFns_;  // callbacks may unsubscribe
+        auto fns = frame_fns_;  // callbacks may unsubscribe
         for (auto& [id, fn] : fns)
-            if (std::any_of(frameFns_.begin(), frameFns_.end(), [id = id](auto& e) { return e.first == id; })) fn(t);
+            if (std::any_of(frame_fns_.begin(), frame_fns_.end(), [id = id](auto& e) { return e.first == id; })) fn(t);
     }
 
-    std::function<void(Painter&, SizeF)> paint_;
-    std::function<void(SizeF)> resize_;
-    std::function<bool(const PointerEvent&)> pointer_;
-    std::function<bool(const ScrollEvent&)> scroll_;
-    std::function<bool(const KeyEvent&)> key_;
+    std::function<void(rap::painter&, rap::size_f)> paint_;
+    std::function<void(size_f)> resize_;
+    std::function<bool(const pointer_event&)> pointer_;
+    std::function<bool(const scroll_event&)> scroll_;
+    std::function<bool(const key_event&)> key_;
     QTimer* frames_;
-    std::vector<std::pair<int, std::function<void(double)>>> frameFns_;
-    int nextFrame_ = 0;
+    std::vector<std::pair<int, std::function<void(double)>>> frame_fns_;
+    int next_frame_ = 0;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
-    int clicks_ = 0, lastButton_ = 0;
-    quint64 lastTime_ = 0;
-    QPointF lastPos_;
+    int clicks_ = 0, last_button_ = 0;
+    quint64 last_time_ = 0;
+    QPointF last_pos_;
 };
 
-void CanvasWidget::paintEvent(QPaintEvent*)
+void canvas_widget::paintEvent(QPaintEvent*)
 {
     if (!owner) return;
     QPainter p(this);
     owner->paint(p);
 }
 
-void CanvasWidget::resizeEvent(QResizeEvent*)
+void canvas_widget::resizeEvent(QResizeEvent*)
 {
     if (owner) owner->resized();
 }
 
-void CanvasWidget::press(QMouseEvent* e)
+void canvas_widget::press(QMouseEvent* e)
 {
     if (!owner) return;
     if (focusPolicy() != Qt::NoFocus && !hasFocus()) setFocus(Qt::MouseFocusReason);
-    PointerEvent ev{PointerEvent::Type::Press, {float(e->position().x()), float(e->position().y())}, buttonNumber(e->button()), 1,
-                    modifiersOf(e->modifiers())};
+    pointer_event ev{pointer_event_type::press, {float(e->position().x()), float(e->position().y())}, button_number(e->button()), 1,
+                    modifiers_of(e->modifiers())};
     ev.clicks = owner->clicks(ev.button, e->position(), e->timestamp());
     if (owner->pointer(ev)) e->accept();
 }
 
-void CanvasWidget::mouseReleaseEvent(QMouseEvent* e)
+void canvas_widget::mouseReleaseEvent(QMouseEvent* e)
 {
     if (!owner) return;
-    owner->pointer({PointerEvent::Type::Release, {float(e->position().x()), float(e->position().y())}, buttonNumber(e->button()), 1,
-                    modifiersOf(e->modifiers())});
+    owner->pointer({pointer_event_type::release, {float(e->position().x()), float(e->position().y())}, button_number(e->button()), 1,
+                    modifiers_of(e->modifiers())});
 }
 
-void CanvasWidget::mouseMoveEvent(QMouseEvent* e)
+void canvas_widget::mouseMoveEvent(QMouseEvent* e)
 {
     if (!owner) return;
-    owner->pointer({PointerEvent::Type::Move, {float(e->position().x()), float(e->position().y())}, 0, 1, modifiersOf(e->modifiers())});
+    owner->pointer({pointer_event_type::move, {float(e->position().x()), float(e->position().y())}, 0, 1, modifiers_of(e->modifiers())});
 }
 
-void CanvasWidget::enterEvent(QEnterEvent* e)
+void canvas_widget::enterEvent(QEnterEvent* e)
 {
     if (!owner) return;
-    owner->pointer({PointerEvent::Type::Enter, {float(e->position().x()), float(e->position().y())}, 0, 1,
-                    modifiersOf(QApplication::keyboardModifiers())});
+    owner->pointer({pointer_event_type::enter, {float(e->position().x()), float(e->position().y())}, 0, 1,
+                    modifiers_of(QApplication::keyboardModifiers())});
 }
 
-void CanvasWidget::leaveEvent(QEvent*)
+void canvas_widget::leaveEvent(QEvent*)
 {
     if (!owner) return;
     const QPointF at = mapFromGlobal(QCursor::pos());
-    owner->pointer({PointerEvent::Type::Leave, {float(at.x()), float(at.y())}, 0, 1, modifiersOf(QApplication::keyboardModifiers())});
+    owner->pointer({pointer_event_type::leave, {float(at.x()), float(at.y())}, 0, 1, modifiers_of(QApplication::keyboardModifiers())});
 }
 
 // Wheels report eighths of a degree, 120 to a notch, positive away from the
 // user (up, and left for a horizontal wheel); touchpads also report pixels.
-void CanvasWidget::wheelEvent(QWheelEvent* e)
+void canvas_widget::wheelEvent(QWheelEvent* e)
 {
     if (!owner) return;
-    ScrollEvent ev{{float(e->position().x()), float(e->position().y())}, 0, 0, false, modifiersOf(e->modifiers())};
+    scroll_event ev{{float(e->position().x()), float(e->position().y())}, 0, 0, false, modifiers_of(e->modifiers())};
     const bool touchpad = e->pointingDevice() && e->pointingDevice()->type() == QInputDevice::DeviceType::TouchPad;
     if (touchpad && !e->pixelDelta().isNull())
     {
@@ -1631,19 +1631,19 @@ void CanvasWidget::wheelEvent(QWheelEvent* e)
         e->ignore();
 }
 
-void CanvasWidget::key(QKeyEvent* e, bool press)
+void canvas_widget::key(QKeyEvent* e, bool press)
 {
     if (!owner) return;
-    KeyEvent ev;
+    key_event ev;
     ev.press = press;
-    ev.key = keyFor(e->key());
-    if (ev.key == Key::Character)
+    ev.key = key_for(e->key());
+    if (ev.key == key::character)
     {
         const QString t = e->text().toLower();
         ev.codepoint = !t.isEmpty() && !t[0].isNull() && t[0].isPrint() ? char32_t(t.toUcs4().value(0))
                                                                          : char32_t(QChar(e->key()).toLower().unicode());
     }
-    ev.modifiers = modifiersOf(e->modifiers());
+    ev.modifiers = modifiers_of(e->modifiers());
     ev.repeat = e->isAutoRepeat();
     if (owner->key(ev))
         e->accept();
@@ -1656,16 +1656,16 @@ void CanvasWidget::key(QKeyEvent* e, bool press)
 // The rapport model as Qt sees it: a row count kept in step with the
 // notifications, and text for type-ahead and accessibility. The view paints
 // rows itself, so nothing else is asked of it.
-class RowsModel : public QAbstractTableModel
+class rows_model : public QAbstractTableModel
 {
 public:
-    RowsModel(std::vector<Column> cols, QObject* parent)
+    rows_model(std::vector<column> cols, QObject* parent)
         : QAbstractTableModel(parent)
         , cols_(std::move(cols))
     {
     }
 
-    ListModel* model = nullptr;
+    list_model* model = nullptr;
     int count = 0;
 
     int rowCount(const QModelIndex& p = {}) const override { return p.isValid() ? 0 : count; }
@@ -1675,7 +1675,7 @@ public:
     }
     QVariant data(const QModelIndex& i, int role) const override
     {
-        if (role != Qt::DisplayRole || !model || size_t(i.row()) >= model->rowCount()) return {};
+        if (role != Qt::DisplayRole || !model || size_t(i.row()) >= model->row_count()) return {};
         return qs(model->text(size_t(i.row()), size_t(i.column())));
     }
     QVariant headerData(int section, Qt::Orientation o, int role) const override
@@ -1683,7 +1683,7 @@ public:
         if (o != Qt::Horizontal || section < 0 || size_t(section) >= cols_.size()) return {};
         if (role == Qt::DisplayRole) return qs(cols_[size_t(section)].title);
         if (role == Qt::TextAlignmentRole)
-            return QVariant::fromValue(qtAlign(cols_[size_t(section)].align) | Qt::AlignVCenter);
+            return QVariant::fromValue(qt_align(cols_[size_t(section)].align) | Qt::AlignVCenter);
         return {};
     }
     Qt::ItemFlags flags(const QModelIndex&) const override
@@ -1716,12 +1716,12 @@ public:
     }
 
 private:
-    std::vector<Column> cols_;
+    std::vector<column> cols_;
 };
 
 // Rows are one height (QTreeView asks only the first) and painted by
-// ListView::drawRow.
-class RowDelegate : public QStyledItemDelegate
+// list_view::drawRow.
+class row_delegate : public QStyledItemDelegate
 {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
@@ -1733,19 +1733,19 @@ public:
     void paint(QPainter*, const QStyleOptionViewItem&, const QModelIndex&) const override {}
 };
 
-class WList;
+class list_impl;
 
 // The QTreeView, handing its painting and input to its WList.
-class ListView : public QTreeView
+class list_view : public QTreeView
 {
 public:
-    WList* owner = nullptr;
+    list_impl* owner = nullptr;
 
-    void baseMousePress(QMouseEvent* e) { QTreeView::mousePressEvent(e); }
-    void baseMouseMove(QMouseEvent* e) { QTreeView::mouseMoveEvent(e); }
-    void baseMouseRelease(QMouseEvent* e) { QTreeView::mouseReleaseEvent(e); }
-    void baseMouseDoubleClick(QMouseEvent* e) { QTreeView::mouseDoubleClickEvent(e); }
-    void baseKeyPress(QKeyEvent* e) { QTreeView::keyPressEvent(e); }
+    void base_mouse_press(QMouseEvent* e) { QTreeView::mousePressEvent(e); }
+    void base_mouse_move(QMouseEvent* e) { QTreeView::mouseMoveEvent(e); }
+    void base_mouse_release(QMouseEvent* e) { QTreeView::mouseReleaseEvent(e); }
+    void base_mouse_double_click(QMouseEvent* e) { QTreeView::mouseDoubleClickEvent(e); }
+    void base_key_press(QKeyEvent* e) { QTreeView::keyPressEvent(e); }
 
 protected:
     void drawRow(QPainter* p, const QStyleOptionViewItem& option,
@@ -1763,19 +1763,19 @@ protected:
     void scrollContentsBy(int dx, int dy) override;
 };
 
-class WList : public W<rap::List>, public ListObserver
+class list_impl : public widget_base<rap::list>, public list_observer
 {
 public:
-    explicit WList(const spec::List& s)
-        : W(new ListView)
+    explicit list_impl(const spec::list& s)
+        : widget_base(new list_view)
         , cols_(s.columns)
         , compact_(s.compact)
-        , autoScroll_(s.autoScroll)
+        , auto_scroll_(s.auto_scroll)
     {
-        view_ = static_cast<ListView*>(w_);
+        view_ = static_cast<list_view*>(w_);
         view_->owner = this;
-        rows_ = new RowsModel(s.columns, view_);
-        delegate_ = new RowDelegate(view_);
+        rows_ = new rows_model(s.columns, view_);
+        delegate_ = new row_delegate(view_);
         view_->setItemDelegate(delegate_);
         view_->setModel(rows_);
         view_->setRootIsDecorated(false);
@@ -1786,21 +1786,21 @@ public:
         view_->setHeaderHidden(!s.headers);
         view_->setEditTriggers(QAbstractItemView::NoEditTriggers);
         view_->setSelectionBehavior(QAbstractItemView::SelectRows);
-        view_->setSelectionMode(s.selection == SelectionMode::None ? QAbstractItemView::NoSelection
-                                : s.selection == SelectionMode::Single
+        view_->setSelectionMode(s.selection == selection_mode::none ? QAbstractItemView::NoSelection
+                                : s.selection == selection_mode::single
                                     ? QAbstractItemView::SingleSelection
                                     : QAbstractItemView::ExtendedSelection);
         // Pixel scrolling: the thumb and the rows follow the pointer exactly.
         view_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
         view_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
         view_->viewport()->setMouseTracking(true);
-        if (compact_) view_->setFont(compactFont(view_->font()));
-        if (s.softSelection) soft_ = softColors(view_);
-        if (autoScroll_) lists().insert(this);
-        firstTextColumn_ =
-            int(std::ranges::find_if(cols_, [](const Column& c) { return !c.painted; }) -
+        if (compact_) view_->setFont(compact_font(view_->font()));
+        if (s.soft_selection) soft_ = soft_colors_for(view_);
+        if (auto_scroll_) lists().insert(this);
+        first_text_column_ =
+            int(std::ranges::find_if(cols_, [](const column& c) { return !c.painted; }) -
                 cols_.begin());
-        if (size_t(firstTextColumn_) >= cols_.size()) firstTextColumn_ = 0;
+        if (size_t(first_text_column_) >= cols_.size()) first_text_column_ = 0;
 
         QHeaderView* h = view_->header();
         h->setStretchLastSection(false);
@@ -1808,54 +1808,54 @@ public:
         h->setMinimumSectionSize(8);
         h->setSectionResizeMode(QHeaderView::Interactive);
         h->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-        const bool sortable = std::ranges::any_of(cols_, &Column::sortable);
+        const bool sortable = std::ranges::any_of(cols_, &column::sortable);
         h->setSectionsClickable(sortable);
         for (size_t i = 0; i < cols_.size(); ++i)
         {
-            const Column& c = cols_[i];
+            const column& c = cols_[i];
             int width = px(c.width);
             if (width < 0)
                 width = int((c.painted ? 8 : std::max<size_t>(c.title.size() + 4, 10)) *
-                            g_metrics.charWidth);
+                            g_metrics.char_width);
             h->resizeSection(int(i), width);
             view_->setColumnHidden(int(i), !c.visible);
         }
-        stretchLast();
+        stretch_last();
         h->setContextMenuPolicy(Qt::CustomContextMenu);
         QObject::connect(h, &QHeaderView::customContextMenuRequested, h,
                          [this](QPoint pos)
                          {
                              const int col = view_->header()->logicalIndexAt(pos);
-                             if (col >= 0 && headerMenu_)
-                                 popupMenu(headerMenu_(size_t(col)), view_->header(),
+                             if (col >= 0 && header_menu_)
+                                 show_popup_menu(header_menu_(size_t(col)), view_->header(),
                                            view_->header()->mapToGlobal(pos));
                          });
         QObject::connect(h, &QHeaderView::sectionClicked, h,
-                         [this](int col) { headerClicked(col); });
+                         [this](int col) { header_clicked(col); });
         QObject::connect(view_->selectionModel(), &QItemSelectionModel::selectionChanged, view_,
                          [this]
                          {
-                             if (selChanged_) selChanged_();
+                             if (sel_changed_) sel_changed_();
                          });
-        fontsChanged();
+        fonts_changed();
     }
 
-    ~WList() override
+    ~list_impl() override
     {
         lists().erase(this);
-        if (active_ == this) active_ = nullptr;
-        if (model_) model_->removeObserver(this);
+        if (active == this) active = nullptr;
+        if (model_) model_->remove_observer(this);
         rows_->model = nullptr;
         view_->owner = nullptr;
     }
 
-    void setModel(ListModel* m) override
+    void set_model(list_model* m) override
     {
-        if (model_) model_->removeObserver(this);
+        if (model_) model_->remove_observer(this);
         model_ = m;
         rows_->model = m;
-        if (model_) model_->addObserver(this);
-        modelReset();
+        if (model_) model_->add_observer(this);
+        model_reset();
     }
 
     std::vector<size_t> selection() const override
@@ -1874,9 +1874,9 @@ public:
         return size_t(i.row());
     }
 
-    void select(const std::vector<size_t>& rowsIn) override
+    void select(const std::vector<size_t>& rows_in) override
     {
-        std::vector<size_t> rows = rowsIn;
+        std::vector<size_t> rows = rows_in;
         std::ranges::sort(rows);
         QItemSelection sel;
         const int last = rows_->columnCount() - 1;
@@ -1893,28 +1893,28 @@ public:
     }
 
     // The cursor row, selected alone (as GTK's set_cursor does).
-    void setCurrent(size_t row) override
+    void set_current(size_t row) override
     {
         if (row >= size_t(rows_->count)) return;
-        view_->selectionModel()->setCurrentIndex(rows_->index(int(row), firstTextColumn_),
+        view_->selectionModel()->setCurrentIndex(rows_->index(int(row), first_text_column_),
                                                  QItemSelectionModel::ClearAndSelect |
                                                      QItemSelectionModel::Rows);
     }
 
-    void scrollTo(size_t row) override
+    void scroll_to(size_t row) override
     {
         if (row < size_t(rows_->count))
             view_->scrollTo(rows_->index(int(row), 0), QAbstractItemView::EnsureVisible);
     }
 
-    void setSortIndicator(std::optional<size_t> column, SortOrder order) override
+    void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
-        sortColumn_ = column;
-        sortOrder_ = order;
-        showSortIndicator();
+        sort_column_ = column;
+        sort_order_ = order;
+        show_sort_indicator();
     }
 
-    std::vector<float> columnWidths() const override
+    std::vector<float> column_widths() const override
     {
         std::vector<float> out;
         for (size_t i = 0; i < cols_.size(); ++i)
@@ -1922,88 +1922,88 @@ public:
         return out;
     }
 
-    void setColumnWidths(const std::vector<float>& widths) override
+    void set_column_widths(const std::vector<float>& widths) override
     {
         for (size_t i = 0; i < widths.size() && i < cols_.size(); ++i)
             if (widths[i] > 0) view_->header()->resizeSection(int(i), int(widths[i]));
         fitted_ = true;  // restored widths win over stretching
     }
 
-    bool columnVisible(size_t column) const override
+    bool column_visible(size_t column) const override
     {
         return column < cols_.size() && !view_->isColumnHidden(int(column));
     }
-    void setColumnVisible(size_t column, bool v) override
+    void set_column_visible(size_t column, bool v) override
     {
         if (column < cols_.size()) view_->setColumnHidden(int(column), !v);
-        stretchLast();
+        stretch_last();
     }
 
-    void onSelectionChanged(std::function<void()> f) override { selChanged_ = std::move(f); }
-    void onActivate(std::function<void(size_t)> f) override { activate_ = std::move(f); }
-    void onSortRequested(std::function<void(size_t, SortOrder)> f) override
+    void on_selection_changed(std::function<void()> f) override { sel_changed_ = std::move(f); }
+    void on_activate(std::function<void(size_t)> f) override { activate_ = std::move(f); }
+    void on_sort_requested(std::function<void(size_t, sort_order)> f) override
     {
         sort_ = std::move(f);
     }
-    void onContextMenu(std::function<Menu(std::optional<size_t>)> f) override
+    void on_context_menu(std::function<menu(std::optional<size_t>)> f) override
     {
-        contextMenu_ = std::move(f);
+        context_menu_ = std::move(f);
     }
-    void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
-    void onCellContextMenu(std::function<Menu(size_t, size_t, PointF)> f) override
+    void on_header_menu(std::function<menu(size_t)> f) override { header_menu_ = std::move(f); }
+    void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)> f) override
     {
-        cellMenu_ = std::move(f);
+        cell_menu_ = std::move(f);
     }
-    void onReorder(ReorderFn f) override { reorder_ = std::move(f); }
-    void setReorderable(bool v) override { reorderable_ = v; }
-    void onCellDrag(CellDrag d) override { cellDrag_ = std::move(d); }
+    void on_reorder(reorder_fn f) override { reorder_ = std::move(f); }
+    void set_reorderable(bool v) override { reorderable_ = v; }
+    void on_cell_drag(cell_drag d) override { cell_drag_ = std::move(d); }
 
-    // ListObserver. Big changes reset: Qt's per-row bookkeeping is O(rows).
-    void modelReset() override { rows_->reset(model_ ? int(model_->rowCount()) : 0); }
-    void rowsChanged(size_t first, size_t n) override
+    // list_observer. Big changes reset: Qt's per-row bookkeeping is O(rows).
+    void model_reset() override { rows_->reset(model_ ? int(model_->row_count()) : 0); }
+    void rows_changed(size_t first, size_t n) override
     {
-        if (n > kBulk || first + n > size_t(rows_->count))
+        if (n > bulk || first + n > size_t(rows_->count))
             view_->viewport()->update();
         else if (n)
             rows_->changed(int(first), int(n));
     }
-    void rowsInserted(size_t first, size_t n) override
+    void rows_inserted(size_t first, size_t n) override
     {
-        if (n > kBulk) return modelReset();
+        if (n > bulk) return model_reset();
         if (n) rows_->inserted(int(first), int(n));
     }
-    void rowsRemoved(size_t first, size_t n) override
+    void rows_removed(size_t first, size_t n) override
     {
-        if (n > kBulk) return modelReset();
+        if (n > bulk) return model_reset();
         if (n) rows_->removed(int(first), int(n));
     }
 
     // Esc during a drag or an autoscroll cancels it, ahead of any window
     // key handling (which might close the dialog).
-    static bool cancelActiveDrag()
+    static bool cancel_active_drag()
     {
-        for (WList* l : lists())
+        for (list_impl* l : lists())
             if (l->auto_.on)
             {
-                l->stopAutoScroll();
+                l->stop_auto_scroll();
                 return true;
             }
-        WList* list = active_;
+        list_impl* list = active;
         if (!list) return false;
         list->drag_ = {};
         list->cell_ = {};
-        list->dropY_.reset();
-        active_ = nullptr;
+        list->drop_y_.reset();
+        active = nullptr;
         list->view_->viewport()->unsetCursor();
         list->view_->viewport()->update();
         return true;
     }
 
-    // ---- called by ListView
+    // ---- called by list_view
 
-    void paintRow(QPainter* p, const QRect& r, int row) const
+    void paint_row(QPainter* p, const QRect& r, int row) const
     {
-        if (!model_ || size_t(row) >= model_->rowCount()) return;
+        if (!model_ || size_t(row) >= model_->row_count()) return;
         const QPalette pal = view_->palette();
         const bool selected = view_->selectionModel()->isRowSelected(row, QModelIndex());
         const bool hot = hot_ == size_t(row) && soft_;
@@ -2011,7 +2011,7 @@ public:
         const QRect band(0, r.y(), vw, r.height());
         // Selection doesn't grey out when the window loses focus.
         if (selected)
-            p->fillRect(band, soft_ ? (hot ? soft_->hoverSelected : soft_->selected)
+            p->fillRect(band, soft_ ? (hot ? soft_->hover_selected : soft_->selected)
                                     : pal.color(QPalette::Active, QPalette::Highlight));
         else if (hot)
             p->fillRect(band, soft_->hover);
@@ -2024,71 +2024,71 @@ public:
             if (x >= vw || x + w <= 0) continue;
             const QRect cell(x, r.y(), w, r.height());
             if (cols_[c].painted)
-                paintCell(p, cell, size_t(row), c, selected, focused);
+                paint_cell(p, cell, size_t(row), c, selected, focused);
             else
-                textCell(p, cell, size_t(row), c, selected);
+                text_cell(p, cell, size_t(row), c, selected);
         }
     }
 
-    void paintOverlay(QPainter& qp)
+    void paint_overlay(QPainter& qp)
     {
-        if (dropY_)
+        if (drop_y_)
         {
-            qp.fillRect(QRect(0, *dropY_ - 1, view_->viewport()->width(), 2),
+            qp.fillRect(QRect(0, *drop_y_ - 1, view_->viewport()->width(), 2),
                         view_->palette().color(QPalette::Active, QPalette::Highlight));
         }
         if (cell_.dragging && cell_.target)
         {
-            const QRect r = rowRect(*cell_.target).adjusted(1, 1, -2, -2);
+            const QRect r = row_rect(*cell_.target).adjusted(1, 1, -2, -2);
             qp.setPen(QPen(view_->palette().color(QPalette::Active, QPalette::Highlight), 2));
             qp.setBrush(Qt::NoBrush);
             qp.drawRect(r);
         }
         if (cell_.dragging && !cell_.start.label.empty())
         {
-            QtPainter p(qp, view_);
-            TextStyle ts;
+            qt_painter p(qp, view_);
+            text_style ts;
             ts.bold = true;
-            const SizeF t = p.measure(cell_.start.label, ts);
-            const RectF box{float(cell_.pos.x()) + 12, float(cell_.pos.y()) + 4, t.w + 12, t.h + 4};
-            p.rect(box, 4, Paint{ThemeColor::Highlight}, Paint{ThemeColor::Mid});
-            ts.fg = ThemeColor::HighlightText;
+            const size_f t = p.measure(cell_.start.label, ts);
+            const rect_f box{float(cell_.pos.x()) + 12, float(cell_.pos.y()) + 4, t.w + 12, t.h + 4};
+            p.rect(box, 4, paint{theme_color::highlight}, paint{theme_color::mid});
+            ts.fg = theme_color::highlight_text;
             p.text({box.x + 6, box.y + 2}, cell_.start.label, ts);
         }
         if (auto_.on)
         {
-            QtPainter p(qp, view_);
-            paintAutoScrollAnchor(p, float(auto_.anchor.x()), float(auto_.anchor.y()));
+            qt_painter p(qp, view_);
+            paint_auto_scroll_anchor(p, float(auto_.anchor.x()), float(auto_.anchor.y()));
         }
     }
 
     // Overlays are drawn in viewport coordinates; a scroll's blit would
     // carry them along with the rows, so the viewport repaints whole.
-    bool overlaid() const { return dropY_ || cell_.dragging || auto_.on; }
+    bool overlaid() const { return drop_y_ || cell_.dragging || auto_.on; }
 
-    void fontsChanged()
+    void fonts_changed()
     {
         fonts_.clear();
         const QFontMetrics fm(view_->font());
-        rowHeight_ = std::max(fm.height() + (compact_ ? 2 : 6), compact_ ? 18 : 22);
-        iconSize_ = std::min(16, rowHeight_ - 1);
-        delegate_->height = rowHeight_;
+        row_height_ = std::max(fm.height() + (compact_ ? 2 : 6), compact_ ? 18 : 22);
+        icon_size_ = std::min(16, row_height_ - 1);
+        delegate_->height = row_height_;
         view_->doItemsLayout();
     }
 
-    void paletteChanged()
+    void palette_changed()
     {
-        if (soft_) soft_ = softColors(view_);
+        if (soft_) soft_ = soft_colors_for(view_);
     }
 
     // A stretching last column keeps the list's right edge: it takes what
     // the others leave as the list resizes, and gives way as they widen.
-    void stretchLast()
+    void stretch_last()
     {
-        const int last = lastVisibleColumn();
+        const int last = last_visible_column();
         view_->header()->setStretchLastSection(last >= 0 && cols_[size_t(last)].stretch);
     }
-    int lastVisibleColumn() const
+    int last_visible_column() const
     {
         for (int i = int(cols_.size()) - 1; i >= 0; --i)
             if (!view_->header()->isSectionHidden(i)) return i;
@@ -2098,14 +2098,14 @@ public:
     // Other stretch columns share the width the others leave, once, when
     // the list first has a size; after that, widening one column never
     // narrows another (the list scrolls sideways instead).
-    void fitStretch()
+    void fit_stretch()
     {
         const int width = view_->viewport()->width();
         if (fitted_ || width <= 1) return;
         fitted_ = true;
         QHeaderView* h = view_->header();
         int used = 0, stretching = 0;
-        const int filled = h->stretchLastSection() ? lastVisibleColumn() : -1;  // looks after itself
+        const int filled = h->stretchLastSection() ? last_visible_column() : -1;  // looks after itself
         for (size_t i = 0; i < cols_.size(); ++i)
         {
             if (h->isSectionHidden(int(i))) continue;
@@ -2119,28 +2119,28 @@ public:
                 h->resizeSection(int(i), h->sectionSize(int(i)) + spare / stretching);
     }
 
-    void mousePress(QMouseEvent* e)
+    void mouse_press(QMouseEvent* e)
     {
         if (auto_.on)
         {
-            stopAutoScroll();
+            stop_auto_scroll();
             return;
         }
-        if (autoScroll_ && e->button() == Qt::MiddleButton)
+        if (auto_scroll_ && e->button() == Qt::MiddleButton)
         {
-            startAutoScroll(e->position().toPoint());
+            start_auto_scroll(e->position().toPoint());
             return;
         }
-        if (cellPressed(e))
+        if (cell_pressed(e))
         {
-            view_->baseMousePress(e);  // selects as usual; dragging begins on motion
+            view_->base_mouse_press(e);  // selects as usual; dragging begins on motion
             return;
         }
-        if (dragPressed(e)) return;
-        view_->baseMousePress(e);
+        if (drag_pressed(e)) return;
+        view_->base_mouse_press(e);
     }
 
-    void mouseMove(QMouseEvent* e)
+    void mouse_move(QMouseEvent* e)
     {
         const QPoint pos = e->position().toPoint();
         if (auto_.on)
@@ -2148,92 +2148,92 @@ public:
             auto_.y = pos.y();
             return;
         }
-        trackHover(e);
+        track_hover(e);
         if (cell_.pressed)
         {
-            cellMotion(e);
+            cell_motion(e);
             return;
         }
         if (drag_.pressed && (e->buttons() & Qt::LeftButton))
         {
-            dragMotion(pos);
+            drag_motion(pos);
             return;
         }
         // No sweeping a selection with the button held, as in Windows'
         // report lists and the GTK backends (Qt's default extends it):
         // dragging is for labels and reordering; Shift and Ctrl select.
         if (e->buttons() & Qt::LeftButton) return;
-        view_->baseMouseMove(e);
+        view_->base_mouse_move(e);
     }
 
-    void mouseRelease(QMouseEvent* e)
+    void mouse_release(QMouseEvent* e)
     {
         if (auto_.on)
         {
-            if (e->button() == Qt::MiddleButton) stopAutoScroll();
+            if (e->button() == Qt::MiddleButton) stop_auto_scroll();
             return;
         }
         if (cell_.pressed && e->button() == Qt::LeftButton)
         {
-            CellDragState d = std::move(cell_);
+            cell_drag_state d = std::move(cell_);
             cell_ = {};
-            if (!d.dragging) return view_->baseMouseRelease(e);  // a plain click
-            if (active_ == this) active_ = nullptr;
+            if (!d.dragging) return view_->base_mouse_release(e);  // a plain click
+            if (active == this) active = nullptr;
             view_->viewport()->unsetCursor();
             view_->viewport()->update();
-            if (d.target && cellDrag_.drop) cellDrag_.drop(d.from, *d.target, d.start.data);
+            if (d.target && cell_drag_.drop) cell_drag_.drop(d.from, *d.target, d.start.data);
             return;
         }
         if (drag_.pressed && e->button() == Qt::LeftButton)
         {
-            Drag d = drag_;
+            drag d = drag_;
             drag_ = {};
-            if (active_ == this) active_ = nullptr;
+            if (active == this) active = nullptr;
             if (d.dragging)
             {
-                const size_t dest = dropTarget(e->position().toPoint().y());
-                dropY_.reset();
+                const size_t dest = drop_target(e->position().toPoint().y());
+                drop_y_.reset();
                 view_->viewport()->unsetCursor();
                 view_->viewport()->update();
-                if (reorder_ && !isNoopDrop(dest)) reorder_(selection(), dest);
+                if (reorder_ && !is_noop_drop(dest)) reorder_(selection(), dest);
                 return;
             }
-            if (d.deferSelect)
+            if (d.defer_select)
             {
                 select({d.row});
-                view_->selectionModel()->setCurrentIndex(rows_->index(int(d.row), firstTextColumn_),
+                view_->selectionModel()->setCurrentIndex(rows_->index(int(d.row), first_text_column_),
                                                          QItemSelectionModel::NoUpdate);
                 return;
             }
         }
-        view_->baseMouseRelease(e);
+        view_->base_mouse_release(e);
     }
 
-    void mouseDoubleClick(QMouseEvent* e)
+    void mouse_double_click(QMouseEvent* e)
     {
-        if (e->button() != Qt::LeftButton) return mousePress(e);
-        view_->baseMouseDoubleClick(e);
+        if (e->button() != Qt::LeftButton) return mouse_press(e);
+        view_->base_mouse_double_click(e);
         const QModelIndex i = view_->indexAt(e->position().toPoint());
         if (i.isValid() && activate_) activate_(size_t(i.row()));
     }
 
     // Enter activates the current row (and stops there: a dialog's default
     // button would take it too).
-    void keyPress(QKeyEvent* e)
+    void key_press(QKeyEvent* e)
     {
-        if (e->key() == Qt::Key_Escape && cancelActiveDrag()) return;
+        if (e->key() == Qt::Key_Escape && cancel_active_drag()) return;
         if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter)
         {
             if (auto row = current(); row && activate_) activate_(*row);
             e->accept();
             return;
         }
-        view_->baseKeyPress(e);
+        view_->base_key_press(e);
     }
 
     // Right-click: Qt has already selected the row, or kept a multi-
     // selection that holds it (two revisions to compare).
-    void contextMenu(QContextMenuEvent* e)
+    void context_menu(QContextMenuEvent* e)
     {
         std::optional<size_t> row;
         QPoint global = e->globalPos();
@@ -2244,13 +2244,13 @@ public:
             {
                 row = size_t(i.row());
                 const int col = view_->header()->logicalIndexAt(e->pos().x());
-                if (cellMenu_ && col >= 0)
+                if (cell_menu_ && col >= 0)
                 {
-                    const QRect r = rowRect(*row);
-                    const PointF at{
+                    const QRect r = row_rect(*row);
+                    const point_f at{
                         float(e->pos().x() - view_->header()->sectionViewportPosition(col)),
                         float(e->pos().y() - r.y())};
-                    popupMenu(cellMenu_(*row, size_t(col), at), view_, global);
+                    show_popup_menu(cell_menu_(*row, size_t(col), at), view_, global);
                     return;
                 }
             }
@@ -2258,95 +2258,95 @@ public:
         else
         {
             row = current();
-            const QRect r = row ? rowRect(*row) : QRect();
+            const QRect r = row ? row_rect(*row) : QRect();
             global = view_->viewport()->mapToGlobal(row ? QPoint(r.x() + 16, r.bottom())
                                                         : QPoint(16, 16));
         }
-        if (contextMenu_) popupMenu(contextMenu_(row), view_, global);
+        if (context_menu_) show_popup_menu(context_menu_(row), view_, global);
     }
 
-    void leave() { setHot(std::nullopt); }
+    void leave() { set_hot(std::nullopt); }
 
 private:
-    static constexpr size_t kBulk = 256;
+    static constexpr size_t bulk = 256;
 
-    QRect rowRect(size_t row) const
+    QRect row_rect(size_t row) const
     {
-        const QRect r = view_->visualRect(rows_->index(int(row), firstTextColumn_));
+        const QRect r = view_->visualRect(rows_->index(int(row), first_text_column_));
         return {0, r.y(), view_->viewport()->width(), r.height()};
     }
 
-    std::optional<size_t> rowAt(int y) const
+    std::optional<size_t> row_at(int y) const
     {
         const QModelIndex i = view_->indexAt(QPoint(0, y));
         if (!i.isValid()) return std::nullopt;
         return size_t(i.row());
     }
 
-    void showSortIndicator()
+    void show_sort_indicator()
     {
         QHeaderView* h = view_->header();
-        h->setSortIndicatorShown(sortColumn_.has_value());
-        if (sortColumn_)
-            h->setSortIndicator(int(*sortColumn_), sortOrder_ == SortOrder::Ascending
+        h->setSortIndicatorShown(sort_column_.has_value());
+        if (sort_column_)
+            h->setSortIndicator(int(*sort_column_), sort_order_ == sort_order::ascending
                                                        ? Qt::AscendingOrder
                                                        : Qt::DescendingOrder);
     }
 
     // The header flips its own indicator on a click; the app decides.
-    void headerClicked(int col)
+    void header_clicked(int col)
     {
         const bool asc =
-            !(sortColumn_ && *sortColumn_ == size_t(col) && sortOrder_ == SortOrder::Ascending);
-        showSortIndicator();
+            !(sort_column_ && *sort_column_ == size_t(col) && sort_order_ == sort_order::ascending);
+        show_sort_indicator();
         if (!sort_ || size_t(col) >= cols_.size() || !cols_[size_t(col)].sortable) return;
-        sort_(size_t(col), asc ? SortOrder::Ascending : SortOrder::Descending);
+        sort_(size_t(col), asc ? sort_order::ascending : sort_order::descending);
     }
 
-    const std::pair<QFont, QFontMetrics>& fontFor(const TextStyle& s) const
+    const std::pair<QFont, QFontMetrics>& font_for(const text_style& s) const
     {
         const int key = (s.bold ? 1 : 0) | (s.italic ? 2 : 0) | (s.monospace ? 4 : 0);
         if (s.size > 0)
         {
             static thread_local std::optional<std::pair<QFont, QFontMetrics>> sized;
-            const QFont f = styledFont(view_->font(), s);
+            const QFont f = styled_font(view_->font(), s);
             sized.emplace(f, QFontMetrics(f));
             return *sized;
         }
         auto it = fonts_.find(key);
         if (it == fonts_.end())
         {
-            const QFont f = styledFont(view_->font(), s);
+            const QFont f = styled_font(view_->font(), s);
             it = fonts_.emplace(key, std::pair{f, QFontMetrics(f)}).first;
         }
         return it->second;
     }
 
-    void textCell(QPainter* p, const QRect& cell, size_t row, size_t c, bool selected) const
+    void text_cell(QPainter* p, const QRect& cell, size_t row, size_t c, bool selected) const
     {
-        const TextStyle style = model_->style(row, c);
+        const text_style style = model_->style(row, c);
         const QPalette pal = view_->palette();
         if (style.bg && !selected) p->fillRect(cell, qcolor(resolve(view_, *style.bg)));
         const int pad = compact_ ? 3 : 4;
         QRect area = cell.adjusted(pad, 0, -pad, 0);
-        if (const Icon icon = model_->icon(row, c))
+        if (const icon icon = model_->icon(row, c))
         {
-            const QIcon qi = toQIcon(icon, iconSize_, view_);
-            qi.paint(p, QRect(area.x(), area.y() + (area.height() - iconSize_) / 2, iconSize_,
-                              iconSize_));
-            area.setLeft(area.left() + iconSize_ + 4);
+            const QIcon qi = to_q_icon(icon, icon_size_, view_);
+            qi.paint(p, QRect(area.x(), area.y() + (area.height() - icon_size_) / 2, icon_size_,
+                              icon_size_));
+            area.setLeft(area.left() + icon_size_ + 4);
         }
-        const auto& [font, fm] = fontFor(style);
+        const auto& [font, fm] = font_for(style);
         p->setFont(font);
         p->setPen(style.fg             ? qcolor(resolve(view_, *style.fg))
                   : selected && !soft_ ? pal.color(QPalette::Active, QPalette::HighlightedText)
                                        : pal.color(QPalette::Active, QPalette::Text));
         const QString text = qs(model_->text(row, c));
-        p->drawText(area, qtAlign(cols_[c].align) | Qt::AlignVCenter | Qt::TextSingleLine,
+        p->drawText(area, qt_align(cols_[c].align) | Qt::AlignVCenter | Qt::TextSingleLine,
                     fm.elidedText(text, Qt::ElideRight, area.width()));
     }
 
-    void paintCell(QPainter* p, const QRect& cell, size_t row, size_t c, bool selected,
+    void paint_cell(QPainter* p, const QRect& cell, size_t row, size_t c, bool selected,
                    bool focused) const
     {
         if (auto bg = model_->style(row, c).bg; bg && !selected)
@@ -2355,80 +2355,80 @@ private:
         p->setClipRect(cell, Qt::IntersectClip);
         p->translate(cell.topLeft());
         {
-            QtPainter painter(*p, view_,
-                              selected && !soft_ ? std::optional<Paint>{ThemeColor::HighlightText}
+            qt_painter painter(*p, view_,
+                              selected && !soft_ ? std::optional<paint>{theme_color::highlight_text}
                                                  : std::nullopt);
             if (soft_)
             {
-                painter.overrideColor(ThemeColor::Highlight, fromQColor(soft_->selected));
-                painter.overrideColor(ThemeColor::HighlightText,
-                                      themeColor(view_, ThemeColor::Text));
+                painter.override_color(theme_color::highlight, from_q_color(soft_->selected));
+                painter.override_color(theme_color::highlight_text,
+                                      theme_color_of(view_, theme_color::text));
             }
             model_->paint(row, c, painter,
-                          CellInfo{{float(cell.width()), float(cell.height())}, selected, focused});
+                          cell_info{{float(cell.width()), float(cell.height())}, selected, focused});
         }
         p->restore();
     }
 
     // Soft-selection lists tint the row under the pointer (as on win32 and
     // GTK, and Explorer's and TortoiseGit's lists).
-    void setHot(std::optional<size_t> row)
+    void set_hot(std::optional<size_t> row)
     {
         if (row == hot_) return;
         for (std::optional<size_t> r : {hot_, row})
-            if (r) view_->viewport()->update(rowRect(*r));
+            if (r) view_->viewport()->update(row_rect(*r));
         hot_ = row;
     }
-    void trackHover(QMouseEvent* e)
+    void track_hover(QMouseEvent* e)
     {
-        if (!soft_ || drag_.dragging || cell_.dragging) return setHot(std::nullopt);
-        setHot(rowAt(e->position().toPoint().y()));
+        if (!soft_ || drag_.dragging || cell_.dragging) return set_hot(std::nullopt);
+        set_hot(row_at(e->position().toPoint().y()));
     }
 
-    // Drag-reordering (onReorder): press on a row, move past the drag
+    // Drag-reordering (on_reorder): press on a row, move past the drag
     // distance, and a line between rows follows the pointer until release.
-    struct Drag
+    struct drag
     {
         bool pressed = false;
         bool dragging = false;
-        bool deferSelect = false;  // pressed inside a multi-selection
+        bool defer_select = false;  // pressed inside a multi-selection
         QPoint start;
         size_t row = 0;
     };
-    // A CellDrag in progress: from a press `begin` accepted.
-    struct CellDragState
+    // A cell_drag in progress: from a press `begin` accepted.
+    struct cell_drag_state
     {
         bool pressed = false, dragging = false;
         QPoint origin, pos;  // the press, the pointer now
         size_t from = 0;
-        CellDragStart start;
+        cell_drag_start start;
         std::optional<size_t> target;
     };
 
-    bool dragPressed(QMouseEvent* e)
+    bool drag_pressed(QMouseEvent* e)
     {
         drag_ = {};
         if (!reorder_ || !reorderable_ || e->button() != Qt::LeftButton ||
             (e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier)))
             return false;
         const QPoint pos = e->position().toPoint();
-        auto row = rowAt(pos.y());
+        auto row = row_at(pos.y());
         if (!row) return false;
         const bool selected = view_->selectionModel()->isRowSelected(int(*row), QModelIndex());
         drag_ = {true, false, selected && view_->selectionModel()->selectedRows().size() > 1, pos,
                  *row};
         // Keep a multi-selection so it can be dragged; a plain click inside
         // it selects just that row on release instead.
-        if (drag_.deferSelect)
+        if (drag_.defer_select)
         {
             view_->setFocus(Qt::MouseFocusReason);
             return true;
         }
-        view_->baseMousePress(e);
+        view_->base_mouse_press(e);
         return true;
     }
 
-    bool isNoopDrop(size_t dest) const
+    bool is_noop_drop(size_t dest) const
     {
         const auto sel = selection();
         if (sel.empty()) return true;
@@ -2437,64 +2437,64 @@ private:
     }
 
     // The row the dragged rows would go in front of; sets the drop line.
-    size_t dropTarget(int y)
+    size_t drop_target(int y)
     {
         const size_t count = size_t(rows_->count);
         size_t dest = count;
         const int vh = view_->viewport()->height();
-        if (auto row = rowAt(std::clamp(y, 0, std::max(0, vh - 1))))
+        if (auto row = row_at(std::clamp(y, 0, std::max(0, vh - 1))))
         {
-            const QRect r = rowRect(*row);
+            const QRect r = row_rect(*row);
             dest = y < r.center().y() ? *row : *row + 1;
         }
-        const bool noop = isNoopDrop(dest);
+        const bool noop = is_noop_drop(dest);
         view_->viewport()->setCursor(noop ? Qt::ForbiddenCursor : Qt::ClosedHandCursor);
         if (count && !noop)
-            dropY_ = dest >= count ? rowRect(count - 1).bottom() + 1 : rowRect(dest).top();
+            drop_y_ = dest >= count ? row_rect(count - 1).bottom() + 1 : row_rect(dest).top();
         else
-            dropY_.reset();
+            drop_y_.reset();
         return dest;
     }
 
-    void edgeScroll(int y)
+    void edge_scroll(int y)
     {
         const int edge = 24, vh = view_->viewport()->height();
         if (y < edge || y > vh - edge)
         {
             QScrollBar* bar = view_->verticalScrollBar();
-            bar->setValue(bar->value() + (y < edge ? -1 : 1) * rowHeight_);
+            bar->setValue(bar->value() + (y < edge ? -1 : 1) * row_height_);
         }
     }
 
-    void dragMotion(QPoint pos)
+    void drag_motion(QPoint pos)
     {
         if (!drag_.dragging)
         {
             if ((pos - drag_.start).manhattanLength() < QApplication::startDragDistance()) return;
             drag_.dragging = true;
-            active_ = this;
-            setHot(std::nullopt);
+            active = this;
+            set_hot(std::nullopt);
         }
-        dropTarget(pos.y());
-        edgeScroll(pos.y());
+        drop_target(pos.y());
+        edge_scroll(pos.y());
         view_->viewport()->update();
     }
 
     // A press on something the app lets you drag out of a cell. Selection
     // still happens as for any click; the drag starts past the threshold.
-    bool cellPressed(QMouseEvent* e)
+    bool cell_pressed(QMouseEvent* e)
     {
         cell_ = {};
-        if (!cellDrag_.begin || e->button() != Qt::LeftButton ||
+        if (!cell_drag_.begin || e->button() != Qt::LeftButton ||
             (e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier)))
             return false;
         const QPoint pos = e->position().toPoint();
-        auto row = rowAt(pos.y());
+        auto row = row_at(pos.y());
         const int col = view_->header()->logicalIndexAt(pos.x());
         if (!row || col < 0) return false;
-        const QRect r = rowRect(*row);
+        const QRect r = row_rect(*row);
         auto start =
-            cellDrag_.begin(*row, size_t(col),
+            cell_drag_.begin(*row, size_t(col),
                             {float(pos.x() - view_->header()->sectionViewportPosition(col)),
                              float(pos.y() - r.y())});
         if (!start) return false;
@@ -2505,7 +2505,7 @@ private:
         return true;
     }
 
-    void cellMotion(QMouseEvent* e)
+    void cell_motion(QMouseEvent* e)
     {
         if (!(e->buttons() & Qt::LeftButton)) return;
         const QPoint pos = e->position().toPoint();
@@ -2514,167 +2514,167 @@ private:
         {
             if ((pos - cell_.origin).manhattanLength() < QApplication::startDragDistance()) return;
             cell_.dragging = true;
-            active_ = this;
-            setHot(std::nullopt);
+            active = this;
+            set_hot(std::nullopt);
         }
         cell_.target.reset();
-        if (auto row = rowAt(pos.y()))
-            if (cellDrag_.canDrop && cellDrag_.canDrop(cell_.from, *row, cell_.start.data))
+        if (auto row = row_at(pos.y()))
+            if (cell_drag_.can_drop && cell_drag_.can_drop(cell_.from, *row, cell_.start.data))
                 cell_.target = row;
         view_->viewport()->setCursor(cell_.target ? Qt::ClosedHandCursor : Qt::ForbiddenCursor);
-        edgeScroll(pos.y());
+        edge_scroll(pos.y());
         view_->viewport()->update();
     }
 
-    // Autoscroll (spec.autoScroll): the middle button held, the list
+    // Autoscroll (spec.auto_scroll): the middle button held, the list
     // scrolls each display frame by the pointer's offset from the anchor.
-    void startAutoScroll(QPoint at)
+    void start_auto_scroll(QPoint at)
     {
         auto_ = {true, at, at.y(), double(view_->verticalScrollBar()->value())};
-        if (!autoTimer_)
+        if (!auto_timer_)
         {
-            autoTimer_ = new QTimer(view_);
-            autoTimer_->setTimerType(Qt::PreciseTimer);
-            QObject::connect(autoTimer_, &QTimer::timeout, view_, [this] { autoScrollStep(); });
+            auto_timer_ = new QTimer(view_);
+            auto_timer_->setTimerType(Qt::PreciseTimer);
+            QObject::connect(auto_timer_, &QTimer::timeout, view_, [this] { auto_scroll_step(); });
         }
         const QScreen* screen = view_->screen();
         const double hz = screen && screen->refreshRate() > 1 ? screen->refreshRate() : 60;
-        autoTimer_->start(std::max(1, int(1000 / hz)));
+        auto_timer_->start(std::max(1, int(1000 / hz)));
         clock_.start();
         view_->viewport()->setCursor(Qt::SizeVerCursor);
         view_->viewport()->update();
     }
-    void autoScrollStep()
+    void auto_scroll_step()
     {
         const double dt = double(clock_.nsecsElapsed()) / 1e9;
         clock_.restart();
         QScrollBar* bar = view_->verticalScrollBar();
-        auto_.pos = std::clamp(auto_.pos + autoScrollSpeed(float(auto_.y - auto_.anchor.y())) * dt,
+        auto_.pos = std::clamp(auto_.pos + auto_scroll_speed(float(auto_.y - auto_.anchor.y())) * dt,
                                double(bar->minimum()), double(bar->maximum()));
         bar->setValue(int(std::lround(auto_.pos)));
     }
-    void stopAutoScroll()
+    void stop_auto_scroll()
     {
         if (!auto_.on) return;
-        if (autoTimer_) autoTimer_->stop();
+        if (auto_timer_) auto_timer_->stop();
         auto_ = {};
         view_->viewport()->unsetCursor();
         view_->viewport()->update();
     }
 
-    static std::set<WList*>& lists()  // lists that autoscroll, for Esc
+    static std::set<list_impl*>& lists()  // lists that autoscroll, for Esc
     {
-        static std::set<WList*> l;
+        static std::set<list_impl*> l;
         return l;
     }
-    static inline WList* active_ = nullptr;  // the list a drag is in
+    static inline list_impl* active = nullptr;  // the list a drag is in
 
-    ListView* view_;
-    RowsModel* rows_;
-    RowDelegate* delegate_;
-    ListModel* model_ = nullptr;
-    std::vector<Column> cols_;
+    list_view* view_;
+    rows_model* rows_;
+    row_delegate* delegate_;
+    list_model* model_ = nullptr;
+    std::vector<column> cols_;
     bool compact_;
-    bool autoScroll_;
-    std::optional<SoftColors> soft_;
-    int firstTextColumn_ = 0;
-    int rowHeight_ = 20, iconSize_ = 16;
+    bool auto_scroll_;
+    std::optional<soft_colors> soft_;
+    int first_text_column_ = 0;
+    int row_height_ = 20, icon_size_ = 16;
     bool fitted_ = false;
     mutable std::map<int, std::pair<QFont, QFontMetrics>> fonts_;
-    std::optional<size_t> sortColumn_;
-    SortOrder sortOrder_ = SortOrder::Ascending;
+    std::optional<size_t> sort_column_;
+    sort_order sort_order_ = sort_order::ascending;
 
-    std::function<void()> selChanged_;
+    std::function<void()> sel_changed_;
     std::function<void(size_t)> activate_;
-    std::function<void(size_t, SortOrder)> sort_;
-    std::function<Menu(std::optional<size_t>)> contextMenu_;
-    std::function<Menu(size_t)> headerMenu_;
-    std::function<Menu(size_t, size_t, PointF)> cellMenu_;
-    ReorderFn reorder_;
+    std::function<void(size_t, sort_order)> sort_;
+    std::function<menu(std::optional<size_t>)> context_menu_;
+    std::function<menu(size_t)> header_menu_;
+    std::function<menu(size_t, size_t, point_f)> cell_menu_;
+    reorder_fn reorder_;
     bool reorderable_ = true;
-    CellDrag cellDrag_;
-    Drag drag_;
-    CellDragState cell_;
-    std::optional<int> dropY_;
+    cell_drag cell_drag_;
+    drag drag_;
+    cell_drag_state cell_;
+    std::optional<int> drop_y_;
     std::optional<size_t> hot_;  // the row under the pointer
 
-    struct AutoScroll
+    struct auto_scroll_state
     {
         bool on = false;
         QPoint anchor;
         int y = 0;       // the pointer
         double pos = 0;  // scroll position, with the fraction a step leaves
     };
-    AutoScroll auto_;
-    QTimer* autoTimer_ = nullptr;
+    auto_scroll_state auto_;
+    QTimer* auto_timer_ = nullptr;
     QElapsedTimer clock_;
 };
 
-void ListView::drawRow(QPainter* p, const QStyleOptionViewItem& option,
+void list_view::drawRow(QPainter* p, const QStyleOptionViewItem& option,
                        const QModelIndex& index) const
 {
-    if (owner) owner->paintRow(p, option.rect, index.row());
+    if (owner) owner->paint_row(p, option.rect, index.row());
 }
 
-void ListView::paintEvent(QPaintEvent* e)
+void list_view::paintEvent(QPaintEvent* e)
 {
     QTreeView::paintEvent(e);
     if (!owner || !owner->overlaid()) return;
     QPainter p(viewport());
-    owner->paintOverlay(p);
+    owner->paint_overlay(p);
 }
 
-void ListView::mousePressEvent(QMouseEvent* e)
+void list_view::mousePressEvent(QMouseEvent* e)
 {
-    owner ? owner->mousePress(e) : QTreeView::mousePressEvent(e);
+    owner ? owner->mouse_press(e) : QTreeView::mousePressEvent(e);
 }
 
-void ListView::mouseMoveEvent(QMouseEvent* e)
+void list_view::mouseMoveEvent(QMouseEvent* e)
 {
-    owner ? owner->mouseMove(e) : QTreeView::mouseMoveEvent(e);
+    owner ? owner->mouse_move(e) : QTreeView::mouseMoveEvent(e);
 }
 
-void ListView::mouseReleaseEvent(QMouseEvent* e)
+void list_view::mouseReleaseEvent(QMouseEvent* e)
 {
-    owner ? owner->mouseRelease(e) : QTreeView::mouseReleaseEvent(e);
+    owner ? owner->mouse_release(e) : QTreeView::mouseReleaseEvent(e);
 }
 
-void ListView::mouseDoubleClickEvent(QMouseEvent* e)
+void list_view::mouseDoubleClickEvent(QMouseEvent* e)
 {
-    owner ? owner->mouseDoubleClick(e) : QTreeView::mouseDoubleClickEvent(e);
+    owner ? owner->mouse_double_click(e) : QTreeView::mouseDoubleClickEvent(e);
 }
 
-void ListView::keyPressEvent(QKeyEvent* e)
+void list_view::keyPressEvent(QKeyEvent* e)
 {
-    owner ? owner->keyPress(e) : QTreeView::keyPressEvent(e);
+    owner ? owner->key_press(e) : QTreeView::keyPressEvent(e);
 }
 
-void ListView::contextMenuEvent(QContextMenuEvent* e)
+void list_view::contextMenuEvent(QContextMenuEvent* e)
 {
-    if (owner) owner->contextMenu(e);
+    if (owner) owner->context_menu(e);
 }
 
-bool ListView::viewportEvent(QEvent* e)
+bool list_view::viewportEvent(QEvent* e)
 {
     if (e->type() == QEvent::Leave && owner) owner->leave();
     return QTreeView::viewportEvent(e);
 }
 
-void ListView::resizeEvent(QResizeEvent* e)
+void list_view::resizeEvent(QResizeEvent* e)
 {
     QTreeView::resizeEvent(e);
-    if (owner) owner->fitStretch();
+    if (owner) owner->fit_stretch();
 }
 
-void ListView::changeEvent(QEvent* e)
+void list_view::changeEvent(QEvent* e)
 {
     QTreeView::changeEvent(e);
     if (!owner) return;
-    if (e->type() == QEvent::FontChange) owner->fontsChanged();
-    if (e->type() == QEvent::PaletteChange) owner->paletteChanged();
+    if (e->type() == QEvent::FontChange) owner->fonts_changed();
+    if (e->type() == QEvent::PaletteChange) owner->palette_changed();
 }
 
-void ListView::scrollContentsBy(int dx, int dy)
+void list_view::scrollContentsBy(int dx, int dy)
 {
     QTreeView::scrollContentsBy(dx, dy);
     if (owner && owner->overlaid()) viewport()->update();
@@ -2682,15 +2682,15 @@ void ListView::scrollContentsBy(int dx, int dy)
 
 // ---------------------------------------------------------------- window
 
-class WWindow;
+class window_impl;
 
 // Every window is a QDialog, for its keys: Enter presses the default
 // button, Esc asks to end a dialog. Closing goes through the WWindow.
-class Frame : public QDialog
+class frame_widget : public QDialog
 {
 public:
     using QDialog::QDialog;
-    WWindow* owner = nullptr;
+    window_impl* owner = nullptr;
     void reject() override;
     void accept() override {}
 
@@ -2699,22 +2699,22 @@ protected:
     void changeEvent(QEvent* e) override;
 };
 
-// Keys reach the window's onKey before the focused widget: an application
+// Keys reach the window's on_key before the focused widget: an application
 // event filter that takes them as they're sent to the focus widget.
-class KeyFilter : public QObject
+class key_filter : public QObject
 {
 public:
-    WWindow* owner = nullptr;
+    window_impl* owner = nullptr;
     bool eventFilter(QObject* o, QEvent* e) override;
 };
 
-class WWindow : public rap::Window
+class window_impl : public rap::window
 {
 public:
-    WWindow(const WindowSpec& spec, WWindow* parent)
+    window_impl(const window_spec& spec, window_impl* parent)
         : dialog_(spec.dialog)
     {
-        frame_ = new Frame(parent ? parent->frame_.data() : nullptr);
+        frame_ = new frame_widget(parent ? parent->frame_.data() : nullptr);
         frame_->owner = this;
         frame_->setWindowTitle(qs(spec.title));
         frame_->setWindowFlags(dialog_ ? Qt::Dialog : Qt::Window);
@@ -2725,25 +2725,25 @@ public:
             frame_->setAttribute(Qt::WA_ShowWithoutActivating);
         layout_ = new QVBoxLayout(frame_);
         layout_->setSpacing(0);
-        filter_ = new KeyFilter;
+        filter_ = new key_filter;
         filter_->owner = this;
         qApp->installEventFilter(filter_);
     }
 
     // Qt widgets go later (deleteLater), as this may run inside one of
     // their signals; until then nothing may reach the parts going now.
-    ~WWindow() override
+    ~window_impl() override
     {
         filter_->owner = nullptr;
         if (qApp) qApp->removeEventFilter(filter_);
         filter_->deleteLater();
-        if (lastShown() == frame_) lastShown() = nullptr;
+        if (last_shown() == frame_) last_shown() = nullptr;
         if (frame_)
         {
             frame_->owner = nullptr;
             for (QObject* o : frame_->findChildren<QObject*>())
             {
-                if (auto* h = dynamic_cast<EventHook*>(o)) h->disarm();
+                if (auto* h = dynamic_cast<event_hook*>(o)) h->disarm();
                 o->blockSignals(true);
             }
             frame_->hide();
@@ -2752,12 +2752,12 @@ public:
         parts.clear();
     }
 
-    void setContent(QWidget* content, const WindowSpec& spec)
+    void set_content(QWidget* content, const window_spec& spec)
     {
         const int m = !spec.margins ? 0 : dialog_ ? 12 : 6;
         layout_->setContentsMargins(m, m, m, m);
         layout_->addWidget(content);
-        if (!spec.menuBar.empty()) buildMenuBar(spec.menuBar);
+        if (!spec.menu_bar.empty()) build_menu_bar(spec.menu_bar);
         const int w = px(spec.width), h = px(spec.height);
         frame_->ensurePolished();  // the style's fonts and margins, before sizing by them
         layout_->activate();
@@ -2772,7 +2772,7 @@ public:
             frame_->resize(size);
     }
 
-    void setTitle(const std::string& t) override { frame_->setWindowTitle(qs(t)); }
+    void set_title(const std::string& t) override { frame_->setWindowTitle(qs(t)); }
     void show() override
     {
         finished_ = false;
@@ -2782,113 +2782,113 @@ public:
             frame_->raise();
             frame_->activateWindow();
         }
-        snapshotIfAsked();
+        snapshot_if_asked();
     }
     void close() override { frame_->hide(); }
-    void onFinished(std::function<void(DialogRole)> f) override { onFinished_ = std::move(f); }
-    void onCloseRequest(std::function<bool()> f) override { onCloseRequest_ = std::move(f); }
+    void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
+    void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
 
-    SizeF size() const override { return {float(frame_->width()), float(frame_->height())}; }
-    void resize(SizeF s) override
+    size_f size() const override { return {float(frame_->width()), float(frame_->height())}; }
+    void resize(size_f s) override
     {
         frame_->resize(std::max(1, int(s.w)), std::max(1, int(s.h)));
-        keepOnScreen();
+        keep_on_screen();
     }
-    void setMinSize(SizeF s) override { frame_->setMinimumSize(int(s.w), int(s.h)); }
-    std::optional<PointF> position() const override
+    void set_min_size(size_f s) override { frame_->setMinimumSize(int(s.w), int(s.h)); }
+    std::optional<point_f> position() const override
     {
         if (!placeable()) return std::nullopt;
         const QPoint p = frame_->frameGeometry().topLeft();
-        return PointF{float(p.x()), float(p.y())};
+        return point_f{float(p.x()), float(p.y())};
     }
-    void move(PointF p) override
+    void move(point_f p) override
     {
         if (!placeable()) return;
         frame_->move(int(p.x), int(p.y));
-        keepOnScreen();
+        keep_on_screen();
     }
-    RectF workArea() const override
+    rect_f work_area() const override
     {
         const QScreen* s = frame_->screen() ? frame_->screen() : QGuiApplication::primaryScreen();
         if (!s) return {};
         const QRect r = s->availableGeometry();
-        return withoutWindowsTaskbar(
+        return without_windows_taskbar(
             {float(r.x()), float(r.y()), float(r.width()), float(r.height())});
     }
 
     bool fullscreen() const override { return frame_->isFullScreen(); }
-    void setFullscreen(bool on) override
+    void set_fullscreen(bool on) override
     {
         if (on == frame_->isFullScreen()) return;
         if (on)
         {
-            wasMaximized_ = frame_->isMaximized();
+            was_maximized_ = frame_->isMaximized();
             frame_->showFullScreen();
         }
-        else if (wasMaximized_)
+        else if (was_maximized_)
             frame_->showMaximized();
         else
             frame_->showNormal();
     }
-    void onFullscreenChanged(std::function<void(bool)> f) override { onFullscreen_ = std::move(f); }
+    void on_fullscreen_changed(std::function<void(bool)> f) override { on_fullscreen_ = std::move(f); }
 
-    void setIcon(const Icon& icon) override
+    void set_icon(const icon& icon) override
     {
         if (!icon.name.empty())
-            if (QIcon named = themeIcon(icon.name); !named.isNull())
+            if (QIcon named = theme_icon(icon.name); !named.isNull())
             {
                 frame_->setWindowIcon(named);
                 return;
             }
-        if (icon.draw) frame_->setWindowIcon(drawnIcon(icon.draw, 256, frame_));
+        if (icon.draw) frame_->setWindowIcon(drawn_icon(icon.draw, 256, frame_));
     }
 
-    void setMenuBarVisible(bool on) override
+    void set_menu_bar_visible(bool on) override
     {
-        menuBarWanted_ = on;
-        showMenuBar();
+        menu_bar_wanted_ = on;
+        show_menu_bar();
     }
 
-    void onKey(std::function<bool(const KeyEvent&)> f) override { onKey_ = std::move(f); }
+    void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
 
     // A dialog button with no handler of its own ends the dialog with its
     // role; OK and Yes are the default, which Enter presses.
-    void addRoleButton(QPushButton* b, DialogRole role)
+    void add_role_button(QPushButton* b, dialog_role role)
     {
         QObject::connect(b, &QPushButton::clicked, b, [this, role] { finish(role); });
-        if (role == DialogRole::Ok || role == DialogRole::Yes) b->setDefault(true);
+        if (role == dialog_role::ok || role == dialog_role::yes) b->setDefault(true);
     }
 
     QWidget* frame() const { return frame_; }
 
-    std::vector<std::unique_ptr<Part>> parts;
+    std::vector<std::unique_ptr<part>> parts;
 
-    // ---- from Frame and KeyFilter
+    // ---- from Frame and key_filter
 
     void escape()
     {
-        if (dialog_) closeRequested();
+        if (dialog_) close_requested();
     }
 
-    void closeRequested()
+    void close_requested()
     {
-        if (onCloseRequest_ && !onCloseRequest_()) return;
+        if (on_close_request_ && !on_close_request_()) return;
         if (dialog_)
-            finish(DialogRole::Cancel);
+            finish(dialog_role::cancel);
         else
             close();
     }
 
-    void stateChanged()
+    void state_changed()
     {
         const bool fs = frame_->isFullScreen();
         if (fs == fullscreen_) return;
         fullscreen_ = fs;
-        showMenuBar();
-        if (onFullscreen_) onFullscreen_(fs);
+        show_menu_bar();
+        if (on_fullscreen_) on_fullscreen_(fs);
     }
 
-    bool filterKey(QObject* o, QEvent* e)
+    bool filter_key(QObject* o, QEvent* e)
     {
         if (e->type() != QEvent::KeyPress && e->type() != QEvent::KeyRelease) return false;
         auto* w = qobject_cast<QWidget*>(o);
@@ -2896,38 +2896,38 @@ public:
         if (!w || w != (focus ? focus : frame_.data()) || w->window() != frame_) return false;
         auto* k = static_cast<QKeyEvent*>(e);
         if (k->key() == Qt::Key_Escape && e->type() == QEvent::KeyPress &&
-            WList::cancelActiveDrag())
+            list_impl::cancel_active_drag())
             return true;
-        if (!onKey_) return false;
+        if (!on_key_) return false;
         // While typing, only Escape and the function keys come here.
         auto* plain = qobject_cast<QPlainTextEdit*>(focus);
         const bool typing =
             focus && (qobject_cast<QLineEdit*>(focus) || qobject_cast<QAbstractSpinBox*>(focus) ||
                       (plain && !plain->isReadOnly()));
-        const bool notText =
+        const bool not_text =
             k->key() == Qt::Key_Escape || (k->key() >= Qt::Key_F1 && k->key() <= Qt::Key_F12);
-        if (typing && !notText) return false;
-        KeyEvent ev;
+        if (typing && !not_text) return false;
+        key_event ev;
         ev.press = e->type() == QEvent::KeyPress;
-        ev.key = keyFor(k->key());
-        if (ev.key == Key::Character) ev.codepoint = char32_t(QChar::toLower(char32_t(k->key())));
-        ev.modifiers = modifiersOf(k->modifiers());
+        ev.key = key_for(k->key());
+        if (ev.key == key::character) ev.codepoint = char32_t(QChar::toLower(char32_t(k->key())));
+        ev.modifiers = modifiers_of(k->modifiers());
         ev.repeat = k->isAutoRepeat();
-        return onKey_(ev);
+        return on_key_(ev);
     }
 
 private:
     // Development aid: RAPPORT_SNAPSHOT=file.png saves the window shown last,
     // RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears, then quits.
-    static QPointer<QWidget>& lastShown()
+    static QPointer<QWidget>& last_shown()
     {
         static QPointer<QWidget> w;
         return w;
     }
 
-    void snapshotIfAsked()
+    void snapshot_if_asked()
     {
-        lastShown() = frame_.data();
+        last_shown() = frame_.data();
         static bool taken = false;
         const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (taken || !path || !*path) return;
@@ -2936,7 +2936,7 @@ private:
         QTimer::singleShot(delay ? std::atoi(delay) : 500, qApp,
                            []
                            {
-                               if (QWidget* w = lastShown())
+                               if (QWidget* w = last_shown())
                                    w->grab().save(qs(std::getenv("RAPPORT_SNAPSHOT")));
                                QCoreApplication::exit(0);
                            });
@@ -2947,142 +2947,142 @@ private:
 
     // Keeps the whole frame in the work area: the size shrinks to fit, and
     // the position slides back inside, as on win32. Once shown.
-    void keepOnScreen()
+    void keep_on_screen()
     {
         if (!frame_->isVisible() || !placeable()) return;
-        const RectF wa = workArea();
+        const rect_f wa = work_area();
         if (wa.w <= 0 || wa.h <= 0) return;
         const QRect f = frame_->frameGeometry();
-        const int extraW = f.width() - frame_->width(), extraH = f.height() - frame_->height();
-        const int w = std::min(frame_->width(), int(wa.w) - extraW);
-        const int h = std::min(frame_->height(), int(wa.h) - extraH);
+        const int extra_w = f.width() - frame_->width(), extra_h = f.height() - frame_->height();
+        const int w = std::min(frame_->width(), int(wa.w) - extra_w);
+        const int h = std::min(frame_->height(), int(wa.h) - extra_h);
         if (w != frame_->width() || h != frame_->height())
             frame_->resize(std::max(1, w), std::max(1, h));
         const int x =
-            std::clamp(f.x(), int(wa.x), std::max(int(wa.x), int(wa.x + wa.w) - (w + extraW)));
+            std::clamp(f.x(), int(wa.x), std::max(int(wa.x), int(wa.x + wa.w) - (w + extra_w)));
         const int y =
-            std::clamp(f.y(), int(wa.y), std::max(int(wa.y), int(wa.y + wa.h) - (h + extraH)));
+            std::clamp(f.y(), int(wa.y), std::max(int(wa.y), int(wa.y + wa.h) - (h + extra_h)));
         if (x != f.x() || y != f.y()) frame_->move(x, y);
     }
 
     // A menu bar's menus are rebuilt each time one opens, so they show the
     // app's state as it is.
-    void buildMenuBar(const std::vector<MenuBarItem>& menus)
+    void build_menu_bar(const std::vector<menu_bar_item>& menus)
     {
-        menuBar_ = new QMenuBar(frame_);
-        for (const MenuBarItem& item : menus)
+        menu_bar_ = new QMenuBar(frame_);
+        for (const menu_bar_item& item : menus)
         {
-            QMenu* menu = menuBar_->addMenu(mnemonic(item.title));
+            QMenu* menu = menu_bar_->addMenu(mnemonic(item.title));
             QObject::connect(menu, &QMenu::aboutToShow, menu,
                              [menu, fn = item.menu]
                              {
                                  menu->clear();
-                                 if (fn) fillMenu(menu, fn());
+                                 if (fn) fill_menu(menu, fn());
                              });
         }
-        layout_->setMenuBar(menuBar_);
+        layout_->setMenuBar(menu_bar_);
     }
 
-    void showMenuBar()
+    void show_menu_bar()
     {
-        if (menuBar_) menuBar_->setVisible(menuBarWanted_ && !fullscreen_);
+        if (menu_bar_) menu_bar_->setVisible(menu_bar_wanted_ && !fullscreen_);
     }
 
     // The callback may delete this window, so it runs last.
-    void finish(DialogRole role)
+    void finish(dialog_role role)
     {
         close();
         if (finished_) return;
         finished_ = true;
-        if (auto f = onFinished_) f(role);
+        if (auto f = on_finished_) f(role);
     }
 
-    QPointer<Frame> frame_;
+    QPointer<frame_widget> frame_;
     QVBoxLayout* layout_;
-    KeyFilter* filter_;
-    QMenuBar* menuBar_ = nullptr;
-    bool menuBarWanted_ = true;
+    key_filter* filter_;
+    QMenuBar* menu_bar_ = nullptr;
+    bool menu_bar_wanted_ = true;
     bool dialog_;
     bool finished_ = false;
     bool fullscreen_ = false;
-    bool wasMaximized_ = false;
-    std::function<void(DialogRole)> onFinished_;
-    std::function<bool()> onCloseRequest_;
-    std::function<void(bool)> onFullscreen_;
-    std::function<bool(const KeyEvent&)> onKey_;
+    bool was_maximized_ = false;
+    std::function<void(dialog_role)> on_finished_;
+    std::function<bool()> on_close_request_;
+    std::function<void(bool)> on_fullscreen_;
+    std::function<bool(const key_event&)> on_key_;
 };
 
-void Frame::reject()
+void frame_widget::reject()
 {
     if (owner) owner->escape();
 }
 
-void Frame::closeEvent(QCloseEvent* e)
+void frame_widget::closeEvent(QCloseEvent* e)
 {
     e->ignore();
-    if (owner) owner->closeRequested();
+    if (owner) owner->close_requested();
 }
 
-void Frame::changeEvent(QEvent* e)
+void frame_widget::changeEvent(QEvent* e)
 {
     QDialog::changeEvent(e);
-    if (e->type() == QEvent::WindowStateChange && owner) owner->stateChanged();
+    if (e->type() == QEvent::WindowStateChange && owner) owner->state_changed();
 }
 
-bool KeyFilter::eventFilter(QObject* o, QEvent* e)
+bool key_filter::eventFilter(QObject* o, QEvent* e)
 {
-    return owner && owner->filterKey(o, e);
+    return owner && owner->filter_key(o, e);
 }
 
 // ---------------------------------------------------------------- builder
 
-class Builder
+class builder
 {
 public:
-    Builder(WWindow& win, BuildSink& sink)
+    builder(window_impl& win, build_sink& sink)
         : win_(win)
         , sink_(sink)
     {
     }
 
-    QWidget* build(const Node& n, Orientation parentDir)
+    QWidget* build(const node& n, orientation parent_dir)
     {
-        QWidget* w = std::visit([&](const auto& s) { return make(n, s, parentDir); }, n.spec);
+        QWidget* w = std::visit([&](const auto& s) { return make(n, s, parent_dir); }, n.spec);
         // Containers have no interface; one with a handle gets a plain Widget.
-        const bool container = std::holds_alternative<spec::Box>(n.spec) ||
-                               std::holds_alternative<spec::Form>(n.spec) ||
-                               std::holds_alternative<spec::Group>(n.spec) ||
-                               std::holds_alternative<spec::Scroll>(n.spec) ||
-                               std::holds_alternative<spec::Toolbar>(n.spec);
-        if (container && n.common.handle) add<WPlain>(n, w);
+        const bool container = std::holds_alternative<spec::box>(n.spec) ||
+                               std::holds_alternative<spec::form>(n.spec) ||
+                               std::holds_alternative<spec::group>(n.spec) ||
+                               std::holds_alternative<spec::scroll>(n.spec) ||
+                               std::holds_alternative<spec::toolbar>(n.spec);
+        if (container && n.common.handle) add<plain_impl>(n, w);
         if (int width = px(n.common.width); width > 0) w->setMinimumWidth(width);
         if (int height = px(n.common.height); height > 0) w->setMinimumHeight(height);
         return w;
     }
 
 private:
-    static bool isLineControl(const Spec& s)
+    static bool is_line_control(const rap::node_spec& s)
     {
-        return std::holds_alternative<spec::Label>(s) || std::holds_alternative<spec::Button>(s) ||
-               std::holds_alternative<spec::Check>(s) || std::holds_alternative<spec::Entry>(s) ||
-               std::holds_alternative<spec::Select>(s) || std::holds_alternative<spec::Combo>(s) ||
-               std::holds_alternative<spec::MenuButton>(s) ||
-               std::holds_alternative<spec::ProgressBar>(s) ||
-               std::holds_alternative<spec::DatePicker>(s);
+        return std::holds_alternative<spec::label>(s) || std::holds_alternative<spec::button>(s) ||
+               std::holds_alternative<spec::check>(s) || std::holds_alternative<spec::entry>(s) ||
+               std::holds_alternative<spec::drop_down>(s) || std::holds_alternative<spec::combo>(s) ||
+               std::holds_alternative<spec::menu_button>(s) ||
+               std::holds_alternative<spec::progress_bar>(s) ||
+               std::holds_alternative<spec::date_picker>(s);
     }
 
-    static bool fillsFormRow(const Spec& s)
+    static bool fills_form_row(const rap::node_spec& s)
     {
-        return std::holds_alternative<spec::Entry>(s) || std::holds_alternative<spec::Combo>(s) ||
-               std::holds_alternative<spec::TextView>(s) || std::holds_alternative<spec::List>(s) ||
-               std::holds_alternative<spec::Canvas>(s) || std::holds_alternative<spec::Box>(s) ||
-               std::holds_alternative<spec::Form>(s) || std::holds_alternative<spec::Splitter>(s) ||
-               std::holds_alternative<spec::Group>(s) || std::holds_alternative<spec::Scroll>(s) ||
-               std::holds_alternative<spec::Tabs>(s);
+        return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
+               std::holds_alternative<spec::text_view>(s) || std::holds_alternative<spec::list>(s) ||
+               std::holds_alternative<spec::canvas>(s) || std::holds_alternative<spec::box>(s) ||
+               std::holds_alternative<spec::form>(s) || std::holds_alternative<spec::splitter>(s) ||
+               std::holds_alternative<spec::group>(s) || std::holds_alternative<spec::scroll>(s) ||
+               std::holds_alternative<spec::tabs>(s);
     }
 
     template <class T, class... Args>
-    T& add(const Node& n, Args&&... args)
+    T& add(const node& n, Args&&... args)
     {
         auto* w = new T(std::forward<Args>(args)...);
         win_.parts.emplace_back(w);
@@ -3090,14 +3090,14 @@ private:
         return *w;
     }
 
-    std::function<QWidget*(const Node&)> pageBuilder()
+    std::function<QWidget*(const node&)> page_builder()
     {
-        return [&win = win_, &sink = sink_](const Node& page)
-        { return Builder(win, sink).build(page, Orientation::Vertical); };
+        return [&win = win_, &sink = sink_](const node& page)
+        { return builder(win, sink).build(page, orientation::vertical); };
     }
 
     // A page: its content with the usual margin around it.
-    static QWidget* pageOf(QWidget* content)
+    static QWidget* page_of(QWidget* content)
     {
         auto* page = new QWidget;
         auto* l = new QVBoxLayout(page);
@@ -3106,17 +3106,17 @@ private:
         return page;
     }
 
-    QWidget* make(const Node&, const spec::Box& s, Orientation)
+    QWidget* make(const node&, const spec::box& s, orientation)
     {
         auto* box = new QWidget;
-        auto* l = new QBoxLayout(s.dir == Orientation::Vertical ? QBoxLayout::TopToBottom
+        auto* l = new QBoxLayout(s.dir == orientation::vertical ? QBoxLayout::TopToBottom
                                                                 : QBoxLayout::LeftToRight,
                                  box);
         l->setSpacing(6);
         if (s.margins)
         {
             // A bar along a window edge: the full margin at its ends, half along its sides.
-            const bool row = s.dir == Orientation::Horizontal;
+            const bool row = s.dir == orientation::horizontal;
             l->setContentsMargins(row ? 6 : 3, row ? 3 : 6, row ? 6 : 3, row ? 3 : 6);
         }
         else
@@ -3126,7 +3126,7 @@ private:
             QWidget* w = build(c, s.dir);
             // Single-line controls keep their natural height when a taller
             // sibling sets the row height.
-            const Qt::Alignment align = s.dir == Orientation::Horizontal && isLineControl(c.spec)
+            const Qt::Alignment align = s.dir == orientation::horizontal && is_line_control(c.spec)
                                             ? Qt::AlignVCenter
                                             : Qt::Alignment();
             l->addWidget(w, c.common.stretch, align);
@@ -3134,7 +3134,7 @@ private:
         return box;
     }
 
-    QWidget* make(const Node&, const spec::Form& s, Orientation)
+    QWidget* make(const node&, const spec::form& s, orientation)
     {
         auto* form = new QWidget;
         auto* l = new QFormLayout(form);
@@ -3148,9 +3148,9 @@ private:
         l->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
         for (size_t i = 0; i < s.fields.size(); ++i)
         {
-            QWidget* field = build(s.fields[i], Orientation::Horizontal);
+            QWidget* field = build(s.fields[i], orientation::horizontal);
             QSizePolicy policy = field->sizePolicy();
-            if (fillsFormRow(s.fields[i].spec) || s.fields[i].common.stretch > 0)
+            if (fills_form_row(s.fields[i].spec) || s.fields[i].common.stretch > 0)
                 policy.setHorizontalPolicy(QSizePolicy::Expanding);
             else if (policy.horizontalPolicy() & QSizePolicy::ExpandFlag)
                 policy.setHorizontalPolicy(QSizePolicy::Preferred);
@@ -3167,9 +3167,9 @@ private:
         return form;
     }
 
-    QWidget* make(const Node& n, const spec::Splitter& s, Orientation)
+    QWidget* make(const node& n, const spec::splitter& s, orientation)
     {
-        auto* sp = new QSplitter(s.dir == Orientation::Vertical ? Qt::Vertical : Qt::Horizontal);
+        auto* sp = new QSplitter(s.dir == orientation::vertical ? Qt::Vertical : Qt::Horizontal);
         sp->setChildrenCollapsible(false);
         std::vector<int> stretch;
         for (auto& pane : s.panes)
@@ -3181,49 +3181,49 @@ private:
         if (std::ranges::all_of(stretch, [](int f) { return f == 0; }))
             std::ranges::fill(stretch, 1);
         for (size_t i = 0; i < stretch.size(); ++i) sp->setStretchFactor(int(i), stretch[i]);
-        add<WSplitter>(n, sp, stretch);
+        add<splitter_impl>(n, sp, stretch);
         return sp;
     }
 
-    QWidget* make(const Node&, const spec::Scroll& s, Orientation)
+    QWidget* make(const node&, const spec::scroll& s, orientation)
     {
         auto* area = new QScrollArea;
         area->setFrameShape(QFrame::NoFrame);
         area->setWidgetResizable(true);
         area->setHorizontalScrollBarPolicy(s.horizontal ? Qt::ScrollBarAsNeeded
                                                         : Qt::ScrollBarAlwaysOff);
-        if (!s.content.empty()) area->setWidget(build(s.content.front(), Orientation::Vertical));
+        if (!s.content.empty()) area->setWidget(build(s.content.front(), orientation::vertical));
         return area;
     }
 
-    QWidget* make(const Node&, const spec::Group& s, Orientation)
+    QWidget* make(const node&, const spec::group& s, orientation)
     {
         auto* group = new QGroupBox(literal(s.title));
         auto* l = new QVBoxLayout(group);
         l->setContentsMargins(6, 6, 6, 6);
-        if (!s.content.empty()) l->addWidget(build(s.content.front(), Orientation::Vertical));
+        if (!s.content.empty()) l->addWidget(build(s.content.front(), orientation::vertical));
         return group;
     }
 
-    QWidget* make(const Node& n, const spec::Tabs& s, Orientation)
+    QWidget* make(const node& n, const spec::tabs& s, orientation)
     {
-        if (s.sidebar) return makeSidebar(n, s);
+        if (s.sidebar) return make_sidebar(n, s);
         auto* tabs = new QTabWidget;
-        LazyPages lazy{s.lazy, {}, pageBuilder()};
+        lazy_pages lazy{s.lazy, {}, page_builder()};
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
-            const bool isLazy = i < s.lazy.size() && s.lazy[i];
-            QWidget* page = pageOf(isLazy ? nullptr : build(s.pages[i], Orientation::Vertical));
+            const bool is_lazy = i < s.lazy.size() && s.lazy[i];
+            QWidget* page = page_of(is_lazy ? nullptr : build(s.pages[i], orientation::vertical));
             tabs->addTab(page, mnemonic(s.titles[i]));
             lazy.pages.push_back(page);
         }
-        auto& w = add<WTabs>(n, tabs);
-        if (!s.lazy.empty()) w.setLazy(std::move(lazy));
+        auto& w = add<tabs_impl>(n, tabs);
+        if (!s.lazy.empty()) w.set_lazy(std::move(lazy));
         return tabs;
     }
 
     // Tabs as a list of page names down the left, the page in a stack beside it.
-    QWidget* makeSidebar(const Node& n, const spec::Tabs& s)
+    QWidget* make_sidebar(const node& n, const spec::tabs& s)
     {
         auto* box = new QWidget;
         auto* l = new QHBoxLayout(box);
@@ -3231,15 +3231,15 @@ private:
         l->setSpacing(0);
         auto* list = new QListWidget;
         auto* stack = new QStackedWidget;
-        LazyPages lazy{s.lazy, {}, pageBuilder()};
+        lazy_pages lazy{s.lazy, {}, page_builder()};
         int width = 0;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             auto* item = new QListWidgetItem(qs(s.titles[i]).remove('_'), list);
-            item->setSizeHint(QSize(0, int(g_metrics.lineHeight) + 16));
+            item->setSizeHint(QSize(0, int(g_metrics.line_height) + 16));
             width = std::max(width, list->fontMetrics().horizontalAdvance(item->text()));
-            const bool isLazy = i < s.lazy.size() && s.lazy[i];
-            QWidget* page = pageOf(isLazy ? nullptr : build(s.pages[i], Orientation::Vertical));
+            const bool is_lazy = i < s.lazy.size() && s.lazy[i];
+            QWidget* page = page_of(is_lazy ? nullptr : build(s.pages[i], orientation::vertical));
             stack->addWidget(page);
             lazy.pages.push_back(page);
         }
@@ -3253,176 +3253,176 @@ private:
         line->setFrameShadow(QFrame::Sunken);
         l->addWidget(line);
         l->addWidget(stack, 1);
-        auto& tabs = add<WSideTabs>(n, box, list, stack);
-        tabs.setCurrent(0);
-        if (!s.lazy.empty()) tabs.setLazy(std::move(lazy));
+        auto& tabs = add<side_tabs_impl>(n, box, list, stack);
+        tabs.set_current(0);
+        if (!s.lazy.empty()) tabs.set_lazy(std::move(lazy));
         return box;
     }
 
-    QWidget* make(const Node&, const spec::Spacer&, Orientation)
+    QWidget* make(const node&, const spec::spacer&, orientation)
     {
         auto* w = new QWidget;
         w->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         return w;
     }
 
-    QWidget* make(const Node&, const spec::Separator&, Orientation parentDir)
+    QWidget* make(const node&, const spec::separator&, orientation parent_dir)
     {
         auto* line = new QFrame;
-        line->setFrameShape(parentDir == Orientation::Vertical ? QFrame::HLine : QFrame::VLine);
+        line->setFrameShape(parent_dir == orientation::vertical ? QFrame::HLine : QFrame::VLine);
         line->setFrameShadow(QFrame::Sunken);
         return line;
     }
 
-    QWidget* make(const Node& n, const spec::Label& s, Orientation)
+    QWidget* make(const node& n, const spec::label& s, orientation)
     {
-        return add<WLabel>(n, s).widget();
+        return add<label_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::MenuButton& s, Orientation)
+    QWidget* make(const node& n, const spec::menu_button& s, orientation)
     {
-        return add<WMenuButton>(n, s).widget();
+        return add<menu_button_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::DatePicker& s, Orientation)
+    QWidget* make(const node& n, const spec::date_picker& s, orientation)
     {
-        return add<WDatePicker>(n, s).widget();
+        return add<date_picker_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::Check& s, Orientation)
+    QWidget* make(const node& n, const spec::check& s, orientation)
     {
-        return add<WCheck>(n, s).widget();
+        return add<check_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::Entry& s, Orientation)
+    QWidget* make(const node& n, const spec::entry& s, orientation)
     {
-        return add<WEntry>(n, s).widget();
+        return add<entry_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::Select& s, Orientation)
+    QWidget* make(const node& n, const spec::drop_down& s, orientation)
     {
-        return add<WSelect>(n, s).widget();
+        return add<drop_down_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::Combo& s, Orientation)
+    QWidget* make(const node& n, const spec::combo& s, orientation)
     {
-        return add<WCombo>(n, s).widget();
+        return add<combo_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::TextView& s, Orientation)
+    QWidget* make(const node& n, const spec::text_view& s, orientation)
     {
-        return add<WTextView>(n, s).widget();
+        return add<text_view_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::List& s, Orientation)
+    QWidget* make(const node& n, const spec::list& s, orientation)
     {
-        return add<WList>(n, s).widget();
+        return add<list_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::ProgressBar&, Orientation)
+    QWidget* make(const node& n, const spec::progress_bar&, orientation)
     {
-        return add<WProgressBar>(n).widget();
+        return add<progress_bar_impl>(n).widget();
     }
 
-    QWidget* make(const Node& n, const spec::Button& s, Orientation)
+    QWidget* make(const node& n, const spec::button& s, orientation)
     {
-        auto* b = new QPushButton(s.iconOnly ? QString() : mnemonic(s.text));
-        auto& w = add<WButton>(n, b);
-        if (s.icon) w.setIcon(s.icon);
-        if (s.iconOnly && n.common.tooltip.empty()) w.setTooltip(s.text);
+        auto* b = new QPushButton(s.icon_only ? QString() : mnemonic(s.text));
+        auto& w = add<button_impl>(n, b);
+        if (s.icon) w.set_icon(s.icon);
+        if (s.icon_only && n.common.tooltip.empty()) w.set_tooltip(s.text);
         b->setFlat(s.flat);
         return b;
     }
 
-    QWidget* make(const Node& n, const spec::ToolButton& s, Orientation)
+    QWidget* make(const node& n, const spec::tool_button& s, orientation)
     {
-        return add<WToolButton>(n, s).widget();
+        return add<tool_button_impl>(n, s).widget();
     }
     // A QToolBar: separators as its own, stretching spacers as expanding gaps.
-    QWidget* make(const Node&, const spec::Toolbar& s, Orientation)
+    QWidget* make(const node&, const spec::toolbar& s, orientation)
     {
         auto* bar = new QToolBar;
         bar->setMovable(false);
         bar->setFloatable(false);
         bar->setIconSize(QSize(16, 16));
         bar->setToolButtonStyle(Qt::ToolButtonIconOnly);
-        for (const Node& item : s.items)
+        for (const node& item : s.items)
         {
-            if (std::holds_alternative<spec::Separator>(item.spec))
+            if (std::holds_alternative<spec::separator>(item.spec))
             {
                 bar->addSeparator();
                 continue;
             }
-            if (std::holds_alternative<spec::Spacer>(item.spec))
+            if (std::holds_alternative<spec::spacer>(item.spec))
             {
                 auto* gap = new QWidget;
                 gap->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
                 bar->addWidget(gap);
                 continue;
             }
-            QWidget* w = build(item, Orientation::Horizontal);
+            QWidget* w = build(item, orientation::horizontal);
             QAction* action = bar->addWidget(w);
             w->setProperty("rapport-toolbar-action", QVariant::fromValue<QObject*>(action));
         }
         return bar;
     }
-    QWidget* make(const Node& n, const spec::Slider& s, Orientation)
+    QWidget* make(const node& n, const spec::slider& s, orientation)
     {
-        return add<WSlider>(n, s).widget();
+        return add<slider_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::Spin& s, Orientation)
+    QWidget* make(const node& n, const spec::spin& s, orientation)
     {
-        return add<WSpin>(n, s).widget();
+        return add<spin_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::ColorButton& s, Orientation)
+    QWidget* make(const node& n, const spec::color_button& s, orientation)
     {
-        return add<WColorButton>(n, s).widget();
+        return add<color_button_impl>(n, s).widget();
     }
-    QWidget* make(const Node& n, const spec::Canvas& s, Orientation)
+    QWidget* make(const node& n, const spec::canvas& s, orientation)
     {
-        return add<WCanvas>(n, s).widget();
+        return add<canvas_impl>(n, s).widget();
     }
 
     // QDialogButtonBox puts the roles in the platform's order, with its
     // stock labels (Help at the far start).
-    static QDialogButtonBox::StandardButton standardFor(DialogRole r)
+    static QDialogButtonBox::StandardButton standard_for(dialog_role r)
     {
         switch (r)
         {
-        case DialogRole::Ok: return QDialogButtonBox::Ok;
-        case DialogRole::Cancel: return QDialogButtonBox::Cancel;
-        case DialogRole::Apply: return QDialogButtonBox::Apply;
-        case DialogRole::Close: return QDialogButtonBox::Close;
-        case DialogRole::Yes: return QDialogButtonBox::Yes;
-        case DialogRole::No: return QDialogButtonBox::No;
-        case DialogRole::Help: return QDialogButtonBox::Help;
-        case DialogRole::Reset: return QDialogButtonBox::Reset;
-        case DialogRole::None: break;
+        case dialog_role::ok: return QDialogButtonBox::Ok;
+        case dialog_role::cancel: return QDialogButtonBox::Cancel;
+        case dialog_role::apply: return QDialogButtonBox::Apply;
+        case dialog_role::close: return QDialogButtonBox::Close;
+        case dialog_role::yes: return QDialogButtonBox::Yes;
+        case dialog_role::no: return QDialogButtonBox::No;
+        case dialog_role::help: return QDialogButtonBox::Help;
+        case dialog_role::reset: return QDialogButtonBox::Reset;
+        case dialog_role::none: break;
         }
         return QDialogButtonBox::NoButton;
     }
 
-    QWidget* make(const Node&, const spec::Buttons& s, Orientation)
+    QWidget* make(const node&, const spec::buttons& s, orientation)
     {
         auto* box = new QDialogButtonBox;
         box->setContentsMargins(0, 6, 0, 0);
         for (auto& b : s.buttons)
         {
-            const auto standard = standardFor(b.role);
+            const auto standard = standard_for(b.role);
             QPushButton* pb = standard == QDialogButtonBox::NoButton
                                   ? box->addButton(mnemonic(b.text), QDialogButtonBox::ActionRole)
                                   : box->addButton(standard);
             if (!b.text.empty()) pb->setText(mnemonic(b.text));
             pb->setIcon(QIcon());  // stock labels only, as on GTK and Windows
-            auto* w = new WButton(pb);
+            auto* w = new button_impl(pb);
             win_.parts.emplace_back(w);
-            if (!b.onClick) win_.addRoleButton(pb, b.role);
+            if (!b.on_click) win_.add_role_button(pb, b.role);
             sink_.created(b, *w);
         }
         return box;
     }
 
-    WWindow& win_;
-    BuildSink& sink_;
+    window_impl& win_;
+    build_sink& sink_;
 };
 
 // ---------------------------------------------------------------- backend
 
-class Qt6Backend : public Backend
+class qt6_backend : public backend
 {
 public:
-    static Backend* create(int* argc, char** argv)
+    static backend* create(int* argc, char** argv)
     {
         QApplication* app = nullptr;  // one made here, deleted with the backend
         if (!qApp)
@@ -3448,15 +3448,15 @@ public:
                     QIcon::setThemeName(theme);
                     break;
                 }
-        initMetrics();
-        return new Qt6Backend(app);
+        init_metrics();
+        return new qt6_backend(app);
     }
 
     // Windows closed once the loop had ended left their widgets to
     // deleteLater, which no loop will run: they go now, and the
     // QApplication before static teardown, where Qt can no longer release
     // the GL contexts its windows' backing stores made (xcb uses GLX).
-    ~Qt6Backend() override
+    ~qt6_backend() override
     {
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         delete app_;
@@ -3464,11 +3464,11 @@ public:
 
     std::string_view name() const override { return "qt6"; }
 
-    std::unique_ptr<rap::Window> createWindow(const WindowSpec& spec, rap::Window* parent,
-                                                BuildSink& sink) override
+    std::unique_ptr<rap::window> create_window(const window_spec& spec, rap::window* parent,
+                                                build_sink& sink) override
     {
-        auto win = std::make_unique<WWindow>(spec, static_cast<WWindow*>(parent));
-        win->setContent(Builder(*win, sink).build(spec.content, Orientation::Vertical), spec);
+        auto win = std::make_unique<window_impl>(spec, static_cast<window_impl*>(parent));
+        win->set_content(builder(*win, sink).build(spec.content, orientation::vertical), spec);
         return win;
     }
 
@@ -3493,14 +3493,14 @@ public:
         QMetaObject::invokeMethod(qApp, [f = std::move(f)] { f(); }, Qt::QueuedConnection);
     }
 
-    std::unique_ptr<rap::Image> createImage(int w, int h, PixelFormat format,
+    std::unique_ptr<rap::image> create_image(int w, int h, pixel_format format,
                                               const uint8_t* pixels, size_t stride) override
     {
-        return std::make_unique<QtImage>(w, h, format, pixels, stride);
+        return std::make_unique<qt_image>(w, h, format, pixels, stride);
     }
 
     // `fn` may drop its own subscription; the timer then goes once it returns.
-    Subscription timer(int ms, bool repeat, std::function<void()> fn) override
+    subscription timer(int ms, bool repeat, std::function<void()> fn) override
     {
         auto* t = new QTimer;
         t->setSingleShot(!repeat);
@@ -3512,7 +3512,7 @@ public:
                              fn();
                          });
         t->start(std::max(ms, 0));
-        return Subscription(
+        return subscription(
             [p = QPointer<QTimer>(t)]
             {
                 if (!p) return;
@@ -3521,29 +3521,29 @@ public:
             });
     }
 
-    void message(rap::Window* parent, const MessageSpec& m,
-                 std::function<void(DialogRole)> done) override
+    void message(rap::window* parent, const message_spec& m,
+                 std::function<void(dialog_role)> done) override
     {
-        auto* box = new QMessageBox(parentWidget(parent));
+        auto* box = new QMessageBox(parent_widget(parent));
         box->setAttribute(Qt::WA_DeleteOnClose);
         switch (m.icon)
         {
-        case MessageSpec::Icon::Info: box->setIcon(QMessageBox::Information); break;
-        case MessageSpec::Icon::Warning: box->setIcon(QMessageBox::Warning); break;
-        case MessageSpec::Icon::Error: box->setIcon(QMessageBox::Critical); break;
-        case MessageSpec::Icon::Question: box->setIcon(QMessageBox::Question); break;
+        case message_spec::icon::info: box->setIcon(QMessageBox::Information); break;
+        case message_spec::icon::warning: box->setIcon(QMessageBox::Warning); break;
+        case message_spec::icon::error: box->setIcon(QMessageBox::Critical); break;
+        case message_spec::icon::question: box->setIcon(QMessageBox::Question); break;
         }
         if (!m.title.empty()) box->setWindowTitle(qs(m.title));
         box->setTextFormat(Qt::PlainText);
         box->setText(qs(m.text));
         if (!m.detail.empty()) box->setInformativeText(qs(m.detail));
-        const auto roles = m.buttons.empty() ? std::vector<DialogRole>{DialogRole::Ok} : m.buttons;
-        auto buttons = std::make_shared<std::vector<std::pair<QAbstractButton*, DialogRole>>>();
-        for (DialogRole r : roles) buttons->push_back({box->addButton(messageButton(r)), r});
+        const auto roles = m.buttons.empty() ? std::vector<dialog_role>{dialog_role::ok} : m.buttons;
+        auto buttons = std::make_shared<std::vector<std::pair<QAbstractButton*, dialog_role>>>();
+        for (dialog_role r : roles) buttons->push_back({box->addButton(message_button(r)), r});
         QObject::connect(box, &QMessageBox::finished, box,
                          [box, buttons, done = std::move(done)](int)
                          {
-                             DialogRole role = DialogRole::Cancel;
+                             dialog_role role = dialog_role::cancel;
                              for (auto& [b, r] : *buttons)
                                  if (b == box->clickedButton()) role = r;
                              if (done) done(role);
@@ -3552,20 +3552,20 @@ public:
         box->show();
     }
 
-    void chooseFiles(rap::Window* parent, const FileDialogSpec& f,
+    void choose_files(rap::window* parent, const file_dialog_spec& f,
                      std::function<void(std::vector<std::string>)> done) override
     {
-        auto* dlg = new QFileDialog(parentWidget(parent), qs(f.title));
+        auto* dlg = new QFileDialog(parent_widget(parent), qs(f.title));
         dlg->setAttribute(Qt::WA_DeleteOnClose);
         switch (f.mode)
         {
-        case FileDialogSpec::Mode::Open: dlg->setFileMode(QFileDialog::ExistingFile); break;
-        case FileDialogSpec::Mode::OpenMany: dlg->setFileMode(QFileDialog::ExistingFiles); break;
-        case FileDialogSpec::Mode::Save:
+        case file_dialog_spec::mode::open: dlg->setFileMode(QFileDialog::ExistingFile); break;
+        case file_dialog_spec::mode::open_many: dlg->setFileMode(QFileDialog::ExistingFiles); break;
+        case file_dialog_spec::mode::save:
             dlg->setFileMode(QFileDialog::AnyFile);
             dlg->setAcceptMode(QFileDialog::AcceptSave);
             break;
-        case FileDialogSpec::Mode::Folder:
+        case file_dialog_spec::mode::folder:
             dlg->setFileMode(QFileDialog::Directory);
             dlg->setOption(QFileDialog::ShowDirsOnly);
             break;
@@ -3578,7 +3578,7 @@ public:
         {
             const QString name = qs(flt.name) + " (" + qs(flt.pattern).replace(';', ' ') + ")";
             filters << name;
-            (*extensions)[name] = defaultExtension(flt.pattern);
+            (*extensions)[name] = default_extension(flt.pattern);
         }
         if (!filters.isEmpty())
         {
@@ -3588,9 +3588,9 @@ public:
                              [dlg, extensions](const QString& flt)
                              { dlg->setDefaultSuffix((*extensions)[flt]); });
         }
-        if (!f.initialPath.empty())
+        if (!f.initial_path.empty())
         {
-            const QFileInfo info(qs(f.initialPath));
+            const QFileInfo info(qs(f.initial_path));
             if (info.isDir())
                 dlg->setDirectory(info.absoluteFilePath());
             else
@@ -3612,44 +3612,44 @@ public:
         dlg->show();
     }
 
-    void setClipboard(const std::string& s) override
+    void set_clipboard(const std::string& s) override
     {
         QGuiApplication::clipboard()->setText(qs(s));
     }
 
-    void setClipboardImage(int w, int h, PixelFormat format, const uint8_t* pixels,
+    void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels,
                            size_t stride) override
     {
-        const QImage::Format f = format == PixelFormat::Rgba8 ? QImage::Format_RGBA8888
+        const QImage::Format f = format == pixel_format::rgba8 ? QImage::Format_RGBA8888
                                                               : QImage::Format_ARGB32_Premultiplied;
         // The pixels are the caller's: copied now.
         QGuiApplication::clipboard()->setImage(QImage(pixels, w, h, qsizetype(stride), f).copy());
     }
 
 private:
-    static QWidget* parentWidget(rap::Window* w)
+    static QWidget* parent_widget(rap::window* w)
     {
-        return w ? static_cast<WWindow*>(w)->frame() : nullptr;
+        return w ? static_cast<window_impl*>(w)->frame() : nullptr;
     }
 
-    static QMessageBox::StandardButton messageButton(DialogRole r)
+    static QMessageBox::StandardButton message_button(dialog_role r)
     {
         switch (r)
         {
-        case DialogRole::Ok: return QMessageBox::Ok;
-        case DialogRole::Cancel: return QMessageBox::Cancel;
-        case DialogRole::Apply: return QMessageBox::Apply;
-        case DialogRole::Close: return QMessageBox::Close;
-        case DialogRole::Yes: return QMessageBox::Yes;
-        case DialogRole::No: return QMessageBox::No;
-        case DialogRole::Help: return QMessageBox::Help;
-        case DialogRole::Reset: return QMessageBox::Reset;
-        case DialogRole::None: break;
+        case dialog_role::ok: return QMessageBox::Ok;
+        case dialog_role::cancel: return QMessageBox::Cancel;
+        case dialog_role::apply: return QMessageBox::Apply;
+        case dialog_role::close: return QMessageBox::Close;
+        case dialog_role::yes: return QMessageBox::Yes;
+        case dialog_role::no: return QMessageBox::No;
+        case dialog_role::help: return QMessageBox::Help;
+        case dialog_role::reset: return QMessageBox::Reset;
+        case dialog_role::none: break;
         }
         return QMessageBox::Ok;
     }
 
-    explicit Qt6Backend(QApplication* app)
+    explicit qt6_backend(QApplication* app)
         : app_(app)
     {
     }
@@ -3663,4 +3663,4 @@ private:
 }  // namespace
 }  // namespace rap::qt6
 
-RAPPORT_BACKEND_ENTRY(qt6, rap::qt6::Qt6Backend)
+RAPPORT_BACKEND_ENTRY(qt6, rap::qt6::qt6_backend)

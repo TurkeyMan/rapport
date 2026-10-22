@@ -32,31 +32,31 @@ namespace rap::win32
 std::wstring wide(const std::string& utf8);
 std::string narrow(const std::wstring& w);
 std::string narrow(const wchar_t* w, int len = -1);
-std::wstring windowText(HWND h);
+std::wstring window_text(HWND h);
 // "\n" -> "\r\n" for multi-line edit controls, and back.
-std::wstring toCrlf(const std::wstring& s);
-std::wstring fromCrlf(const std::wstring& s);
+std::wstring to_crlf(const std::wstring& s);
+std::wstring from_crlf(const std::wstring& s);
 
 // ---------------------------------------------------------------- COM objects
 
 template <class T>
-class Com
+class com
 {
 public:
-    Com() = default;
-    Com(const Com& o)
+    com() = default;
+    com(const com& o)
         : p_(o.p_)
     {
         if (p_) p_->AddRef();
     }
-    Com& operator=(const Com& o)
+    com& operator=(const com& o)
     {
         if (o.p_) o.p_->AddRef();
         reset();
         p_ = o.p_;
         return *this;
     }
-    ~Com() { reset(); }
+    ~com() { reset(); }
     void reset()
     {
         if (p_) p_->Release();
@@ -75,35 +75,35 @@ private:
     T* p_ = nullptr;
 };
 
-ID2D1Factory* d2dFactory();
-IDWriteFactory* dwriteFactory();
-IWICImagingFactory* wicFactory();
+ID2D1Factory* d2d_factory();
+IDWriteFactory* dwrite_factory();
+IWICImagingFactory* wic_factory();
 
 // ---------------------------------------------------------------- DPI, fonts
 
 // Device pixels per logical pixel for a window (1 at 96 dpi).
-float scaleOf(HWND h);
-UINT dpiOf(HWND h);
+float scale_of(HWND h);
+UINT dpi_of(HWND h);
 // The system message font at `dpi` (cached; owned by the cache).
-HFONT uiFont(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f);
+HFONT ui_font(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f);
 // Average character width and line height of the UI font at `dpi`, in device px.
-SIZE fontMetrics(UINT dpi);
+SIZE font_metrics(UINT dpi);
 // The UI font family name and size in DIPs (for DirectWrite text).
-std::wstring uiFontFamily();
-float uiFontSizeDip();
+std::wstring ui_font_family();
+float ui_font_size_dip();
 
 // Extent -> device pixels for a window.
-int extentPx(HWND h, Extent e, bool vertical);
+int extent_px(HWND h, extent e, bool vertical);
 
 // ---------------------------------------------------------------- colours
 
-Color sysColor(int index);
-Color themeColor(ThemeColor role);
-inline COLORREF colorRef(Color c)
+color sys_color(int index);
+color theme_color_of(theme_color role);
+inline COLORREF color_ref(color c)
 {
     return RGB(c.r, c.g, c.b);
 }
-inline D2D1_COLOR_F d2dColor(Color c)
+inline D2D1_COLOR_F d2d_color(color c)
 {
     return D2D1::ColorF(c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f);
 }
@@ -112,123 +112,123 @@ inline D2D1_COLOR_F d2dColor(Color c)
 
 // Pixels kept in memory (premultiplied BGRA) plus a Direct2D bitmap per
 // render target that has drawn them, created on first use.
-class D2DImage : public Image
+class d2d_image : public image
 {
 public:
-    D2DImage(int w, int h, PixelFormat format, const uint8_t* pixels, size_t stride);
+    d2d_image(int w, int h, pixel_format format, const uint8_t* pixels, size_t stride);
     int width() const override { return w_; }
     int height() const override { return h_; }
     void update(const uint8_t* pixels, size_t stride) override;
 
-    ID2D1Bitmap* bitmapFor(ID2D1RenderTarget* rt) const;
+    ID2D1Bitmap* bitmap_for(ID2D1RenderTarget* rt) const;
     const std::vector<uint8_t>& pixels() const { return px_; }
 
 private:
     int w_, h_;
-    PixelFormat format_;
+    pixel_format format_;
     std::vector<uint8_t> px_;
-    mutable std::map<ID2D1RenderTarget*, Com<ID2D1Bitmap>> bitmaps_;
+    mutable std::map<ID2D1RenderTarget*, com<ID2D1Bitmap>> bitmaps_;
     mutable std::map<ID2D1RenderTarget*, bool> stale_;
 };
 
 // ---------------------------------------------------------------- painter
 
-class D2DPainter : public Painter
+class d2d_painter : public painter
 {
 public:
     // `scale`: device px per logical px; the target's DPI is set to match so
     // all coordinates here are logical px (DIPs).
-    D2DPainter(ID2D1RenderTarget* rt, float scale);
-    ~D2DPainter() override;
+    d2d_painter(ID2D1RenderTarget* rt, float scale);
+    ~d2d_painter() override;
 
-    Color resolve(const Paint& p) const override;
-    void line(PointF a, PointF b, const Paint& p, float width, LineCap cap) override;
-    void curve(PointF a, PointF c1, PointF c2, PointF b, const Paint& p, float width) override;
-    void circle(PointF centre, float radius, std::optional<Paint> fill, std::optional<Paint> stroke) override;
-    void rect(RectF r, float cornerRadius, std::optional<Paint> fill, std::optional<Paint> stroke) override;
-    void polygon(const std::vector<PointF>& points, std::optional<Paint> fill, std::optional<Paint> stroke,
+    color resolve(const paint& p) const override;
+    void line(point_f a, point_f b, const paint& p, float width, line_cap cap) override;
+    void curve(point_f a, point_f c1, point_f c2, point_f b, const paint& p, float width) override;
+    void circle(point_f centre, float radius, std::optional<paint> fill, std::optional<paint> stroke) override;
+    void rect(rect_f r, float corner_radius, std::optional<paint> fill, std::optional<paint> stroke) override;
+    void polygon(const std::vector<point_f>& points, std::optional<paint> fill, std::optional<paint> stroke,
                  float width) override;
-    void arc(PointF centre, float radius, float start, float end, const Paint& p, float width, LineCap cap) override;
-    void image(const Image& img, RectF src, RectF dst, Filter filter, float alpha) override;
-    float deviceScale() const override { return scale_; }
-    void pushClip(RectF r) override;
-    void popClip() override;
-    void text(PointF at, const std::string& s, const TextStyle& style) override;
-    SizeF measure(const std::string& s, const TextStyle& style) const override;
+    void arc(point_f centre, float radius, float start, float end, const paint& p, float width, line_cap cap) override;
+    void image(const rap::image& img, rect_f src, rect_f dst, filter filter, float alpha) override;
+    float device_scale() const override { return scale_; }
+    void push_clip(rect_f r) override;
+    void pop_clip() override;
+    void text(point_f at, const std::string& s, const text_style& style) override;
+    size_f measure(const std::string& s, const text_style& style) const override;
 
     // Colours that replace a theme role while painting (list selection).
-    void overrideColor(ThemeColor role, Color c) { overrides_[int(role)] = c; }
+    void override_color(theme_color role, color c) { overrides_[int(role)] = c; }
 
 private:
-    ID2D1SolidColorBrush* brush(const Paint& p);
-    ID2D1StrokeStyle* stroke(LineCap cap);
-    Com<IDWriteTextLayout> layout(const std::string& s, const TextStyle& style, float maxWidth = 100000) const;
-    void finish(ID2D1Geometry* g, const std::optional<Paint>& fill, const std::optional<Paint>& stroke, float width);
+    ID2D1SolidColorBrush* brush(const paint& p);
+    ID2D1StrokeStyle* stroke(line_cap cap);
+    com<IDWriteTextLayout> layout(const std::string& s, const text_style& style, float max_width = 100000) const;
+    void finish(ID2D1Geometry* g, const std::optional<paint>& fill, const std::optional<paint>& stroke, float width);
 
     ID2D1RenderTarget* rt_;
     float scale_;
-    Com<ID2D1SolidColorBrush> brush_;
-    Com<ID2D1StrokeStyle> round_;
+    com<ID2D1SolidColorBrush> brush_;
+    com<ID2D1StrokeStyle> round_;
     int clips_ = 0;
-    std::map<int, Color> overrides_;
+    std::map<int, color> overrides_;
 };
 
 // Renders an icon (named icons have no theme on Windows: drawn ones only)
 // to a 32-bpp premultiplied DIB of `px` device pixels square, in `ink`.
-HBITMAP renderIcon(const Icon& icon, int px, float scale);
-HICON renderIconHandle(const Icon& icon, int px, float scale);
+HBITMAP render_icon(const icon& icon, int px, float scale);
+HICON render_icon_handle(const icon& icon, int px, float scale);
 // Draws an icon with a Painter onto an HDC rectangle (owner-drawn buttons).
-void drawIconOnDC(HDC dc, RECT r, const Icon& icon, float scale, Color ink);
+void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink);
 
 // ---------------------------------------------------------------- layout
 
 // Bumped whenever something may have changed a size (a relayout request); a
 // measurement from the same pass is reused. Without it a nested layout
 // re-measures each leaf once per level, twice over.
-inline unsigned g_layoutPass = 1;
+inline unsigned g_layout_pass = 1;
 
 // Anything that takes space in a window: a control, or a container of items.
 // Sizes and rectangles are device pixels of the window's current DPI.
-class Item
+class item
 {
 public:
-    virtual ~Item() = default;
+    virtual ~item() = default;
     // Preferred size: measure()d once per layout pass.
     SIZE natural()
     {
-        if (measuredIn_ != g_layoutPass)
+        if (measured_in_ != g_layout_pass)
         {
             measured_ = measure();
-            measuredIn_ = g_layoutPass;
+            measured_in_ = g_layout_pass;
         }
         return measured_;
     }
     virtual SIZE measure() = 0;
     virtual void place(RECT r) = 0;       // position (and size) everything
-    virtual void showAll(bool shown) = 0;  // show/hide HWNDs (respecting own visibility)
+    virtual void show_all(bool shown) = 0;  // show/hide HWNDs (respecting own visibility)
     // Fills the cross axis of a box (multi-line things, containers).
     virtual bool fills() const { return false; }
     // Takes spare width as a form field (text entry, lists, containers).
-    virtual bool expandsInForm() const { return false; }
+    virtual bool expands_in_form() const { return false; }
 
     bool visible = true;
     int stretch = 0;
-    int fixedW = 0, fixedH = 0;  // from Common::width/height, device px
-    bool isSpacer = false;
+    int fixed_w = 0, fixed_h = 0;  // from common::width/height, device px
+    bool is_spacer = false;
 
 private:
     SIZE measured_{};
-    unsigned measuredIn_ = 0;
+    unsigned measured_in_ = 0;
 };
 
-using ItemPtr = std::unique_ptr<Item>;
+using item_ptr = std::unique_ptr<item>;
 
 
 // Distances in the window's scale: spacing between items, margins.
-struct Metrics
+struct metrics
 {
-    int spacing, margin, dialogMargin, formColumnGap, rowGap;
-    static Metrics forScale(float s)
+    int spacing, margin, dialog_margin, form_column_gap, row_gap;
+    static metrics for_scale(float s)
     {
         auto px = [s](int v) { return int(v * s + 0.5f); };
         return {px(6), px(6), px(11), px(10), px(6)};

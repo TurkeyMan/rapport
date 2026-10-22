@@ -27,8 +27,8 @@ namespace rap::sys
 
 // UTF-8 to path and back (fs::path's own conversions use the ANSI code page
 // on Windows).
-std::filesystem::path pathFromUtf8(std::string_view utf8);
-std::string pathToUtf8(const std::filesystem::path&);
+std::filesystem::path path_from_utf8(std::string_view utf8);
+std::string path_to_utf8(const std::filesystem::path&);
 
 // An environment variable, UTF-8. Empty optional if unset.
 std::optional<std::string> env(const char* name);
@@ -41,36 +41,36 @@ std::FILE* fopen(const std::filesystem::path&, const char* mode);
 // ---------------------------------------------------------------- locations
 
 // The running executable, absolute.
-std::filesystem::path executablePath();
+std::filesystem::path executable_path();
 
 // Per-user directories for `app`, created on first use:
 //   config: $XDG_CONFIG_HOME/app   or %APPDATA%\app
 //   cache:  $XDG_CACHE_HOME/app    or %LOCALAPPDATA%\app\cache
 //   data:   $XDG_DATA_HOME/app     or %LOCALAPPDATA%\app
-std::filesystem::path configDir(std::string_view app);
-std::filesystem::path cacheDir(std::string_view app);
-std::filesystem::path dataDir(std::string_view app);
+std::filesystem::path config_dir(std::string_view app);
+std::filesystem::path cache_dir(std::string_view app);
+std::filesystem::path data_dir(std::string_view app);
 
 // ---------------------------------------------------------------- shared libraries
 
 // A dynamically loaded library (dlopen / LoadLibrary). Move-only; unloads
 // when destroyed unless released.
-class Library
+class library
 {
 public:
     // `name` is a file name searched the platform's way ("libfoo.so.1",
     // "foo-1.dll") or a path.
-    static std::expected<Library, std::string> open(const std::filesystem::path& name);
+    static std::expected<library, std::string> open(const std::filesystem::path& name);
 
-    Library() = default;
-    Library(Library&& other) noexcept
+    library() = default;
+    library(library&& other) noexcept
         : handle_(std::exchange(other.handle_, nullptr))
     {
     }
-    Library& operator=(Library&& other) noexcept;
-    Library(const Library&) = delete;
-    Library& operator=(const Library&) = delete;
-    ~Library();
+    library& operator=(library&& other) noexcept;
+    library(const library&) = delete;
+    library& operator=(const library&) = delete;
+    ~library();
 
     explicit operator bool() const { return handle_ != nullptr; }
     void* symbol(const char* name) const;
@@ -83,29 +83,29 @@ public:
     void release() { handle_ = nullptr; }
 
 private:
-    explicit Library(void* h)
+    explicit library(void* h)
         : handle_(h)
     {
     }
     void* handle_ = nullptr;
 };
 
-// Whether `name` would be found by Library::open, judged by the file being
+// Whether `name` would be found by library::open, judged by the file being
 // on the loader's search path. A few stats, no load: use it to decide what
 // to offer before paying for the load.
-bool libraryInstalled(std::string_view name);
+bool library_installed(std::string_view name);
 
 // ---------------------------------------------------------------- processes
 
 // How Process starts a child.
-struct ProcessOptions
+struct process_options
 {
     std::filesystem::path dir;  // working directory; empty: the caller's
     // Set in the child's environment, replacing any inherited value.
     std::vector<std::pair<std::string, std::string>> env;
     // false: stderr goes to the null device, so warnings can't mix into
     // output that is parsed.
-    bool mergeStderr = true;
+    bool merge_stderr = true;
 };
 
 // A child process with stdin from the null device and stdout and stderr
@@ -115,28 +115,28 @@ struct ProcessOptions
 // ends anything the child started (its process group; a job object on
 // Windows). Destroying a process that wasn't waited for kills it and reaps
 // it.
-class Process
+class process
 {
 public:
-    using Options = ProcessOptions;
+    using options = process_options;
 
-    struct Result
+    struct result
     {
-        int exitCode = -1;
+        int exit_code = -1;
         std::string output;  // stdout and stderr interleaved
     };
 
     // `program` is searched on PATH unless it is a path; `args` follow it.
-    static std::expected<std::unique_ptr<Process>, std::string>
-    start(std::string_view program, std::span<const std::string> args, const Options& = {});
+    static std::expected<std::unique_ptr<process>, std::string>
+    start(std::string_view program, std::span<const std::string> args, const options& = {});
 
     // Starts, reads all output and waits.
-    static std::expected<Result, std::string>
-    run(std::string_view program, std::span<const std::string> args, const Options& = {});
+    static std::expected<result, std::string>
+    run(std::string_view program, std::span<const std::string> args, const options& = {});
 
-    Process(const Process&) = delete;
-    Process& operator=(const Process&) = delete;
-    ~Process();
+    process(const process&) = delete;
+    process& operator=(const process&) = delete;
+    ~process();
 
     // Blocks for output; 0 once the child closed it (normally on exit).
     std::size_t read(char* buf, std::size_t size);
@@ -147,9 +147,9 @@ public:
     void kill();
 
 private:
-    struct Impl;
-    explicit Process(std::unique_ptr<Impl>);
-    std::unique_ptr<Impl> impl_;
+    struct impl;
+    explicit process(std::unique_ptr<impl>);
+    std::unique_ptr<impl> impl_;
 };
 
 // ---------------------------------------------------------------- mapped files
@@ -159,25 +159,25 @@ private:
 // mapping, so data structures inside it should link by offset, not pointer.
 // Pages written through data() reach the file in the OS's own time, or at
 // flush(). Move-only.
-class MappedFile
+class mapped_file
 {
 public:
-    enum class Mode
+    enum class mode
     {
-        Read,
-        ReadWrite,  // creates the file if missing
+        read,
+        read_write,  // creates the file if missing
     };
 
-    static std::expected<MappedFile, std::string> open(const std::filesystem::path&, Mode);
+    static std::expected<mapped_file, std::string> open(const std::filesystem::path&, mode);
 
-    MappedFile() = default;
-    MappedFile(MappedFile&& other) noexcept;
-    MappedFile& operator=(MappedFile&& other) noexcept;
-    MappedFile(const MappedFile&) = delete;
-    MappedFile& operator=(const MappedFile&) = delete;
-    ~MappedFile();
+    mapped_file() = default;
+    mapped_file(mapped_file&& other) noexcept;
+    mapped_file& operator=(mapped_file&& other) noexcept;
+    mapped_file(const mapped_file&) = delete;
+    mapped_file& operator=(const mapped_file&) = delete;
+    ~mapped_file();
 
-    explicit operator bool() const { return file_ != kNoFile; }
+    explicit operator bool() const { return file_ != no_file; }
     std::byte* data() { return data_; }
     const std::byte* data() const { return data_; }
     std::size_t size() const { return size_; }
@@ -192,19 +192,19 @@ public:
     // if another process holds it, or if the filesystem can't lock (WSL paths
     // seen from Windows, some network shares). Released by unlock() or on
     // close.
-    bool tryLock();
+    bool try_lock();
     void unlock();
 
 private:
     std::expected<void, std::string> map();
     void unmap();
 
-    static constexpr std::intptr_t kNoFile = -1;  // INVALID_HANDLE_VALUE, or no fd
-    std::intptr_t file_ = kNoFile;                // HANDLE or fd
+    static constexpr std::intptr_t no_file = -1;  // INVALID_HANDLE_VALUE, or no fd
+    std::intptr_t file_ = no_file;                // HANDLE or fd
 #ifdef _WIN32
     void* mapping_ = nullptr;  // the file mapping object's HANDLE
 #endif
-    Mode mode_ = Mode::Read;
+    mode mode_ = mode::read;
     std::byte* data_ = nullptr;
     std::size_t size_ = 0;
 };
@@ -212,9 +212,9 @@ private:
 // ---------------------------------------------------------------- threads, memory
 
 // Let the calling thread yield to the UI and other foreground work.
-void lowerThreadPriority();
+void lower_thread_priority();
 
 // Memory the system could hand out without swapping; 0 if unknown.
-std::size_t availableMemory();
+std::size_t available_memory();
 
 }  // namespace rap::sys

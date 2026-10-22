@@ -2,7 +2,7 @@
 //
 // Lists use GtkColumnView over a lazy GListModel (RapportRows) whose items
 // are bare GObjects tagged with their row index; cells pull text from the
-// rap::ListModel at bind time. Painted columns are GtkDrawingAreas.
+// rap::list_model at bind time. Painted columns are GtkDrawingAreas.
 #include <gtk/gtk.h>
 
 #include "gtk_common.h"
@@ -65,11 +65,11 @@ using namespace gtkcommon;
 }  // namespace
 }  // namespace rap::gtk4
 
-rap::Color rap::gtkcommon::themeColor(GtkWidget* w, ThemeColor role)
+rap::color rap::gtkcommon::theme_color_of(GtkWidget* w, theme_color role)
 {
     GdkRGBA fg;
     gtk_widget_get_color(w, &fg);
-    return fallbackColor(role, toColor(fg), isDarkText(fg));
+    return fallback_color(role, to_color(fg), is_dark_text(fg));
 }
 
 namespace rap::gtk4
@@ -80,79 +80,79 @@ namespace
 // ---------------------------------------------------------------- widgets
 
 // A container (box, form, group, toolbar) as a plain Widget, for handles.
-class WPlain : public W<rap::Widget>
+class plain_impl : public widget_base<rap::widget>
 {
 public:
-    using W::W;
+    using widget_base::widget_base;
 };
 
-class WLabel : public W<rap::Label>
+class label_impl : public widget_base<rap::label>
 {
 public:
-    explicit WLabel(const spec::Label& s)
-        : W(gtk_label_new(s.text.c_str()))
+    explicit label_impl(const spec::label& s)
+        : widget_base(gtk_label_new(s.text.c_str()))
     {
         gtk_label_set_xalign(GTK_LABEL(w_), 0);
         gtk_label_set_selectable(GTK_LABEL(w_), s.selectable);
         if (s.ellipsize) gtk_label_set_ellipsize(GTK_LABEL(w_), PANGO_ELLIPSIZE_END);
     }
 
-    void setText(const std::string& t) override { gtk_label_set_text(GTK_LABEL(w_), t.c_str()); }
+    void set_text(const std::string& t) override { gtk_label_set_text(GTK_LABEL(w_), t.c_str()); }
 };
 
-class WButton : public W<rap::Button>
+class button_impl : public widget_base<rap::button>
 {
 public:
-    explicit WButton(const std::string& text)
-        : W(gtk_button_new_with_mnemonic(text.c_str()))
+    explicit button_impl(const std::string& text)
+        : widget_base(gtk_button_new_with_mnemonic(text.c_str()))
     {
         connect(
             w_, "clicked",
             +[](GtkButton*, gpointer p)
             {
-                auto* self = static_cast<WButton*>(p);
+                auto* self = static_cast<button_impl*>(p);
                 if (self->click_) self->click_();
             },
             this);
     }
 
-    void setText(const std::string& t) override { gtk_button_set_label(GTK_BUTTON(w_), t.c_str()); }
-    // TODO(pengit): drawn icons (Icon::draw); named ones only for now.
-    void setIcon(const Icon& icon) override
+    void set_text(const std::string& t) override { gtk_button_set_label(GTK_BUTTON(w_), t.c_str()); }
+    // TODO(tortilla): drawn icons (icon::draw); named ones only for now.
+    void set_icon(const icon& icon) override
     {
         if (!icon.name.empty()) gtk_button_set_icon_name(GTK_BUTTON(w_), icon.name.c_str());
     }
-    void onClick(std::function<void()> f) override { click_ = std::move(f); }
+    void on_click(std::function<void()> f) override { click_ = std::move(f); }
 
 private:
     std::function<void()> click_;
 };
 
 // GTK 4 has no GtkToolbar: a flat button in a box. Written without a GTK 4
-// build. TODO(pengit): toggles' pressed look, drawn icons.
-class WToolButton : public W<rap::ToolButton>
+// build. TODO(tortilla): toggles' pressed look, drawn icons.
+class tool_button_impl : public widget_base<rap::tool_button>
 {
 public:
-    explicit WToolButton(const spec::ToolButton& s)
-        : W(s.toggle ? gtk_toggle_button_new() : gtk_button_new())
+    explicit tool_button_impl(const spec::tool_button& s)
+        : widget_base(s.toggle ? gtk_toggle_button_new() : gtk_button_new())
         , toggle_(s.toggle)
     {
         gtk_button_set_has_frame(GTK_BUTTON(w_), false);
         gtk_widget_set_tooltip_text(w_, s.label.c_str());
-        setIcon(s.icon);
+        set_icon(s.icon);
         if (toggle_) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w_), s.checked);
         connect(
             w_, "clicked",
             +[](GtkButton*, gpointer p)
             {
-                auto* self = static_cast<WToolButton*>(p);
+                auto* self = static_cast<tool_button_impl*>(p);
                 if (self->quiet_) return;
                 if (self->click_) self->click_();
                 if (self->toggle_ && self->toggled_) self->toggled_(self->checked());
             },
             this);
     }
-    void setIcon(const Icon& icon) override
+    void set_icon(const icon& icon) override
     {
         if (!icon.name.empty()) gtk_button_set_icon_name(GTK_BUTTON(w_), icon.name.c_str());
     }
@@ -160,15 +160,15 @@ public:
     {
         return toggle_ && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w_));
     }
-    void setChecked(bool c) override
+    void set_checked(bool c) override
     {
         if (!toggle_) return;
         quiet_ = true;
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w_), c);
         quiet_ = false;
     }
-    void onClick(std::function<void()> f) override { click_ = std::move(f); }
-    void onToggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
+    void on_click(std::function<void()> f) override { click_ = std::move(f); }
+    void on_toggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
 
 private:
     bool toggle_;
@@ -179,23 +179,23 @@ private:
 
 // GtkScale and GtkSpinButton keep their GTK 3 API in GTK 4.
 template <class Base>
-class WValue : public W<Base>
+class value_impl : public widget_base<Base>
 {
 public:
-    explicit WValue(GtkWidget* w)
-        : W<Base>(w)
+    explicit value_impl(GtkWidget* w)
+        : widget_base<Base>(w)
     {
         this->connect(
             w, "value-changed",
             +[](GtkWidget*, gpointer p)
             {
-                auto* self = static_cast<WValue*>(p);
+                auto* self = static_cast<value_impl*>(p);
                 if (!self->quiet_ && self->changed_) self->changed_(self->value());
             },
             this);
     }
     double value() const override { return gtk_range_or_spin_value(this->w_); }
-    void setValue(double v) override
+    void set_value(double v) override
     {
         quiet_ = true;
         if (GTK_IS_SPIN_BUTTON(this->w_))
@@ -204,7 +204,7 @@ public:
             gtk_range_set_value(GTK_RANGE(this->w_), v);
         quiet_ = false;
     }
-    void setRange(double min, double max) override
+    void set_range(double min, double max) override
     {
         quiet_ = true;
         if (GTK_IS_SPIN_BUTTON(this->w_))
@@ -213,7 +213,7 @@ public:
             gtk_range_set_range(GTK_RANGE(this->w_), min, max);
         quiet_ = false;
     }
-    void onChanged(std::function<void(double)> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
 
 private:
     static double gtk_range_or_spin_value(GtkWidget* w)
@@ -225,53 +225,53 @@ private:
     std::function<void(double)> changed_;
 };
 
-// TODO(pengit): GtkColorButton is deprecated since GTK 4.10 (GtkColorDialogButton).
-class WColorButton : public W<rap::ColorButton>
+// TODO(tortilla): GtkColorButton is deprecated since GTK 4.10 (GtkColorDialogButton).
+class color_button_impl : public widget_base<rap::color_button>
 {
 public:
-    explicit WColorButton(const spec::ColorButton& s)
-        : W(gtk_color_button_new())
+    explicit color_button_impl(const spec::color_button& s)
+        : widget_base(gtk_color_button_new())
     {
-        setColor(s.color);
+        set_color(s.color);
         gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(w_), s.alpha);
         connect(
             w_, "color-set",
             +[](GtkColorButton*, gpointer p)
             {
-                auto* self = static_cast<WColorButton*>(p);
+                auto* self = static_cast<color_button_impl*>(p);
                 if (self->changed_) self->changed_(self->color());
             },
             this);
     }
-    Color color() const override
+    rap::color color() const override
     {
         GdkRGBA c;
         gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(w_), &c);
-        return toColor(c);
+        return to_color(c);
     }
-    void setColor(Color c) override
+    void set_color(rap::color c) override
     {
         const GdkRGBA rgba{c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
         gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(w_), &rgba);
     }
-    void onChanged(std::function<void(Color)> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void(rap::color)> f) override { changed_ = std::move(f); }
 
 private:
-    std::function<void(Color)> changed_;
+    std::function<void(rap::color)> changed_;
 };
 
-class WCheck : public W<rap::Check>
+class check_impl : public widget_base<rap::check>
 {
 public:
-    explicit WCheck(const spec::Check& s)
-        : W(gtk_check_button_new_with_mnemonic(s.text.c_str()))
+    explicit check_impl(const spec::check& s)
+        : widget_base(gtk_check_button_new_with_mnemonic(s.text.c_str()))
     {
-        setState(s.state);
+        set_state(s.state);
         connect(
             w_, "toggled",
             +[](GtkCheckButton* b, gpointer p)
             {
-                auto* self = static_cast<WCheck*>(p);
+                auto* self = static_cast<check_impl*>(p);
                 if (self->updating_) return;
                 // A click on the mixed state lands on checked.
                 if (gtk_check_button_get_inconsistent(b))
@@ -286,53 +286,53 @@ public:
             this);
     }
 
-    bool checked() const override { return state() == CheckState::Checked; }
-    void setChecked(bool v) override { setState(v ? CheckState::Checked : CheckState::Unchecked); }
+    bool checked() const override { return state() == check_state::checked; }
+    void set_checked(bool v) override { set_state(v ? check_state::checked : check_state::unchecked); }
 
-    CheckState state() const override
+    check_state state() const override
     {
         auto* b = GTK_CHECK_BUTTON(w_);
-        if (gtk_check_button_get_inconsistent(b)) return CheckState::Indeterminate;
-        return gtk_check_button_get_active(b) ? CheckState::Checked : CheckState::Unchecked;
+        if (gtk_check_button_get_inconsistent(b)) return check_state::indeterminate;
+        return gtk_check_button_get_active(b) ? check_state::checked : check_state::unchecked;
     }
 
-    void setState(CheckState s) override
+    void set_state(check_state s) override
     {
         auto* b = GTK_CHECK_BUTTON(w_);
         updating_ = true;
-        gtk_check_button_set_inconsistent(b, s == CheckState::Indeterminate);
-        gtk_check_button_set_active(b, s == CheckState::Checked);
+        gtk_check_button_set_inconsistent(b, s == check_state::indeterminate);
+        gtk_check_button_set_active(b, s == check_state::checked);
         updating_ = false;
     }
 
-    void onToggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
+    void on_toggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
 
 private:
     std::function<void(bool)> toggled_;
     bool updating_ = false;
 };
 
-// TODO(pengit): build the menu as a GtkPopoverMenu (like WList's context
+// TODO(tortilla): build the menu as a GtkPopoverMenu (like WList's context
 // menu) and show the pushed state; untested without GTK 4 headers.
-// An rap::Menu as a GMenu model plus the actions its items name, for
+// A rap::menu as a GMenu model plus the actions its items name, for
 // popover menus. Built afresh each time a menu opens (so it shows the app's
 // state then); the actions call into the Menu kept here, which lives until
 // the next build. Separators become GMenu sections.
-class MenuActions
+class menu_actions
 {
 public:
-    MenuActions(GtkWidget* owner, std::string prefix)
+    menu_actions(GtkWidget* owner, std::string prefix)
         : prefix_(std::move(prefix))
         , group_(g_simple_action_group_new())
     {
         gtk_widget_insert_action_group(owner, prefix_.c_str(), G_ACTION_GROUP(group_));
     }
-    ~MenuActions() { g_object_unref(group_); }
-    MenuActions(const MenuActions&) = delete;
-    MenuActions& operator=(const MenuActions&) = delete;
+    ~menu_actions() { g_object_unref(group_); }
+    menu_actions(const menu_actions&) = delete;
+    menu_actions& operator=(const menu_actions&) = delete;
 
     // A new model for `menu`; the caller owns the reference.
-    GMenu* build(Menu menu)
+    GMenu* build(menu menu)
     {
         for (auto& name : names_) g_action_map_remove_action(G_ACTION_MAP(group_), name.c_str());
         names_.clear();
@@ -341,7 +341,7 @@ public:
     }
 
 private:
-    GMenu* model(const Menu& items)
+    GMenu* model(const menu& items)
     {
         GMenu* top = g_menu_new();
         GMenu* section = g_menu_new();
@@ -352,9 +352,9 @@ private:
             g_object_unref(section);
             section = g_menu_new();
         };
-        for (const MenuItem& item : items)
+        for (const menu_item& item : items)
         {
-            if (item.isSeparator())
+            if (item.is_separator())
             {
                 flush();
                 continue;
@@ -377,14 +377,14 @@ private:
             g_signal_connect(action, "activate",
                              G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer p)
                                         {
-                                            auto* mi = static_cast<const MenuItem*>(p);
+                                            auto* mi = static_cast<const menu_item*>(p);
                                             if (mi->action) mi->action();
                                         }),
-                             const_cast<MenuItem*>(&item));
+                             const_cast<menu_item*>(&item));
             g_action_map_add_action(G_ACTION_MAP(group_), G_ACTION(action));
             g_object_unref(action);
             GMenuItem* mi = g_menu_item_new(item.label.c_str(), (prefix_ + "." + name).c_str());
-            if (!item.shortcut.empty()) g_menu_item_set_attribute(mi, "accel", "s", gtkAccel(item.shortcut).c_str());
+            if (!item.shortcut.empty()) g_menu_item_set_attribute(mi, "accel", "s", gtk_accel(item.shortcut).c_str());
             g_menu_append_item(section, mi);
             g_object_unref(mi);
         }
@@ -396,64 +396,64 @@ private:
     std::string prefix_;
     GSimpleActionGroup* group_;
     std::vector<std::string> names_;
-    Menu menu_;
+    menu menu_;
 };
 
 // A GtkMenuButton whose menu is built by `fn` each time it opens.
-void attachMenu(GtkMenuButton* button, MenuActions* actions, std::function<Menu()>* fn)
+void attach_menu(GtkMenuButton* button, menu_actions* actions, std::function<menu()>* fn)
 {
-    struct Ctx
+    struct context
     {
-        MenuActions* actions;
-        std::function<Menu()>* fn;
+        menu_actions* actions;
+        std::function<menu()>* fn;
     };
     gtk_menu_button_set_create_popup_func(
         button,
         +[](GtkMenuButton* b, gpointer p)
         {
-            auto* c = static_cast<Ctx*>(p);
-            GMenu* model = c->actions->build(*c->fn ? (*c->fn)() : Menu{});
+            auto* c = static_cast<context*>(p);
+            GMenu* model = c->actions->build(*c->fn ? (*c->fn)() : menu{});
             gtk_menu_button_set_menu_model(b, G_MENU_MODEL(model));
             g_object_unref(model);
         },
-        new Ctx{actions, fn}, +[](gpointer p) { delete static_cast<Ctx*>(p); });
+        new context{actions, fn}, +[](gpointer p) { delete static_cast<context*>(p); });
 }
 
-class WMenuButton : public W<rap::MenuButton>
+class menu_button_impl : public widget_base<rap::menu_button>
 {
 public:
-    explicit WMenuButton(const spec::MenuButton& s)
-        : W(gtk_menu_button_new())
+    explicit menu_button_impl(const spec::menu_button& s)
+        : widget_base(gtk_menu_button_new())
         , actions_(w_, "mb")
     {
         gtk_menu_button_set_use_underline(GTK_MENU_BUTTON(w_), true);  // "_View": V is the access key
-        setText(s.text);
-        attachMenu(GTK_MENU_BUTTON(w_), &actions_, &menuFn_);
+        set_text(s.text);
+        attach_menu(GTK_MENU_BUTTON(w_), &actions_, &menu_fn_);
     }
 
-    void setText(const std::string& t) override
+    void set_text(const std::string& t) override
     {
         gtk_menu_button_set_label(GTK_MENU_BUTTON(w_), t.c_str());
     }
-    void setIcon(const Icon&) override {}  // TODO(pengit)
-    void setPushed(bool) override {}
-    void onMenu(std::function<Menu()> f) override { menuFn_ = std::move(f); }
+    void set_icon(const icon&) override {}  // TODO(tortilla)
+    void set_pushed(bool) override {}
+    void on_menu(std::function<menu()> f) override { menu_fn_ = std::move(f); }
 
 private:
-    std::function<Menu()> menuFn_;
-    MenuActions actions_;
+    std::function<menu()> menu_fn_;
+    menu_actions actions_;
 };
 
-class WProgressBar : public W<rap::ProgressBar>
+class progress_bar_impl : public widget_base<rap::progress_bar>
 {
 public:
-    WProgressBar()
-        : W(gtk_progress_bar_new())
+    progress_bar_impl()
+        : widget_base(gtk_progress_bar_new())
     {
         gtk_widget_set_valign(w_, GTK_ALIGN_CENTER);
     }
 
-    void setFraction(float f) override
+    void set_fraction(float f) override
     {
         gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w_), std::clamp(f, 0.f, 1.f));
     }
@@ -461,37 +461,37 @@ public:
 };
 
 // A menu button showing the date, with a calendar in its popover.
-class WDatePicker : public W<rap::DatePicker>
+class date_picker_impl : public widget_base<rap::date_picker>
 {
 public:
-    explicit WDatePicker(const spec::DatePicker& s)
-        : W(gtk_menu_button_new())
+    explicit date_picker_impl(const spec::date_picker& s)
+        : widget_base(gtk_menu_button_new())
     {
         calendar_ = gtk_calendar_new();
         gtk_calendar_set_show_week_numbers(GTK_CALENDAR(calendar_), true);
         GtkWidget* popover = gtk_popover_new();
         gtk_popover_set_child(GTK_POPOVER(popover), calendar_);
         gtk_menu_button_set_popover(GTK_MENU_BUTTON(w_), popover);
-        setDate(s.date);
+        set_date(s.date);
 
         connect(
             calendar_, "day-selected",
             +[](GtkCalendar* c, gpointer p)
             {
-                auto* self = static_cast<WDatePicker*>(p);
+                auto* self = static_cast<date_picker_impl*>(p);
                 if (self->updating_) return;
                 GDateTime* dt = gtk_calendar_get_date(c);
                 self->date_ = {g_date_time_get_year(dt), g_date_time_get_month(dt),
                                g_date_time_get_day_of_month(dt)};
                 g_date_time_unref(dt);
-                self->updateLabel();
+                self->update_label();
             },
             this);
         connect(
             popover, "show",
             +[](GtkWidget*, gpointer p)
             {
-                auto* self = static_cast<WDatePicker*>(p);
+                auto* self = static_cast<date_picker_impl*>(p);
                 self->shown_ = self->date_;
             },
             this);
@@ -499,14 +499,14 @@ public:
             popover, "closed",
             +[](GtkPopover*, gpointer p)
             {
-                auto* self = static_cast<WDatePicker*>(p);
+                auto* self = static_cast<date_picker_impl*>(p);
                 if (self->date_ != self->shown_ && self->changed_) self->changed_(self->date_);
             },
             this);
     }
 
-    Date date() const override { return date_; }
-    void setDate(Date d) override
+    rap::date date() const override { return date_; }
+    void set_date(rap::date d) override
     {
         date_ = d;
         updating_ = true;
@@ -517,12 +517,12 @@ public:
             g_date_time_unref(dt);
         }
         updating_ = false;
-        updateLabel();
+        update_label();
     }
-    void onChanged(std::function<void(Date)> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void(rap::date)> f) override { changed_ = std::move(f); }
 
 private:
-    void updateLabel()
+    void update_label()
     {
         GDate* d =
             g_date_new_dmy(GDateDay(date_.day), GDateMonth(date_.month), GDateYear(date_.year));
@@ -533,24 +533,24 @@ private:
     }
 
     GtkWidget* calendar_;
-    Date date_, shown_;
-    std::function<void(Date)> changed_;
+    rap::date date_, shown_;
+    std::function<void(rap::date)> changed_;
     bool updating_ = false;
 };
 
-class WEntry : public W<rap::Entry>
+class entry_impl : public widget_base<rap::entry>
 {
 public:
-    explicit WEntry(const spec::Entry& s)
-        : W(gtk_entry_new())
+    explicit entry_impl(const spec::entry& s)
+        : widget_base(gtk_entry_new())
     {
         gtk_editable_set_text(GTK_EDITABLE(w_), s.text.c_str());
-        if (!s.placeholder.empty()) setPlaceholder(s.placeholder);
+        if (!s.placeholder.empty()) set_placeholder(s.placeholder);
         connect(
             w_, "changed",
             +[](GtkEditable* e, gpointer p)
             {
-                auto* self = static_cast<WEntry*>(p);
+                auto* self = static_cast<entry_impl*>(p);
                 if (self->changed_) self->changed_(gtk_editable_get_text(e));
             },
             this);
@@ -558,48 +558,48 @@ public:
             w_, "activate",
             +[](GtkEntry*, gpointer p)
             {
-                auto* self = static_cast<WEntry*>(p);
+                auto* self = static_cast<entry_impl*>(p);
                 if (self->activate_) self->activate_();
             },
             this);
     }
 
     std::string text() const override { return gtk_editable_get_text(GTK_EDITABLE(w_)); }
-    void setText(const std::string& t) override
+    void set_text(const std::string& t) override
     {
         gtk_editable_set_text(GTK_EDITABLE(w_), t.c_str());
     }
-    void setPlaceholder(const std::string& t) override
+    void set_placeholder(const std::string& t) override
     {
         gtk_entry_set_placeholder_text(GTK_ENTRY(w_), t.c_str());
     }
-    void onChanged(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
-    void onActivate(std::function<void()> f) override { activate_ = std::move(f); }
+    void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
+    void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
 
 private:
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
 
-class WSelect : public W<rap::Select>
+class drop_down_impl : public widget_base<rap::drop_down>
 {
 public:
-    explicit WSelect(const spec::Select& s)
-        : W(gtk_drop_down_new(nullptr, nullptr))
+    explicit drop_down_impl(const spec::drop_down& s)
+        : widget_base(gtk_drop_down_new(nullptr, nullptr))
     {
-        setItems(s.items);
-        setCurrent(s.current);
+        set_items(s.items);
+        set_current(s.current);
         connect(
             w_, "notify::selected",
             +[](GObject*, GParamSpec*, gpointer p)
             {
-                auto* self = static_cast<WSelect*>(p);
+                auto* self = static_cast<drop_down_impl*>(p);
                 if (self->changed_) self->changed_(self->current());
             },
             this);
     }
 
-    void setItems(std::vector<std::string> items) override
+    void set_items(std::vector<std::string> items) override
     {
         GtkStringList* list = gtk_string_list_new(nullptr);
         for (auto& i : items) gtk_string_list_append(list, i.c_str());
@@ -611,11 +611,11 @@ public:
         guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(w_));
         return i == GTK_INVALID_LIST_POSITION ? -1 : int(i);
     }
-    void setCurrent(int i) override
+    void set_current(int i) override
     {
         gtk_drop_down_set_selected(GTK_DROP_DOWN(w_), i < 0 ? GTK_INVALID_LIST_POSITION : guint(i));
     }
-    void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
 private:
     std::function<void(int)> changed_;
@@ -624,20 +624,20 @@ private:
 G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 
 // GTK 4 has no non-deprecated editable combo; GtkComboBoxText still works.
-class WCombo : public W<rap::Combo>
+class combo_impl : public widget_base<rap::combo>
 {
 public:
-    explicit WCombo(const spec::Combo& s)
-        : W(gtk_combo_box_text_new_with_entry())
+    explicit combo_impl(const spec::combo& s)
+        : widget_base(gtk_combo_box_text_new_with_entry())
     {
         entry_ = gtk_combo_box_get_child(GTK_COMBO_BOX(w_));
-        setItems(s.items);
-        setText(s.text);
+        set_items(s.items);
+        set_text(s.text);
         connect(
             entry_, "changed",
             +[](GtkEditable* e, gpointer p)
             {
-                auto* self = static_cast<WCombo*>(p);
+                auto* self = static_cast<combo_impl*>(p);
                 if (self->changed_) self->changed_(gtk_editable_get_text(e));
             },
             this);
@@ -645,25 +645,25 @@ public:
             entry_, "activate",
             +[](GtkEntry*, gpointer p)
             {
-                auto* self = static_cast<WCombo*>(p);
+                auto* self = static_cast<combo_impl*>(p);
                 if (self->activate_) self->activate_();
             },
             this);
     }
 
-    void setItems(std::vector<std::string> items) override
+    void set_items(std::vector<std::string> items) override
     {
         auto* combo = GTK_COMBO_BOX_TEXT(w_);
         gtk_combo_box_text_remove_all(combo);
         for (auto& i : items) gtk_combo_box_text_append_text(combo, i.c_str());
     }
     std::string text() const override { return gtk_editable_get_text(GTK_EDITABLE(entry_)); }
-    void setText(const std::string& t) override
+    void set_text(const std::string& t) override
     {
         gtk_editable_set_text(GTK_EDITABLE(entry_), t.c_str());
     }
-    void onChanged(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
-    void onActivate(std::function<void()> f) override { activate_ = std::move(f); }
+    void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
+    void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
 
 private:
     GtkWidget* entry_;
@@ -673,11 +673,11 @@ private:
 
 G_GNUC_END_IGNORE_DEPRECATIONS
 
-class WTextView : public W<rap::TextView>
+class text_view_impl : public widget_base<rap::text_view>
 {
 public:
-    explicit WTextView(const spec::TextView& s)
-        : W(gtk_text_view_new(), gtk_scrolled_window_new())
+    explicit text_view_impl(const spec::text_view& s)
+        : widget_base(gtk_text_view_new(), gtk_scrolled_window_new())
     {
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
         gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
@@ -685,18 +685,18 @@ public:
         gtk_text_view_set_monospace(tv, s.monospace);
         gtk_text_view_set_wrap_mode(tv, s.wrap ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
         gtk_text_view_set_left_margin(tv, 4);
-        // TODO(pengit): relies on a compact list having installed the
+        // TODO(tortilla): relies on a compact list having installed the
         // display-wide rapport-compact rule; untested without GTK 4 headers.
         if (s.compact) gtk_widget_add_css_class(w_, "rapport-compact");
         gtk_text_view_set_right_margin(tv, 4);
-        setReadOnly(s.readOnly);
+        set_read_only(s.read_only);
         buffer_ = gtk_text_view_get_buffer(tv);
-        setText(s.text);
+        set_text(s.text);
         connect(
             buffer_, "changed",
             +[](GtkTextBuffer*, gpointer p)
             {
-                auto* self = static_cast<WTextView*>(p);
+                auto* self = static_cast<text_view_impl*>(p);
                 if (self->changed_) self->changed_();
             },
             this);
@@ -712,13 +712,13 @@ public:
         return out;
     }
 
-    void setText(const std::string& t, std::vector<Span> spans = {}) override
+    void set_text(const std::string& t, std::vector<span> spans = {}) override
     {
         gtk_text_buffer_set_text(buffer_, t.c_str(), int(t.size()));
         tags_.apply(buffer_, w_, t, std::move(spans));
     }
 
-    void append(const std::string& t, const TextStyle& style) override
+    void append(const std::string& t, const text_style& style) override
     {
         GtkTextIter end;
         gtk_text_buffer_get_end_iter(buffer_, &end);
@@ -726,13 +726,13 @@ public:
                                          tags_.get(buffer_, w_, style), nullptr);
     }
 
-    void setReadOnly(bool ro) override
+    void set_read_only(bool ro) override
     {
         gtk_text_view_set_editable(GTK_TEXT_VIEW(w_), !ro);
         gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(w_), !ro);
     }
 
-    void onChanged(std::function<void()> f) override { changed_ = std::move(f); }
+    void on_changed(std::function<void()> f) override { changed_ = std::move(f); }
 
     // GTK counts characters; the API counts UTF-8 bytes.
     std::pair<size_t, size_t> selection() const override
@@ -769,17 +769,17 @@ public:
 
 private:
     GtkTextBuffer* buffer_;
-    TagCache tags_;
+    tag_cache tags_;
     std::function<void()> changed_;
 };
 
 // A splitter of n panes is a chain of n-1 nested GtkPaneds (each marked
 // "rapport-split-chain"); sizes are one per pane, along the split.
-class WSplitter : public W<rap::Splitter>
+class splitter_impl : public widget_base<rap::splitter>
 {
 public:
-    explicit WSplitter(GtkWidget* paned)
-        : W(paned)
+    explicit splitter_impl(GtkWidget* paned)
+        : widget_base(paned)
     {
     }
 
@@ -811,28 +811,28 @@ public:
     // layout restored before the window reaches its saved size) would come
     // out short; each divider is set again as the splitter grows, until its
     // position fits.
-    void setSizes(const std::vector<float>& s) override
+    void set_sizes(const std::vector<float>& s) override
     {
         g_object_set_data(G_OBJECT(w_), "rapport-user-sized", GINT_TO_POINTER(1));
         GtkWidget* w = w_;
         for (size_t i = 0; i + 1 < s.size() && w; ++i)
         {
             auto* p = GTK_PANED(w);
-            if (s[i] > 0) placeDivider(p, int(s[i]));
+            if (s[i] > 0) place_divider(p, int(s[i]));
             GtkWidget* next = gtk_paned_get_end_child(p);
             w = next && g_object_get_data(G_OBJECT(next), "rapport-split-chain") ? next : nullptr;
         }
     }
 
 private:
-    static void placeDivider(GtkPaned* p, int position)
+    static void place_divider(GtkPaned* p, int position)
     {
         gtk_paned_set_position(p, position);
-        int maxPos = 0;
-        g_object_get(p, "max-position", &maxPos, nullptr);
+        int max_pos = 0;
+        g_object_get(p, "max-position", &max_pos, nullptr);
         // G_MAXINT: not laid out with both panes yet (one was hidden), so not
         // known to fit either.
-        if (maxPos >= position && maxPos != G_MAXINT) return;
+        if (max_pos >= position && max_pos != G_MAXINT) return;
         // Too long for now: again when the splitter grows (once it fits).
         auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(p), "rapport-want-position"));
         if (!want)
@@ -844,11 +844,11 @@ private:
                                         {
                                             auto* want = static_cast<int*>(g_object_get_data(obj, "rapport-want-position"));
                                             if (!want || *want < 0) return;
-                                            int maxPos = 0;
-                                            g_object_get(obj, "max-position", &maxPos, nullptr);
-                                            if (maxPos == G_MAXINT) return;
-                                            gtk_paned_set_position(GTK_PANED(obj), std::min(*want, maxPos));
-                                            if (maxPos >= *want) *want = -1;  // there: the user's from here on
+                                            int max_pos = 0;
+                                            g_object_get(obj, "max-position", &max_pos, nullptr);
+                                            if (max_pos == G_MAXINT) return;
+                                            gtk_paned_set_position(GTK_PANED(obj), std::min(*want, max_pos));
+                                            if (max_pos >= *want) *want = -1;  // there: the user's from here on
                                         }),
                              nullptr);
         }
@@ -856,37 +856,37 @@ private:
     }
 };
 
-class WTabs : public W<rap::Tabs>
+class tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    explicit WTabs(GtkWidget* notebook)
-        : W(notebook)
+    explicit tabs_impl(GtkWidget* notebook)
+        : widget_base(notebook)
     {
         connect(
             w_, "switch-page",
             +[](GtkNotebook*, GtkWidget*, guint page, gpointer p)
             {
-                auto* self = static_cast<WTabs*>(p);
-                self->ensureBuilt(int(page));
+                auto* self = static_cast<tabs_impl*>(p);
+                self->ensure_built(int(page));
                 if (self->changed_) self->changed_(int(page));
             },
             this);
     }
 
     int current() const override { return gtk_notebook_get_current_page(GTK_NOTEBOOK(w_)); }
-    void setCurrent(int i) override { gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i); }
-    void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void set_current(int i) override { gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i); }
+    void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
     // Lazy pages: an empty box each, filled the first time it's shown.
-    void setLazy(std::vector<std::function<Node()>> lazy, std::vector<GtkWidget*> pages,
-                 std::function<GtkWidget*(const Node&)> build)
+    void set_lazy(std::vector<std::function<node()>> lazy, std::vector<GtkWidget*> pages,
+                 std::function<GtkWidget*(const node&)> build)
     {
         lazy_ = std::move(lazy);
         pages_ = std::move(pages);
         build_ = std::move(build);
-        ensureBuilt(current());
+        ensure_built(current());
     }
-    void ensureBuilt(int i)
+    void ensure_built(int i)
     {
         if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)]) return;
         const auto build = std::move(lazy_[size_t(i)]);
@@ -899,17 +899,17 @@ public:
 
 private:
     std::function<void(int)> changed_;
-    std::vector<std::function<Node()>> lazy_;
+    std::vector<std::function<node()>> lazy_;
     std::vector<GtkWidget*> pages_;
-    std::function<GtkWidget*(const Node&)> build_;
+    std::function<GtkWidget*(const node&)> build_;
 };
 
 // Tabs as a list of page names down the left, the page beside it.
-class WSideTabs : public W<rap::Tabs>
+class side_tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    WSideTabs(GtkWidget* box, GtkWidget* list, GtkWidget* stack)
-        : W(box)
+    side_tabs_impl(GtkWidget* box, GtkWidget* list, GtkWidget* stack)
+        : widget_base(box)
         , list_(list)
         , stack_(stack)
     {
@@ -917,10 +917,10 @@ public:
             list_, "row-selected",
             +[](GtkListBox*, GtkListBoxRow* row, gpointer p)
             {
-                auto* self = static_cast<WSideTabs*>(p);
+                auto* self = static_cast<side_tabs_impl*>(p);
                 if (!row) return;
                 const int i = gtk_list_box_row_get_index(row);
-                self->ensureBuilt(i);
+                self->ensure_built(i);
                 gtk_stack_set_visible_child_name(GTK_STACK(self->stack_), std::to_string(i).c_str());
                 if (self->changed_) self->changed_(i);
             },
@@ -932,19 +932,19 @@ public:
         GtkListBoxRow* row = gtk_list_box_get_selected_row(GTK_LIST_BOX(list_));
         return row ? gtk_list_box_row_get_index(row) : 0;
     }
-    void setCurrent(int i) override { gtk_list_box_select_row(GTK_LIST_BOX(list_), gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i)); }
-    void onChanged(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void set_current(int i) override { gtk_list_box_select_row(GTK_LIST_BOX(list_), gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i)); }
+    void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
     // Lazy pages: an empty box each, filled the first time it's shown.
-    void setLazy(std::vector<std::function<Node()>> lazy, std::vector<GtkWidget*> pages,
-                 std::function<GtkWidget*(const Node&)> build)
+    void set_lazy(std::vector<std::function<node()>> lazy, std::vector<GtkWidget*> pages,
+                 std::function<GtkWidget*(const node&)> build)
     {
         lazy_ = std::move(lazy);
         pages_ = std::move(pages);
         build_ = std::move(build);
-        ensureBuilt(current());
+        ensure_built(current());
     }
-    void ensureBuilt(int i)
+    void ensure_built(int i)
     {
         if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)]) return;
         const auto build = std::move(lazy_[size_t(i)]);
@@ -959,25 +959,25 @@ private:
     GtkWidget* list_;
     GtkWidget* stack_;
     std::function<void(int)> changed_;
-    std::vector<std::function<Node()>> lazy_;
+    std::vector<std::function<node()>> lazy_;
     std::vector<GtkWidget*> pages_;
-    std::function<GtkWidget*(const Node&)> build_;
+    std::function<GtkWidget*(const node&)> build_;
 };
 
 // ---------------------------------------------------------------- list
 
-class WList : public W<rap::List>, public ListObserver
+class list_impl : public widget_base<rap::list>, public list_observer
 {
 public:
-    explicit WList(const spec::List& s)
-        : W(nullptr, gtk_scrolled_window_new())
+    explicit list_impl(const spec::list& s)
+        : widget_base(nullptr, gtk_scrolled_window_new())
     {
         rows_ = RAPPORT_ROWS(g_object_new(rapport_rows_get_type(), nullptr));
         auto* rows = G_LIST_MODEL(rows_);  // ownership passes to the selection model
         switch (s.selection)
         {
-        case SelectionMode::None: sel_ = GTK_SELECTION_MODEL(gtk_no_selection_new(rows)); break;
-        case SelectionMode::Single:
+        case selection_mode::none: sel_ = GTK_SELECTION_MODEL(gtk_no_selection_new(rows)); break;
+        case selection_mode::single:
         {
             auto* single = gtk_single_selection_new(rows);
             gtk_single_selection_set_autoselect(single, false);
@@ -985,7 +985,7 @@ public:
             sel_ = GTK_SELECTION_MODEL(single);
             break;
         }
-        case SelectionMode::Multi: sel_ = GTK_SELECTION_MODEL(gtk_multi_selection_new(rows)); break;
+        case selection_mode::multi: sel_ = GTK_SELECTION_MODEL(gtk_multi_selection_new(rows)); break;
         }
 
         w_ = gtk_column_view_new(GTK_SELECTION_MODEL(g_object_ref(sel_)));
@@ -993,12 +993,12 @@ public:
         gtk_column_view_set_show_column_separators(view, true);
         if (s.compact)
         {
-            // TODO(pengit): untested without GTK 4 headers. One display-wide
+            // TODO(tortilla): untested without GTK 4 headers. One display-wide
             // rule, matching only lists marked compact.
             static bool installed = false;
             if (!installed)
             {
-                std::string px = std::to_string(compactFont(w_).px) + "px";
+                std::string px = std::to_string(compact_font(w_).px) + "px";
                 std::string rule =
                     "columnview.rapport-compact, textview.rapport-compact { font-size: " + px +
                     "; } columnview.rapport-compact row cell { padding-top: 0; "
@@ -1013,31 +1013,31 @@ public:
             }
             gtk_widget_add_css_class(w_, "rapport-compact");
         }
-        if (s.softSelection)
+        if (s.soft_selection)
         {
             // The colours computed as gtk3 does, written into the rule:
             // @accent_bg_color isn't defined by every GTK 4 theme, and an
             // unresolved colour left selected rows with no background.
-            soft_ = softSelectionColors(w_);
+            soft_ = soft_selection_colors(w_);
             static bool installed = false;
             if (!installed)
             {
-                auto rgb = [](Color c)
+                auto rgb = [](color c)
                 {
                     return "rgb(" + std::to_string(c.r) + "," + std::to_string(c.g) + "," +
                            std::to_string(c.b) + ")";
                 };
                 // The row under the pointer gets a light tint, as on gtk3 and
                 // win32; GTK 4 already gives rows :hover.
-                Color base = themeColor(w_, ThemeColor::Base), accent = themeColor(w_, ThemeColor::Accent);
+                color base = theme_color_of(w_, theme_color::base), accent = theme_color_of(w_, theme_color::accent);
                 const bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
-                const Color hover = mixColors(base, accent, dark ? 0.16f : 0.09f);
+                const color hover = mix_colors(base, accent, dark ? 0.16f : 0.09f);
                 std::string rule = "columnview.rapport-soft row:hover { background-color: " + rgb(hover) +
                                    "; } columnview.rapport-soft row:selected, columnview.rapport-soft row:selected:focus, "
                                    "columnview.rapport-soft row:selected:hover { background-color: " +
                                    rgb(soft_->first) + "; color: " + rgb(soft_->second) +
                                    "; } columnview row.rapport-drop { box-shadow: inset 0 0 0 2px " +
-                                   rgb(themeColor(w_, ThemeColor::Highlight)) + "; }";
+                                   rgb(theme_color_of(w_, theme_color::highlight)) + "; }";
                 GtkCssProvider* css = gtk_css_provider_new();
                 gtk_css_provider_load_from_string(css, rule.c_str());
                 gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
@@ -1051,49 +1051,49 @@ public:
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
         gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
 
-        for (size_t i = 0; i < s.columns.size(); ++i) addColumn(s.columns[i], i);
+        for (size_t i = 0; i < s.columns.size(); ++i) add_column(s.columns[i], i);
 
-        ctxMenu_ = std::make_unique<MenuActions>(w_, "ctx");
-        if (s.autoScroll) enableAutoScroll();
+        ctx_menu_ = std::make_unique<menu_actions>(w_, "ctx");
+        if (s.auto_scroll) enable_auto_scroll();
 
         connect(
             sel_, "selection-changed",
             +[](GtkSelectionModel*, guint, guint, gpointer p)
             {
-                auto* self = static_cast<WList*>(p);
+                auto* self = static_cast<list_impl*>(p);
                 // Painted cells draw with the selection's colours.
                 for (auto [li, ctx] : self->bound_)
                     if (ctx->painted) gtk_widget_queue_draw(gtk_list_item_get_child(li));
-                if (self->selChanged_) self->selChanged_();
+                if (self->sel_changed_) self->sel_changed_();
             },
             this);
         connect(
             w_, "activate",
             +[](GtkColumnView*, guint row, gpointer p)
             {
-                auto* self = static_cast<WList*>(p);
+                auto* self = static_cast<list_impl*>(p);
                 if (self->activate_) self->activate_(row);
             },
             this);
         connect(
             gtk_column_view_get_sorter(view), "changed",
             +[](GtkSorter* sorter, GtkSorterChange, gpointer p)
-            { static_cast<WList*>(p)->sortChanged(GTK_COLUMN_VIEW_SORTER(sorter)); },
+            { static_cast<list_impl*>(p)->sort_changed(GTK_COLUMN_VIEW_SORTER(sorter)); },
             this);
     }
 
-    ~WList() override
+    ~list_impl() override
     {
-        if (model_) model_->removeObserver(this);
+        if (model_) model_->remove_observer(this);
         g_object_unref(sel_);
     }
 
-    void setModel(ListModel* m) override
+    void set_model(list_model* m) override
     {
-        if (model_) model_->removeObserver(this);
+        if (model_) model_->remove_observer(this);
         model_ = m;
-        if (model_) model_->addObserver(this);
-        modelReset();
+        if (model_) model_->add_observer(this);
+        model_reset();
     }
 
     std::vector<size_t> selection() const override
@@ -1122,101 +1122,101 @@ public:
         for (size_t r : rows) gtk_selection_model_select_item(sel_, guint(r), false);
     }
 
-    void setCurrent(size_t row) override
+    void set_current(size_t row) override
     {
         gtk_column_view_scroll_to(
             GTK_COLUMN_VIEW(w_), guint(row), nullptr,
             GtkListScrollFlags(GTK_LIST_SCROLL_FOCUS | GTK_LIST_SCROLL_SELECT), nullptr);
     }
 
-    void scrollTo(size_t row) override
+    void scroll_to(size_t row) override
     {
         gtk_column_view_scroll_to(GTK_COLUMN_VIEW(w_), guint(row), nullptr, GTK_LIST_SCROLL_NONE,
                                   nullptr);
     }
 
-    void setSortIndicator(std::optional<size_t> column, SortOrder order) override
+    void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
-        suppressSort_ = true;
+        suppress_sort_ = true;
         GtkColumnViewColumn* col = column && *column < cols_.size() ? cols_[*column] : nullptr;
         gtk_column_view_sort_by_column(GTK_COLUMN_VIEW(w_), col,
-                                       order == SortOrder::Ascending ? GTK_SORT_ASCENDING
+                                       order == sort_order::ascending ? GTK_SORT_ASCENDING
                                                                      : GTK_SORT_DESCENDING);
-        suppressSort_ = false;
+        suppress_sort_ = false;
     }
 
-    std::vector<float> columnWidths() const override
+    std::vector<float> column_widths() const override
     {
         std::vector<float> out;
         for (auto* c : cols_) out.push_back(float(gtk_column_view_column_get_fixed_width(c)));
         return out;
     }
 
-    void setColumnWidths(const std::vector<float>& widths) override
+    void set_column_widths(const std::vector<float>& widths) override
     {
         for (size_t i = 0; i < widths.size() && i < cols_.size(); ++i)
             if (widths[i] > 0) gtk_column_view_column_set_fixed_width(cols_[i], int(widths[i]));
     }
 
-    void onSelectionChanged(std::function<void()> f) override { selChanged_ = std::move(f); }
-    void onActivate(std::function<void(size_t)> f) override { activate_ = std::move(f); }
-    void onSortRequested(std::function<void(size_t, SortOrder)> f) override
+    void on_selection_changed(std::function<void()> f) override { sel_changed_ = std::move(f); }
+    void on_activate(std::function<void(size_t)> f) override { activate_ = std::move(f); }
+    void on_sort_requested(std::function<void(size_t, sort_order)> f) override
     {
         sort_ = std::move(f);
     }
-    void onContextMenu(std::function<Menu(std::optional<size_t>)> f) override
+    void on_context_menu(std::function<menu(std::optional<size_t>)> f) override
     {
-        contextMenu_ = std::move(f);
+        context_menu_ = std::move(f);
     }
-    // TODO(pengit): header right-click menu (gesture on the header row).
-    void onHeaderMenu(std::function<Menu(size_t)> f) override { headerMenu_ = std::move(f); }
-    void onCellContextMenu(std::function<Menu(size_t, size_t, PointF)> f) override { cellMenu_ = std::move(f); }
-    // TODO(pengit): drag-reordering (GtkDragSource on the rows).
-    void onReorder(ReorderFn) override {}
-    void setReorderable(bool) override {}
-    // Autoscroll (spec.autoScroll): with the middle button held, a tick
+    // TODO(tortilla): header right-click menu (gesture on the header row).
+    void on_header_menu(std::function<menu(size_t)> f) override { header_menu_ = std::move(f); }
+    void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)> f) override { cell_menu_ = std::move(f); }
+    // TODO(tortilla): drag-reordering (GtkDragSource on the rows).
+    void on_reorder(reorder_fn) override {}
+    void set_reorderable(bool) override {}
+    // Autoscroll (spec.auto_scroll): with the middle button held, a tick
     // callback scrolls by the pointer's offset from the anchor. (The anchor
     // isn't drawn on gtk4 yet: the cursor shows the mode.)
-    void enableAutoScroll()
+    void enable_auto_scroll()
     {
         GtkGesture* click = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_MIDDLE);
         gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
         g_signal_connect(click, "pressed", G_CALLBACK(+[](GtkGestureClick* g, int, double, double y, gpointer p)
                                                        {
-                                                           auto* self = static_cast<WList*>(p);
+                                                           auto* self = static_cast<list_impl*>(p);
                                                            gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-                                                           self->startAutoScroll(y);
+                                                           self->start_auto_scroll(y);
                                                        }),
                          this);
         g_signal_connect(click, "released", G_CALLBACK(+[](GtkGestureClick*, int, double, double, gpointer p)
-                                                        { static_cast<WList*>(p)->stopAutoScroll(); }),
+                                                        { static_cast<list_impl*>(p)->stop_auto_scroll(); }),
                          this);
         g_signal_connect(click, "cancel", G_CALLBACK(+[](GtkGesture*, GdkEventSequence*, gpointer p)
-                                                      { static_cast<WList*>(p)->stopAutoScroll(); }),
+                                                      { static_cast<list_impl*>(p)->stop_auto_scroll(); }),
                          this);
         gtk_widget_add_controller(w_, GTK_EVENT_CONTROLLER(click));
         GtkEventController* motion = gtk_event_controller_motion_new();
         g_signal_connect(motion, "motion", G_CALLBACK(+[](GtkEventControllerMotion*, double, double y, gpointer p)
-                                                       { static_cast<WList*>(p)->autoY_ = y; }),
+                                                       { static_cast<list_impl*>(p)->auto_y = y; }),
                          this);
         gtk_widget_add_controller(w_, motion);
     }
-    void startAutoScroll(double y)
+    void start_auto_scroll(double y)
     {
-        stopAutoScroll();
-        autoY0_ = autoY_ = y;
-        autoLast_ = 0;
-        autoTick_ = gtk_widget_add_tick_callback(
+        stop_auto_scroll();
+        auto_y0 = auto_y = y;
+        auto_last = 0;
+        auto_tick = gtk_widget_add_tick_callback(
             w_,
             +[](GtkWidget*, GdkFrameClock* clock, gpointer p) -> gboolean
             {
-                auto* self = static_cast<WList*>(p);
+                auto* self = static_cast<list_impl*>(p);
                 const gint64 now = gdk_frame_clock_get_frame_time(clock);
-                const double dt = self->autoLast_ ? (now - self->autoLast_) / 1e6 : 0;
-                self->autoLast_ = now;
+                const double dt = self->auto_last ? (now - self->auto_last) / 1e6 : 0;
+                self->auto_last = now;
                 GtkAdjustment* adj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(self->outer_));
-                const double v = gtk_adjustment_get_value(adj) + autoScrollSpeed(float(self->autoY_ - self->autoY0_)) * dt;
+                const double v = gtk_adjustment_get_value(adj) + auto_scroll_speed(float(self->auto_y - self->auto_y0)) * dt;
                 gtk_adjustment_set_value(adj, std::clamp(v, gtk_adjustment_get_lower(adj),
                                                          gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj)));
                 return G_SOURCE_CONTINUE;
@@ -1224,92 +1224,92 @@ public:
             this, nullptr);
         gtk_widget_set_cursor_from_name(w_, "all-scroll");
     }
-    void stopAutoScroll()
+    void stop_auto_scroll()
     {
-        if (!autoTick_) return;
-        gtk_widget_remove_tick_callback(w_, autoTick_);
-        autoTick_ = 0;
+        if (!auto_tick) return;
+        gtk_widget_remove_tick_callback(w_, auto_tick);
+        auto_tick = 0;
         gtk_widget_set_cursor(w_, nullptr);
     }
-    guint autoTick_ = 0;
-    double autoY0_ = 0, autoY_ = 0;
-    gint64 autoLast_ = 0;
+    guint auto_tick = 0;
+    double auto_y0 = 0, auto_y = 0;
+    gint64 auto_last = 0;
 
-    // CellDrag: a drag gesture on the column view. The cell under a point
+    // cell_drag: a drag gesture on the column view. The cell under a point
     // is found by picking the widget there; the target row is framed with
     // a CSS class. (No floating label on gtk4 yet: the cursor and the frame
     // show the drag.)
-    void onCellDrag(CellDrag d) override
+    void on_cell_drag(cell_drag d) override
     {
-        if (!cellDrag_.begin)
+        if (!cell_drag_.begin)
         {
             GtkGesture* drag = gtk_gesture_drag_new();
             gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), GDK_BUTTON_PRIMARY);
             g_signal_connect(drag, "drag-begin", G_CALLBACK(+[](GtkGestureDrag* g, double x, double y, gpointer p)
-                                                            { static_cast<WList*>(p)->cellDragBegin(g, x, y); }),
+                                                            { static_cast<list_impl*>(p)->cell_drag_begin(g, x, y); }),
                              this);
             g_signal_connect(drag, "drag-update", G_CALLBACK(+[](GtkGestureDrag* g, double dx, double dy, gpointer p)
-                                                             { static_cast<WList*>(p)->cellDragUpdate(g, dx, dy); }),
+                                                             { static_cast<list_impl*>(p)->cell_drag_update(g, dx, dy); }),
                              this);
             g_signal_connect(drag, "drag-end", G_CALLBACK(+[](GtkGestureDrag*, double, double, gpointer p)
-                                                          { static_cast<WList*>(p)->cellDragEnd(true); }),
+                                                          { static_cast<list_impl*>(p)->cell_drag_end(true); }),
                              this);
             gtk_widget_add_controller(w_, GTK_EVENT_CONTROLLER(drag));
             GtkEventController* keys = gtk_event_controller_key_new();
             g_signal_connect(keys, "key-pressed",
                              G_CALLBACK(+[](GtkEventControllerKey*, guint key, guint, GdkModifierType, gpointer p) -> gboolean
                                         {
-                                            auto* self = static_cast<WList*>(p);
+                                            auto* self = static_cast<list_impl*>(p);
                                             if (key != GDK_KEY_Escape || !self->cell_.dragging) return false;
-                                            self->cellDragEnd(false);
+                                            self->cell_drag_end(false);
                                             return true;
                                         }),
                              this);
             gtk_widget_add_controller(w_, keys);
         }
-        cellDrag_ = std::move(d);
+        cell_drag_ = std::move(d);
     }
 
-    bool columnVisible(size_t column) const override
+    bool column_visible(size_t column) const override
     {
         return column < cols_.size() && gtk_column_view_column_get_visible(cols_[column]);
     }
-    void setColumnVisible(size_t column, bool v) override
+    void set_column_visible(size_t column, bool v) override
     {
         if (column < cols_.size()) gtk_column_view_column_set_visible(cols_[column], v);
     }
 
-    // ListObserver
-    void modelReset() override
+    // list_observer
+    void model_reset() override
     {
         guint old = rows_->count;
-        rows_->count = model_ ? guint(model_->rowCount()) : 0;
+        rows_->count = model_ ? guint(model_->row_count()) : 0;
         g_list_model_items_changed(G_LIST_MODEL(rows_), 0, old, rows_->count);
     }
     // Changed rows are refreshed in the cells showing them. Reporting them
     // to GTK as removed and re-added (items-changed) dropped their
     // selection and rebuilt their widgets, on every label or icon update.
-    void rowsChanged(size_t first, size_t n) override
+    void rows_changed(size_t first, size_t n) override
     {
         for (auto [li, ctx] : bound_)
         {
-            const size_t row = rowOf(gtk_list_item_get_item(li));
-            if (row >= first && row < first + n) bindCell(li, *ctx);
+            const size_t row = row_of(gtk_list_item_get_item(li));
+            if (row >= first && row < first + n) bind_cell(li, *ctx);
         }
     }
-    void rowsInserted(size_t first, size_t n) override
+    void rows_inserted(size_t first, size_t n) override
     {
         rows_->count += guint(n);
         g_list_model_items_changed(G_LIST_MODEL(rows_), guint(first), 0, guint(n));
     }
-    void rowsRemoved(size_t first, size_t n) override
+    void rows_removed(size_t first, size_t n) override
     {
         rows_->count -= guint(n);
         g_list_model_items_changed(G_LIST_MODEL(rows_), guint(first), guint(n), 0);
     }
 
 protected:
-    void onDisconnect() override
+    void on_disconnect() override
     {
         alive_ = false;
         if (popover_) gtk_widget_unparent(popover_);
@@ -1317,55 +1317,55 @@ protected:
     }
 
 private:
-    struct ColumnCtx
+    struct column_ctx
     {
-        WList* list;
+        list_impl* list;
         size_t column;
         bool painted;
     };
 
     // The cell widget at a point of the column view, its row and column.
-    struct CellHit
+    struct cell_hit
     {
         GtkWidget* cell = nullptr;
         size_t row = 0, column = 0;
     };
-    std::optional<CellHit> cellAt(double x, double y) const
+    std::optional<cell_hit> cell_at(double x, double y) const
     {
         for (GtkWidget* w = gtk_widget_pick(w_, x, y, GTK_PICK_DEFAULT); w && w != w_; w = gtk_widget_get_parent(w))
         {
-            const size_t tagged = rowOf(w);
-            auto* ctx = static_cast<ColumnCtx*>(g_object_get_data(G_OBJECT(w), "rapport-ctx"));
-            if (tagged && ctx) return CellHit{w, tagged - 1, ctx->column};
+            const size_t tagged = row_of(w);
+            auto* ctx = static_cast<column_ctx*>(g_object_get_data(G_OBJECT(w), "rapport-ctx"));
+            if (tagged && ctx) return cell_hit{w, tagged - 1, ctx->column};
         }
         return std::nullopt;
     }
-    static GtkWidget* rowWidget(GtkWidget* cell)
+    static GtkWidget* row_widget(GtkWidget* cell)
     {
         for (GtkWidget* w = cell; w; w = gtk_widget_get_parent(w))
             if (std::string_view(gtk_widget_get_css_name(w)) == "row") return w;
         return nullptr;
     }
 
-    struct CellDragState
+    struct cell_drag_state
     {
         bool pressed = false, dragging = false;
         double x0 = 0, y0 = 0;
         size_t from = 0;
-        CellDragStart start;
+        cell_drag_start start;
         std::optional<size_t> target;
-        GtkWidget* targetRow = nullptr;  // framed
+        GtkWidget* target_row = nullptr;  // framed
     };
-    void cellDragBegin(GtkGestureDrag* g, double x, double y)
+    void cell_drag_begin(GtkGestureDrag* g, double x, double y)
     {
         cell_ = {};
-        auto hit = cellAt(x, y);
-        std::optional<CellDragStart> start;
+        auto hit = cell_at(x, y);
+        std::optional<cell_drag_start> start;
         if (hit && model_)
         {
             graphene_point_t in = GRAPHENE_POINT_INIT(float(x), float(y)), out;
             if (!gtk_widget_compute_point(w_, hit->cell, &in, &out)) out = in;
-            start = cellDrag_.begin(hit->row, hit->column, PointF{out.x, out.y});
+            start = cell_drag_.begin(hit->row, hit->column, point_f{out.x, out.y});
         }
         if (!start)
         {
@@ -1374,7 +1374,7 @@ private:
         }
         cell_ = {true, false, x, y, hit->row, std::move(*start), std::nullopt, nullptr};
     }
-    void cellDragUpdate(GtkGestureDrag* g, double dx, double dy)
+    void cell_drag_update(GtkGestureDrag* g, double dx, double dy)
     {
         if (!cell_.pressed) return;
         if (!cell_.dragging)
@@ -1386,59 +1386,59 @@ private:
             gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);  // no selection change on release
             gtk_widget_grab_focus(w_);  // Esc reaches the key controller
         }
-        if (cell_.targetRow) gtk_widget_remove_css_class(cell_.targetRow, "rapport-drop");
+        if (cell_.target_row) gtk_widget_remove_css_class(cell_.target_row, "rapport-drop");
         cell_.target.reset();
-        cell_.targetRow = nullptr;
-        if (auto hit = cellAt(cell_.x0 + dx, cell_.y0 + dy);
-            hit && cellDrag_.canDrop && cellDrag_.canDrop(cell_.from, hit->row, cell_.start.data))
+        cell_.target_row = nullptr;
+        if (auto hit = cell_at(cell_.x0 + dx, cell_.y0 + dy);
+            hit && cell_drag_.can_drop && cell_drag_.can_drop(cell_.from, hit->row, cell_.start.data))
         {
             cell_.target = hit->row;
-            if ((cell_.targetRow = rowWidget(hit->cell))) gtk_widget_add_css_class(cell_.targetRow, "rapport-drop");
+            if ((cell_.target_row = row_widget(hit->cell))) gtk_widget_add_css_class(cell_.target_row, "rapport-drop");
         }
         gtk_widget_set_cursor_from_name(w_, cell_.target ? "grabbing" : "not-allowed");
     }
-    void cellDragEnd(bool drop)
+    void cell_drag_end(bool drop)
     {
         if (!cell_.pressed) return;
-        CellDragState c = std::move(cell_);
+        cell_drag_state c = std::move(cell_);
         cell_ = {};
-        if (c.targetRow) gtk_widget_remove_css_class(c.targetRow, "rapport-drop");
+        if (c.target_row) gtk_widget_remove_css_class(c.target_row, "rapport-drop");
         gtk_widget_set_cursor(w_, nullptr);
-        if (drop && c.dragging && c.target && cellDrag_.drop) cellDrag_.drop(c.from, *c.target, c.start.data);
+        if (drop && c.dragging && c.target && cell_drag_.drop) cell_drag_.drop(c.from, *c.target, c.start.data);
     }
-    CellDrag cellDrag_;
-    CellDragState cell_;
+    cell_drag cell_drag_;
+    cell_drag_state cell_;
 
-    static size_t rowOf(gpointer obj)
+    static size_t row_of(gpointer obj)
     {
         return GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(obj), "rapport-row"));
     }
 
-    void addColumn(const Column& c, size_t index)
+    void add_column(const column& c, size_t index)
     {
-        auto& ctx = ctxs_.emplace_back(new ColumnCtx{this, index, c.painted});
+        auto& ctx = ctxs_.emplace_back(new column_ctx{this, index, c.painted});
         GtkListItemFactory* factory = gtk_signal_list_item_factory_new();
         connect(
             factory, "setup",
             +[](GtkSignalListItemFactory*, GtkListItem* li, gpointer p)
-            { static_cast<ColumnCtx*>(p)->list->setupCell(li, *static_cast<ColumnCtx*>(p)); },
+            { static_cast<column_ctx*>(p)->list->setup_cell(li, *static_cast<column_ctx*>(p)); },
             ctx.get());
         connect(
             factory, "bind",
             +[](GtkSignalListItemFactory*, GtkListItem* li, gpointer p)
-            { static_cast<ColumnCtx*>(p)->list->bindCell(li, *static_cast<ColumnCtx*>(p)); },
+            { static_cast<column_ctx*>(p)->list->bind_cell(li, *static_cast<column_ctx*>(p)); },
             ctx.get());
         connect(
             factory, "unbind",
             +[](GtkSignalListItemFactory*, GtkListItem* li, gpointer p)
-            { static_cast<ColumnCtx*>(p)->list->bound_.erase(li); },
+            { static_cast<column_ctx*>(p)->list->bound_.erase(li); },
             ctx.get());
 
         GtkColumnViewColumn* col = gtk_column_view_column_new(c.title.c_str(), factory);
         gtk_column_view_column_set_resizable(col, true);
         gtk_column_view_column_set_expand(col, c.stretch);
         int width = px(c.width);
-        if (width < 0 && c.painted) width = int(8 * g_metrics.charWidth);
+        if (width < 0 && c.painted) width = int(8 * g_metrics.char_width);
         if (width > 0) gtk_column_view_column_set_fixed_width(col, width);
         if (c.sortable)
         {
@@ -1454,21 +1454,21 @@ private:
         g_object_unref(col);
     }
 
-    void setupCell(GtkListItem* li, ColumnCtx& ctx)
+    void setup_cell(GtkListItem* li, column_ctx& ctx)
     {
         GtkWidget* child;
         if (ctx.painted)
         {
             child = gtk_drawing_area_new();
             gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(child),
-                                                int(g_metrics.lineHeight + 0.5f));
+                                                int(g_metrics.line_height + 0.5f));
             gtk_widget_set_hexpand(child, true);
             gtk_drawing_area_set_draw_func(
                 GTK_DRAWING_AREA(child),
                 +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
                 {
-                    static_cast<ColumnCtx*>(p)->list->drawCell(area, cr, w, h,
-                                                               *static_cast<ColumnCtx*>(p));
+                    static_cast<column_ctx*>(p)->list->draw_cell(area, cr, w, h,
+                                                               *static_cast<column_ctx*>(p));
                 },
                 &ctx, nullptr);
         }
@@ -1496,7 +1496,7 @@ private:
                                     {
                                         auto* cell = gtk_event_controller_get_widget(
                                             GTK_EVENT_CONTROLLER(g));
-                                        static_cast<ColumnCtx*>(p)->list->contextMenuAt(cell, x, y);
+                                        static_cast<column_ctx*>(p)->list->context_menu_at(cell, x, y);
                                     }),
                          &ctx);
         gtk_widget_add_controller(child, GTK_EVENT_CONTROLLER(click));
@@ -1505,11 +1505,11 @@ private:
         gtk_list_item_set_child(li, child);
     }
 
-    void bindCell(GtkListItem* li, ColumnCtx& ctx)
+    void bind_cell(GtkListItem* li, column_ctx& ctx)
     {
         if (!model_) return;
         bound_[li] = &ctx;
-        size_t row = rowOf(gtk_list_item_get_item(li));
+        size_t row = row_of(gtk_list_item_get_item(li));
         GtkWidget* child = gtk_list_item_get_child(li);
         // Stored +1 so 0 means "not bound".
         g_object_set_data(G_OBJECT(child), "rapport-row", GSIZE_TO_POINTER(row + 1));
@@ -1520,55 +1520,55 @@ private:
         }
         auto* label = GTK_LABEL(g_object_get_data(G_OBJECT(child), "rapport-label"));
         auto* image = GTK_IMAGE(g_object_get_data(G_OBJECT(child), "rapport-image"));
-        const Icon icon = model_->icon(row, ctx.column);
-        GIcon* gicon = !icon.file.empty() ? fileTypeIcon(icon.file) : !icon.name.empty() ? namedGIcon(icon.name) : nullptr;
+        const icon icon = model_->icon(row, ctx.column);
+        GIcon* gicon = !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
         gtk_image_set_from_gicon(image, gicon);
         gtk_widget_set_visible(GTK_WIDGET(image), gicon != nullptr);
         gtk_label_set_text(label, model_->text(row, ctx.column).c_str());
-        PangoAttrList* attrs = pangoAttrs(GTK_WIDGET(label), model_->style(row, ctx.column));
+        PangoAttrList* attrs = pango_attrs(GTK_WIDGET(label), model_->style(row, ctx.column));
         gtk_label_set_attributes(label, attrs);
         if (attrs) pango_attr_list_unref(attrs);
     }
 
-    void drawCell(GtkDrawingArea* area, cairo_t* cr, int w, int h, ColumnCtx& ctx)
+    void draw_cell(GtkDrawingArea* area, cairo_t* cr, int w, int h, column_ctx& ctx)
     {
-        size_t tagged = rowOf(area);
+        size_t tagged = row_of(area);
         if (!alive_ || !model_ || tagged == 0) return;
         size_t row = tagged - 1;
-        if (row >= model_->rowCount()) return;
-        CairoPainter painter(cr, GTK_WIDGET(area));
-        CellInfo info{{float(w), float(h)},
+        if (row >= model_->row_count()) return;
+        cairo_painter painter(cr, GTK_WIDGET(area));
+        cell_info info{{float(w), float(h)},
                       bool(gtk_selection_model_is_selected(sel_, guint(row))),
-                      gtk_widget_has_focus(GTK_WIDGET(area))};
+                      bool(gtk_widget_has_focus(GTK_WIDGET(area)))};
         model_->paint(row, ctx.column, painter, info);
     }
 
-    void sortChanged(GtkColumnViewSorter* sorter)
+    void sort_changed(GtkColumnViewSorter* sorter)
     {
-        if (suppressSort_ || !sort_) return;
+        if (suppress_sort_ || !sort_) return;
         GtkColumnViewColumn* col = gtk_column_view_sorter_get_primary_sort_column(sorter);
         auto it = std::ranges::find(cols_, col);
         if (it == cols_.end()) return;
         bool asc = gtk_column_view_sorter_get_primary_sort_order(sorter) == GTK_SORT_ASCENDING;
-        sort_(size_t(it - cols_.begin()), asc ? SortOrder::Ascending : SortOrder::Descending);
+        sort_(size_t(it - cols_.begin()), asc ? sort_order::ascending : sort_order::descending);
     }
 
-    void contextMenuAt(GtkWidget* cell, double x, double y)
+    void context_menu_at(GtkWidget* cell, double x, double y)
     {
         if (!alive_) return;
-        size_t tagged = rowOf(cell);
+        size_t tagged = row_of(cell);
         std::optional<size_t> row;
         if (tagged) row = tagged - 1;
         if (row && !gtk_selection_model_is_selected(sel_, guint(*row)))
             gtk_selection_model_select_item(sel_, guint(*row), true);
-        auto* ctx = static_cast<ColumnCtx*>(g_object_get_data(G_OBJECT(cell), "rapport-ctx"));
-        const bool atCell = cellMenu_ && row && ctx;
-        if (!contextMenu_ && !atCell) return;
+        auto* ctx = static_cast<column_ctx*>(g_object_get_data(G_OBJECT(cell), "rapport-ctx"));
+        const bool at_cell = cell_menu_ && row && ctx;
+        if (!context_menu_ && !at_cell) return;
 
-        Menu menu = atCell ? cellMenu_(*row, ctx->column, PointF{float(x), float(y)}) : contextMenu_(row);
+        menu menu = at_cell ? cell_menu_(*row, ctx->column, point_f{float(x), float(y)}) : context_menu_(row);
         if (menu.empty()) return;
 
-        GMenu* model = ctxMenu_->build(std::move(menu));
+        GMenu* model = ctx_menu_->build(std::move(menu));
 
         graphene_point_t in = GRAPHENE_POINT_INIT(float(x), float(y)), out;
         if (!gtk_widget_compute_point(cell, w_, &in, &out)) out = in;
@@ -1587,22 +1587,22 @@ private:
 
     RapportRows* rows_ = nullptr;  // owned by sel_
     GtkSelectionModel* sel_ = nullptr;
-    std::unordered_map<GtkListItem*, ColumnCtx*> bound_;  // cells showing a row now
-    std::optional<std::pair<Color, Color>> soft_;  // selection background, text
-    std::unique_ptr<MenuActions> ctxMenu_;
+    std::unordered_map<GtkListItem*, column_ctx*> bound_;  // cells showing a row now
+    std::optional<std::pair<color, color>> soft_;  // selection background, text
+    std::unique_ptr<menu_actions> ctx_menu_;
     GtkWidget* popover_ = nullptr;
-    ListModel* model_ = nullptr;
+    list_model* model_ = nullptr;
     std::vector<GtkColumnViewColumn*> cols_;
-    std::vector<std::unique_ptr<ColumnCtx>> ctxs_;
-    bool suppressSort_ = false;
+    std::vector<std::unique_ptr<column_ctx>> ctxs_;
+    bool suppress_sort_ = false;
     bool alive_ = true;
 
-    std::function<void()> selChanged_;
+    std::function<void()> sel_changed_;
     std::function<void(size_t)> activate_;
-    std::function<void(size_t, SortOrder)> sort_;
-    std::function<Menu(std::optional<size_t>)> contextMenu_;
-    std::function<Menu(size_t)> headerMenu_;
-    std::function<Menu(size_t, size_t, PointF)> cellMenu_;
+    std::function<void(size_t, sort_order)> sort_;
+    std::function<menu(std::optional<size_t>)> context_menu_;
+    std::function<menu(size_t)> header_menu_;
+    std::function<menu(size_t, size_t, point_f)> cell_menu_;
 };
 
 // ---------------------------------------------------------------- window
@@ -1614,30 +1614,30 @@ private:
 unsigned modifiers(GdkModifierType state)
 {
     unsigned m = 0;
-    if (state & GDK_SHIFT_MASK) m |= ModShift;
-    if (state & GDK_CONTROL_MASK) m |= ModCtrl;
-    if (state & GDK_ALT_MASK) m |= ModAlt;
-    if (state & (GDK_SUPER_MASK | GDK_META_MASK)) m |= ModMeta;
+    if (state & GDK_SHIFT_MASK) m |= mod_shift;
+    if (state & GDK_CONTROL_MASK) m |= mod_ctrl;
+    if (state & GDK_ALT_MASK) m |= mod_alt;
+    if (state & (GDK_SUPER_MASK | GDK_META_MASK)) m |= mod_meta;
     return m;
 }
 
 // Input mirrors the gtk3 WCanvas: presses, releases and the wheel from a
 // legacy controller (raw events, so a release after a drag still arrives),
 // motion and crossing from a motion controller, keys from a key controller.
-class WCanvas : public W<rap::Canvas>
+class canvas_impl : public widget_base<rap::canvas>
 {
 public:
-    explicit WCanvas(const spec::Canvas& s)
-        : W(gtk_drawing_area_new())
+    explicit canvas_impl(const spec::canvas& s)
+        : widget_base(gtk_drawing_area_new())
     {
         gtk_widget_set_focusable(w_, s.focusable);
         gtk_drawing_area_set_draw_func(
             GTK_DRAWING_AREA(w_),
             +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
             {
-                auto* self = static_cast<WCanvas*>(p);
+                auto* self = static_cast<canvas_impl*>(p);
                 if (!self->paint_) return;
-                CairoPainter painter(cr, GTK_WIDGET(area));
+                cairo_painter painter(cr, GTK_WIDGET(area));
                 self->paint_(painter, {float(w), float(h)});
             },
             this, nullptr);
@@ -1645,7 +1645,7 @@ public:
             w_, "resize",
             +[](GtkDrawingArea*, int w, int h, gpointer p)
             {
-                auto* self = static_cast<WCanvas*>(p);
+                auto* self = static_cast<canvas_impl*>(p);
                 if (self->resize_) self->resize_({float(w), float(h)});
             },
             this);
@@ -1653,49 +1653,49 @@ public:
 
         GtkEventController* legacy = gtk_event_controller_legacy_new();
         connect(legacy, "event", +[](GtkEventControllerLegacy*, GdkEvent* e, gpointer p) -> gboolean
-                { return static_cast<WCanvas*>(p)->rawEvent(e); }, this);
+                { return static_cast<canvas_impl*>(p)->raw_event(e); }, this);
         gtk_widget_add_controller(w_, legacy);
 
         GtkEventController* motion = gtk_event_controller_motion_new();
         connect(motion, "motion", +[](GtkEventControllerMotion* c, double x, double y, gpointer p)
-                { static_cast<WCanvas*>(p)->crossing(GTK_EVENT_CONTROLLER(c), PointerEvent::Type::Move, x, y); }, this);
+                { static_cast<canvas_impl*>(p)->crossing(GTK_EVENT_CONTROLLER(c), pointer_event_type::move, x, y); }, this);
         connect(motion, "enter", +[](GtkEventControllerMotion* c, double x, double y, gpointer p)
-                { static_cast<WCanvas*>(p)->crossing(GTK_EVENT_CONTROLLER(c), PointerEvent::Type::Enter, x, y); }, this);
+                { static_cast<canvas_impl*>(p)->crossing(GTK_EVENT_CONTROLLER(c), pointer_event_type::enter, x, y); }, this);
         connect(motion, "leave", +[](GtkEventControllerMotion* c, gpointer p)
-                { static_cast<WCanvas*>(p)->crossing(GTK_EVENT_CONTROLLER(c), PointerEvent::Type::Leave, -1, -1); }, this);
+                { static_cast<canvas_impl*>(p)->crossing(GTK_EVENT_CONTROLLER(c), pointer_event_type::leave, -1, -1); }, this);
         gtk_widget_add_controller(w_, motion);
 
         GtkEventController* keys = gtk_event_controller_key_new();
         connect(keys, "key-pressed", +[](GtkEventControllerKey*, guint keyval, guint code, GdkModifierType state, gpointer p) -> gboolean
-                { return static_cast<WCanvas*>(p)->key(true, keyval, code, state); }, this);
+                { return static_cast<canvas_impl*>(p)->key(true, keyval, code, state); }, this);
         connect(keys, "key-released", +[](GtkEventControllerKey*, guint keyval, guint code, GdkModifierType state, gpointer p)
-                { static_cast<WCanvas*>(p)->key(false, keyval, code, state); }, this);
+                { static_cast<canvas_impl*>(p)->key(false, keyval, code, state); }, this);
         gtk_widget_add_controller(w_, keys);
     }
 
-    ~WCanvas() override { onDisconnect(); }
+    ~canvas_impl() override { on_disconnect(); }
 
     void invalidate() override { gtk_widget_queue_draw(w_); }
-    SizeF size() const override
+    size_f size() const override
     {
         return {float(gtk_widget_get_width(w_)), float(gtk_widget_get_height(w_))};
     }
-    float deviceScale() const override { return float(gtk_widget_get_scale_factor(w_)); }
-    void setCursor(Cursor c) override
+    float device_scale() const override { return float(gtk_widget_get_scale_factor(w_)); }
+    void set_cursor(cursor c) override
     {
         static const char* names[] = {"default", "pointer",  "text",    "crosshair",
                                       "grab",    "grabbing", "zoom-in", "zoom-out",
                                       "move",    "wait",     "none"};
-        gtk_widget_set_cursor_from_name(w_, c == Cursor::Default ? nullptr : names[int(c)]);
+        gtk_widget_set_cursor_from_name(w_, c == cursor::default_ ? nullptr : names[int(c)]);
     }
 
-    void onPaint(std::function<void(Painter&, SizeF)> f) override { paint_ = std::move(f); }
-    void onResize(std::function<void(SizeF)> f) override { resize_ = std::move(f); }
-    void onPointer(std::function<bool(const PointerEvent&)> f) override { pointer_ = std::move(f); }
-    void onScroll(std::function<bool(const ScrollEvent&)> f) override { scroll_ = std::move(f); }
-    void onKey(std::function<bool(const KeyEvent&)> f) override { key_ = std::move(f); }
+    void on_paint(std::function<void(rap::painter&, rap::size_f)> f) override { paint_ = std::move(f); }
+    void on_resize(std::function<void(size_f)> f) override { resize_ = std::move(f); }
+    void on_pointer(std::function<bool(const pointer_event&)> f) override { pointer_ = std::move(f); }
+    void on_scroll(std::function<bool(const scroll_event&)> f) override { scroll_ = std::move(f); }
+    void on_key(std::function<bool(const key_event&)> f) override { key_ = std::move(f); }
 
-    Subscription onFrame(std::function<void(double)> f) override
+    subscription on_frame(std::function<void(double)> f) override
     {
         if (!*alive_) return {};
         guint id = gtk_widget_add_tick_callback(
@@ -1709,7 +1709,7 @@ public:
             new std::function<void(double)>(std::move(f)),
             +[](gpointer p) { delete static_cast<std::function<void(double)>*>(p); });
         ticks_.push_back(id);
-        return Subscription(
+        return subscription(
             [this, alive = alive_, id]
             {
                 if (!*alive) return;
@@ -1719,7 +1719,7 @@ public:
     }
 
 protected:
-    void onDisconnect() override
+    void on_disconnect() override
     {
         if (!*alive_) return;
         *alive_ = false;
@@ -1729,7 +1729,7 @@ protected:
 
 private:
     // A raw event's position, from its surface to this widget.
-    PointF widgetPos(GdkEvent* e) const
+    point_f widget_pos(GdkEvent* e) const
     {
         double x = 0, y = 0;
         gdk_event_get_position(e, &x, &y);
@@ -1741,14 +1741,14 @@ private:
         return {out.x, out.y};
     }
 
-    bool rawEvent(GdkEvent* e)
+    bool raw_event(GdkEvent* e)
     {
         const GdkEventType type = gdk_event_get_event_type(e);
         if (type == GDK_BUTTON_PRESS || type == GDK_BUTTON_RELEASE)
         {
-            PointerEvent ev{type == GDK_BUTTON_PRESS ? PointerEvent::Type::Press : PointerEvent::Type::Release, widgetPos(e),
+            pointer_event ev{type == GDK_BUTTON_PRESS ? pointer_event_type::press : pointer_event_type::release, widget_pos(e),
                             int(gdk_button_event_get_button(e)), 1, modifiers(gdk_event_get_modifier_state(e))};
-            if (ev.type == PointerEvent::Type::Press)
+            if (ev.type == pointer_event_type::press)
             {
                 if (focusable_ && !gtk_widget_has_focus(w_)) gtk_widget_grab_focus(w_);
                 // Count clicks ourselves, as gtk3 does, so each press arrives once.
@@ -1756,19 +1756,19 @@ private:
                 g_object_get(gtk_widget_get_settings(w_), "gtk-double-click-time", &time, "gtk-double-click-distance", &distance,
                              nullptr);
                 const guint32 t = gdk_event_get_time(e);
-                const bool again = ev.button == lastButton_ && t - lastTime_ <= guint32(time) &&
-                                   std::abs(ev.pos.x - lastPos_.x) <= distance && std::abs(ev.pos.y - lastPos_.y) <= distance;
+                const bool again = ev.button == last_button_ && t - last_time_ <= guint32(time) &&
+                                   std::abs(ev.pos.x - last_pos_.x) <= distance && std::abs(ev.pos.y - last_pos_.y) <= distance;
                 clicks_ = again ? clicks_ + 1 : 1;
                 ev.clicks = clicks_;
-                lastButton_ = ev.button;
-                lastTime_ = t;
-                lastPos_ = ev.pos;
+                last_button_ = ev.button;
+                last_time_ = t;
+                last_pos_ = ev.pos;
             }
             return pointer_ && pointer_(ev);
         }
         if (type == GDK_SCROLL && scroll_)
         {
-            ScrollEvent ev{widgetPos(e), 0, 0, false, modifiers(gdk_event_get_modifier_state(e))};
+            scroll_event ev{widget_pos(e), 0, 0, false, modifiers(gdk_event_get_modifier_state(e))};
             switch (gdk_scroll_event_get_direction(e))
             {
             case GDK_SCROLL_UP: ev.dy = -1; break;
@@ -1792,22 +1792,22 @@ private:
         return false;
     }
 
-    void crossing(GtkEventController* c, PointerEvent::Type type, double x, double y)
+    void crossing(GtkEventController* c, pointer_event_type type, double x, double y)
     {
         if (!pointer_) return;
-        PointF pos{float(x), float(y)};
-        if (type == PointerEvent::Type::Leave) pos = lastMove_;
+        point_f pos{float(x), float(y)};
+        if (type == pointer_event_type::leave) pos = last_move_;
         pointer_({type, pos, 0, 1, modifiers(gtk_event_controller_get_current_event_state(c))});
-        if (type != PointerEvent::Type::Leave) lastMove_ = pos;
+        if (type != pointer_event_type::leave) last_move_ = pos;
     }
 
     bool key(bool press, guint keyval, guint code, GdkModifierType state)
     {
         if (!key_) return false;
-        KeyEvent ev;
+        key_event ev;
         ev.press = press;
-        ev.key = keyFor(keyval);
-        if (ev.key == Key::Character) ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval));
+        ev.key = key_for(keyval);
+        if (ev.key == key::character) ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval));
         ev.modifiers = modifiers(state);
         if (press)
         {
@@ -1819,24 +1819,24 @@ private:
         return key_(ev);
     }
 
-    std::function<void(Painter&, SizeF)> paint_;
-    std::function<void(SizeF)> resize_;
-    std::function<bool(const PointerEvent&)> pointer_;
-    std::function<bool(const ScrollEvent&)> scroll_;
-    std::function<bool(const KeyEvent&)> key_;
+    std::function<void(rap::painter&, rap::size_f)> paint_;
+    std::function<void(size_f)> resize_;
+    std::function<bool(const pointer_event&)> pointer_;
+    std::function<bool(const scroll_event&)> scroll_;
+    std::function<bool(const key_event&)> key_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     std::vector<guint> ticks_;
     std::vector<guint> held_;
     bool focusable_ = false;
-    int clicks_ = 0, lastButton_ = 0;
-    guint32 lastTime_ = 0;
-    PointF lastPos_{}, lastMove_{};
+    int clicks_ = 0, last_button_ = 0;
+    guint32 last_time_ = 0;
+    point_f last_pos_{}, last_move_{};
 };
 
-class WWindow : public rap::Window, public Part
+class window_impl : public rap::window, public part
 {
 public:
-    WWindow(const WindowSpec& spec, WWindow* parent)
+    window_impl(const window_spec& spec, window_impl* parent)
         : win_(gtk_window_new())
         , dialog_(spec.dialog)
     {
@@ -1850,19 +1850,19 @@ public:
         GtkEventController* keys = gtk_event_controller_key_new();
         gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
         connect(keys, "key-pressed", +[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer p) -> gboolean
-                { return static_cast<WWindow*>(p)->windowKey(true, keyval, state); }, this);
+                { return static_cast<window_impl*>(p)->window_key(true, keyval, state); }, this);
         connect(keys, "key-released", +[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer p)
-                { static_cast<WWindow*>(p)->windowKey(false, keyval, state); }, this);
+                { static_cast<window_impl*>(p)->window_key(false, keyval, state); }, this);
         gtk_widget_add_controller(win_, keys);
         connect(win_, "notify::fullscreened",
                 +[](GObject*, GParamSpec*, gpointer p)
                 {
-                    auto* self = static_cast<WWindow*>(p);
+                    auto* self = static_cast<window_impl*>(p);
                     const bool fs = gtk_window_is_fullscreen(GTK_WINDOW(self->win_));
                     if (fs == self->fullscreen_) return;
                     self->fullscreen_ = fs;
-                    if (self->menuBar_) self->setMenuBarVisible(self->menuBarWanted_);  // hidden in fullscreen
-                    if (self->onFullscreen_) self->onFullscreen_(fs);
+                    if (self->menu_bar) self->set_menu_bar_visible(self->menu_bar_wanted);  // hidden in fullscreen
+                    if (self->on_fullscreen) self->on_fullscreen(fs);
                 },
                 this);
         if (dialog_)
@@ -1879,21 +1879,21 @@ public:
             win_, "close-request",
             +[](GtkWindow*, gpointer p) -> gboolean
             {
-                static_cast<WWindow*>(p)->closeRequested();
+                static_cast<window_impl*>(p)->close_requested();
                 return true;  // we own the window; never let GTK destroy it
             },
             this);
     }
 
-    ~WWindow() override
+    ~window_impl() override
     {
-        if (lastShown() == win_) lastShown() = nullptr;
+        if (last_shown() == win_) last_shown() = nullptr;
         for (auto& part : parts) part->disconnect();
         disconnect();
         gtk_window_destroy(GTK_WINDOW(win_));
     }
 
-    void setTitle(const std::string& t) override
+    void set_title(const std::string& t) override
     {
         gtk_window_set_title(GTK_WINDOW(win_), t.c_str());
     }
@@ -1901,25 +1901,25 @@ public:
     {
         finished_ = false;
         gtk_window_present(GTK_WINDOW(win_));
-        snapshotIfAsked();
+        snapshot_if_asked();
     }
 
     // Development aid, as in gtk3: RAPPORT_SNAPSHOT=file.png saves the window
     // shown last RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears,
     // then quits the main loop.
-    static GtkWidget*& lastShown()
+    static GtkWidget*& last_shown()
     {
         static GtkWidget* w = nullptr;
         return w;
     }
-    static GMainLoop*& mainLoop()
+    static GMainLoop*& main_loop()
     {
         static GMainLoop* loop = nullptr;
         return loop;
     }
-    void snapshotIfAsked()
+    void snapshot_if_asked()
     {
-        lastShown() = win_;
+        last_shown() = win_;
         static bool taken = false;
         const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (taken || !path || !*path) return;
@@ -1929,7 +1929,7 @@ public:
             delay ? guint(std::atoi(delay)) : 500u,
             +[](gpointer) -> gboolean
             {
-                if (GtkWidget* win = lastShown())
+                if (GtkWidget* win = last_shown())
                 {
                     // The window as GTK last drew it, rendered to a texture.
                     GdkPaintable* paintable = gtk_widget_paintable_new(win);
@@ -1946,39 +1946,39 @@ public:
                     }
                     g_object_unref(paintable);
                 }
-                if (mainLoop()) g_main_loop_quit(mainLoop());
+                if (main_loop()) g_main_loop_quit(main_loop());
                 return G_SOURCE_REMOVE;
             },
             nullptr);
     }
     void close() override { gtk_widget_set_visible(win_, false); }
-    void onFinished(std::function<void(DialogRole)> f) override { onFinished_ = std::move(f); }
-    void onCloseRequest(std::function<bool()> f) override { onCloseRequest_ = std::move(f); }
+    void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
+    void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
 
-    // TODO(pengit): drawn window icons.
-    SizeF size() const override
+    // TODO(tortilla): drawn window icons.
+    size_f size() const override
     {
         return {float(gtk_widget_get_width(win_)), float(gtk_widget_get_height(win_))};
     }
-    void resize(SizeF s) override
+    void resize(size_f s) override
     {
         // GTK 4 can't place windows, but at least the frame fits the work
         // area (its shadows are what the surface has beyond the window).
         int w = int(s.w), h = int(s.h);
-        const RectF wa = workArea();
+        const rect_f wa = work_area();
         if (GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(win_)); surface && wa.w > 0 && wa.h > 0)
         {
-            const int extraW = std::max(0, gdk_surface_get_width(surface) - gtk_widget_get_width(win_));
-            const int extraH = std::max(0, gdk_surface_get_height(surface) - gtk_widget_get_height(win_));
-            w = std::min(w, int(wa.w) - extraW);
-            h = std::min(h, int(wa.h) - extraH);
+            const int extra_w = std::max(0, gdk_surface_get_width(surface) - gtk_widget_get_width(win_));
+            const int extra_h = std::max(0, gdk_surface_get_height(surface) - gtk_widget_get_height(win_));
+            w = std::min(w, int(wa.w) - extra_w);
+            h = std::min(h, int(wa.h) - extra_h);
         }
         gtk_window_set_default_size(GTK_WINDOW(win_), std::max(1, w), std::max(1, h));
     }
-    void setMinSize(SizeF s) override { gtk_widget_set_size_request(win_, int(s.w), int(s.h)); }
-    std::optional<PointF> position() const override { return std::nullopt; }  // GTK 4: never
-    void move(PointF) override {}
-    RectF workArea() const override
+    void set_min_size(size_f s) override { gtk_widget_set_size_request(win_, int(s.w), int(s.h)); }
+    std::optional<point_f> position() const override { return std::nullopt; }  // GTK 4: never
+    void move(point_f) override {}
+    rect_f work_area() const override
     {
         // GTK 4 has no work area: the monitor's geometry, less what WSLg
         // can't see (the Windows taskbar).
@@ -1996,52 +1996,52 @@ public:
             gdk_monitor_get_geometry(first, &r);
             g_object_unref(first);
         }
-        return withoutWindowsTaskbar({float(r.x), float(r.y), float(r.width), float(r.height)});
+        return without_windows_taskbar({float(r.x), float(r.y), float(r.width), float(r.height)});
     }
     bool fullscreen() const override { return gtk_window_is_fullscreen(GTK_WINDOW(win_)); }
-    void setFullscreen(bool on) override
+    void set_fullscreen(bool on) override
     {
         if (on)
             gtk_window_fullscreen(GTK_WINDOW(win_));
         else
             gtk_window_unfullscreen(GTK_WINDOW(win_));
     }
-    void onFullscreenChanged(std::function<void(bool)> f) override { onFullscreen_ = std::move(f); }
-    void setIcon(const Icon& icon) override
+    void on_fullscreen_changed(std::function<void(bool)> f) override { on_fullscreen = std::move(f); }
+    void set_icon(const icon& icon) override
     {
         if (!icon.name.empty()) gtk_window_set_icon_name(GTK_WINDOW(win_), icon.name.c_str());
     }
-    void onKey(std::function<bool(const KeyEvent&)> f) override { onKey_ = std::move(f); }
-    void setMenuBarVisible(bool on) override
+    void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
+    void set_menu_bar_visible(bool on) override
     {
-        menuBarWanted_ = on;
-        if (menuBar_) gtk_widget_set_visible(menuBar_, on && !gtk_window_is_fullscreen(GTK_WINDOW(win_)));
+        menu_bar_wanted = on;
+        if (menu_bar) gtk_widget_set_visible(menu_bar, on && !gtk_window_is_fullscreen(GTK_WINDOW(win_)));
     }
 
     // The menu bar: a row of flat menu buttons, each building its menu when
     // it opens. (GtkPopoverMenuBar wants its whole model up front.)
-    GtkWidget* buildMenuBar(const std::vector<MenuBarItem>& menus)
+    GtkWidget* build_menu_bar(const std::vector<menu_bar_item>& menus)
     {
-        menuBar_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-        gtk_widget_add_css_class(menuBar_, "menubar");
-        for (const MenuBarItem& m : menus)
+        menu_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_add_css_class(menu_bar, "menubar");
+        for (const menu_bar_item& m : menus)
         {
-            auto bar = std::make_unique<BarMenu>();
+            auto bar = std::make_unique<bar_menu>();
             bar->fn = m.menu;
             GtkWidget* button = gtk_menu_button_new();
             gtk_menu_button_set_label(GTK_MENU_BUTTON(button), m.title.c_str());
             gtk_menu_button_set_use_underline(GTK_MENU_BUTTON(button), true);
             gtk_menu_button_set_has_frame(GTK_MENU_BUTTON(button), false);
             gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(button), false);
-            bar->actions = std::make_unique<MenuActions>(button, "bar");
-            attachMenu(GTK_MENU_BUTTON(button), bar->actions.get(), &bar->fn);
-            gtk_box_append(GTK_BOX(menuBar_), button);
-            bars_.push_back(std::move(bar));
+            bar->actions = std::make_unique<menu_actions>(button, "bar");
+            attach_menu(GTK_MENU_BUTTON(button), bar->actions.get(), &bar->fn);
+            gtk_box_append(GTK_BOX(menu_bar), button);
+            bars.push_back(std::move(bar));
         }
-        return menuBar_;
+        return menu_bar;
     }
 
-    void setContent(GtkWidget* content, bool margins, const std::vector<MenuBarItem>& menus)
+    void set_content(GtkWidget* content, bool margins, const std::vector<menu_bar_item>& menus)
     {
         int margin = !margins ? 0 : dialog_ ? 12 : 6;
         gtk_widget_set_margin_start(content, margin);
@@ -2050,40 +2050,40 @@ public:
         gtk_widget_set_margin_bottom(content, margin);
         if (menus.empty()) return gtk_window_set_child(GTK_WINDOW(win_), content);
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-        gtk_box_append(GTK_BOX(box), buildMenuBar(menus));
+        gtk_box_append(GTK_BOX(box), build_menu_bar(menus));
         gtk_widget_set_vexpand(content, true);
         gtk_box_append(GTK_BOX(box), content);
         gtk_window_set_child(GTK_WINDOW(win_), box);
     }
 
-    bool windowKey(bool press, guint keyval, GdkModifierType state)
+    bool window_key(bool press, guint keyval, GdkModifierType state)
     {
-        if (!onKey_) return false;
+        if (!on_key_) return false;
         GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
         const bool typing = focus && (GTK_IS_EDITABLE(focus) || (GTK_IS_TEXT_VIEW(focus) && gtk_text_view_get_editable(GTK_TEXT_VIEW(focus))));
-        const bool notText = keyval == GDK_KEY_Escape || (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12);
-        if (typing && !notText) return false;
-        KeyEvent ev;
+        const bool not_text = keyval == GDK_KEY_Escape || (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12);
+        if (typing && !not_text) return false;
+        key_event ev;
         ev.press = press;
-        ev.key = keyFor(keyval);
-        if (ev.key == Key::Character) ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval));
+        ev.key = key_for(keyval);
+        if (ev.key == key::character) ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval));
         ev.modifiers = modifiers(state);
-        return onKey_(ev);
+        return on_key_(ev);
     }
-    std::function<bool(const KeyEvent&)> onKey_;
-    std::function<void(bool)> onFullscreen_;
+    std::function<bool(const key_event&)> on_key_;
+    std::function<void(bool)> on_fullscreen;
     bool fullscreen_ = false;
 
-    struct BarMenu
+    struct bar_menu
     {
-        std::function<Menu()> fn;
-        std::unique_ptr<MenuActions> actions;
+        std::function<menu()> fn;
+        std::unique_ptr<menu_actions> actions;
     };
-    GtkWidget* menuBar_ = nullptr;
-    std::vector<std::unique_ptr<BarMenu>> bars_;
-    bool menuBarWanted_ = true;
+    GtkWidget* menu_bar = nullptr;
+    std::vector<std::unique_ptr<bar_menu>> bars;
+    bool menu_bar_wanted = true;
 
-    void addRoleButton(GtkWidget* button, DialogRole role)
+    void add_role_button(GtkWidget* button, dialog_role role)
     {
         g_object_set_data(G_OBJECT(button), "rapport-role", GINT_TO_POINTER(int(role)));
         connect(
@@ -2091,73 +2091,73 @@ public:
             +[](GtkButton* b, gpointer p)
             {
                 auto role =
-                    DialogRole(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "rapport-role")));
-                static_cast<WWindow*>(p)->finish(role);
+                    dialog_role(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "rapport-role")));
+                static_cast<window_impl*>(p)->finish(role);
             },
             this);
-        if (role == DialogRole::Ok || role == DialogRole::Yes)
+        if (role == dialog_role::ok || role == dialog_role::yes)
         {
             gtk_widget_add_css_class(button, "suggested-action");
             gtk_window_set_default_widget(GTK_WINDOW(win_), button);
         }
     }
 
-    GtkWidget* gtkWindow() const { return win_; }
+    GtkWidget* gtk_window() const { return win_; }
 
-    std::vector<std::unique_ptr<Part>> parts;
+    std::vector<std::unique_ptr<part>> parts;
 
 private:
-    void closeRequested()
+    void close_requested()
     {
-        if (onCloseRequest_ && !onCloseRequest_()) return;
+        if (on_close_request_ && !on_close_request_()) return;
         if (dialog_)
-            finish(DialogRole::Cancel);
+            finish(dialog_role::cancel);
         else
             close();
     }
 
     // The callback may delete this window, so it runs last.
-    void finish(DialogRole role)
+    void finish(dialog_role role)
     {
         close();
         if (finished_) return;
         finished_ = true;
-        if (auto f = onFinished_) f(role);
+        if (auto f = on_finished_) f(role);
     }
 
     GtkWidget* win_;
     bool dialog_;
     bool finished_ = false;
-    std::function<void(DialogRole)> onFinished_;
-    std::function<bool()> onCloseRequest_;
+    std::function<void(dialog_role)> on_finished_;
+    std::function<bool()> on_close_request_;
 };
 
 // ---------------------------------------------------------------- builder
 
-class Builder
+class builder
 {
 public:
-    Builder(WWindow& win, BuildSink& sink)
+    builder(window_impl& win, build_sink& sink)
         : win_(win)
         , sink_(sink)
     {
     }
 
-    GtkWidget* build(const Node& n, Orientation parentDir)
+    GtkWidget* build(const node& n, orientation parent_dir)
     {
-        GtkWidget* w = std::visit([&](const auto& s) { return make(n, s, parentDir); }, n.spec);
+        GtkWidget* w = std::visit([&](const auto& s) { return make(n, s, parent_dir); }, n.spec);
         // Containers have no interface; one with a handle gets a plain Widget.
-        const bool container = std::holds_alternative<spec::Box>(n.spec) ||
-                               std::holds_alternative<spec::Form>(n.spec) ||
-                               std::holds_alternative<spec::Group>(n.spec) ||
-                               std::holds_alternative<spec::Scroll>(n.spec) ||
-                               std::holds_alternative<spec::Toolbar>(n.spec);
-        if (container && n.common.handle) add<WPlain>(n, w);
+        const bool container = std::holds_alternative<spec::box>(n.spec) ||
+                               std::holds_alternative<spec::form>(n.spec) ||
+                               std::holds_alternative<spec::group>(n.spec) ||
+                               std::holds_alternative<spec::scroll>(n.spec) ||
+                               std::holds_alternative<spec::toolbar>(n.spec);
+        if (container && n.common.handle) add<plain_impl>(n, w);
         int width = px(n.common.width), height = px(n.common.height);
         if (width > 0 || height > 0) gtk_widget_set_size_request(w, width, height);
         if (n.common.stretch > 0)
         {
-            if (parentDir == Orientation::Vertical)
+            if (parent_dir == orientation::vertical)
                 gtk_widget_set_vexpand(w, true);
             else
                 gtk_widget_set_hexpand(w, true);
@@ -2166,18 +2166,18 @@ public:
     }
 
 private:
-    static bool fillsFormRow(const Spec& s)
+    static bool fills_form_row(const rap::node_spec& s)
     {
-        return std::holds_alternative<spec::Entry>(s) || std::holds_alternative<spec::Combo>(s) ||
-               std::holds_alternative<spec::TextView>(s) || std::holds_alternative<spec::List>(s) ||
-               std::holds_alternative<spec::Canvas>(s) || std::holds_alternative<spec::Box>(s) ||
-               std::holds_alternative<spec::Form>(s) || std::holds_alternative<spec::Splitter>(s) ||
-               std::holds_alternative<spec::Group>(s) || std::holds_alternative<spec::Scroll>(s) ||
-               std::holds_alternative<spec::Tabs>(s);
+        return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
+               std::holds_alternative<spec::text_view>(s) || std::holds_alternative<spec::list>(s) ||
+               std::holds_alternative<spec::canvas>(s) || std::holds_alternative<spec::box>(s) ||
+               std::holds_alternative<spec::form>(s) || std::holds_alternative<spec::splitter>(s) ||
+               std::holds_alternative<spec::group>(s) || std::holds_alternative<spec::scroll>(s) ||
+               std::holds_alternative<spec::tabs>(s);
     }
 
     template <class T, class... Args>
-    T& add(const Node& n, Args&&... args)
+    T& add(const node& n, Args&&... args)
     {
         auto* w = new T(std::forward<Args>(args)...);
         win_.parts.emplace_back(w);
@@ -2185,14 +2185,14 @@ private:
         return *w;
     }
 
-    GtkWidget* make(const Node&, const spec::Box& s, Orientation)
+    GtkWidget* make(const node&, const spec::box& s, orientation)
     {
-        GtkWidget* box = gtk_box_new(gtkOrientation(s.dir), 6);
+        GtkWidget* box = gtk_box_new(gtk_orientation(s.dir), 6);
         for (auto& c : s.items) gtk_box_append(GTK_BOX(box), build(c, s.dir));
         if (s.margins)
         {
             // A bar along a window edge: the full margin at its ends, half along its sides.
-            const bool row = s.dir == Orientation::Horizontal;
+            const bool row = s.dir == orientation::horizontal;
             gtk_widget_set_margin_start(box, row ? 6 : 3);
             gtk_widget_set_margin_end(box, row ? 6 : 3);
             gtk_widget_set_margin_top(box, row ? 3 : 6);
@@ -2201,18 +2201,18 @@ private:
         return box;
     }
 
-    GtkWidget* make(const Node&, const spec::Form& s, Orientation)
+    GtkWidget* make(const node&, const spec::form& s, orientation)
     {
         GtkWidget* grid = gtk_grid_new();
         gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
         gtk_grid_set_row_spacing(GTK_GRID(grid), 6);
         for (size_t i = 0; i < s.fields.size(); ++i)
         {
-            GtkWidget* field = build(s.fields[i], Orientation::Horizontal);
+            GtkWidget* field = build(s.fields[i], orientation::horizontal);
             // Text fields and containers fill the row; spins, selects, colour
             // buttons and the like keep their natural width (as in Windows
             // dialogs) unless the node asks to stretch.
-            if (fillsFormRow(s.fields[i].spec))
+            if (fills_form_row(s.fields[i].spec))
                 gtk_widget_set_hexpand(field, true);
             else if (!gtk_widget_get_hexpand(field))
                 gtk_widget_set_halign(field, GTK_ALIGN_START);
@@ -2230,40 +2230,40 @@ private:
         return grid;
     }
 
-    GtkWidget* make(const Node& n, const spec::Splitter& s, Orientation)
+    GtkWidget* make(const node& n, const spec::splitter& s, orientation)
     {
         if (s.panes.empty()) return gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
         GtkWidget* paned = panes(s, 0);
-        if (GTK_IS_PANED(paned)) add<WSplitter>(n, paned);
+        if (GTK_IS_PANED(paned)) add<splitter_impl>(n, paned);
         return paned;
     }
 
     // GtkPaned holds two children; more panes nest to the right/bottom.
-    GtkWidget* panes(const spec::Splitter& s, size_t from)
+    GtkWidget* panes(const spec::splitter& s, size_t from)
     {
         GtkWidget* first = build(s.panes[from], s.dir);
         if (from + 1 == s.panes.size()) return first;
 
-        bool anyStretch =
+        bool any_stretch =
             std::ranges::any_of(s.panes, [](auto& p) { return p.common.stretch > 0; });
         // Spare space goes to stretching panes only (as on win32): the rest
         // keep their size when the window grows.
-        const bool restStretch = std::any_of(s.panes.begin() + std::ptrdiff_t(from + 1), s.panes.end(),
+        const bool rest_stretch = std::any_of(s.panes.begin() + std::ptrdiff_t(from + 1), s.panes.end(),
                                              [](auto& p) { return p.common.stretch > 0; });
-        GtkWidget* paned = gtk_paned_new(gtkOrientation(s.dir));
+        GtkWidget* paned = gtk_paned_new(gtk_orientation(s.dir));
         auto* p = GTK_PANED(paned);
         gtk_paned_set_wide_handle(p, true);
         g_object_set_data(G_OBJECT(paned), "rapport-split-chain", GINT_TO_POINTER(1));
         gtk_paned_set_start_child(p, first);
         gtk_paned_set_end_child(p, panes(s, from + 1));
-        gtk_paned_set_resize_start_child(p, !anyStretch || s.panes[from].common.stretch > 0);
-        gtk_paned_set_resize_end_child(p, !anyStretch || restStretch);
+        gtk_paned_set_resize_start_child(p, !any_stretch || s.panes[from].common.stretch > 0);
+        gtk_paned_set_resize_end_child(p, !any_stretch || rest_stretch);
         gtk_paned_set_shrink_start_child(p, false);
         gtk_paned_set_shrink_end_child(p, false);
         return paned;
     }
 
-    GtkWidget* make(const Node&, const spec::Scroll& s, Orientation)
+    GtkWidget* make(const node&, const spec::scroll& s, orientation)
     {
         GtkWidget* scroller = gtk_scrolled_window_new();
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
@@ -2273,16 +2273,16 @@ private:
         gtk_widget_set_vexpand(scroller, true);
         if (!s.content.empty())
             gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller),
-                                          build(s.content.front(), Orientation::Vertical));
+                                          build(s.content.front(), orientation::vertical));
         return scroller;
     }
 
-    GtkWidget* make(const Node&, const spec::Group& s, Orientation)
+    GtkWidget* make(const node&, const spec::group& s, orientation)
     {
         GtkWidget* frame = gtk_frame_new(s.title.c_str());
         if (!s.content.empty())
         {
-            GtkWidget* child = build(s.content.front(), Orientation::Vertical);
+            GtkWidget* child = build(s.content.front(), orientation::vertical);
             gtk_widget_set_margin_start(child, 6);
             gtk_widget_set_margin_end(child, 6);
             gtk_widget_set_margin_top(child, 6);
@@ -2292,15 +2292,15 @@ private:
         return frame;
     }
 
-    GtkWidget* make(const Node& n, const spec::Tabs& s, Orientation)
+    GtkWidget* make(const node& n, const spec::tabs& s, orientation)
     {
-        if (s.sidebar) return makeSidebar(n, s);
+        if (s.sidebar) return make_sidebar(n, s);
         GtkWidget* nb = gtk_notebook_new();
         std::vector<GtkWidget*> pages;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             const bool lazy = i < s.lazy.size() && s.lazy[i];
-            GtkWidget* page = lazy ? gtk_box_new(GTK_ORIENTATION_VERTICAL, 0) : build(s.pages[i], Orientation::Vertical);
+            GtkWidget* page = lazy ? gtk_box_new(GTK_ORIENTATION_VERTICAL, 0) : build(s.pages[i], orientation::vertical);
             pages.push_back(page);
             gtk_widget_set_margin_start(page, 6);
             gtk_widget_set_margin_end(page, 6);
@@ -2309,15 +2309,15 @@ private:
             gtk_notebook_append_page(GTK_NOTEBOOK(nb), page,
                                      gtk_label_new_with_mnemonic(s.titles[i].c_str()));
         }
-        auto& tabs = add<WTabs>(n, nb);
+        auto& tabs = add<tabs_impl>(n, nb);
         if (!s.lazy.empty())
-            tabs.setLazy(s.lazy, std::move(pages),
-                         [&win = win_, &sink = sink_](const Node& page) { return Builder(win, sink).build(page, Orientation::Vertical); });
+            tabs.set_lazy(s.lazy, std::move(pages),
+                         [&win = win_, &sink = sink_](const node& page) { return builder(win, sink).build(page, orientation::vertical); });
         return nb;
     }
 
     // Tabs as a list of page names down the left, the page in a stack beside it.
-    GtkWidget* makeSidebar(const Node& n, const spec::Tabs& s)
+    GtkWidget* make_sidebar(const node& n, const spec::tabs& s)
     {
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
         GtkWidget* list = gtk_list_box_new();
@@ -2336,7 +2336,7 @@ private:
             gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
             gtk_list_box_append(GTK_LIST_BOX(list), row);
             const bool lazy = i < s.lazy.size() && s.lazy[i];
-            GtkWidget* page = lazy ? gtk_box_new(GTK_ORIENTATION_VERTICAL, 0) : build(s.pages[i], Orientation::Vertical);
+            GtkWidget* page = lazy ? gtk_box_new(GTK_ORIENTATION_VERTICAL, 0) : build(s.pages[i], orientation::vertical);
             gtk_widget_set_margin_start(page, 6);
             gtk_widget_set_margin_end(page, 6);
             gtk_widget_set_margin_top(page, 6);
@@ -2348,188 +2348,188 @@ private:
         gtk_box_append(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
         gtk_widget_set_hexpand(stack, TRUE);
         gtk_box_append(GTK_BOX(box), stack);
-        auto& tabs = add<WSideTabs>(n, box, list, stack);
-        tabs.setCurrent(0);
+        auto& tabs = add<side_tabs_impl>(n, box, list, stack);
+        tabs.set_current(0);
         if (!s.lazy.empty())
-            tabs.setLazy(s.lazy, std::move(pages),
-                         [&win = win_, &sink = sink_](const Node& page) { return Builder(win, sink).build(page, Orientation::Vertical); });
+            tabs.set_lazy(s.lazy, std::move(pages),
+                         [&win = win_, &sink = sink_](const node& page) { return builder(win, sink).build(page, orientation::vertical); });
         return box;
     }
 
-    GtkWidget* make(const Node&, const spec::Spacer&, Orientation)
+    GtkWidget* make(const node&, const spec::spacer&, orientation)
     {
         return gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     }
 
-    GtkWidget* make(const Node&, const spec::Separator&, Orientation parentDir)
+    GtkWidget* make(const node&, const spec::separator&, orientation parent_dir)
     {
-        return gtk_separator_new(parentDir == Orientation::Vertical ? GTK_ORIENTATION_HORIZONTAL
+        return gtk_separator_new(parent_dir == orientation::vertical ? GTK_ORIENTATION_HORIZONTAL
                                                                     : GTK_ORIENTATION_VERTICAL);
     }
 
-    GtkWidget* make(const Node& n, const spec::Label& s, Orientation)
+    GtkWidget* make(const node& n, const spec::label& s, orientation)
     {
-        return add<WLabel>(n, s).outer();
+        return add<label_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::Button& s, Orientation)
+    GtkWidget* make(const node& n, const spec::button& s, orientation)
     {
-        auto& w = add<WButton>(n, s.iconOnly ? std::string() : s.text);
-        if (s.icon) w.setIcon(s.icon);
-        if (s.iconOnly && n.common.tooltip.empty()) w.setTooltip(s.text);
+        auto& w = add<button_impl>(n, s.icon_only ? std::string() : s.text);
+        if (s.icon) w.set_icon(s.icon);
+        if (s.icon_only && n.common.tooltip.empty()) w.set_tooltip(s.text);
         GtkWidget* b = w.outer();
         if (s.flat) gtk_button_set_has_frame(GTK_BUTTON(b), false);
         return b;
     }
 
-    GtkWidget* make(const Node& n, const spec::ToolButton& s, Orientation)
+    GtkWidget* make(const node& n, const spec::tool_button& s, orientation)
     {
-        return add<WToolButton>(n, s).outer();
+        return add<tool_button_impl>(n, s).outer();
     }
 
     // No GtkToolbar in GTK 4: a box styled as a toolbar.
-    GtkWidget* make(const Node&, const spec::Toolbar& s, Orientation)
+    GtkWidget* make(const node&, const spec::toolbar& s, orientation)
     {
         GtkWidget* bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
         gtk_widget_add_css_class(bar, "toolbar");
-        for (const Node& item : s.items)
+        for (const node& item : s.items)
         {
-            GtkWidget* w = build(item, Orientation::Horizontal);
-            if (std::holds_alternative<spec::Spacer>(item.spec)) gtk_widget_set_hexpand(w, true);
+            GtkWidget* w = build(item, orientation::horizontal);
+            if (std::holds_alternative<spec::spacer>(item.spec)) gtk_widget_set_hexpand(w, true);
             gtk_box_append(GTK_BOX(bar), w);
         }
         return bar;
     }
 
-    GtkWidget* make(const Node& n, const spec::Slider& s, Orientation)
+    GtkWidget* make(const node& n, const spec::slider& s, orientation)
     {
         GtkWidget* scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, s.min, s.max,
                                                     s.step > 0 ? s.step : 0.01);
         gtk_scale_set_digits(GTK_SCALE(scale), s.digits);
-        gtk_scale_set_draw_value(GTK_SCALE(scale), s.showValue);
+        gtk_scale_set_draw_value(GTK_SCALE(scale), s.show_value);
         gtk_range_set_value(GTK_RANGE(scale), s.value);
         for (auto& [at, label] : s.marks)
             gtk_scale_add_mark(GTK_SCALE(scale), at, GTK_POS_BOTTOM,
                                label.empty() ? nullptr : label.c_str());
-        return add<WValue<rap::Slider>>(n, scale).outer();
+        return add<value_impl<rap::slider>>(n, scale).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::Spin& s, Orientation)
+    GtkWidget* make(const node& n, const spec::spin& s, orientation)
     {
         GtkWidget* spin = gtk_spin_button_new_with_range(s.min, s.max, s.step > 0 ? s.step : 1);
         gtk_spin_button_set_digits(GTK_SPIN_BUTTON(spin), guint(std::max(s.digits, 0)));
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin), s.value);
-        return add<WValue<rap::Spin>>(n, spin).outer();
+        return add<value_impl<rap::spin>>(n, spin).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::ColorButton& s, Orientation)
+    GtkWidget* make(const node& n, const spec::color_button& s, orientation)
     {
-        return add<WColorButton>(n, s).outer();
+        return add<color_button_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::MenuButton& s, Orientation)
+    GtkWidget* make(const node& n, const spec::menu_button& s, orientation)
     {
-        return add<WMenuButton>(n, s).outer();
+        return add<menu_button_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::ProgressBar&, Orientation)
+    GtkWidget* make(const node& n, const spec::progress_bar&, orientation)
     {
-        return add<WProgressBar>(n).outer();
+        return add<progress_bar_impl>(n).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::DatePicker& s, Orientation)
+    GtkWidget* make(const node& n, const spec::date_picker& s, orientation)
     {
-        return add<WDatePicker>(n, s).outer();
+        return add<date_picker_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::Check& s, Orientation)
+    GtkWidget* make(const node& n, const spec::check& s, orientation)
     {
-        return add<WCheck>(n, s).outer();
+        return add<check_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::Entry& s, Orientation)
+    GtkWidget* make(const node& n, const spec::entry& s, orientation)
     {
-        return add<WEntry>(n, s).outer();
+        return add<entry_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::Select& s, Orientation)
+    GtkWidget* make(const node& n, const spec::drop_down& s, orientation)
     {
-        return add<WSelect>(n, s).outer();
+        return add<drop_down_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::Combo& s, Orientation)
+    GtkWidget* make(const node& n, const spec::combo& s, orientation)
     {
-        return add<WCombo>(n, s).outer();
+        return add<combo_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::TextView& s, Orientation)
+    GtkWidget* make(const node& n, const spec::text_view& s, orientation)
     {
-        return add<WTextView>(n, s).outer();
+        return add<text_view_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::List& s, Orientation)
+    GtkWidget* make(const node& n, const spec::list& s, orientation)
     {
-        return add<WList>(n, s).outer();
+        return add<list_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node& n, const spec::Canvas& s, Orientation)
+    GtkWidget* make(const node& n, const spec::canvas& s, orientation)
     {
-        return add<WCanvas>(n, s).outer();
+        return add<canvas_impl>(n, s).outer();
     }
 
-    GtkWidget* make(const Node&, const spec::Buttons& s, Orientation)
+    GtkWidget* make(const node&, const spec::buttons& s, orientation)
     {
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         gtk_widget_set_margin_top(box, 6);
         auto ordered = s.buttons;
-        std::ranges::stable_sort(ordered, {}, [](auto& b) { return gnomeOrder(b.role); });
+        std::ranges::stable_sort(ordered, {}, [](auto& b) { return gnome_order(b.role); });
         bool spaced = false;
         for (auto& b : ordered)
         {
             // Help sits at the far start, the rest at the end.
-            if (!spaced && b.role != DialogRole::Help)
+            if (!spaced && b.role != dialog_role::help)
             {
                 GtkWidget* gap = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
                 gtk_widget_set_hexpand(gap, true);
                 gtk_box_append(GTK_BOX(box), gap);
                 spaced = true;
             }
-            auto* w = new WButton(b.text.empty() ? stockLabel(b.role) : b.text);
+            auto* w = new button_impl(b.text.empty() ? stock_label(b.role) : b.text);
             win_.parts.emplace_back(w);
-            if (!b.onClick) win_.addRoleButton(w->outer(), b.role);
+            if (!b.on_click) win_.add_role_button(w->outer(), b.role);
             sink_.created(b, *w);
             gtk_box_append(GTK_BOX(box), w->outer());
         }
         return box;
     }
 
-    WWindow& win_;
-    BuildSink& sink_;
+    window_impl& win_;
+    build_sink& sink_;
 };
 
 // ---------------------------------------------------------------- backend
 
-class Gtk4Backend : public Backend
+class gtk4_backend : public backend
 {
 public:
-    static Backend* create(int*, char**)
+    static backend* create(int*, char**)
     {
         // Under WSLg, X11 draws faster than its Wayland (measured: 23 against
         // 20 fps for a panning canvas; gtk3 39 against 29).
-        if (underWsl() && !std::getenv("GDK_BACKEND")) gdk_set_allowed_backends("x11,*");
+        if (under_wsl() && !std::getenv("GDK_BACKEND")) gdk_set_allowed_backends("x11,*");
         if (!gtk_init_check()) return nullptr;
-        initMetrics();
-        return new Gtk4Backend;
+        init_metrics();
+        return new gtk4_backend;
     }
 
     std::string_view name() const override { return "gtk4"; }
 
-    std::unique_ptr<rap::Window> createWindow(const WindowSpec& spec, rap::Window* parent,
-                                                BuildSink& sink) override
+    std::unique_ptr<rap::window> create_window(const window_spec& spec, rap::window* parent,
+                                                build_sink& sink) override
     {
-        auto win = std::make_unique<WWindow>(spec, static_cast<WWindow*>(parent));
-        win->setContent(Builder(*win, sink).build(spec.content, Orientation::Vertical),
-                        spec.margins, spec.menuBar);
+        auto win = std::make_unique<window_impl>(spec, static_cast<window_impl*>(parent));
+        win->set_content(builder(*win, sink).build(spec.content, orientation::vertical),
+                        spec.margins, spec.menu_bar);
         return win;
     }
 
@@ -2537,9 +2537,9 @@ public:
     {
         if (quit_) return code_;
         loop_ = g_main_loop_new(nullptr, false);
-        WWindow::mainLoop() = loop_;
+        window_impl::main_loop() = loop_;
         g_main_loop_run(loop_);
-        WWindow::mainLoop() = nullptr;
+        window_impl::main_loop() = nullptr;
         g_main_loop_unref(loop_);
         loop_ = nullptr;
         return code_;
@@ -2565,24 +2565,24 @@ public:
             +[](gpointer p) { delete static_cast<std::function<void()>*>(p); });
     }
 
-    void message(rap::Window* parent, const MessageSpec& m,
-                 std::function<void(DialogRole)> done) override
+    void message(rap::window* parent, const message_spec& m,
+                 std::function<void(dialog_role)> done) override
     {
         GtkAlertDialog* dlg = gtk_alert_dialog_new("%s", m.text.c_str());
         if (!m.detail.empty()) gtk_alert_dialog_set_detail(dlg, m.detail.c_str());
 
-        struct Ctx
+        struct context
         {
-            std::vector<DialogRole> roles;
-            std::function<void(DialogRole)> done;
+            std::vector<dialog_role> roles;
+            std::function<void(dialog_role)> done;
         };
-        auto* ctx = new Ctx{m.buttons, std::move(done)};
-        if (ctx->roles.empty()) ctx->roles = {DialogRole::Ok};
+        auto* ctx = new context{m.buttons, std::move(done)};
+        if (ctx->roles.empty()) ctx->roles = {dialog_role::ok};
 
         std::vector<std::string> labels;
         for (auto r : ctx->roles)
         {
-            std::string l = stockLabel(r);
+            std::string l = stock_label(r);
             std::erase(l, '_');
             labels.push_back(l);
         }
@@ -2591,17 +2591,17 @@ public:
         ptrs.push_back(nullptr);
         gtk_alert_dialog_set_buttons(dlg, ptrs.data());
         for (size_t i = 0; i < ctx->roles.size(); ++i)
-            if (ctx->roles[i] == DialogRole::Cancel || ctx->roles[i] == DialogRole::No)
+            if (ctx->roles[i] == dialog_role::cancel || ctx->roles[i] == dialog_role::no)
                 gtk_alert_dialog_set_cancel_button(dlg, int(i));
 
         gtk_alert_dialog_choose(
-            dlg, parentWindow(parent), nullptr,
+            dlg, parent_window(parent), nullptr,
             +[](GObject* src, GAsyncResult* res, gpointer p)
             {
-                std::unique_ptr<Ctx> ctx(static_cast<Ctx*>(p));
+                std::unique_ptr<context> ctx(static_cast<context*>(p));
                 int i = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(src), res, nullptr);
-                DialogRole role = i >= 0 && size_t(i) < ctx->roles.size() ? ctx->roles[size_t(i)]
-                                                                          : DialogRole::Cancel;
+                dialog_role role = i >= 0 && size_t(i) < ctx->roles.size() ? ctx->roles[size_t(i)]
+                                                                          : dialog_role::cancel;
                 if (ctx->done) ctx->done(role);
             },
             ctx);
@@ -2611,7 +2611,7 @@ public:
     // A save in progress. When the backend added the extension and that
     // file exists, GTK's own overwrite check saw only the name as typed, so
     // replacing is asked here; Cancel reopens the dialog on the typed name.
-    struct SaveState
+    struct save_state
     {
         GtkFileDialog* dlg;  // owned
         GtkWindow* parent;
@@ -2623,7 +2623,7 @@ public:
             gtk_file_dialog_save(dlg, parent, nullptr,
                                  +[](GObject* s, GAsyncResult* r, gpointer p)
                                  {
-                                     static_cast<SaveState*>(p)->saved(
+                                     static_cast<save_state*>(p)->saved(
                                          gtk_file_dialog_save_finish(GTK_FILE_DIALOG(s), r, nullptr));
                                  },
                                  this);
@@ -2641,7 +2641,7 @@ public:
                 g_object_unref(file);
             }
             if (typed.empty()) return finish({});
-            const std::string path = withExtension(typed, ext);
+            const std::string path = with_extension(typed, ext);
             if (path == typed || !g_file_test(path.c_str(), G_FILE_TEST_EXISTS)) return finish({path});
             gchar* name = g_path_get_basename(path.c_str());
             GtkAlertDialog* alert =
@@ -2651,14 +2651,14 @@ public:
             gtk_alert_dialog_set_buttons(alert, buttons);
             gtk_alert_dialog_set_cancel_button(alert, 0);
             gtk_alert_dialog_set_default_button(alert, 0);
-            pending_ = {typed, path};
+            pending = {typed, path};
             gtk_alert_dialog_choose(alert, parent, nullptr,
                                     +[](GObject* a, GAsyncResult* r, gpointer p)
                                     {
-                                        auto* self = static_cast<SaveState*>(p);
+                                        auto* self = static_cast<save_state*>(p);
                                         const int b = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(a), r, nullptr);
-                                        if (b == 1) return self->finish({self->pending_.second});
-                                        GFile* again = g_file_new_for_path(self->pending_.first.c_str());
+                                        if (b == 1) return self->finish({self->pending.second});
+                                        GFile* again = g_file_new_for_path(self->pending.first.c_str());
                                         gtk_file_dialog_set_initial_file(self->dlg, again);
                                         g_object_unref(again);
                                         self->run();
@@ -2673,10 +2673,10 @@ public:
             delete this;
             if (done) done(std::move(out));
         }
-        std::pair<std::string, std::string> pending_;  // typed, with extension
+        std::pair<std::string, std::string> pending;  // typed, with extension
     };
 
-    void chooseFiles(rap::Window* parent, const FileDialogSpec& f,
+    void choose_files(rap::window* parent, const file_dialog_spec& f,
                      std::function<void(std::vector<std::string>)> done) override
     {
         GtkFileDialog* dlg = gtk_file_dialog_new();
@@ -2700,31 +2700,31 @@ public:
             gtk_file_dialog_set_filters(dlg, G_LIST_MODEL(store));
             g_object_unref(store);
         }
-        if (!f.initialPath.empty())
+        if (!f.initial_path.empty())
         {
-            GFile* file = g_file_new_for_path(f.initialPath.c_str());
-            if (g_file_test(f.initialPath.c_str(), G_FILE_TEST_IS_DIR))
+            GFile* file = g_file_new_for_path(f.initial_path.c_str());
+            if (g_file_test(f.initial_path.c_str(), G_FILE_TEST_IS_DIR))
                 gtk_file_dialog_set_initial_folder(dlg, file);
             else
                 gtk_file_dialog_set_initial_file(dlg, file);
             g_object_unref(file);
         }
 
-        using Done = std::function<void(std::vector<std::string>)>;
-        GtkWindow* pw = parentWindow(parent);
-        if (f.mode == FileDialogSpec::Mode::Save)
+        using done_fn = std::function<void(std::vector<std::string>)>;
+        GtkWindow* pw = parent_window(parent);
+        if (f.mode == file_dialog_spec::mode::save)
         {
             // GTK 4 doesn't say which filter the user picked: the first's
             // extension goes on a name typed without one.
-            auto* save = new SaveState{dlg, pw, f.filters.empty() ? "" : defaultExtension(f.filters.front().pattern),
+            auto* save = new save_state{dlg, pw, f.filters.empty() ? "" : default_extension(f.filters.front().pattern),
                                        std::move(done)};
             g_object_ref(dlg);
             save->run();
             g_object_unref(dlg);
             return;
         }
-        auto* ctx = new Done(std::move(done));
-        auto pathOf = [](GFile* file)
+        auto* ctx = new done_fn(std::move(done));
+        auto path_of = [](GFile* file)
         {
             std::string out;
             if (char* p = g_file_get_path(file))
@@ -2736,7 +2736,7 @@ public:
         };
         static auto single = +[](GFile* file, gpointer p)
         {
-            std::unique_ptr<Done> done(static_cast<Done*>(p));
+            std::unique_ptr<done_fn> done(static_cast<done_fn*>(p));
             std::vector<std::string> out;
             if (file)
             {
@@ -2749,19 +2749,19 @@ public:
             }
             if (*done) (*done)(std::move(out));
         };
-        (void)pathOf;
+        (void)path_of;
 
         switch (f.mode)
         {
-        case FileDialogSpec::Mode::Open:
+        case file_dialog_spec::mode::open:
             gtk_file_dialog_open(
                 dlg, pw, nullptr,
                 +[](GObject* s, GAsyncResult* r, gpointer p)
                 { single(gtk_file_dialog_open_finish(GTK_FILE_DIALOG(s), r, nullptr), p); },
                 ctx);
             break;
-        case FileDialogSpec::Mode::Save: break;  // above
-        case FileDialogSpec::Mode::Folder:
+        case file_dialog_spec::mode::save: break;  // above
+        case file_dialog_spec::mode::folder:
             gtk_file_dialog_select_folder(
                 dlg, pw, nullptr,
                 +[](GObject* s, GAsyncResult* r, gpointer p)
@@ -2770,12 +2770,12 @@ public:
                 },
                 ctx);
             break;
-        case FileDialogSpec::Mode::OpenMany:
+        case file_dialog_spec::mode::open_many:
             gtk_file_dialog_open_multiple(
                 dlg, pw, nullptr,
                 +[](GObject* s, GAsyncResult* r, gpointer p)
                 {
-                    std::unique_ptr<Done> done(static_cast<Done*>(p));
+                    std::unique_ptr<done_fn> done(static_cast<done_fn*>(p));
                     std::vector<std::string> out;
                     if (GListModel* files =
                             gtk_file_dialog_open_multiple_finish(GTK_FILE_DIALOG(s), r, nullptr))
@@ -2800,44 +2800,44 @@ public:
         g_object_unref(dlg);
     }
 
-    // TODO(pengit): a GdkTexture on the clipboard.
-    void setClipboardImage(int, int, PixelFormat, const uint8_t*, size_t) override {}
+    // TODO(tortilla): a GdkTexture on the clipboard.
+    void set_clipboard_image(int, int, pixel_format, const uint8_t*, size_t) override {}
 
-    void setClipboard(const std::string& s) override
+    void set_clipboard(const std::string& s) override
     {
         if (GdkDisplay* d = gdk_display_get_default())
             gdk_clipboard_set_text(gdk_display_get_clipboard(d), s.c_str());
     }
 
-    // TODO(pengit): a GdkTexture-backed Image would avoid cairo for painting.
-    std::unique_ptr<rap::Image> createImage(int w, int h, PixelFormat format,
+    // TODO(tortilla): a GdkTexture-backed Image would avoid cairo for painting.
+    std::unique_ptr<rap::image> create_image(int w, int h, pixel_format format,
                                               const uint8_t* pixels, size_t stride) override
     {
-        return std::make_unique<CairoImage>(w, h, format, pixels, stride);
+        return std::make_unique<cairo_image>(w, h, format, pixels, stride);
     }
 
-    Subscription timer(int ms, bool repeat, std::function<void()> fn) override
+    subscription timer(int ms, bool repeat, std::function<void()> fn) override
     {
-        struct State
+        struct timer_state
         {
             std::function<void()> fn;
             bool repeat;
             guint id = 0;
         };
-        auto state = std::make_shared<State>(State{std::move(fn), repeat});
+        auto state = std::make_shared<timer_state>(timer_state{std::move(fn), repeat});
         state->id = g_timeout_add_full(
             G_PRIORITY_DEFAULT, guint(std::max(ms, 0)),
             +[](gpointer p) -> gboolean
             {
-                auto state = *static_cast<std::shared_ptr<State>*>(p);
+                auto state = *static_cast<std::shared_ptr<timer_state>*>(p);
                 const bool again = state->repeat;
                 if (!again) state->id = 0;
                 state->fn();
                 return again && state->id ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
             },
-            new std::shared_ptr<State>(state),
-            +[](gpointer p) { delete static_cast<std::shared_ptr<State>*>(p); });
-        return Subscription(
+            new std::shared_ptr<timer_state>(state),
+            +[](gpointer p) { delete static_cast<std::shared_ptr<timer_state>*>(p); });
+        return subscription(
             [state]
             {
                 if (state->id) g_source_remove(std::exchange(state->id, 0));
@@ -2845,9 +2845,9 @@ public:
     }
 
 private:
-    static GtkWindow* parentWindow(rap::Window* w)
+    static GtkWindow* parent_window(rap::window* w)
     {
-        return w ? GTK_WINDOW(static_cast<WWindow*>(w)->gtkWindow()) : nullptr;
+        return w ? GTK_WINDOW(static_cast<window_impl*>(w)->gtk_window()) : nullptr;
     }
 
     GMainLoop* loop_ = nullptr;
@@ -2858,4 +2858,4 @@ private:
 }  // namespace
 }  // namespace rap::gtk4
 
-RAPPORT_BACKEND_ENTRY(gtk4, rap::gtk4::Gtk4Backend)
+RAPPORT_BACKEND_ENTRY(gtk4, rap::gtk4::gtk4_backend)

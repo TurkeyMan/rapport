@@ -19,7 +19,7 @@ using namespace rap;
 namespace
 {
 
-std::vector<uint8_t> testCard(int w, int h)
+std::vector<uint8_t> test_card(int w, int h)
 {
     std::vector<uint8_t> px(size_t(w) * h * 4);
     for (int y = 0; y < h; ++y)
@@ -55,38 +55,38 @@ std::vector<uint8_t> disc(int n)
 std::string mods(unsigned m)
 {
     std::string s;
-    if (m & ModCtrl) s += "Ctrl+";
-    if (m & ModShift) s += "Shift+";
-    if (m & ModAlt) s += "Alt+";
-    if (m & ModMeta) s += "Meta+";
+    if (m & mod_ctrl) s += "Ctrl+";
+    if (m & mod_shift) s += "Shift+";
+    if (m & mod_alt) s += "Alt+";
+    if (m & mod_meta) s += "Meta+";
     return s.empty() ? "-" : s.substr(0, s.size() - 1);
 }
 
-const char* typeName(PointerEvent::Type t)
+const char* type_name(pointer_event_type t)
 {
     switch (t)
     {
-    case PointerEvent::Type::Press: return "press";
-    case PointerEvent::Type::Release: return "release";
-    case PointerEvent::Type::Move: return "move";
-    case PointerEvent::Type::Enter: return "enter";
-    case PointerEvent::Type::Leave: return "leave";
+    case pointer_event_type::press: return "press";
+    case pointer_event_type::release: return "release";
+    case pointer_event_type::move: return "move";
+    case pointer_event_type::enter: return "enter";
+    case pointer_event_type::leave: return "leave";
     }
     return "?";
 }
 
-bool inside(RectF r, PointF p)
+bool inside(rect_f r, point_f p)
 {
     return p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h;
 }
 
 // Drawn icons: follow the theme's text colour and the display scale.
-Icon playPauseIcon(const bool& paused)
+icon play_pause_icon(const bool& paused)
 {
-    return Icon::drawn(
-        [&paused](Painter& p, SizeF s)
+    return icon::drawn(
+        [&paused](painter& p, size_f s)
         {
-            const Paint ink = ThemeColor::WindowText;
+            const paint ink = theme_color::window_text;
             if (paused)
                 p.polygon({{s.w * 0.25f, s.h * 0.15f},
                            {s.w * 0.25f, s.h * 0.85f},
@@ -100,14 +100,14 @@ Icon playPauseIcon(const bool& paused)
         });
 }
 
-Icon magnifier(bool plus)
+icon magnifier(bool plus)
 {
-    return Icon::drawn(
-        [plus](Painter& p, SizeF s)
+    return icon::drawn(
+        [plus](painter& p, size_f s)
         {
-            const Paint ink = ThemeColor::WindowText;
+            const paint ink = theme_color::window_text;
             const float r = s.w * 0.3f;
-            const PointF c{s.w * 0.42f, s.h * 0.42f};
+            const point_f c{s.w * 0.42f, s.h * 0.42f};
             p.circle(c, r, std::nullopt, ink);
             p.line({c.x + r * 0.7f, c.y + r * 0.7f}, {s.w * 0.9f, s.h * 0.9f}, ink, s.w * 0.12f);
             p.line({c.x - r * 0.5f, c.y}, {c.x + r * 0.5f, c.y}, ink, 1.5f);
@@ -119,165 +119,165 @@ Icon magnifier(bool plus)
 
 int main(int argc, char** argv)
 {
-    auto ui = Ui::load(argc, argv);
+    auto ui = ui::load(argc, argv);
     if (!ui)
     {
         std::fprintf(stderr, "%s\n", ui.error().c_str());
         return 1;
     }
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
-    std::printf("backend: %s\n", std::string((*ui)->backendName()).c_str());
+    std::printf("backend: %s\n", std::string((*ui)->backend_name()).c_str());
 
-    const auto card = testCard(64, 48);
-    const auto discPx = disc(32);
-    auto cardImage =
-        (*ui)->createImage(64, 48, PixelFormat::Bgra8Premultiplied, card.data(), 64 * 4);
-    auto discImage = (*ui)->createImage(32, 32, PixelFormat::Rgba8, discPx.data(), 32 * 4);
+    const auto card = test_card(64, 48);
+    const auto disc_px = disc(32);
+    auto card_image =
+        (*ui)->create_image(64, 48, pixel_format::bgra8_premultiplied, card.data(), 64 * 4);
+    auto disc_image = (*ui)->create_image(32, 32, pixel_format::rgba8, disc_px.data(), 32 * 4);
 
-    rap::Canvas* canvas = nullptr;
-    rap::Label* status = nullptr;
-    rap::Slider* zoomSlider = nullptr;
-    rap::ToolButton* playToggle = nullptr;
-    rap::Widget* toolbar = nullptr;  // handles: hidden in fullscreen
-    rap::Widget* bottomBar = nullptr;
-    std::unique_ptr<rap::Window> win;
+    rap::canvas* canvas = nullptr;
+    rap::label* status = nullptr;
+    rap::slider* zoom_slider = nullptr;
+    rap::tool_button* play_toggle = nullptr;
+    rap::widget* toolbar = nullptr;  // handles: hidden in fullscreen
+    rap::widget* bottom_bar = nullptr;
+    std::unique_ptr<rap::window> win;
 
-    PointF pan{0, 0}, dragFrom{};
+    point_f pan{0, 0}, drag_from{};
     bool dragging = false, paused = false;
     float zoom = 4, padding = 16;
-    Color background{40, 40, 44};
+    color background{40, 40, 44};
     double clock = 0, last = -1;
     int frames = 0;
-    SizeF lastSize{};
+    size_f last_size{};
 
     // Geometry shared by painting and hit testing.
-    auto playRect = [&] { return RectF{lastSize.w - 150, padding, 60, 60}; };
-    auto zoomedRects = [&](float scale)
+    auto play_rect = [&] { return rect_f{last_size.w - 150, padding, 60, 60}; };
+    auto zoomed_rects = [&](float scale)
     {
         const float zw = 64 * zoom / scale, zh = 48 * zoom / scale;
-        return std::pair{RectF{padding + pan.x, 80 + pan.y, zw, zh},
-                         RectF{2 * padding + zw + pan.x, 80 + pan.y, zw, zh}};
+        return std::pair{rect_f{padding + pan.x, 80 + pan.y, zw, zh},
+                         rect_f{2 * padding + zw + pan.x, 80 + pan.y, zw, zh}};
     };
-    auto setZoom = [&](float z)
+    auto set_zoom = [&](float z)
     {
         zoom = std::clamp(z, 0.25f, 32.f);
-        if (zoomSlider) zoomSlider->setValue(zoom);
+        if (zoom_slider) zoom_slider->set_value(zoom);
         canvas->invalidate();
     };
-    auto setPaused = [&](bool p)
+    auto set_paused = [&](bool p)
     {
         paused = p;
-        if (playToggle) playToggle->setChecked(!paused);
+        if (play_toggle) play_toggle->set_checked(!paused);
         std::printf("animation %s\n", paused ? "paused" : "playing");
         canvas->invalidate();
     };
 
-    auto paint = [&](Painter& p, SizeF size)
+    auto paint = [&](painter& p, size_f size)
     {
-        lastSize = size;
-        const float scale = p.deviceScale();
+        last_size = size;
+        const float scale = p.device_scale();
         p.rect({0, 0, size.w, size.h}, 0, background, std::nullopt);
 
-        p.image(*cardImage, {0, 0, 64, 48}, {padding, padding, 64 / scale, 48 / scale});
-        auto [nearest, linear] = zoomedRects(scale);
-        p.image(*cardImage, {0, 0, 64, 48}, nearest, Filter::Nearest);
-        p.image(*cardImage, {0, 0, 64, 48}, linear, Filter::Linear, 0.75f);
+        p.image(*card_image, {0, 0, 64, 48}, {padding, padding, 64 / scale, 48 / scale});
+        auto [nearest, linear] = zoomed_rects(scale);
+        p.image(*card_image, {0, 0, 64, 48}, nearest, filter::nearest);
+        p.image(*card_image, {0, 0, 64, 48}, linear, filter::linear, 0.75f);
         p.text({padding, 64},
                "1:1, then nearest and linear (75%) at " + std::to_string(int(zoom * 100)) + "%",
-               {Color{220, 220, 220}});
+               {color{220, 220, 220}});
 
         // Drawn play/pause button (clickable) and a busy arc.
-        const RectF b = playRect();
-        p.rect(b, 8, Color{0, 0, 0, 160}, Color{255, 255, 255, 80});
+        const rect_f b = play_rect();
+        p.rect(b, 8, color{0, 0, 0, 160}, color{255, 255, 255, 80});
         if (paused)
             p.polygon({{b.x + 22, b.y + 16}, {b.x + 22, b.y + 44}, {b.x + 44, b.y + 30}},
-                      Color{255, 255, 255}, Color{0, 0, 0}, 2);
+                      color{255, 255, 255}, color{0, 0, 0}, 2);
         else
         {
-            p.rect({b.x + 19, b.y + 16, 8, 28}, 1, Color{255, 255, 255}, Color{0, 0, 0});
-            p.rect({b.x + 33, b.y + 16, 8, 28}, 1, Color{255, 255, 255}, Color{0, 0, 0});
+            p.rect({b.x + 19, b.y + 16, 8, 28}, 1, color{255, 255, 255}, color{0, 0, 0});
+            p.rect({b.x + 33, b.y + 16, 8, 28}, 1, color{255, 255, 255}, color{0, 0, 0});
         }
         const float spin = float(std::fmod(clock * 2, 2 * std::numbers::pi));
-        p.arc({size.w - 50, padding + 30}, 18, spin, spin + 4.5f, Color{120, 180, 255}, 4);
+        p.arc({size.w - 50, padding + 30}, 18, spin, spin + 4.5f, color{120, 180, 255}, 4);
 
         const float cx = size.w / 2 + 120 * float(std::cos(clock));
         const float cy = size.h - 80 + 30 * float(std::sin(clock));
-        p.image(*discImage, {0, 0, 32, 32}, {cx - 16, cy - 16, 32, 32});
+        p.image(*disc_image, {0, 0, 32, 32}, {cx - 16, cy - 16, 32, 32});
 
-        p.pushClip({padding, size.h - 40, 120, 24});
-        p.text({padding, size.h - 40}, "clipped text that runs past its box", {Color{255, 210, 0}});
-        p.popClip();
+        p.push_clip({padding, size.h - 40, 120, 24});
+        p.text({padding, size.h - 40}, "clipped text that runs past its box", {color{255, 210, 0}});
+        p.pop_clip();
     };
 
-    auto cursorFor = [&](PointF pos)
+    auto cursor_for = [&](point_f pos)
     {
-        if (dragging) return Cursor::Grabbing;
-        if (inside(playRect(), pos)) return Cursor::Pointer;
-        auto [a, b] = zoomedRects(canvas->deviceScale());
-        if (inside(a, pos) || inside(b, pos)) return Cursor::Grab;
-        return Cursor::Default;
+        if (dragging) return cursor::grabbing;
+        if (inside(play_rect(), pos)) return cursor::pointer;
+        auto [a, b] = zoomed_rects(canvas->device_scale());
+        if (inside(a, pos) || inside(b, pos)) return cursor::grab;
+        return cursor::default_;
     };
 
-    auto onPointer = [&](const PointerEvent& e)
+    auto on_pointer = [&](const pointer_event& e)
     {
-        using T = PointerEvent::Type;
-        if (e.type != T::Move || dragging)  // moves only while dragging, or the log floods
-            std::printf("pointer %-7s button=%d clicks=%d mods=%s at %.0f,%.0f\n", typeName(e.type),
+        using t = pointer_event_type;
+        if (e.type != t::move || dragging)  // moves only while dragging, or the log floods
+            std::printf("pointer %-7s button=%d clicks=%d mods=%s at %.0f,%.0f\n", type_name(e.type),
                         e.button, e.clicks, mods(e.modifiers).c_str(), e.pos.x, e.pos.y);
-        if (e.type == T::Press && e.button == 1)
+        if (e.type == t::press && e.button == 1)
         {
-            if (inside(playRect(), e.pos))
-                setPaused(!paused);
-            else if (cursorFor(e.pos) == Cursor::Grab)
+            if (inside(play_rect(), e.pos))
+                set_paused(!paused);
+            else if (cursor_for(e.pos) == cursor::grab)
             {
                 dragging = true;
-                dragFrom = {e.pos.x - pan.x, e.pos.y - pan.y};
+                drag_from = {e.pos.x - pan.x, e.pos.y - pan.y};
             }
         }
-        else if (e.type == T::Press && e.button == 2)
+        else if (e.type == t::press && e.button == 2)
         {
             pan = {0, 0};
-            setZoom(4);
+            set_zoom(4);
         }
-        else if (e.type == T::Release && e.button == 1)
+        else if (e.type == t::release && e.button == 1)
             dragging = false;
-        else if (e.type == T::Move && dragging)
+        else if (e.type == t::move && dragging)
         {
-            pan = {e.pos.x - dragFrom.x, e.pos.y - dragFrom.y};
+            pan = {e.pos.x - drag_from.x, e.pos.y - drag_from.y};
             canvas->invalidate();
         }
-        canvas->setCursor(e.type == T::Leave ? Cursor::Default : cursorFor(e.pos));
+        canvas->set_cursor(e.type == t::leave ? cursor::default_ : cursor_for(e.pos));
         return true;
     };
 
-    auto onScroll = [&](const ScrollEvent& e)
+    auto on_scroll = [&](const scroll_event& e)
     {
         std::printf("scroll dx=%.2f dy=%.2f precise=%d mods=%s at %.0f,%.0f\n", e.dx, e.dy,
                     e.precise, mods(e.modifiers).c_str(), e.pos.x, e.pos.y);
-        setZoom(zoom * std::pow(1.15f, -e.dy));
+        set_zoom(zoom * std::pow(1.15f, -e.dy));
         return true;
     };
 
     // Window-level keys work whatever has focus (toolbar, slider, canvas).
-    auto onKey = [&](const KeyEvent& e)
+    auto on_key = [&](const key_event& e)
     {
         const std::string ch =
-            e.key == Key::Character && e.codepoint < 128 ? std::string(1, char(e.codepoint)) : "";
+            e.key == key::character && e.codepoint < 128 ? std::string(1, char(e.codepoint)) : "";
         std::printf("key %s %d '%s' mods=%s repeat=%d\n", e.press ? "press  " : "release",
                     int(e.key), ch.c_str(), mods(e.modifiers).c_str(), e.repeat);
         if (!e.press) return false;
         switch (e.key)
         {
-        case Key::Escape: (*ui)->quit(); return true;
-        case Key::F11: win->setFullscreen(!win->fullscreen()); return true;
-        case Key::Left: pan.x -= 10; break;
-        case Key::Right: pan.x += 10; break;
-        case Key::Up: pan.y -= 10; break;
-        case Key::Down: pan.y += 10; break;
-        case Key::Character:
-            if (e.codepoint == 'c' && (e.modifiers & ModCtrl))
+        case key::escape: (*ui)->quit(); return true;
+        case key::f11: win->set_fullscreen(!win->fullscreen()); return true;
+        case key::left: pan.x -= 10; break;
+        case key::right: pan.x += 10; break;
+        case key::up: pan.y -= 10; break;
+        case key::down: pan.y += 10; break;
+        case key::character:
+            if (e.codepoint == 'c' && (e.modifiers & mod_ctrl))
             {
-                (*ui)->setClipboardImage(64, 48, PixelFormat::Bgra8Premultiplied, card.data(),
+                (*ui)->set_clipboard_image(64, 48, pixel_format::bgra8_premultiplied, card.data(),
                                          64 * 4);
                 std::printf("copied the test card\n");
                 return true;
@@ -290,44 +290,44 @@ int main(int argc, char** argv)
     };
 
     using namespace rap::layout;
-    win = (*ui)->create(layout::Window{
+    win = (*ui)->create(layout::window{
         "rapport canvas",
-        {VBox{
-            layout::Toolbar{
-                layout::ToolButton{playPauseIcon(paused), "Play / pause"}
+        {vbox{
+            layout::toolbar{
+                layout::tool_button{play_pause_icon(paused), "Play / pause"}
                     .toggle(true)
-                    .onToggled([&](bool on) { setPaused(!on); })
-                    .bind(playToggle),
-                Separator{},
-                layout::ToolButton{magnifier(false), "Zoom out"}.onClick(
-                    [&] { setZoom(zoom / 1.25f); }),
-                layout::ToolButton{magnifier(true), "Zoom in"}.onClick([&]
-                                                                       { setZoom(zoom * 1.25f); }),
-                layout::ToolButton{Icon::named("zoom-original"), "Reset"}.onClick(
+                    .on_toggled([&](bool on) { set_paused(!on); })
+                    .bind(play_toggle),
+                separator{},
+                layout::tool_button{magnifier(false), "Zoom out"}.on_click(
+                    [&] { set_zoom(zoom / 1.25f); }),
+                layout::tool_button{magnifier(true), "Zoom in"}.on_click([&]
+                                                                       { set_zoom(zoom * 1.25f); }),
+                layout::tool_button{icon::named("zoom-original"), "Reset"}.on_click(
                     [&]
                     {
                         pan = {0, 0};
-                        setZoom(4);
+                        set_zoom(4);
                     }),
-                Spacer{},
-                layout::Label{"Zoom"},
-                layout::Slider{0.25, 32, zoom}
+                spacer{},
+                layout::label{"Zoom"},
+                layout::slider{0.25, 32, zoom}
                     .step(0.25, 1)
                     .mark(1, "1×")
                     .mark(4)
                     .mark(16, "16×")
-                    .onChanged([&](double v) { setZoom(float(v)); })
-                    .bind(zoomSlider)
+                    .on_changed([&](double v) { set_zoom(float(v)); })
+                    .bind(zoom_slider)
                     .width(20_ch),
-                layout::Label{"Padding"},
-                layout::Spin{0, 64, padding}.onChanged(
+                layout::label{"Padding"},
+                layout::spin{0, 64, padding}.on_changed(
                     [&](double v)
                     {
                         padding = float(v);
                         canvas->invalidate();
                     }),
-                layout::ColorButton{background, "Background"}.onChanged(
-                    [&](Color c)
+                layout::color_button{background, "Background"}.on_changed(
+                    [&](color c)
                     {
                         background = c;
                         std::printf("background %d,%d,%d\n", c.r, c.g, c.b);
@@ -335,50 +335,50 @@ int main(int argc, char** argv)
                     }),
             }
                 .handle(toolbar),
-            layout::Canvas{}
-                .onPaint(paint)
-                .onPointer(onPointer)
-                .onScroll(onScroll)
+            layout::canvas{}
+                .on_paint(paint)
+                .on_pointer(on_pointer)
+                .on_scroll(on_scroll)
                 .bind(canvas)
                 .stretch(),
-            HBox{
-                layout::Label{"starting"}.bind(status).stretch(),
-                layout::Button{"Copy image"}
-                    .icon(Icon::named("edit-copy"))
-                    .onClick(
+            hbox{
+                layout::label{"starting"}.bind(status).stretch(),
+                layout::button{"Copy image"}
+                    .icon(icon::named("edit-copy"))
+                    .on_click(
                         [&]
                         {
-                            (*ui)->setClipboardImage(64, 48, PixelFormat::Bgra8Premultiplied,
+                            (*ui)->set_clipboard_image(64, 48, pixel_format::bgra8_premultiplied,
                                                      card.data(), 64 * 4);
                             std::printf("copied the test card\n");
                         }),
-                layout::Button{"Fullscreen"}
-                    .icon(Icon::named("view-fullscreen"))
-                    .iconOnly()
-                    .onClick([&] { win->setFullscreen(!win->fullscreen()); }),
+                layout::button{"Fullscreen"}
+                    .icon(icon::named("view-fullscreen"))
+                    .icon_only()
+                    .on_click([&] { win->set_fullscreen(!win->fullscreen()); }),
             }
-                .handle(bottomBar),
+                .handle(bottom_bar),
         }}}.size(80_ch, 34_lines));
-    win->onCloseRequest(
+    win->on_close_request(
         [&]
         {
             (*ui)->quit();
             return true;
         });
-    win->onKey(onKey);
-    win->onFullscreenChanged(
+    win->on_key(on_key);
+    win->on_fullscreen_changed(
         [&](bool fs)
         {
             std::printf("fullscreen %s\n", fs ? "on" : "off");
-            toolbar->setVisible(!fs);
-            bottomBar->setVisible(!fs);
+            toolbar->set_visible(!fs);
+            bottom_bar->set_visible(!fs);
         });
-    std::printf("handles %s\n", toolbar && bottomBar ? "filled" : "MISSING");
-    win->setIcon(magnifier(true));
-    playToggle->setChecked(true);
+    std::printf("handles %s\n", toolbar && bottom_bar ? "filled" : "MISSING");
+    win->set_icon(magnifier(true));
+    play_toggle->set_checked(true);
 
     // The frame clock drives the orbit; paused time doesn't advance it.
-    auto frame = canvas->onFrame(
+    auto frame = canvas->on_frame(
         [&](double t)
         {
             if (last >= 0 && !paused) clock += t - last;
@@ -390,8 +390,8 @@ int main(int argc, char** argv)
         1000, true,
         [&]
         {
-            const SizeF ws = win->size();
-            const RectF wa = win->workArea();
+            const size_f ws = win->size();
+            const rect_f wa = win->work_area();
             const auto pos = win->position();
             const std::string where =
                 pos ? " at " + std::to_string(int(pos->x)) + "," + std::to_string(int(pos->y))
@@ -399,8 +399,8 @@ int main(int argc, char** argv)
             char buf[200];
             std::snprintf(buf, sizeof buf,
                           "%d frames/s, scale %.0f, window %.0f×%.0f%s, work area %.0f×%.0f",
-                          frames, canvas->deviceScale(), ws.w, ws.h, where.c_str(), wa.w, wa.h);
-            status->setText(buf);
+                          frames, canvas->device_scale(), ws.w, ws.h, where.c_str(), wa.w, wa.h);
+            status->set_text(buf);
             frames = 0;
         });
 
