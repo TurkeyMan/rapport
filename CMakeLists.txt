@@ -5,6 +5,7 @@
 #   core/             libanyui, libanyui-dev  (Recommends the backends)
 #   backends/gtk3/    libanyui-gtk3           (Depends: libanyui, GTK 3)
 #   backends/gtk4/    libanyui-gtk4           (Depends: libanyui, GTK 4)
+#   backends/qt6/     libanyui-qt6            (Depends: libanyui, Qt 6 Widgets)
 #   backends/null/    not packaged; headless backend for tests
 #   backends/gtk-common/  shared source compiled into both GTK backends
 cmake_minimum_required(VERSION 3.25)
@@ -30,7 +31,7 @@ add_subdirectory(core)
 
 # Backends skip themselves (with a status message) when their toolkit is
 # missing; set ANYUI_REQUIRE_BACKENDS to make that an error instead.
-foreach(backend null gtk3 gtk4 win32)
+foreach(backend null gtk3 gtk4 qt6 win32)
     string(TOUPPER ${backend} upper)
     option(ANYUI_BACKEND_${upper} "Build the ${backend} backend" ON)
     if(ANYUI_BACKEND_${upper})
