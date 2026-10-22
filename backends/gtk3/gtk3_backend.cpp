@@ -334,6 +334,22 @@ private:
     std::function<void()> click_;
 };
 
+// "A file named “x” already exists. Replace it?" - true for Replace.
+bool confirmReplace(GtkWindow* parent, const std::string& path)
+{
+    gchar* name = g_path_get_basename(path.c_str());
+    GtkWidget* msg = gtk_message_dialog_new(parent, GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+                                            GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+                                            "A file named \u201c%s\u201d already exists. Replace it?", name);
+    g_free(name);
+    gtk_dialog_add_buttons(GTK_DIALOG(msg), "_Cancel", GTK_RESPONSE_CANCEL, "_Replace", GTK_RESPONSE_ACCEPT,
+                           nullptr);
+    gtk_dialog_set_default_response(GTK_DIALOG(msg), GTK_RESPONSE_CANCEL);
+    const bool replace = gtk_dialog_run(GTK_DIALOG(msg)) == GTK_RESPONSE_ACCEPT;
+    gtk_widget_destroy(msg);
+    return replace;
+}
+
 GtkWidget* buildMenu(const Menu& items);
 
 // Appends `items` to `menu`; the GTK items point into `items`, which must
@@ -3288,6 +3304,8 @@ public:
                 if (end > at) gtk_file_filter_add_pattern(ff, flt.pattern.substr(at, end - at).c_str());
                 at = end + 1;
             }
+            g_object_set_data_full(G_OBJECT(ff), "anyui-ext", g_strdup(defaultExtension(flt.pattern).c_str()),
+                                   g_free);
             gtk_file_chooser_add_filter(chooser, ff);
         }
         if (!f.initialPath.empty())
@@ -3306,10 +3324,32 @@ public:
                            std::vector<std::string> out;
                            if (resp == GTK_RESPONSE_ACCEPT)
                            {
-                               GSList* names = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(d));
+                               auto* chooser = GTK_FILE_CHOOSER(d);
+                               GSList* names = gtk_file_chooser_get_filenames(chooser);
                                for (GSList* l = names; l; l = l->next)
                                    out.push_back(static_cast<char*>(l->data));
                                g_slist_free_full(names, g_free);
+                               // A save typed without an extension gets the
+                               // chosen filter's, as on Windows. GTK confirmed
+                               // overwriting the name as typed, not that one,
+                               // so replacing an existing file is asked here;
+                               // Cancel reopens the chooser on the typed name.
+                               GtkFileFilter* ff = gtk_file_chooser_get_filter(chooser);
+                               const char* ext =
+                                   ff ? static_cast<const char*>(g_object_get_data(G_OBJECT(ff), "anyui-ext")) : nullptr;
+                               if (gtk_file_chooser_get_action(chooser) == GTK_FILE_CHOOSER_ACTION_SAVE &&
+                                   out.size() == 1 && ext)
+                               {
+                                   const std::string typed = out[0];
+                                   out[0] = withExtension(typed, ext);
+                                   if (out[0] != typed && g_file_test(out[0].c_str(), G_FILE_TEST_EXISTS) &&
+                                       !confirmReplace(gtk_native_dialog_get_transient_for(d), out[0]))
+                                   {
+                                       gtk_file_chooser_set_filename(chooser, typed.c_str());
+                                       gtk_native_dialog_show(d);
+                                       return;
+                                   }
+                               }
                            }
                            Done done = std::move(*static_cast<Done*>(p));
                            g_object_unref(d);  // frees p

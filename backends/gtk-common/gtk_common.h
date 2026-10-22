@@ -104,6 +104,25 @@ inline Color mixColors(Color a, Color b, float t)
 
 // Soft selection colours: a tint of the accent over the base colour, with
 // the normal text colour on top.
+// A file filter's extension for saving: the first glob's, if it's a plain
+// "*.ext" ("*.patch;*.diff" -> "patch"; "*" -> none). GTK's save dialogs
+// don't add one the way Windows' does.
+inline std::string defaultExtension(const std::string& pattern)
+{
+    const std::string first = pattern.substr(0, pattern.find(';'));
+    if (!first.starts_with("*.") || first.find_first_of("*?[", 2) != std::string::npos) return {};
+    return first.substr(2);
+}
+
+// `path` with `.ext` appended if its file name has no extension.
+inline std::string withExtension(std::string path, const std::string& ext)
+{
+    const size_t slash = path.find_last_of('/');
+    const std::string name = path.substr(slash == std::string::npos ? 0 : slash + 1);
+    if (!ext.empty() && name.find('.') == std::string::npos) path += "." + ext;
+    return path;
+}
+
 inline std::pair<Color, Color> softSelectionColors(GtkWidget* w)
 {
     Color base = themeColor(w, ThemeColor::Base), accent = themeColor(w, ThemeColor::Accent);

@@ -2001,6 +2001,74 @@ public:
         g_object_unref(dlg);
     }
 
+    // A save in progress. When the backend added the extension and that
+    // file exists, GTK's own overwrite check saw only the name as typed, so
+    // replacing is asked here; Cancel reopens the dialog on the typed name.
+    struct SaveState
+    {
+        GtkFileDialog* dlg;  // owned
+        GtkWindow* parent;
+        std::string ext;
+        std::function<void(std::vector<std::string>)> done;
+
+        void run()
+        {
+            gtk_file_dialog_save(dlg, parent, nullptr,
+                                 +[](GObject* s, GAsyncResult* r, gpointer p)
+                                 {
+                                     static_cast<SaveState*>(p)->saved(
+                                         gtk_file_dialog_save_finish(GTK_FILE_DIALOG(s), r, nullptr));
+                                 },
+                                 this);
+        }
+        void saved(GFile* file)
+        {
+            std::string typed;
+            if (file)
+            {
+                if (char* path = g_file_get_path(file))
+                {
+                    typed = path;
+                    g_free(path);
+                }
+                g_object_unref(file);
+            }
+            if (typed.empty()) return finish({});
+            const std::string path = withExtension(typed, ext);
+            if (path == typed || !g_file_test(path.c_str(), G_FILE_TEST_EXISTS)) return finish({path});
+            gchar* name = g_path_get_basename(path.c_str());
+            GtkAlertDialog* alert =
+                gtk_alert_dialog_new("A file named \u201c%s\u201d already exists. Replace it?", name);
+            g_free(name);
+            const char* buttons[] = {"_Cancel", "_Replace", nullptr};
+            gtk_alert_dialog_set_buttons(alert, buttons);
+            gtk_alert_dialog_set_cancel_button(alert, 0);
+            gtk_alert_dialog_set_default_button(alert, 0);
+            pending_ = {typed, path};
+            gtk_alert_dialog_choose(alert, parent, nullptr,
+                                    +[](GObject* a, GAsyncResult* r, gpointer p)
+                                    {
+                                        auto* self = static_cast<SaveState*>(p);
+                                        const int b = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(a), r, nullptr);
+                                        if (b == 1) return self->finish({self->pending_.second});
+                                        GFile* again = g_file_new_for_path(self->pending_.first.c_str());
+                                        gtk_file_dialog_set_initial_file(self->dlg, again);
+                                        g_object_unref(again);
+                                        self->run();
+                                    },
+                                    this);
+            g_object_unref(alert);
+        }
+        void finish(std::vector<std::string> out)
+        {
+            auto done = std::move(this->done);
+            g_object_unref(dlg);
+            delete this;
+            if (done) done(std::move(out));
+        }
+        std::pair<std::string, std::string> pending_;  // typed, with extension
+    };
+
     void chooseFiles(anyui::Window* parent, const FileDialogSpec& f,
                      std::function<void(std::vector<std::string>)> done) override
     {
@@ -2036,6 +2104,18 @@ public:
         }
 
         using Done = std::function<void(std::vector<std::string>)>;
+        GtkWindow* pw = parentWindow(parent);
+        if (f.mode == FileDialogSpec::Mode::Save)
+        {
+            // GTK 4 doesn't say which filter the user picked: the first's
+            // extension goes on a name typed without one.
+            auto* save = new SaveState{dlg, pw, f.filters.empty() ? "" : defaultExtension(f.filters.front().pattern),
+                                       std::move(done)};
+            g_object_ref(dlg);
+            save->run();
+            g_object_unref(dlg);
+            return;
+        }
         auto* ctx = new Done(std::move(done));
         auto pathOf = [](GFile* file)
         {
@@ -2064,7 +2144,6 @@ public:
         };
         (void)pathOf;
 
-        GtkWindow* pw = parentWindow(parent);
         switch (f.mode)
         {
         case FileDialogSpec::Mode::Open:
@@ -2074,13 +2153,7 @@ public:
                 { single(gtk_file_dialog_open_finish(GTK_FILE_DIALOG(s), r, nullptr), p); },
                 ctx);
             break;
-        case FileDialogSpec::Mode::Save:
-            gtk_file_dialog_save(
-                dlg, pw, nullptr,
-                +[](GObject* s, GAsyncResult* r, gpointer p)
-                { single(gtk_file_dialog_save_finish(GTK_FILE_DIALOG(s), r, nullptr), p); },
-                ctx);
-            break;
+        case FileDialogSpec::Mode::Save: break;  // above
         case FileDialogSpec::Mode::Folder:
             gtk_file_dialog_select_folder(
                 dlg, pw, nullptr,
