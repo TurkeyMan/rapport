@@ -92,7 +92,11 @@ Metrics g_metrics;
 void initMetrics()
 {
     const QFontMetricsF fm(QApplication::font());
-    g_metrics.charWidth = float(fm.averageCharWidth());
+    // The alphabet's mean, as Windows' dialog units and Pango's approximate
+    // width have it; the font's own average is about a fifth narrower than
+    // text, so fields sized in characters cut their text off.
+    g_metrics.charWidth =
+        float(fm.horizontalAdvance("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") / 52);
     g_metrics.lineHeight = float(fm.lineSpacing());
 }
 
@@ -1816,6 +1820,7 @@ public:
             h->resizeSection(int(i), width);
             view_->setColumnHidden(int(i), !c.visible);
         }
+        stretchLast();
         h->setContextMenuPolicy(Qt::CustomContextMenu);
         QObject::connect(h, &QHeaderView::customContextMenuRequested, h,
                          [this](QPoint pos)
@@ -1931,6 +1936,7 @@ public:
     void setColumnVisible(size_t column, bool v) override
     {
         if (column < cols_.size()) view_->setColumnHidden(int(column), !v);
+        stretchLast();
     }
 
     void onSelectionChanged(std::function<void()> f) override { selChanged_ = std::move(f); }
@@ -2075,9 +2081,23 @@ public:
         if (soft_) soft_ = softColors(view_);
     }
 
-    // Stretch columns share the width the others leave, once, when the
-    // list first has a size; after that, widening one column never narrows
-    // another (the list scrolls sideways instead).
+    // A stretching last column keeps the list's right edge: it takes what
+    // the others leave as the list resizes, and gives way as they widen.
+    void stretchLast()
+    {
+        const int last = lastVisibleColumn();
+        view_->header()->setStretchLastSection(last >= 0 && cols_[size_t(last)].stretch);
+    }
+    int lastVisibleColumn() const
+    {
+        for (int i = int(cols_.size()) - 1; i >= 0; --i)
+            if (!view_->header()->isSectionHidden(i)) return i;
+        return -1;
+    }
+
+    // Other stretch columns share the width the others leave, once, when
+    // the list first has a size; after that, widening one column never
+    // narrows another (the list scrolls sideways instead).
     void fitStretch()
     {
         const int width = view_->viewport()->width();
@@ -2085,16 +2105,22 @@ public:
         fitted_ = true;
         QHeaderView* h = view_->header();
         int used = 0, stretching = 0;
+        const int filled = h->stretchLastSection() ? lastVisibleColumn() : -1;  // looks after itself
         for (size_t i = 0; i < cols_.size(); ++i)
         {
             if (h->isSectionHidden(int(i))) continue;
+            if (int(i) == filled)
+            {
+                used += h->minimumSectionSize();
+                continue;
+            }
             used += h->sectionSize(int(i));
             stretching += cols_[i].stretch;
         }
         const int spare = width - used;
         if (spare <= 0 || !stretching) return;
         for (size_t i = 0; i < cols_.size(); ++i)
-            if (cols_[i].stretch && !h->isSectionHidden(int(i)))
+            if (cols_[i].stretch && !h->isSectionHidden(int(i)) && int(i) != filled)
                 h->resizeSection(int(i), h->sectionSize(int(i)) + spare / stretching);
     }
 
@@ -3218,7 +3244,9 @@ private:
             lazy.pages.push_back(page);
         }
         list->setFixedWidth(width + 48);
-        list->setStyleSheet("QListWidget::item { padding-left: 12px; padding-right: 12px; }");
+        // No focus outline round the current page's title: it's selected.
+        list->setStyleSheet("QListWidget { outline: 0; } "
+                            "QListWidget::item { padding-left: 12px; padding-right: 12px; }");
         l->addWidget(list);
         auto* line = new QFrame;
         line->setFrameShape(QFrame::VLine);
