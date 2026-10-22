@@ -2675,7 +2675,7 @@ public:
     ~WWindow() override
     {
         filter_->owner = nullptr;
-        qApp->removeEventFilter(filter_);
+        if (qApp) qApp->removeEventFilter(filter_);
         filter_->deleteLater();
         if (lastShown() == frame_) lastShown() = nullptr;
         if (frame_)
@@ -3356,6 +3356,7 @@ class Qt6Backend : public Backend
 public:
     static Backend* create(int* argc, char** argv)
     {
+        QApplication* app = nullptr;  // one made here, deleted with the backend
         if (!qApp)
         {
 #if defined(__linux__) || defined(__FreeBSD__)
@@ -3368,7 +3369,8 @@ public:
             if (underWsl() && std::getenv("DISPLAY") && !std::getenv("QT_QPA_PLATFORM"))
                 qputenv("QT_QPA_PLATFORM", "xcb");
 #endif
-            new QApplication(*argc, argv);  // keeps argc: the caller's, alive for the program
+            // Keeps argc: the caller's, alive for the program.
+            app = new QApplication(*argc, argv);
         }
         // Outside a desktop that sets one, Qt's icon theme is just hicolor,
         // which has no MIME or action icons.
@@ -3380,7 +3382,17 @@ public:
                     break;
                 }
         initMetrics();
-        return new Qt6Backend;
+        return new Qt6Backend(app);
+    }
+
+    // Windows closed once the loop had ended left their widgets to
+    // deleteLater, which no loop will run: they go now, and the
+    // QApplication before static teardown, where Qt can no longer release
+    // the GL contexts its windows' backing stores made (xcb uses GLX).
+    ~Qt6Backend() override
+    {
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        delete app_;
     }
 
     std::string_view name() const override { return "qt6"; }
@@ -3570,6 +3582,12 @@ private:
         return QMessageBox::Ok;
     }
 
+    explicit Qt6Backend(QApplication* app)
+        : app_(app)
+    {
+    }
+
+    QApplication* app_;
     bool quit_ = false;
     bool running_ = false;
     int code_ = 0;
