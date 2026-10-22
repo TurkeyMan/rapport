@@ -2121,6 +2121,10 @@ public:
             dragMotion(pos);
             return;
         }
+        // No sweeping a selection with the button held, as in Windows'
+        // report lists and the GTK backends (Qt's default extends it):
+        // dragging is for labels and reordering; Shift and Ctrl select.
+        if (e->buttons() & Qt::LeftButton) return;
         view_->baseMouseMove(e);
     }
 
