@@ -1416,6 +1416,7 @@ public:
 
     ~WWindow() override
     {
+        if (lastShown() == win_) lastShown() = nullptr;
         for (auto& part : parts) part->disconnect();
         disconnect();
         gtk_window_destroy(GTK_WINDOW(win_));
@@ -1429,6 +1430,55 @@ public:
     {
         finished_ = false;
         gtk_window_present(GTK_WINDOW(win_));
+        snapshotIfAsked();
+    }
+
+    // Development aid, as in gtk3: ANYUI_SNAPSHOT=file.png saves the window
+    // shown last ANYUI_SNAPSHOT_DELAY ms (default 500) after it appears,
+    // then quits the main loop.
+    static GtkWidget*& lastShown()
+    {
+        static GtkWidget* w = nullptr;
+        return w;
+    }
+    static GMainLoop*& mainLoop()
+    {
+        static GMainLoop* loop = nullptr;
+        return loop;
+    }
+    void snapshotIfAsked()
+    {
+        lastShown() = win_;
+        static bool taken = false;
+        const char* path = std::getenv("ANYUI_SNAPSHOT");
+        if (taken || !path || !*path) return;
+        taken = true;
+        const char* delay = std::getenv("ANYUI_SNAPSHOT_DELAY");
+        g_timeout_add(
+            delay ? guint(std::atoi(delay)) : 500u,
+            +[](gpointer) -> gboolean
+            {
+                if (GtkWidget* win = lastShown())
+                {
+                    // The window as GTK last drew it, rendered to a texture.
+                    GdkPaintable* paintable = gtk_widget_paintable_new(win);
+                    GtkSnapshot* snap = gtk_snapshot_new();
+                    gdk_paintable_snapshot(paintable, snap, gtk_widget_get_width(win),
+                                           gtk_widget_get_height(win));
+                    if (GskRenderNode* node = gtk_snapshot_free_to_node(snap))
+                    {
+                        GskRenderer* renderer = gtk_native_get_renderer(GTK_NATIVE(win));
+                        GdkTexture* tex = gsk_renderer_render_texture(renderer, node, nullptr);
+                        gdk_texture_save_to_png(tex, std::getenv("ANYUI_SNAPSHOT"));
+                        g_object_unref(tex);
+                        gsk_render_node_unref(node);
+                    }
+                    g_object_unref(paintable);
+                }
+                if (mainLoop()) g_main_loop_quit(mainLoop());
+                return G_SOURCE_REMOVE;
+            },
+            nullptr);
     }
     void close() override { gtk_widget_set_visible(win_, false); }
     void onFinished(std::function<void(DialogRole)> f) override { onFinished_ = std::move(f); }
@@ -1933,7 +1983,9 @@ public:
     {
         if (quit_) return code_;
         loop_ = g_main_loop_new(nullptr, false);
+        WWindow::mainLoop() = loop_;
         g_main_loop_run(loop_);
+        WWindow::mainLoop() = nullptr;
         g_main_loop_unref(loop_);
         loop_ = nullptr;
         return code_;
