@@ -1645,6 +1645,13 @@ private:
         }
         else
         {
+            // An icon before the text, when the model gives one (a file's
+            // type); hidden otherwise.
+            GtkCellRenderer* icon = gtk_cell_renderer_pixbuf_new();
+            if (compact_) g_object_set(icon, "ypad", 0, nullptr);
+            gtk_tree_view_column_pack_start(col, icon, false);
+            gtk_tree_view_column_set_cell_data_func(col, icon, &WList::iconCell, ctx.get(), nullptr);
+
             r = gtk_cell_renderer_text_new();
             g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_END, "xalign",
                          c.align == Align::Center ? 0.5f
@@ -1689,6 +1696,21 @@ private:
                     return true;
                 },
                 ctx.get());
+    }
+
+    static void iconCell(GtkTreeViewColumn*, GtkCellRenderer* r, GtkTreeModel*, GtkTreeIter* iter,
+                         gpointer p)
+    {
+        auto* ctx = static_cast<ColumnCtx*>(p);
+        ListModel* model = ctx->list->model_;
+        GIcon* gicon = nullptr;
+        if (model && ctx->list->alive_ && rowOf(iter) < model->rowCount())
+        {
+            const Icon icon = model->icon(rowOf(iter), ctx->column);
+            if (!icon.file.empty()) gicon = fileTypeIcon(icon.file);
+            else if (!icon.name.empty()) gicon = namedGIcon(icon.name);
+        }
+        g_object_set(r, "gicon", gicon, "visible", gicon != nullptr, nullptr);
     }
 
     static void textCell(GtkTreeViewColumn*, GtkCellRenderer* r, GtkTreeModel*, GtkTreeIter* iter,

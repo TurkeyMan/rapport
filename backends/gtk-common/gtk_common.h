@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -115,6 +116,36 @@ inline void paintAutoScrollAnchor(Painter& p, float x, float y)
     p.polygon({{x - 4, y - 3}, {x + 4, y - 3}, {x, y - 8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
     p.polygon({{x - 4, y + 3}, {x + 4, y + 3}, {x, y + 8}}, Paint{ThemeColor::Text}, std::nullopt, 1);
     p.circle({x, y}, 1.5f, Paint{ThemeColor::Text}, std::nullopt);
+}
+
+// The desktop's icon for a kind of file, as the file manager shows it:
+// the name's guessed MIME type (a trailing '/' is a folder) and the icon
+// theme's icon for that. Cached per extension; owned by the cache.
+inline GIcon* fileTypeIcon(const std::string& name)
+{
+    static std::unordered_map<std::string, GIcon*> cache;
+    const bool folder = !name.empty() && name.back() == '/';
+    const size_t slash = name.find_last_of('/', folder ? name.size() - 2 : std::string::npos);
+    const std::string base = name.substr(slash == std::string::npos ? 0 : slash + 1);
+    const size_t dot = base.rfind('.');
+    // Extensionless names (Makefile, README) guess by the whole name.
+    const std::string key = folder ? "/" : dot == std::string::npos || dot == 0 ? base : base.substr(dot);
+    GIcon*& icon = cache[key];
+    if (!icon)
+    {
+        gchar* type = folder ? g_strdup("inode/directory") : g_content_type_guess(base.c_str(), nullptr, 0, nullptr);
+        icon = g_content_type_get_icon(type);
+        g_free(type);
+    }
+    return icon;
+}
+
+inline GIcon* namedGIcon(const std::string& name)
+{
+    static std::unordered_map<std::string, GIcon*> cache;
+    GIcon*& icon = cache[name];
+    if (!icon) icon = g_themed_icon_new(name.c_str());
+    return icon;
 }
 
 inline Color mixColors(Color a, Color b, float t)

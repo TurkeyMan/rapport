@@ -303,14 +303,19 @@ struct Icon
 {
     // freedesktop icon name, e.g. "go-up", "document-save".
     std::string name;
+    // The desktop's icon for this kind of file, as its file manager shows
+    // it (forFile). Only the name matters (its extension or MIME type); the
+    // file needn't exist. A name ending in '/' is a folder.
+    std::string file;
     // Draws the icon into `size` (logical px) on a Painter with the right
     // deviceScale. Draw with theme colours (ThemeColor::WindowText) so it
     // follows dark mode; backends redraw it when the theme or scale changes.
     std::function<void(Painter&, SizeF)> draw;
 
-    static Icon named(std::string n) { return {std::move(n), {}}; }
-    static Icon drawn(std::function<void(Painter&, SizeF)> f) { return {{}, std::move(f)}; }
-    explicit operator bool() const { return !name.empty() || bool(draw); }
+    static Icon named(std::string n) { return {std::move(n), {}, {}}; }
+    static Icon forFile(std::string fileName) { return {{}, std::move(fileName), {}}; }
+    static Icon drawn(std::function<void(Painter&, SizeF)> f) { return {{}, {}, std::move(f)}; }
+    explicit operator bool() const { return !name.empty() || !file.empty() || bool(draw); }
 };
 
 // ---------------------------------------------------------------- list model
@@ -336,6 +341,9 @@ public:
     virtual std::string text(size_t row, size_t column) const = 0;
     // A background (bg) colours the whole cell, except on selected rows.
     virtual TextStyle style(size_t /*row*/, size_t /*column*/) const { return {}; }
+    // A small icon before a text cell's text (a file's type); painted cells
+    // ignore it.
+    virtual Icon icon(size_t /*row*/, size_t /*column*/) const { return {}; }
     // Called for columns declared `painted`; text() is still used for
     // accessibility, type-ahead and copy.
     virtual void paint(size_t /*row*/, size_t /*column*/, Painter&, const CellInfo&) const {}

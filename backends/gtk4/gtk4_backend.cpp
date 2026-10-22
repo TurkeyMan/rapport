@@ -1436,10 +1436,19 @@ private:
         }
         else
         {
-            child = gtk_label_new(nullptr);
-            gtk_label_set_xalign(GTK_LABEL(child), 0);
-            gtk_label_set_ellipsize(GTK_LABEL(child), PANGO_ELLIPSIZE_END);
-            gtk_label_set_single_line_mode(GTK_LABEL(child), true);
+            // An icon (a file's type, when the model gives one) and the text.
+            GtkWidget* label = gtk_label_new(nullptr);
+            gtk_label_set_xalign(GTK_LABEL(label), 0);
+            gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+            gtk_label_set_single_line_mode(GTK_LABEL(label), true);
+            gtk_widget_set_hexpand(label, true);
+            GtkWidget* image = gtk_image_new();
+            gtk_widget_set_visible(image, false);
+            child = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+            gtk_box_append(GTK_BOX(child), image);
+            gtk_box_append(GTK_BOX(child), label);
+            g_object_set_data(G_OBJECT(child), "anyui-label", label);
+            g_object_set_data(G_OBJECT(child), "anyui-image", image);
         }
 
         GtkGesture* click = gtk_gesture_click_new();
@@ -1471,9 +1480,15 @@ private:
             gtk_widget_queue_draw(child);
             return;
         }
-        gtk_label_set_text(GTK_LABEL(child), model_->text(row, ctx.column).c_str());
-        PangoAttrList* attrs = pangoAttrs(child, model_->style(row, ctx.column));
-        gtk_label_set_attributes(GTK_LABEL(child), attrs);
+        auto* label = GTK_LABEL(g_object_get_data(G_OBJECT(child), "anyui-label"));
+        auto* image = GTK_IMAGE(g_object_get_data(G_OBJECT(child), "anyui-image"));
+        const Icon icon = model_->icon(row, ctx.column);
+        GIcon* gicon = !icon.file.empty() ? fileTypeIcon(icon.file) : !icon.name.empty() ? namedGIcon(icon.name) : nullptr;
+        gtk_image_set_from_gicon(image, gicon);
+        gtk_widget_set_visible(GTK_WIDGET(image), gicon != nullptr);
+        gtk_label_set_text(label, model_->text(row, ctx.column).c_str());
+        PangoAttrList* attrs = pangoAttrs(GTK_WIDGET(label), model_->style(row, ctx.column));
+        gtk_label_set_attributes(label, attrs);
         if (attrs) pango_attr_list_unref(attrs);
     }
 

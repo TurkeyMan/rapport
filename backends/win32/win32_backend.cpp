@@ -2358,6 +2358,44 @@ private:
         return f.get();
     }
 
+    // The shell's small icon for a kind of file (Explorer's), as a bitmap
+    // for the row target: per extension ("/" for folders), made once and
+    // dropped with the target. Shell icons are straight-alpha BGRA, so WIC
+    // converts them to premultiplied first.
+    ID2D1Bitmap* fileIcon(ID2D1RenderTarget* rt, const std::string& name)
+    {
+        const bool folder = !name.empty() && name.back() == '/';
+        const size_t slash = name.find_last_of("/\\", folder ? name.size() - 2 : std::string::npos);
+        const std::string base = name.substr(slash == std::string::npos ? 0 : slash + 1);
+        const size_t dot = base.rfind('.');
+        const std::string key = folder ? "/" : dot == std::string::npos ? base : base.substr(dot);
+        auto it = fileIcons_.find(key);
+        if (it != fileIcons_.end()) return it->second.get();
+        Com<ID2D1Bitmap>& out = fileIcons_[key];
+        SHFILEINFOW info{};
+        const std::wstring probe = folder ? L"folder" : wide(dot == std::string::npos ? base : "file" + base.substr(dot));
+        if (!SHGetFileInfoW(probe.c_str(), folder ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL, &info, sizeof info,
+                            SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES) ||
+            !info.hIcon)
+            return nullptr;
+        Com<IWICBitmap> wic;
+        Com<IWICFormatConverter> pbgra;
+        if (wicFactory() && SUCCEEDED(wicFactory()->CreateBitmapFromHICON(info.hIcon, wic.put())) &&
+            SUCCEEDED(wicFactory()->CreateFormatConverter(pbgra.put())) &&
+            SUCCEEDED(pbgra->Initialize(wic.get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0,
+                                        WICBitmapPaletteTypeCustom)))
+        {
+            // At the target's DPI the icon's pixels map 1:1 to device pixels.
+            float dpiX = 96, dpiY = 96;
+            rt->GetDpi(&dpiX, &dpiY);
+            const D2D1_BITMAP_PROPERTIES props =
+                D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), dpiX, dpiY);
+            rt->CreateBitmapFromWicBitmap(pbgra.get(), &props, out.put());
+        }
+        DestroyIcon(info.hIcon);
+        return out.get();
+    }
+
     void paintRows(HDC dc)
     {
         RECT clip{};
@@ -2450,6 +2488,17 @@ private:
                         cellPainter.popClip();
                         continue;
                     }
+                    float iconSpace = 0;
+                    if (const Icon icon = model_->icon(size_t(row), sp.col); !icon.file.empty())
+                        if (ID2D1Bitmap* bmp = fileIcon(rt, icon.file))
+                        {
+                            // The shell's icon for the file's type, before the text.
+                            const D2D1_SIZE_F sz = bmp->GetSize();  // DIPs at the target's DPI
+                            const float x = dip(cell.left) + 4, y = dip(cell.top) + (dip(cell.bottom - cell.top) - sz.height) / 2;
+                            rt->SetTransform(origin);
+                            rt->DrawBitmap(bmp, D2D1::RectF(x, y, x + sz.width, y + sz.height));
+                            iconSpace = sz.width + 2;
+                        }
                     const std::wstring text = wide(model_->text(size_t(row), sp.col));
                     if (text.empty()) continue;
                     IDWriteTextFormat* format = textFormat(st, columns_[sp.col].align);
@@ -2460,7 +2509,7 @@ private:
                     rt->SetTransform(origin);
                     const float pad = 6;  // the ListView's own cell padding, in DIPs
                     rt->DrawText(text.c_str(), UINT32(text.size()), format,
-                                 D2D1::RectF(dip(cell.left) + pad, dip(cell.top), dip(cell.right) - pad, dip(cell.bottom)),
+                                 D2D1::RectF(dip(cell.left) + pad + iconSpace, dip(cell.top), dip(cell.right) - pad, dip(cell.bottom)),
                                  brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
                 }
             }
@@ -2503,7 +2552,11 @@ private:
             }
             rt->SetTransform(D2D1::Matrix3x2F::Identity());
         }
-        if (rt->EndDraw() == D2DERR_RECREATE_TARGET) rowTarget_.reset();
+        if (rt->EndDraw() == D2DERR_RECREATE_TARGET)
+        {
+            rowTarget_.reset();
+            fileIcons_.clear();  // bitmaps belong to the target
+        }
     }
 
     // A click changes the selection in steps (everything off, then the new
@@ -2829,6 +2882,7 @@ private:
     bool fitted_ = false;  // stretch columns have had their share of the width
     bool selPending_ = false;  // a selection change is posted, not yet reported
     Com<ID2D1DCRenderTarget> rowTarget_;
+    std::map<std::string, Com<ID2D1Bitmap>> fileIcons_;  // per extension, for rowTarget_
     std::map<int, Com<IDWriteTextFormat>> formats_;  // by style and alignment
     bool soft_ = false;
     int hot_ = -1;  // the row under the pointer
