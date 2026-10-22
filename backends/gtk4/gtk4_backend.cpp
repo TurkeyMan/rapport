@@ -1701,6 +1701,10 @@ private:
 
         bool anyStretch =
             std::ranges::any_of(s.panes, [](auto& p) { return p.common.stretch > 0; });
+        // Spare space goes to stretching panes only (as on win32): the rest
+        // keep their size when the window grows.
+        const bool restStretch = std::any_of(s.panes.begin() + std::ptrdiff_t(from + 1), s.panes.end(),
+                                             [](auto& p) { return p.common.stretch > 0; });
         GtkWidget* paned = gtk_paned_new(gtkOrientation(s.dir));
         auto* p = GTK_PANED(paned);
         gtk_paned_set_wide_handle(p, true);
@@ -1708,6 +1712,7 @@ private:
         gtk_paned_set_start_child(p, first);
         gtk_paned_set_end_child(p, panes(s, from + 1));
         gtk_paned_set_resize_start_child(p, !anyStretch || s.panes[from].common.stretch > 0);
+        gtk_paned_set_resize_end_child(p, !anyStretch || restStretch);
         gtk_paned_set_shrink_start_child(p, false);
         gtk_paned_set_shrink_end_child(p, false);
         return paned;
