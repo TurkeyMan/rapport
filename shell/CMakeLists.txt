@@ -16,6 +16,7 @@ target_include_directories(rapport_shell PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_features(rapport_shell PUBLIC cxx_std_23)
+target_compile_options(rapport_shell PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/utf-8 /Zc:__cplusplus>)
 set_target_properties(rapport_shell PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(rapport_shell PUBLIC ${CMAKE_DL_LIBS})
 

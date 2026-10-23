@@ -12,6 +12,9 @@ target_include_directories(rapport_headers INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_features(rapport_headers INTERFACE cxx_std_23)
+# rapport's strings are UTF-8, in its sources and in its users': MSVC would
+# read them in the ANSI code page. And __cplusplus as the standard says.
+target_compile_options(rapport_headers INTERFACE $<$<CXX_COMPILER_ID:MSVC>:/utf-8 /Zc:__cplusplus>)
 
 if(RAPPORT_STATIC)
     add_library(rapport STATIC src/rapport.cpp src/sys.cpp)
