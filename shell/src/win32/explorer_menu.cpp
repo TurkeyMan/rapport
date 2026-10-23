@@ -371,8 +371,9 @@ factory g_factory;
 
 // -- registration ---------------------------------------------------------------
 
-// Per user, under HKCU\Software\Classes: no elevation, and only this user's
-// Explorer sees it. Files and folders, folder backgrounds, and drives.
+// Under Software\Classes of HKCU (one user, no elevation) or HKLM (every
+// user; an installer's choice, elevated). Files and folders, folder
+// backgrounds, and drives.
 const wchar_t* const k_handler_parents[] = {
     L"Software\\Classes\\AllFilesystemObjects\\shellex\\ContextMenuHandlers\\",
     L"Software\\Classes\\Directory\\Background\\shellex\\ContextMenuHandlers\\",
@@ -381,11 +382,11 @@ const wchar_t* const k_handler_parents[] = {
 const wchar_t k_approved[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Shell Extensions\\Approved";
 
-bool set_value(const std::wstring& key, const wchar_t* name, const std::wstring& value)
+bool set_value(HKEY root, const std::wstring& key, const wchar_t* name, const std::wstring& value)
 {
     HKEY k = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k,
-                        nullptr) != ERROR_SUCCESS)
+    if (RegCreateKeyExW(root, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, nullptr,
+                        &k, nullptr) != ERROR_SUCCESS)
         return false;
     const LONG r = RegSetValueExW(k, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
                                   DWORD((value.size() + 1) * sizeof(wchar_t)));
@@ -431,21 +432,55 @@ STDAPI DllCanUnloadNow()
     return g_objects == 0 && g_locks == 0 ? S_OK : S_FALSE;
 }
 
-STDAPI DllRegisterServer()
-try
+namespace
+{
+
+HRESULT register_in(HKEY root)
 {
     const std::wstring clsid = wide(rap::shell::this_extension.windows_clsid);
     const std::wstring name = wide(rap::shell::this_extension.name);
     const std::wstring path = module_path();
     const std::wstring server = L"Software\\Classes\\CLSID\\" + clsid;
-    bool ok = !path.empty() && set_value(server, nullptr, name) &&
-              set_value(server + L"\\InprocServer32", nullptr, path) &&
-              set_value(server + L"\\InprocServer32", L"ThreadingModel", L"Apartment");
+    bool ok = !path.empty() && set_value(root, server, nullptr, name) &&
+              set_value(root, server + L"\\InprocServer32", nullptr, path) &&
+              set_value(root, server + L"\\InprocServer32", L"ThreadingModel", L"Apartment");
     for (const wchar_t* parent : k_handler_parents)
-        ok = ok && set_value(parent + name, nullptr, clsid);
-    ok = ok && set_value(k_approved, clsid.c_str(), name);
+        ok = ok && set_value(root, parent + name, nullptr, clsid);
+    ok = ok && set_value(root, k_approved, clsid.c_str(), name);
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return ok ? S_OK : SELFREG_E_CLASS;
+}
+
+HRESULT unregister_in(HKEY root)
+{
+    const std::wstring clsid = wide(rap::shell::this_extension.windows_clsid);
+    const std::wstring name = wide(rap::shell::this_extension.name);
+    for (const wchar_t* parent : k_handler_parents)
+        RegDeleteKeyExW(root, (parent + name).c_str(), KEY_WOW64_64KEY, 0);
+    HKEY classes = nullptr;
+    if (RegOpenKeyExW(root, L"Software\\Classes\\CLSID", 0, KEY_ALL_ACCESS | KEY_WOW64_64KEY,
+                      &classes) == ERROR_SUCCESS)
+    {
+        RegDeleteTreeW(classes, clsid.c_str());
+        RegCloseKey(classes);
+    }
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(root, k_approved, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, &k) == ERROR_SUCCESS)
+    {
+        RegDeleteValueW(k, clsid.c_str());
+        RegCloseKey(k);
+    }
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    return S_OK;
+}
+
+}  // namespace
+
+// For this user: regsvr32 tortilla-shell.dll, or rap::shell::install().
+STDAPI DllRegisterServer()
+try
+{
+    return register_in(HKEY_CURRENT_USER);
 }
 catch (...)
 {
@@ -455,19 +490,21 @@ catch (...)
 STDAPI DllUnregisterServer()
 try
 {
-    const std::wstring clsid = wide(rap::shell::this_extension.windows_clsid);
-    const std::wstring name = wide(rap::shell::this_extension.name);
-    for (const wchar_t* parent : k_handler_parents)
-        RegDeleteTreeW(HKEY_CURRENT_USER, (parent + name).c_str());
-    RegDeleteTreeW(HKEY_CURRENT_USER, (L"Software\\Classes\\CLSID\\" + clsid).c_str());
-    HKEY k = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, k_approved, 0, KEY_SET_VALUE, &k) == ERROR_SUCCESS)
-    {
-        RegDeleteValueW(k, clsid.c_str());
-        RegCloseKey(k);
-    }
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
-    return S_OK;
+    return unregister_in(HKEY_CURRENT_USER);
+}
+catch (...)
+{
+    return E_UNEXPECTED;
+}
+
+// "user" or "machine": regsvr32 /n /i:machine <dll>, or rap::shell::install()
+// with scope::machine (elevated).
+STDAPI DllInstall(BOOL install, PCWSTR how)
+try
+{
+    const HKEY root =
+        how && lstrcmpiW(how, L"machine") == 0 ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
+    return install ? register_in(root) : unregister_in(root);
 }
 catch (...)
 {

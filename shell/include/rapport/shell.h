@@ -90,10 +90,16 @@ struct extension_info
 extern const extension_info this_extension;
 
 // For the app (or its installer): registers the extension module at `module`
-// with the file manager, per user where the platform allows (Windows: HKCU,
-// no elevation). On Linux the plugins load only from system directories,
-// so there it's the package's job, and these return false.
-bool install(const std::filesystem::path& module);
-bool uninstall(const std::filesystem::path& module);
+// with the file manager. On Windows, `user` is this user only (HKCU, no
+// elevation), and `machine` is every user (HKLM, elevated, as an installer
+// does). On Linux the plugins load only from system directories, so there
+// it's the package's job, and these return false.
+enum class scope
+{
+    user,
+    machine,
+};
+bool install(const std::filesystem::path& module, scope = scope::user);
+bool uninstall(const std::filesystem::path& module, scope = scope::user);
 
 }  // namespace rap::shell
