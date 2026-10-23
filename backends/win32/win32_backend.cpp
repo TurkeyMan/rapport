@@ -4269,6 +4269,12 @@ public:
     {
         on_files_dropped_ = std::move(f);
         DragAcceptFiles(hwnd_, bool(on_files_dropped_));
+        // An elevated window (run as administrator, or started by an
+        // installer) gets no drops from Explorer unless it lets the drop
+        // messages through Windows' privilege isolation.
+        if (on_files_dropped_)
+            for (UINT msg : {UINT(WM_DROPFILES), UINT(WM_COPYDATA), UINT(0x0049) /* WM_COPYGLOBALDATA */})
+                ChangeWindowMessageFilterEx(hwnd_, msg, MSGFLT_ALLOW, nullptr);
     }
 
     // From the message loop, before the focused control sees the key.
