@@ -9,6 +9,7 @@
 #   backends/null/    not packaged; headless backend for tests
 #   backends/gtk-common/  shared source compiled into both GTK backends
 #   backends/common/      shared source for any backend (drawn icons)
+#   shell/            librapport-shell-dev        (file-manager extensions; no toolkit)
 cmake_minimum_required(VERSION 3.25)
 project(rapport VERSION 0.1 LANGUAGES CXX)
 
@@ -29,6 +30,11 @@ option(RAPPORT_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 option(RAPPORT_STATIC "Build static libraries instead of a shared core and plugins" OFF)
 
 add_subdirectory(core)
+
+option(RAPPORT_SHELL "Build the file-manager extension libraries" ON)
+if(RAPPORT_SHELL)
+    add_subdirectory(shell)
+endif()
 
 # Backends skip themselves (with a status message) when their toolkit is
 # missing; set RAPPORT_REQUIRE_BACKENDS to make that an error instead.

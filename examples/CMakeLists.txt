@@ -27,3 +27,10 @@ if(RAPPORT_STATIC)
         target_link_libraries(${example} PRIVATE ${backend_targets})
     endforeach()
 endif()
+
+if(TARGET rapport::shell)
+    rapport_add_shell_extension(rapport-shell-example
+        NAME "rapport example" ID org.rapport.Example
+        WINDOWS_CLSID {6B1D3F0E-8C2A-4E57-9A41-2F5C7D90B3E8}
+        SOURCES shell_example.cpp)
+endif()
