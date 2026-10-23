@@ -258,13 +258,17 @@ detection detect(const load_options& opts)
     if (!env("KDE_FULL_SESSION").empty()) names.push_back("KDE");
     if (!env("GNOME_DESKTOP_SESSION_ID").empty()) names.push_back("GNOME");
 
+    // The desktop's own toolkit first. After it, GTK 3 before GTK 4: it's the
+    // toolkit most likely to be installed anywhere (Firefox, LibreOffice and
+    // GIMP bring it), and KDE's Breeze themes it, where GTK 4 often isn't
+    // installed on a Qt desktop and ignores its theme.
     for (auto& n : names)
     {
         auto l = lower(n);
         if (is_qt_desktop(l))
         {
             d.desktop = n;
-            d.preference = {"qt6", "gtk4", "gtk3"};
+            d.preference = {"qt6", "gtk3", "gtk4"};
             break;
         }
         if (is_gtk_desktop(l))
@@ -276,9 +280,10 @@ detection detect(const load_options& opts)
     }
     if (d.preference.empty())
     {
-        // Unknown desktop or bare window manager: no native look to match.
+        // Unknown desktop or bare window manager: no native look to match,
+        // so the toolkit most likely to be there.
         d.desktop = names.empty() ? "" : names.front();
-        d.preference = {"qt6", "gtk4", "gtk3"};
+        d.preference = {"gtk3", "qt6", "gtk4"};
     }
 #endif
     return d;
