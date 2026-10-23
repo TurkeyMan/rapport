@@ -1,0 +1,88 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Every backend, as plugins and statically linked (one GTK at a time: a
+  # program can only hold one), with the examples and the shell probe.
+  linux:
+    name: debian ${{ matrix.link }}
+    runs-on: ubuntu-24.04
+    container: 'debian:trixie'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { link: plugins, flags: '' }
+          - { link: static,  flags: '-DRAPPORT_STATIC=ON -DRAPPORT_BACKEND_GTK4=OFF' }
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git cmake ninja-build g++ \
+            pkg-config libgtk-3-dev libgtk-4-dev qt6-base-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRAPPORT_REQUIRE_BACKENDS=ON ${{ matrix.flags }}
+          cmake --build build --parallel "$(nproc)"
+
+      - name: Shell probe
+        run: build/bin/rapport-shell-example-probe --extended .
+
+  # MSVC with the static runtime, as the apps ship: as plugins and statically
+  # linked. The examples must run, and the shell extension must load into
+  # Explorer's way of calling it and need nothing but Windows.
+  windows:
+    name: windows msvc ${{ matrix.link }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { link: plugins, flags: '' }
+          - { link: static,  flags: '-DRAPPORT_STATIC=ON' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" ${{ matrix.flags }}
+          cmake --build build --config Release --parallel
+
+      - name: Gallery snapshot
+        working-directory: build/bin/Release
+        run: |
+          $env:RAPPORT_SNAPSHOT = "$env:RUNNER_TEMP\gallery.png"
+          $env:RAPPORT_SNAPSHOT_DELAY = "500"
+          $p = Start-Process .\rapport-gallery.exe -PassThru -Wait
+          if ($p.ExitCode -ne 0 -or -not (Test-Path $env:RAPPORT_SNAPSHOT)) { throw "rapport-gallery didn't snapshot" }
+
+      - name: Shell extension
+        working-directory: build/bin/Release
+        run: |
+          .\rapport-explorer-probe.exe rapport-shell-example.dll "{6B1D3F0E-8C2A-4E57-9A41-2F5C7D90B3E8}" --extended $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE) { throw 'rapport-explorer-probe failed' }
+
+      # Our own DLLs beside them (the plugin build's core and backends) are
+      # fine; any runtime isn't. The shell extension may need nothing at all.
+      - name: Imports
+        run: |
+          python ci/check-imports.py --allow-beside (Get-ChildItem build/bin/Release/*.exe, build/bin/Release/*.dll)
+          if ($LASTEXITCODE) { throw 'a runtime DLL is imported' }
+          python ci/check-imports.py build/bin/Release/rapport-shell-example.dll
+          if ($LASTEXITCODE) { throw 'the shell extension imports a DLL Explorer won''t find' }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gallery-${{ matrix.link }}
+          path: ${{ runner.temp }}/gallery.png
+          if-no-files-found: ignore

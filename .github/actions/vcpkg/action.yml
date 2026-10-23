@@ -1,0 +1,70 @@
+# vcpkg at exactly the commit a manifest's builtin-baseline names, built from
+# that checkout, with its binary cache kept between runs. The tool and the
+# port files then always match: a preinstalled or IDE-bundled vcpkg can be
+# too old for a newer baseline's ports.
+#
+#   - uses: ./rapport/.github/actions/vcpkg
+#     id: vcpkg
+#     with: { manifest-dir: ., triplet: x64-windows-static }
+#   - run: cmake ... -DCMAKE_TOOLCHAIN_FILE=${{ steps.vcpkg.outputs.toolchain }}
+#                     -DVCPKG_TARGET_TRIPLET=x64-windows-static   # installs the ports
+#   # Saved straight after the ports are built, whatever fails later: a first
+#   # run's hour of port builds isn't lost to an error in the app.
+#   - uses: actions/cache/save@v4
+#     if: always() && steps.vcpkg.outputs.cache-hit != 'true'
+#     with: { path: '${{ steps.vcpkg.outputs.cache }}', key: '${{ steps.vcpkg.outputs.cache-key }}' }
+name: vcpkg at the manifest's baseline
+description: Checks out and bootstraps vcpkg at vcpkg.json's builtin-baseline, with a cached binary cache.
+inputs:
+  manifest-dir:
+    description: The directory holding vcpkg.json
+    default: .
+  triplet:
+    description: The triplet the build uses (part of the cache key)
+    default: x64-windows-static
+outputs:
+  toolchain:
+    description: vcpkg's CMake toolchain file
+    value: ${{ steps.setup.outputs.toolchain }}
+  cache:
+    description: The binary cache directory, for actions/cache/save
+    value: ${{ steps.setup.outputs.cache }}
+  cache-key:
+    description: The key to save the binary cache under
+    value: ${{ steps.setup.outputs.cache-key }}
+  cache-hit:
+    description: Whether the cache held exactly this key (nothing new to save)
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - id: setup
+      shell: pwsh
+      run: |
+        $manifest = Get-Content (Join-Path '${{ inputs.manifest-dir }}' 'vcpkg.json') -Raw | ConvertFrom-Json
+        $baseline = $manifest.'builtin-baseline'
+        if (-not $baseline) { throw 'vcpkg.json has no builtin-baseline' }
+        $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+        $cache = Join-Path $env:RUNNER_TEMP 'vcpkg-cache'
+        New-Item -ItemType Directory -Force $cache | Out-Null
+        git init -q $root
+        git -C $root fetch -q --depth 1 https://github.com/microsoft/vcpkg.git $baseline
+        git -C $root checkout -q FETCH_HEAD
+        & (Join-Path $root 'bootstrap-vcpkg.bat') -disableMetrics
+        if ($LASTEXITCODE) { throw 'bootstrapping vcpkg failed' }
+        "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+        "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite" >> $env:GITHUB_ENV
+        "toolchain=$root/scripts/buildsystems/vcpkg.cmake" -replace '\\', '/' >> $env:GITHUB_OUTPUT
+        "baseline=$baseline" >> $env:GITHUB_OUTPUT
+        "cache=$cache" >> $env:GITHUB_OUTPUT
+        "cache-key=vcpkg-$env:RUNNER_OS-${{ inputs.triplet }}-${{ hashFiles(format('{0}/vcpkg.json', inputs.manifest-dir)) }}" >> $env:GITHUB_OUTPUT
+
+    # Keyed on the manifest: a changed dependency or baseline restores the
+    # last cache, so only what changed is built. Only restored here; the app
+    # saves it once its configure has built the ports (see the top).
+    - id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.setup.outputs.cache }}
+        key: ${{ steps.setup.outputs.cache-key }}
+        restore-keys: vcpkg-${{ runner.os }}-${{ inputs.triplet }}-
