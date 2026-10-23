@@ -7,6 +7,8 @@
 // loaded and from any thread. The core uses it to find and load backends.
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -216,5 +218,31 @@ void lower_thread_priority();
 
 // Memory the system could hand out without swapping; 0 if unknown.
 std::size_t available_memory();
+
+// -- http ---------------------------------------------------------------------
+
+using http_headers = std::vector<std::pair<std::string, std::string>>;
+
+struct http_response
+{
+    int status = 0;        // 0: no response (no connection, TLS failure, cancelled)
+    std::string body;      // decompressed
+    http_headers headers;  // the final response's, names as sent
+    std::string url;       // where it came from, after any redirects
+    std::string error;     // why there's no response, or why the body was cut short
+};
+
+struct http_options
+{
+    http_headers headers;  // Authorization, Accept, User-Agent, ...
+    std::chrono::milliseconds timeout{15000};
+    std::size_t max_bytes = std::size_t(4) << 20;  // a longer body is cut short; 0: no limit
+    const std::atomic<bool>* cancelled = nullptr;  // checked as data arrives
+};
+
+// An HTTP(S) GET, blocking: for a worker thread. TLS, certificates, proxies
+// and redirects are the platform's: WinHTTP on Windows; elsewhere libcurl,
+// loaded when first used (without it, the response says so).
+http_response http_get(const std::string& url, const http_options& = {});
 
 }  // namespace rap::sys
