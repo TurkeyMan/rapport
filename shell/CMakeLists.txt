@@ -44,3 +44,11 @@ install(TARGETS rapport_shell rapport_shell_probe EXPORT rapportShellTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT dev)
 install(FILES include/rapport/shell.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rapport COMPONENT dev)
 install(FILES cmake/RapportShell.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rapport COMPONENT dev)
+
+if(MSVC)
+    foreach(lib rapport_shell rapport_shell_probe rapport_shell_explorer)
+        if(TARGET ${lib})
+            rapport_shell_static_runtime(${lib})
+        endif()
+    endforeach()
+endif()

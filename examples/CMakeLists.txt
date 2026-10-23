@@ -6,7 +6,9 @@ target_link_libraries(rapport-canvas PRIVATE rapport::rapport)
 
 add_executable(rapport-gallery gallery.cpp)
 target_link_libraries(rapport-gallery PRIVATE rapport::rapport)
-target_compile_options(rapport-gallery PRIVATE -Wno-missing-field-initializers)
+if(NOT MSVC)
+    target_compile_options(rapport-gallery PRIVATE -Wno-missing-field-initializers)
+endif()
 
 # Static builds link the backends in and register them (RAPPORT_BUILTIN_BACKEND)
 # from a generated source, since registrations inside a static library are

@@ -2111,7 +2111,8 @@ public:
     void set_column_order(const std::vector<size_t>& order) override
     {
         if (!is_column_order(order, columns_.size())) return;
-        std::vector<int> o(order.begin(), order.end());
+        std::vector<int> o;
+        for (size_t i : order) o.push_back(int(i));
         ListView_SetColumnOrderArray(h_, int(o.size()), o.data());
         fill_last();
         InvalidateRect(h_, nullptr, FALSE);
@@ -4235,7 +4236,8 @@ public:
     void set_icon(const icon& icon) override
     {
         if (!icon) return;
-        HICON big, small;
+        // (Not `small`: rpcndr.h defines it as char.)
+        HICON big, little;
         if (!icon.draw)
         {
             // Windows has no icon theme: a named window icon is the program's
@@ -4248,16 +4250,16 @@ public:
                 return HICON(LoadImageW(instance(), name.c_str(), IMAGE_ICON, px, px, LR_DEFAULTCOLOR));
             };
             big = load(SM_CXICON);
-            small = load(SM_CXSMICON);
-            if (!big && !small) return;
+            little = load(SM_CXSMICON);
+            if (!big && !little) return;
         }
         else
         {
             big = render_icon_handle(icon, GetSystemMetrics(SM_CXICON), scale());
-            small = render_icon_handle(icon, GetSystemMetrics(SM_CXSMICON), scale());
+            little = render_icon_handle(icon, GetSystemMetrics(SM_CXSMICON), scale());
         }
         if (big) SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
-        if (small) SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
+        if (little) SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(little));
     }
     void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }

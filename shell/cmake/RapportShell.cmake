@@ -21,15 +21,20 @@ function(rapport_add_shell_extension target)
     file(CONFIGURE OUTPUT ${info} @ONLY CONTENT
         "#include <rapport/shell.h>\nconst rap::shell::extension_info rap::shell::this_extension{\"@ARG_NAME@\", \"@ARG_ID@\", \"@ARG_WINDOWS_CLSID@\"};\n")
 
-    add_library(${target}_provider STATIC ${ARG_SOURCES} ${info})
+    add_library(${target}_provider STATIC ${ARG_SOURCES})
     target_link_libraries(${target}_provider PUBLIC rapport::shell)
+    if(MSVC)
+        rapport_shell_static_runtime(${target}_provider)
+    endif()
     set_target_properties(${target}_provider PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-    add_executable(${target}-probe $<TARGET_OBJECTS:rapport_shell_probe>)
+    # The identity is each module's own source: Visual Studio skips linking a
+    # module with no sources of its own.
+    add_executable(${target}-probe $<TARGET_OBJECTS:rapport_shell_probe> ${info})
     target_link_libraries(${target}-probe PRIVATE ${target}_provider)
 
     if(WIN32)
-        add_library(${target} MODULE ${RAPPORT_SHELL_EXPLORER_DEF})
+        add_library(${target} MODULE ${info} ${RAPPORT_SHELL_EXPLORER_DEF})
         # The provider's objects whole: nothing in the module refers to them.
         target_link_libraries(${target} PRIVATE rapport::shell_explorer
                               $<LINK_LIBRARY:WHOLE_ARCHIVE,${target}_provider>)
@@ -40,7 +45,10 @@ function(rapport_add_shell_extension target)
     endif()
 endfunction()
 
-# Links the C++ runtime into <target>, so it needs no runtime DLLs.
+# Links the C++ runtime into <target>, so it needs no runtime DLLs. With MSVC
+# every object in a link must agree, so the shell libraries themselves use
+# the static runtime, and so must an app that links rapport::shell (set
+# CMAKE_MSVC_RUNTIME_LIBRARY to MultiThreaded$<$<CONFIG:Debug>:Debug>).
 function(rapport_shell_static_runtime target)
     if(MINGW)
         # libstdc++ and winpthread come in here, statically, ahead of g++'s
