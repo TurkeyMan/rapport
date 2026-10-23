@@ -31,7 +31,10 @@ target_compile_definitions(rapport PRIVATE
 set_target_properties(rapport PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 0
-    CXX_VISIBILITY_PRESET default)
+    CXX_VISIBILITY_PRESET default
+    # The core's whole interface is exported, as GCC does by default; MSVC
+    # exports nothing from a DLL unless told.
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 install(TARGETS rapport EXPORT rapportTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT core NAMELINK_COMPONENT dev)
