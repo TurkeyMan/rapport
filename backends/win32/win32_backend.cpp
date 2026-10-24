@@ -6,10 +6,10 @@
 #include "rapport/i18n.h"
 
 #include <commdlg.h>
-#include <format>
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
+#include <format>
 #include <oleacc.h>
 #include <richedit.h>
 #include <shellapi.h>
@@ -6313,14 +6313,19 @@ public:
         HANDLE printer = nullptr;
         if (!OpenPrinterW(name.data(), &printer, nullptr)) return nullptr;
         HGLOBAL mem = nullptr;
-        if (const LONG bytes = DocumentPropertiesW(nullptr, printer, name.data(), nullptr, nullptr, 0); bytes > 0)
+        if (const LONG bytes =
+                DocumentPropertiesW(nullptr, printer, name.data(), nullptr, nullptr, 0);
+            bytes > 0)
             if ((mem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, size_t(bytes))))
             {
                 auto* dm = static_cast<DEVMODEW*>(GlobalLock(mem));
-                if (DocumentPropertiesW(nullptr, printer, name.data(), dm, nullptr, DM_OUT_BUFFER) == IDOK)
+                if (DocumentPropertiesW(nullptr, printer, name.data(), dm, nullptr,
+                                        DM_OUT_BUFFER) == IDOK)
                 {
                     dm->dmFields |= DM_ORIENTATION;
-                    dm->dmOrientation = orientation == page_orientation::landscape ? DMORIENT_LANDSCAPE : DMORIENT_PORTRAIT;
+                    dm->dmOrientation = orientation == page_orientation::landscape
+                                            ? DMORIENT_LANDSCAPE
+                                            : DMORIENT_PORTRAIT;
                     GlobalUnlock(mem);
                 }
                 else
@@ -6355,7 +6360,9 @@ public:
         pd.hwndOwner = parent ? static_cast<window_impl*>(parent)->hwnd() : GetDesktopWindow();
         // The default printer's settings, from the spooler, to start the dialog
         // in the job's orientation; without one it starts as the system has it.
-        pd.hDevMode = job.orientation == page_orientation::automatic ? nullptr : default_devmode(job.orientation);
+        pd.hDevMode = job.orientation == page_orientation::automatic
+                          ? nullptr
+                          : default_devmode(job.orientation);
         const DWORD last = job.pages > 0 ? DWORD(job.pages) : 9999;  // unknown until on_begin: any
         PRINTPAGERANGE range{1, last};
         pd.Flags = PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE | PD_NOSELECTION | PD_NOCURRENTPAGE |
@@ -6377,9 +6384,11 @@ public:
         {
             release();
             // Cancelled is no error; a dialog that couldn't open says why.
-            return finish(false, FAILED(hr) ? rap::i18n::format(rap::i18n::tr("rapport", "the print dialog failed ({0})"),
-                                                                std::format("0x{:08X}", uint32_t(hr)))
-                                            : std::string());
+            return finish(
+                false, FAILED(hr) ? rap::i18n::format(
+                                        rap::i18n::tr("rapport", "the print dialog failed ({0})"),
+                                        std::format("0x{:08X}", uint32_t(hr)))
+                                  : std::string());
         }
 
         // Only the pages chosen (one range: nMaxPageRanges is 1), else all.
