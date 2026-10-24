@@ -1026,7 +1026,7 @@ bool open_with(const fs::path& p)
 
 bool open_url(std::string_view url)
 {
-    return shell_execute(nullptr, path_from_utf8(url).wstring());
+    return shell_execute(nullptr, widen(url));
 }
 
 bool reveal(const fs::path& p)
