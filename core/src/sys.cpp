@@ -1,9 +1,11 @@
 #include "rapport/sys.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <system_error>
 #include <vector>
@@ -71,6 +73,124 @@ std::FILE* fopen(const fs::path& path, const char* mode)
     return _wfopen(path.c_str(), wmode.c_str());
 #else
     return std::fopen(path.c_str(), mode);
+#endif
+}
+
+#ifndef _WIN32
+namespace
+{
+
+// A path for a .trashinfo Path= line: percent-encoded but for the
+// unreserved characters and '/'.
+std::string trash_info_path(const std::string& p)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : p)
+        if (std::isalnum(c) || std::strchr("-._~/", c))
+            out += char(c);
+        else
+            out += {'%', hex[c >> 4], hex[c & 15]};
+    return out;
+}
+
+// Moves `item` into the trash directory `trash`, recording `recorded` (an
+// absolute path, or one relative to the trash's filesystem) as where it was.
+// The info file is made first, exclusively, to claim a name.
+std::expected<void, std::string> trash_into(const fs::path& item, const fs::path& trash, const std::string& recorded)
+{
+    std::error_code ec;
+    const bool made = fs::create_directories(trash, ec);
+    if (made) fs::permissions(trash, fs::perms::owner_all, ec);  // the spec's 0700
+    fs::create_directories(trash / "files", ec);
+    fs::create_directories(trash / "info", ec);
+    char date[32];
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+    localtime_r(&now, &tm);
+    std::strftime(date, sizeof date, "%Y-%m-%dT%H:%M:%S", &tm);
+    const std::string text = "[Trash Info]\nPath=" + trash_info_path(recorded) + "\nDeletionDate=" + date + "\n";
+    const std::string base = item.filename().string();
+    for (int n = 1; n < 10000; ++n)
+    {
+        const std::string name = n == 1 ? base : base + "." + std::to_string(n);
+        const fs::path info = trash / "info" / (name + ".trashinfo"), target = trash / "files" / name;
+        const int fd = ::open(info.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd < 0)
+        {
+            if (errno == EEXIST) continue;
+            return std::unexpected("couldn't write " + info.string() + ": " + std::strerror(errno));
+        }
+        const bool written = ::write(fd, text.data(), text.size()) == ssize_t(text.size());
+        ::close(fd);
+        // (rename would replace a file left in files/ without its info.)
+        struct stat st;
+        if (written && ::lstat(target.c_str(), &st) != 0 && ::rename(item.c_str(), target.c_str()) == 0) return {};
+        const int err = errno;
+        ::unlink(info.c_str());
+        if (!written) return std::unexpected("couldn't write " + info.string());
+        if (err == ENOENT || err == EEXIST || err == ENOTEMPTY) continue;
+        return std::unexpected("couldn't move " + item.string() + " to the trash: " + std::strerror(err));
+    }
+    return std::unexpected("no free name in " + trash.string());
+}
+
+}  // namespace
+#endif
+
+std::expected<void, std::string> move_to_trash(const std::vector<fs::path>& paths)
+{
+    if (paths.empty()) return {};
+    std::error_code ec;
+#ifdef _WIN32
+    // SHFileOperation takes the paths NUL-separated, NUL-terminated, absolute
+    // (the Recycle Bin needs them so).
+    std::wstring list;
+    for (const fs::path& p : paths)
+    {
+        list += fs::absolute(p, ec).wstring();
+        list += L'\0';
+    }
+    list += L'\0';
+    SHFILEOPSTRUCTW op{};
+    op.wFunc = FO_DELETE;
+    op.pFrom = list.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT | FOF_NO_CONNECTED_ELEMENTS;
+    const int r = SHFileOperationW(&op);
+    if (r != 0 || op.fAnyOperationsAborted)
+        return std::unexpected("couldn't move to the Recycle Bin (error " + std::to_string(r) + ")");
+    return {};
+#else
+    // $XDG_DATA_HOME/Trash (only an absolute XDG_DATA_HOME counts).
+    const std::string xdg_data = env("XDG_DATA_HOME").value_or("");
+    const fs::path home_trash =
+        (!xdg_data.empty() && xdg_data[0] == '/' ? fs::path(xdg_data)
+                                                  : fs::path(env("HOME").value_or("")) / ".local" / "share") /
+        "Trash";
+    struct stat home{};
+    fs::create_directories(home_trash.parent_path(), ec);
+    const bool have_home = ::stat(home_trash.parent_path().c_str(), &home) == 0;
+    for (const fs::path& p : paths)
+    {
+        const fs::path item = fs::absolute(p, ec).lexically_normal();
+        struct stat st;
+        if (::lstat(item.c_str(), &st) != 0) return std::unexpected(item.string() + ": " + std::strerror(errno));
+        std::expected<void, std::string> moved;
+        if (have_home && st.st_dev == home.st_dev)
+            moved = trash_into(item, home_trash, item.string());
+        else
+        {
+            // Another filesystem: its own trash at its top, paths relative to it.
+            fs::path top = item.parent_path();
+            for (struct stat up; top.has_relative_path() && ::stat(top.parent_path().c_str(), &up) == 0 &&
+                                 up.st_dev == st.st_dev;)
+                top = top.parent_path();
+            moved = trash_into(item, top / (".Trash-" + std::to_string(::getuid())),
+                               item.lexically_relative(top).string());
+        }
+        if (!moved) return moved;
+    }
+    return {};
 #endif
 }
 

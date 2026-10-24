@@ -40,6 +40,13 @@ std::optional<std::string> env(const char* name);
 // fopen for any path (wide on Windows).
 std::FILE* fopen(const std::filesystem::path&, const char* mode);
 
+// Moves files or folders to the desktop's trash, where the user can restore
+// them: the Recycle Bin on Windows (silently; a drive without one deletes
+// for good, as Explorer's own silent delete does); on Linux the freedesktop
+// trash every file manager shares ($XDG_DATA_HOME/Trash, or .Trash-<uid> at
+// the top of another filesystem). Stops at the first that fails.
+std::expected<void, std::string> move_to_trash(const std::vector<std::filesystem::path>&);
+
 // -- locations ----------------------------------------------------------------
 
 // The running executable, absolute.
