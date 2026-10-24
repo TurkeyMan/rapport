@@ -3658,9 +3658,10 @@ class gtk3_backend : public backend
 public:
     static backend* create(int* argc, char** argv)
     {
-        // Under WSLg, Wayland gives an app no window positions, so nothing
-        // could keep a window on screen; its X server does.
-        if (under_wsl() && !std::getenv("GDK_BACKEND")) gdk_set_allowed_backends("x11,*");
+        // Under WSLg, GTK keeps its own choice, Wayland: WSLg's X server
+        // doesn't keep the pointer's shape up to date, leaving whatever was
+        // set last (often nothing) over the window. Wayland can't place
+        // windows, but WSL is for testing.
         if (!gtk_init_check(argc, &argv)) return nullptr;
         init_metrics();
         return new gtk3_backend;
