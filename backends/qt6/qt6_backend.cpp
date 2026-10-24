@@ -3541,6 +3541,10 @@ private:
                 continue;
             }
             QWidget* w = build(item, orientation::horizontal);
+            // Only spacers take the toolbar's spare width: a slider (in a
+            // box or not) keeps its own width rather than sharing it.
+            if (item.common.stretch == 0)
+                w->setSizePolicy(QSizePolicy::Fixed, w->sizePolicy().verticalPolicy());
             QAction* action = bar->addWidget(w);
             w->setProperty("rapport-toolbar-action", QVariant::fromValue<QObject*>(action));
         }
