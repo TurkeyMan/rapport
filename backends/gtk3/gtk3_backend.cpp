@@ -315,6 +315,9 @@ GtkWidget* icon_widget(const icon& icon, int size)
     if (!icon.draw) return nullptr;
     GtkWidget* area = gtk_drawing_area_new();
     gtk_widget_set_size_request(area, size, size);
+    // Square and centred, however tall the toolbar row is.
+    gtk_widget_set_halign(area, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(area, GTK_ALIGN_CENTER);
     g_signal_connect_data(
         area, "draw",
         G_CALLBACK(+[](GtkWidget* w, cairo_t* cr, gpointer p) -> gboolean

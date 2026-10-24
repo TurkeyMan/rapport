@@ -155,8 +155,39 @@ private:
     std::function<void()> click_;
 };
 
+// A named icon the theme has; otherwise a drawing area that runs icon::draw
+// whenever it paints, so drawn icons follow scale and theme (the area takes
+// its button's CSS colour, greyed when insensitive). Null for neither.
+GtkWidget* icon_widget(const icon& icon, int size)
+{
+    GtkIconTheme* theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
+    if (!icon.name.empty() && gtk_icon_theme_has_icon(theme, icon.name.c_str()))
+    {
+        GtkWidget* img = gtk_image_new_from_icon_name(icon.name.c_str());
+        gtk_image_set_pixel_size(GTK_IMAGE(img), size);
+        return img;
+    }
+    if (!icon.draw) return nullptr;
+    using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
+    GtkWidget* area = gtk_drawing_area_new();
+    gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(area), size);
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), size);
+    // Square and centred, however tall the toolbar row is.
+    gtk_widget_set_halign(area, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(area, GTK_ALIGN_CENTER);
+    gtk_drawing_area_set_draw_func(
+        GTK_DRAWING_AREA(area),
+        +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
+        {
+            cairo_painter painter(cr, GTK_WIDGET(a));
+            (*static_cast<draw_fn*>(p))(painter, {float(w), float(h)});
+        },
+        new draw_fn(icon.draw), +[](gpointer p) { delete static_cast<draw_fn*>(p); });
+    return area;
+}
+
 // GTK 4 has no GtkToolbar: a flat button in a box. Written without a GTK 4
-// build. TODO(tortilla): toggles' pressed look, drawn icons.
+// build. TODO(tortilla): toggles' pressed look.
 class tool_button_impl : public widget_base<rap::tool_button>
 {
 public:
@@ -181,7 +212,7 @@ public:
     }
     void set_icon(const icon& icon) override
     {
-        if (!icon.name.empty()) gtk_button_set_icon_name(GTK_BUTTON(w_), icon.name.c_str());
+        if (GtkWidget* child = icon_widget(icon, 16)) gtk_button_set_child(GTK_BUTTON(w_), child);
     }
     bool checked() const override
     {
