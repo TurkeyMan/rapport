@@ -208,7 +208,12 @@ handler* handler_of(HWND h)
 class window_impl;  // forward
 
 // Messages the containers forward to their children's handlers.
-bool forward_child_message(HWND, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result)
+// Paints the frames of the group boxes in window `h` (after its background);
+// false if it has none.
+bool paint_group_frames(HWND h, HDC dc);
+void forget_group_themes(HWND h);
+
+bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result)
 {
     switch (msg)
     {
@@ -259,6 +264,24 @@ bool forward_child_message(HWND, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result
                 return true;
             }
         return false;
+    }
+    case WM_THEMECHANGED:
+        forget_group_themes(wnd);
+        return false;
+    case WM_ERASEBKGND:
+    {
+        // The window's background, with the frames of its group boxes, in
+        // one step (so a frame's line is never erased and redrawn later).
+        HDC dc = reinterpret_cast<HDC>(wp);
+        RECT c;
+        GetClientRect(wnd, &c);
+        const int saved = SaveDC(dc);
+        FillRect(dc, &c, GetSysColorBrush(COLOR_BTNFACE));
+        const bool any = paint_group_frames(wnd, dc);
+        RestoreDC(dc, saved);
+        if (!any) return false;  // (the fill was the default erase anyway)
+        result = 1;
+        return true;
     }
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN:
@@ -328,16 +351,11 @@ HWND make_host(HWND parent, DWORD style = 0)
 // A control that paints through an off-screen buffer: its erase is skipped
 // and WM_PAINT renders it (WM_PRINTCLIENT) into a buffer that reaches the
 // screen in one step. For controls that erase and then draw, and so flash
-// whenever a layout moves or resizes them: group boxes, links, list headers.
+// whenever a layout moves or resizes them: links, list headers.
 enum class buffer_bg
 {
     own,     // the control fills its own background
     parent,  // the buffer starts as the parent's background (a link)
-    // The parent's background, leaving out the controls lying over it (a
-    // group box draws only its frame and title, and created before its
-    // contents it's above them in z-order: its paint would cover them until
-    // they repainted, and they would flash).
-    frame,
 };
 
 void paint_buffered(HWND h, buffer_bg bg)
@@ -355,15 +373,6 @@ void paint_buffered(HWND h, buffer_bg bg)
             HDC dc = BeginPaint(h, &ps);
             RECT r;
             GetClientRect(h, &r);
-            if (bg == buffer_bg::frame)
-                for (HWND s = GetWindow(GetParent(h), GW_CHILD); s; s = GetWindow(s, GW_HWNDNEXT))
-                {
-                    if (s == h || !IsWindowVisible(s)) continue;
-                    RECT sr;
-                    GetWindowRect(s, &sr);
-                    MapWindowPoints(nullptr, h, reinterpret_cast<POINT*>(&sr), 2);
-                    ExcludeClipRect(dc, sr.left, sr.top, sr.right, sr.bottom);
-                }
             HDC mem = nullptr;
             if (HPAINTBUFFER buffer = BeginBufferedPaint(dc, &r, BPBF_COMPATIBLEBITMAP, nullptr, &mem))
             {
@@ -1585,45 +1594,163 @@ private:
 };
 
 // A titled frame around one item.
+// A group box: its frame and title are drawn by the window it's in, as
+// part of that window's background (frames_of), rather than by a control of
+// its own. A BUTTON group box painted after the controls inside it covered
+// them until they repainted, and repainted whole on every layout that
+// resized it (about 1.5 ms apiece); this costs microseconds, and never
+// paints over its contents.
 class group_item : public item
 {
 public:
     group_item(win_context& win, HWND parent, const std::string& title)
         : win_(win)
+        , parent_(parent)
+        , title_(wide(title))
     {
-        // Created first so the controls inside sit above it in z-order; it
-        // paints around them (WS_CLIPSIBLINGS), buffered, so resizing it in
-        // a layout doesn't flash.
-        h_ = create_control(win, parent, L"BUTTON", wide(title), BS_GROUPBOX | WS_CLIPSIBLINGS);
-        paint_buffered(h_, buffer_bg::frame);
+        frames_of()[parent_].push_back(this);
     }
-    ~group_item() override { DestroyWindow(h_); }
+    ~group_item() override
+    {
+        forget_theme();
+        invalidate();
+        auto& list = frames_of()[parent_];
+        list.erase(std::remove(list.begin(), list.end(), this), list.end());
+        if (list.empty()) frames_of().erase(parent_);
+    }
     item* content = nullptr;
     bool fills() const override { return true; }
     bool expands_in_form() const override { return true; }
     SIZE measure() override
     {
         const SIZE c = content ? content->natural() : SIZE{0, 0};
-        const SIZE t = text_extent(h_, window_text(h_));
-        return {std::max(c.cx, t.cx + win_.px(16)) + 2 * pad(), c.cy + top() + pad()};
+        return {std::max(c.cx, title_size().cx + win_.px(16)) + 2 * pad(), c.cy + top() + pad()};
     }
     void place(RECT r) override
     {
-        move_control(h_, r.left, r.top, r.right - r.left, r.bottom - r.top);
+        if (!EqualRect(&r, &rect_))
+        {
+            invalidate();
+            rect_ = r;
+            invalidate();
+        }
         if (content) content->place({r.left + pad(), r.top + top(), r.right - pad(), r.bottom - pad()});
     }
     void show_all(bool shown) override
     {
-        show_control(h_, shown && visible);
+        if (shown && visible) shown_ = true, invalidate();
+        else invalidate(), shown_ = false;
         if (content) content->show_all(shown && visible);
+    }
+
+    // Draws the frame and title over the window's background, if the area
+    // being painted (a child's background, say) reaches them.
+    void paint(HDC dc)
+    {
+        if (!shown_ || IsRectEmpty(&rect_)) return;
+        RECT clip, overlap;
+        if (GetClipBox(dc, &clip) == NULLREGION) return;
+        bool reached = false;
+        for (const RECT& b : bands()) reached = reached || IntersectRect(&overlap, &b, &clip);
+        if (!reached) return;
+        HGDIOBJ old_font = SelectObject(dc, ui_font(win_.dpi()));
+        SIZE t{};
+        GetTextExtentPoint32W(dc, title_.c_str(), int(title_.size()), &t);
+        RECT frame = rect_;
+        frame.top += t.cy / 2;
+        if (!theme_) theme_ = OpenThemeData(parent_, L"BUTTON");
+        HTHEME theme = theme_;
+        if (theme)
+            DrawThemeBackground(theme, dc, BP_GROUPBOX, GBS_NORMAL, &frame, nullptr);
+        else
+            DrawEdge(dc, &frame, EDGE_ETCHED, BF_RECT);
+        if (!title_.empty())
+        {
+            // The title sits in a gap in the top line.
+            RECT text{rect_.left + win_.px(9), rect_.top, rect_.left + win_.px(9) + t.cx, rect_.top + t.cy};
+            RECT gap = text;
+            InflateRect(&gap, win_.px(2), 0);
+            FillRect(dc, &gap, GetSysColorBrush(COLOR_BTNFACE));
+            SetBkMode(dc, TRANSPARENT);
+            if (theme)
+                DrawThemeText(theme, dc, BP_GROUPBOX, GBS_NORMAL, title_.c_str(), -1, DT_SINGLELINE | DT_LEFT, 0,
+                              &text);
+            else
+            {
+                SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+                DrawTextW(dc, title_.c_str(), -1, &text, DT_SINGLELINE | DT_LEFT);
+            }
+        }
+        SelectObject(dc, old_font);
+    }
+    void forget_theme()
+    {
+        if (theme_) CloseThemeData(theme_);
+        theme_ = nullptr;
+    }
+
+    // The group boxes each window draws, by window.
+    static std::map<HWND, std::vector<group_item*>>& frames_of()
+    {
+        static std::map<HWND, std::vector<group_item*>> frames;
+        return frames;
     }
 
 private:
     int pad() const { return win_.px(9); }
     int top() const { return font_metrics(win_.dpi()).cy + win_.px(4); }
+    SIZE title_size() const
+    {
+        HDC dc = GetDC(parent_);
+        HGDIOBJ old = SelectObject(dc, ui_font(win_.dpi()));
+        SIZE t{};
+        GetTextExtentPoint32W(dc, title_.c_str(), int(title_.size()), &t);
+        SelectObject(dc, old);
+        ReleaseDC(parent_, dc);
+        return t;
+    }
+    // Asks the window to redraw the frame's lines and title (the inside is
+    // the window's to repaint as its controls move).
+    void invalidate()
+    {
+        if (!shown_ || IsRectEmpty(&rect_)) return;
+        for (const RECT& b : bands()) InvalidateRect(parent_, &b, TRUE);
+    }
+    // Where the frame draws: the top (title and line) and the other edges.
+    std::array<RECT, 4> bands() const
+    {
+        const int line = win_.px(3);
+        return {{
+            {rect_.left, rect_.top, rect_.right, rect_.top + top()},
+            {rect_.left, rect_.top, rect_.left + line, rect_.bottom},
+            {rect_.right - line, rect_.top, rect_.right, rect_.bottom},
+            {rect_.left, rect_.bottom - line, rect_.right, rect_.bottom},
+        }};
+    }
+
     win_context& win_;
-    HWND h_;
+    HWND parent_;
+    std::wstring title_;
+    RECT rect_{};
+    bool shown_ = false;
+    HTHEME theme_ = nullptr;
 };
+
+void forget_group_themes(HWND h)
+{
+    auto& frames = group_item::frames_of();
+    if (auto it = frames.find(h); it != frames.end())
+        for (group_item* g : it->second) g->forget_theme();
+}
+
+bool paint_group_frames(HWND h, HDC dc)
+{
+    auto& frames = group_item::frames_of();
+    auto it = frames.find(h);
+    if (it == frames.end()) return false;
+    for (group_item* g : it->second) g->paint(dc);
+    return true;
+}
 
 class progress_bar_impl : public leaf<rap::progress_bar>
 {
