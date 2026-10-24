@@ -1242,6 +1242,19 @@ private:
     bool laid_out_ = false;
 };
 
+// A page's content at its top, as GTK packs it, unless something in it
+// grows to fill the height (a list, a text view): a box of rows would
+// otherwise share the page's spare height out between them.
+void add_page_content(QWidget* page, QWidget* content)
+{
+    auto* l = static_cast<QBoxLayout*>(page->layout());
+    l->addWidget(content);
+    const bool grows =
+        (content->sizePolicy().verticalPolicy() & QSizePolicy::ExpandFlag) ||
+        (content->layout() && (content->layout()->expandingDirections() & Qt::Vertical));
+    if (!grows) l->addStretch(1);
+}
+
 // Tab pages built the first time they're shown (layout::lazy): each starts
 // as an empty page with a layout, filled then.
 struct lazy_pages
@@ -1255,7 +1268,7 @@ struct lazy_pages
         if (i < 0 || size_t(i) >= lazy.size() || !lazy[size_t(i)]) return;
         const auto make = std::move(lazy[size_t(i)]);
         lazy[size_t(i)] = nullptr;
-        pages[size_t(i)]->layout()->addWidget(build(make()));
+        add_page_content(pages[size_t(i)], build(make()));
     }
 };
 
@@ -3380,7 +3393,7 @@ private:
         auto* page = new QWidget;
         auto* l = new QVBoxLayout(page);
         l->setContentsMargins(6, 6, 6, 6);
-        if (content) l->addWidget(content);
+        if (content) add_page_content(page, content);
         return page;
     }
 
