@@ -65,10 +65,41 @@ using namespace gtkcommon;
 }  // namespace
 }  // namespace rap::gtk4
 
+// The theme's named colours, as GTK 3's: libadwaita's names first, then the
+// classic ones GTK's own theme still defines. The lookup is deprecated in
+// GTK 4 with nothing to replace it for named colours, so it's kept until
+// one exists. A name that resolves transparent isn't a colour.
 rap::color rap::gtkcommon::theme_color_of(GtkWidget* w, theme_color role)
 {
     GdkRGBA fg;
     gtk_widget_get_color(w, &fg);
+    std::array<const char*, 2> names{};  // most preferred first; unused are null
+    switch (role)
+    {
+    case theme_color::window: names = {"window_bg_color", "theme_bg_color"}; break;
+    case theme_color::window_text: names = {"window_fg_color", "theme_fg_color"}; break;
+    case theme_color::base: names = {"view_bg_color", "theme_base_color"}; break;
+    case theme_color::text: names = {"view_fg_color", "theme_text_color"}; break;
+    case theme_color::highlight:
+    case theme_color::accent: names = {"accent_bg_color", "theme_selected_bg_color"}; break;
+    case theme_color::highlight_text: names = {"accent_fg_color", "theme_selected_fg_color"}; break;
+    case theme_color::positive: names = {"success_color"}; break;
+    case theme_color::negative: names = {"error_color"}; break;
+    case theme_color::link: names = {"link_color"}; break;
+    default: break;
+    }
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    GtkStyleContext* ctx = gtk_widget_get_style_context(w);
+    for (const char* name : names)
+    {
+        GdkRGBA c;
+        if (name && gtk_style_context_lookup_color(ctx, name, &c) && c.alpha > 0)
+        {
+            G_GNUC_END_IGNORE_DEPRECATIONS
+            return to_color(c);
+        }
+    }
+    G_GNUC_END_IGNORE_DEPRECATIONS
     return fallback_color(role, to_color(fg), is_dark_text(fg));
 }
 
