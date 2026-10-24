@@ -2,8 +2,8 @@
 // (later) badges on its icons, through each platform's own extension point.
 //
 // An app writes a provider, built with rapport_add_shell_extension() into an
-// extension the file manager loads: a COM DLL for Explorer, a plugin for
-// Dolphin, Nautilus, Nemo, Caja or Thunar. It runs inside the file manager's
+// extension the file manager loads: a COM DLL for Explorer, a plugin each for
+// Nautilus, Nemo, Caja, Thunar and Dolphin. It runs inside the file manager's
 // process, so it stays small: no toolkit, nothing slow on the UI thread, and
 // nothing that throws past it (the adapters catch, but a crash takes the file
 // manager down). Choosing an item usually launches the app with launch().
@@ -31,7 +31,9 @@ struct menu_item
 {
     std::string id;     // handed back to invoke(); unique within one menu
     std::string label;  // UTF-8; '&' marks the mnemonic; empty for a separator
-    std::string icon;   // an image file (.ico, .png), relative to the extension's directory
+    // An image file (.ico, .png) relative to resource_dir(); on Linux, also an
+    // icon theme's name, which picks the size and scale the menu needs.
+    std::string icon;
     bool enabled = true;
     std::vector<menu_item> submenu;
 
@@ -64,8 +66,14 @@ public:
     virtual std::string badge(const std::filesystem::path&) { return {}; }
 };
 
-// The extension's own directory: where its icons and its app's executable are.
+// The extension's own directory. On Windows its icons and its app sit beside
+// it; on Linux it's the file manager's plugin directory, holding nothing else
+// of the app's.
 std::filesystem::path module_dir();
+
+// Where menu_item::icon and badge_kind::icon are found: module_dir() on
+// Windows, the RESOURCE_DIR given to rapport_add_shell_extension() elsewhere.
+std::filesystem::path resource_dir();
 
 // Starts a program and doesn't wait for it; args don't include the program.
 bool launch(const std::filesystem::path& program, const std::vector<std::string>& args,
@@ -86,6 +94,7 @@ struct extension_info
     const char* name;           // shown where the platform names extensions
     const char* id;             // reverse-DNS, e.g. org.example.App
     const char* windows_clsid;  // "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}"
+    const char* resource_dir;   // absolute; empty for module_dir()
 };
 extern const extension_info this_extension;
 

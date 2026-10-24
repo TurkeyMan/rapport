@@ -25,7 +25,7 @@ void print(const std::vector<rap::shell::menu_item>& items, int depth)
         if (!item.id.empty()) std::printf("  [%s]", item.id.c_str());
         if (!item.icon.empty())
         {
-            const bool found = std::filesystem::exists(rap::shell::module_dir() / item.icon);
+            const bool found = std::filesystem::exists(rap::shell::resource_dir() / item.icon);
             std::printf("  icon %s%s", item.icon.c_str(), found ? "" : " MISSING");
         }
         std::printf("\n");

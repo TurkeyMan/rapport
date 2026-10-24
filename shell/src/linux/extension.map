@@ -1,0 +1,13 @@
+/* What a Linux file-manager extension exports: its file manager's entry
+   points, and nothing of rapport's or the provider's, so two apps'
+   extensions in one file manager can't bind to each other's code. */
+{
+    global:
+        nautilus_module_initialize; nautilus_module_shutdown; nautilus_module_list_types;
+        nemo_module_initialize; nemo_module_shutdown; nemo_module_list_types;
+        caja_module_initialize; caja_module_shutdown; caja_module_list_types;
+        thunar_extension_initialize; thunar_extension_shutdown; thunar_extension_list_types;
+        qt_plugin_instance; qt_plugin_query_metadata; qt_plugin_query_metadata_v2;
+    local:
+        *;
+};
