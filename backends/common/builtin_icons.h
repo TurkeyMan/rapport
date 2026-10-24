@@ -66,6 +66,14 @@ inline bool draw_builtin_icon(const std::string& full_name, painter& p, size_f s
         box(5, 2, 6, 4);
         box(4.5f, 9, 7, 5);
     }
+    else if (name == "document-print" || name == "printer")
+    {
+        // A sheet going in at the top, the body, a sheet coming out below.
+        box(4.5f, 1.5f, 7, 4);
+        p.polygon({pt(1.5f, 5.5f), pt(14.5f, 5.5f), pt(14.5f, 11.5f), pt(1.5f, 11.5f)}, std::nullopt, ink, w);
+        box(4.5f, 9, 7, 5.5f);
+        ln(4.5f, 8, 4.5f, 8);  // a light
+    }
     else if (name == "edit-cut")
     {
         p.circle(pt(4.5f, 11.5f), 2.2f * u, std::nullopt, ink);

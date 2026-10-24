@@ -953,6 +953,17 @@ public:
 
 // -- simple controls ----------------------------------------------------------
 
+// A label's icon, when it's part of a link: the link's hand pointer.
+LRESULT CALLBACK link_icon_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg == WM_SETCURSOR)
+    {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
 class label_impl : public leaf<rap::label>
 {
 public:
@@ -961,7 +972,16 @@ public:
         , ellipsize_(s.ellipsize)
         , link_(s.link)
         , on_click_(s.on_click)
+        , icon_(s.icon)
     {
+        // The icon before the text: a static of its own (SysLink can't hold
+        // one), which on a link takes the link's click and pointer.
+        if (icon_)
+        {
+            icon_h_ = create_control(win, parent, L"STATIC", L"", SS_ICON | SS_CENTERIMAGE | (link_ ? SS_NOTIFY : 0));
+            handlers()[icon_h_] = this;
+            if (link_) SetWindowSubclass(icon_h_, link_icon_proc, 3, 0);
+        }
         if (link_)
         {
             // The system's link control: its colour, focus and Enter.
@@ -979,13 +999,66 @@ public:
         SetWindowTextW(h_, link_ ? link_markup(t).c_str() : wide(t).c_str());
         if (!ellipsize_) win_.relayout();
     }
+    ~label_impl() override
+    {
+        if (icon_h_)
+        {
+            handlers().erase(icon_h_);
+            DestroyWindow(icon_h_);
+        }
+        if (hicon_) DestroyIcon(hicon_);
+    }
     LRESULT notify(NMHDR* n, bool& handled) override
     {
         handled = link_ && n->hwndFrom == h_ && (n->code == NM_CLICK || n->code == NM_RETURN);
         if (handled && on_click_) on_click_();
         return 0;
     }
+    // The icon's click (only a link's icon sends one).
+    void command(WORD code) override
+    {
+        if (code == STN_CLICKED && link_ && on_click_) on_click_();
+    }
+    void set_enabled(bool e) override
+    {
+        EnableWindow(h_, e);
+        if (icon_h_) EnableWindow(icon_h_, e);
+    }
+    void show_all(bool shown) override
+    {
+        show_control(h_, shown && visible);
+        if (icon_h_) show_control(icon_h_, shown && visible);
+    }
+    void place(RECT r) override
+    {
+        if (icon_h_)
+        {
+            const int size = px(16), h = r.bottom - r.top;
+            move_control(icon_h_, r.left, r.top + (h - size) / 2, size, size);
+            r.left += size + px(4);
+        }
+        move_control(h_, r.left, r.top, r.right - r.left, r.bottom - r.top);
+    }
     SIZE measure() override
+    {
+        SIZE s = measure_text();
+        if (icon_h_)
+        {
+            // Drawn for the window's scale, again if that's changed.
+            const int size = px(16);
+            if (size != icon_px_)
+            {
+                if (hicon_) DestroyIcon(hicon_);
+                hicon_ = render_icon_handle(icon_, size, win_.scale());
+                SendMessageW(icon_h_, STM_SETICON, reinterpret_cast<WPARAM>(hicon_), 0);
+                icon_px_ = size;
+            }
+            s.cx += size + px(4);
+            s.cy = std::max<long>(s.cy, size);
+        }
+        return s;
+    }
+    SIZE measure_text()
     {
         if (link_)
         {
@@ -1020,6 +1093,10 @@ private:
     long full_cx_ = 0;
     bool link_;
     std::function<void()> on_click_;
+    icon icon_;
+    HWND icon_h_ = nullptr;
+    HICON hicon_ = nullptr;
+    int icon_px_ = 0;
 };
 
 class button_impl : public leaf<rap::button>
