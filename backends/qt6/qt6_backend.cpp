@@ -3301,7 +3301,7 @@ private:
     QWidget* make(const node& n, const spec::box& s, orientation o)
     {
         // Controls here are cheap to make: a deferred box is built now.
-        if (s.deferred) return make(n, spec::box{s.dir, {s.deferred()}, s.margins}, o);
+        if (s.deferred) return make(n, spec::box{s.dir, {s.deferred()}, s.margins, {}}, o);
         auto* box = new QWidget;
         auto* l = new QBoxLayout(s.dir == orientation::vertical ? QBoxLayout::TopToBottom
                                                                 : QBoxLayout::LeftToRight,

@@ -405,7 +405,7 @@ private:
 class vbox : public builder<vbox, spec::box>
 {
 public:
-    vbox(std::initializer_list<node> items) { s() = {vertical, items}; }
+    vbox(std::initializer_list<node> items) { s() = {vertical, items, false, {}}; }
     vbox& margins(bool on = true)
     {
         s().margins = on;
@@ -416,7 +416,7 @@ public:
 class hbox : public builder<hbox, spec::box>
 {
 public:
-    hbox(std::initializer_list<node> items) { s() = {horizontal, items}; }
+    hbox(std::initializer_list<node> items) { s() = {horizontal, items, false, {}}; }
     hbox& margins(bool on = true)
     {
         s().margins = on;
@@ -534,7 +534,7 @@ public:
         for (auto& p : pages)
         {
             s().titles.push_back(p.title);
-            s().pages.push_back(p.build ? node{spec::box{vertical, {}}, {}} : p.content);
+            s().pages.push_back(p.build ? node{spec::box{vertical, {}, false, {}}, {}} : p.content);
             if (any_lazy) s().lazy.push_back(p.build);
         }
     }

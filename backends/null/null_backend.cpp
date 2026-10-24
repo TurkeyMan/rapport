@@ -352,7 +352,7 @@ private:
 
     void visit(const node& n, const spec::box& s, int d)
     {
-        if (s.deferred) return visit(n, spec::box{s.dir, {s.deferred()}, s.margins}, d);
+        if (s.deferred) return visit(n, spec::box{s.dir, {s.deferred()}, s.margins, {}}, d);
         std::printf("%s", s.dir == orientation::vertical ? "vbox" : "hbox");
         suffix(n);
         children(s.items, d);

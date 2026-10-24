@@ -3241,7 +3241,7 @@ private:
     GtkWidget* make(const node& n, const spec::box& s, orientation o)
     {
         // Controls here are cheap to make: a deferred box is built now.
-        if (s.deferred) return make(n, spec::box{s.dir, {s.deferred()}, s.margins}, o);
+        if (s.deferred) return make(n, spec::box{s.dir, {s.deferred()}, s.margins, {}}, o);
         GtkWidget* box = gtk_box_new(gtk_orientation(s.dir), 6);
         for (auto& c : s.items)
         {
