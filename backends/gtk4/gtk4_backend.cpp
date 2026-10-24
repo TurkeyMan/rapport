@@ -2012,7 +2012,7 @@ public:
     {
         return {float(gtk_widget_get_width(w_)), float(gtk_widget_get_height(w_))};
     }
-    float device_scale() const override { return float(gtk_widget_get_scale_factor(w_)); }
+    float device_scale() const override { return device_scale_of(w_); }
     void set_cursor(cursor c) override
     {
         static const char* names[] = {"default",   "pointer",   "text",        "crosshair",  "grab",

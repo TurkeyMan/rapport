@@ -262,6 +262,19 @@ inline std::pair<color, color> soft_selection_colors(GtkWidget* w)
     return {mix_colors(base, accent, dark ? 0.38f : 0.24f), text};
 }
 
+// Device pixels per logical pixel. GTK 4's widget scale factor rounds a
+// fractional scale (150%) up to 2; its surface scale is the true one, and
+// drawing areas are replayed at it, so callers can place pixels 1:1.
+inline float device_scale_of(GtkWidget* w)
+{
+#if GTK_CHECK_VERSION(4, 12, 0)
+    if (GtkNative* native = gtk_widget_get_native(w))
+        if (GdkSurface* surface = gtk_native_get_surface(native))
+            return float(gdk_surface_get_scale(surface));
+#endif
+    return float(gtk_widget_get_scale_factor(w));
+}
+
 // The font size for compact lists and text views: 90% of the widget's
 // font, rounded to whole pixels so glyphs sit on the pixel grid.
 struct compact_font_size
@@ -537,7 +550,7 @@ public:
 
     float device_scale() const override
     {
-        return print_font_ ? print_scale_ : float(gtk_widget_get_scale_factor(w_));
+        return print_font_ ? print_scale_ : device_scale_of(w_);
     }
 
     void push_clip(rect_f r) override
