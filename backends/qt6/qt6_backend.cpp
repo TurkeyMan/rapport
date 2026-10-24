@@ -829,13 +829,38 @@ public:
     std::string text() const override { return edit()->text().toStdString(); }
     void set_text(const std::string& t) override { edit()->setText(qs(t)); }
     void set_placeholder(const std::string& t) override { edit()->setPlaceholderText(qs(t)); }
-    void set_read_only(bool v) override { edit()->setReadOnly(v); }
-    void set_frame(bool v) override { edit()->setFrame(v); }
+    void set_read_only(bool v) override
+    {
+        edit()->setReadOnly(v);
+        update_base();
+    }
+    // Frameless keeps the framed height (the frame's space, as GTK keeps
+    // it), so giving the frame back doesn't move the layout.
+    void set_frame(bool v) override
+    {
+        if (!v && edit()->hasFrame()) edit()->setMinimumHeight(edit()->sizeHint().height());
+        edit()->setFrame(v);
+        if (v) edit()->setMinimumHeight(0);
+        update_base();
+    }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
 
 private:
     QLineEdit* edit() const { return static_cast<QLineEdit*>(w_); }
+    // Read-only and frameless, it reads as text on the window: its Base is
+    // the palette's Window; otherwise the palette it inherits.
+    void update_base()
+    {
+        if (edit()->isReadOnly() && !edit()->hasFrame())
+        {
+            QPalette p = edit()->palette();
+            p.setBrush(QPalette::Base, p.brush(QPalette::Window));
+            edit()->setPalette(p);
+        }
+        else
+            edit()->setPalette(QPalette());
+    }
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };

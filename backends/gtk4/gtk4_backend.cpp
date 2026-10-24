@@ -633,7 +633,29 @@ public:
         gtk_editable_set_text(GTK_EDITABLE(w_), t.c_str());
     }
     void set_read_only(bool v) override { gtk_editable_set_editable(GTK_EDITABLE(w_), !v); }
-    void set_frame(bool v) override { gtk_entry_set_has_frame(GTK_ENTRY(w_), v); }
+    // Frameless keeps the frame, made invisible, rather than
+    // gtk_entry_set_has_frame(false): that entry is shorter, so giving it
+    // its frame back (TortoiseGit's "new branch") would move the layout.
+    void set_frame(bool v) override
+    {
+        static bool installed = false;
+        if (!installed)
+        {
+            GtkCssProvider* css = gtk_css_provider_new();
+            gtk_css_provider_load_from_string(
+                css, "entry.rapport-frameless { background: none; border-color: transparent; "
+                     "box-shadow: none; outline-color: transparent; }");
+            gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
+                                                       GTK_STYLE_PROVIDER(css),
+                                                       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+            g_object_unref(css);
+            installed = true;
+        }
+        if (v)
+            gtk_widget_remove_css_class(w_, "rapport-frameless");
+        else
+            gtk_widget_add_css_class(w_, "rapport-frameless");
+    }
     void set_placeholder(const std::string& t) override
     {
         gtk_entry_set_placeholder_text(GTK_ENTRY(w_), t.c_str());

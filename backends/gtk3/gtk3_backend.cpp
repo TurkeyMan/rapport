@@ -949,7 +949,32 @@ public:
     std::string text() const override { return gtk_entry_get_text(GTK_ENTRY(w_)); }
     void set_text(const std::string& t) override { gtk_entry_set_text(GTK_ENTRY(w_), t.c_str()); }
     void set_read_only(bool v) override { gtk_editable_set_editable(GTK_EDITABLE(w_), !v); }
-    void set_frame(bool v) override { gtk_entry_set_has_frame(GTK_ENTRY(w_), v); }
+    // Frameless keeps the frame, made invisible, rather than
+    // gtk_entry_set_has_frame(false): that entry is shorter, so giving it
+    // its frame back (TortoiseGit's "new branch") would move the layout.
+    void set_frame(bool v) override
+    {
+        static bool installed = false;
+        if (!installed)
+        {
+            GtkCssProvider* css = gtk_css_provider_new();
+            gtk_css_provider_load_from_data(
+                css,
+                "entry.rapport-frameless { background-image: none; background-color: transparent; "
+                "border-color: transparent; box-shadow: none; }",
+                -1, nullptr);
+            gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(w_),
+                                                      GTK_STYLE_PROVIDER(css),
+                                                      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+            g_object_unref(css);
+            installed = true;
+        }
+        GtkStyleContext* style = gtk_widget_get_style_context(w_);
+        if (v)
+            gtk_style_context_remove_class(style, "rapport-frameless");
+        else
+            gtk_style_context_add_class(style, "rapport-frameless");
+    }
     void set_placeholder(const std::string& t) override
     {
         gtk_entry_set_placeholder_text(GTK_ENTRY(w_), t.c_str());

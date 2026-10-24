@@ -1144,6 +1144,35 @@ LRESULT CALLBACK enter_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
     return DefSubclassProc(h, msg, wp, lp);
 }
 
+// A frameless entry keeps its WS_EX_CLIENTEDGE, so its size and where its
+// text sits match a framed one (as GTK's and Qt's frameless entries keep
+// their padding); the edge is painted with the background its text has
+// instead of the themed border. Themed EDITs repaint that border on focus
+// and hover (WM_NCPAINT), so all of its painting comes here.
+LRESULT CALLBACK frameless_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg != WM_NCPAINT) return DefSubclassProc(h, msg, wp, lp);
+    RECT window, client;
+    GetWindowRect(h, &window);
+    GetClientRect(h, &client);
+    MapWindowPoints(h, nullptr, reinterpret_cast<POINT*>(&client), 2);
+    OffsetRect(&client, -window.left, -window.top);
+    OffsetRect(&window, -window.left, -window.top);
+    HDC dc = GetWindowDC(h);
+    // What the text's background is: the parent's WM_CTLCOLORSTATIC brush
+    // for a read-only EDIT, else the edit colour.
+    HBRUSH brush = nullptr;
+    if (GetWindowLongPtrW(h, GWL_STYLE) & ES_READONLY || !IsWindowEnabled(h))
+        brush = reinterpret_cast<HBRUSH>(
+            SendMessageW(GetParent(h), WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(dc),
+                         reinterpret_cast<LPARAM>(h)));
+    if (!brush) brush = GetSysColorBrush(COLOR_WINDOW);
+    ExcludeClipRect(dc, client.left, client.top, client.right, client.bottom);
+    FillRect(dc, &window, brush);
+    ReleaseDC(h, dc);
+    return 0;
+}
+
 class entry_impl : public leaf<rap::entry>
 {
 public:
@@ -1163,16 +1192,16 @@ public:
         quiet_ = false;
     }
     void set_read_only(bool v) override { SendMessageW(h_, EM_SETREADONLY, v, 0); }
-    // The themed border is drawn in the non-client area WS_EX_CLIENTEDGE
-    // makes, so without it there's none, as for the selectable label's EDIT;
-    // read-only, it then takes the window's background (WM_CTLCOLORSTATIC).
+    // Frameless: the edge stays, painted as background (frameless_subclass).
+    // Read-only, the text then sits on the window's background
+    // (WM_CTLCOLORSTATIC).
     void set_frame(bool v) override
     {
-        const LONG_PTR ex = GetWindowLongPtrW(h_, GWL_EXSTYLE);
-        SetWindowLongPtrW(h_, GWL_EXSTYLE,
-                          v ? ex | WS_EX_CLIENTEDGE : ex & ~LONG_PTR(WS_EX_CLIENTEDGE));
-        SetWindowPos(h_, nullptr, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        if (v)
+            RemoveWindowSubclass(h_, frameless_subclass, 2);
+        else
+            SetWindowSubclass(h_, frameless_subclass, 2, 0);
+        RedrawWindow(h_, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE | RDW_ERASE);
     }
     void set_placeholder(const std::string& p) override
     {
