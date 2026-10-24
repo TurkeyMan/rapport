@@ -495,10 +495,17 @@ struct move_batch
 };
 move_batch* g_moves = nullptr;
 
-// A moved control repaints whole: Windows would otherwise carry its old
-// pixels along and repaint only what's newly uncovered, and a label whose
-// text changed as it moved shows a mix of old and new text.
-constexpr UINT move_flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS;
+// A control that only moves carries its pixels along (no repaint); one that
+// changes size, or has a repaint pending (a label whose text changed as it
+// moved), repaints whole, or it would show a mix of old and new.
+constexpr UINT move_flags = SWP_NOZORDER | SWP_NOACTIVATE;
+UINT move_flags_for(HWND h, int w, int hgt)
+{
+    RECT r;
+    GetWindowRect(h, &r);
+    const bool same_size = r.right - r.left == w && r.bottom - r.top == hgt;
+    return same_size && !GetUpdateRect(h, nullptr, FALSE) ? move_flags : move_flags | SWP_NOCOPYBITS;
+}
 
 bool placed_at(HWND h, int x, int y, int w, int hgt)
 {
@@ -520,7 +527,7 @@ void move_control(HWND h, int x, int y, int w, int hgt)
     if (g_moves)
         g_moves->moves[GetParent(h)].push_back({h, RECT{x, y, x + w, y + hgt}});
     else
-        SetWindowPos(h, nullptr, x, y, w, hgt, move_flags);
+        SetWindowPos(h, nullptr, x, y, w, hgt, move_flags_for(h, w, hgt));
 }
 
 // Batches the moves of a layout pass (nested passes join the outer one).
@@ -540,7 +547,8 @@ public:
             HDWP dwp = BeginDeferWindowPos(int(list.size()));
             for (auto& [h, r] : list)
                 if (dwp)
-                    dwp = DeferWindowPos(dwp, h, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, move_flags);
+                    dwp = DeferWindowPos(dwp, h, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                                         move_flags_for(h, r.right - r.left, r.bottom - r.top));
             if (dwp) EndDeferWindowPos(dwp);
         }
     }
