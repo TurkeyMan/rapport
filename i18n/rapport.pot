@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: rapport\n"
 "Report-Msgid-Bugs-To: https://github.com/TurkeyMan/rapport/issues\n"
-"POT-Creation-Date: 2026-10-24 16:51+0000\n"
+"POT-Creation-Date: 2026-10-24 17:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,23 +18,23 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 
 #: backends/gtk-common/gtk_common.h:707 backends/qt6/qt6_backend.cpp:3928
-#: backends/win32/win32_backend.cpp:6308
+#: backends/win32/win32_backend.cpp:6343
 msgid "nothing to print"
 msgstr ""
 
 #: backends/gtk-common/gtk_common.h:717 backends/qt6/qt6_backend.cpp:4014
-#: backends/win32/win32_backend.cpp:6293
+#: backends/win32/win32_backend.cpp:6294
 #, c++-format
 msgid "couldn't write {0}"
 msgstr ""
 
 #: backends/gtk-common/gtk_common.h:722 backends/qt6/qt6_backend.cpp:3933
-#: backends/win32/win32_backend.cpp:6374
+#: backends/win32/win32_backend.cpp:6404
 msgid "Document"
 msgstr ""
 
 #: backends/gtk-common/gtk_common.h:767 backends/qt6/qt6_backend.cpp:3961
-#: backends/qt6/qt6_backend.cpp:3974 backends/win32/win32_backend.cpp:6387
+#: backends/qt6/qt6_backend.cpp:3974 backends/win32/win32_backend.cpp:6417
 msgid "printing failed"
 msgstr ""
 
@@ -52,19 +52,16 @@ msgstr ""
 msgid "printing isn't available with this toolkit yet"
 msgstr ""
 
-#: backends/win32/win32_backend.cpp:6322
-msgid "there's no printer"
+#: backends/win32/win32_backend.cpp:6380
+#, c++-format
+msgid "the print dialog failed ({0})"
 msgstr ""
 
-#: backends/win32/win32_backend.cpp:6352
-msgid "the print dialog failed"
-msgstr ""
-
-#: backends/win32/win32_backend.cpp:6379
+#: backends/win32/win32_backend.cpp:6409
 msgid "the printer didn't start the document"
 msgstr ""
 
-#: backends/win32/win32_backend.cpp:6424
+#: backends/win32/win32_backend.cpp:6454
 msgid "there's no Microsoft Print to PDF printer"
 msgstr ""
 

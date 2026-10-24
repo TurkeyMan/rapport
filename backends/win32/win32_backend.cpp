@@ -6,6 +6,7 @@
 #include "rapport/i18n.h"
 
 #include <commdlg.h>
+#include <format>
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
@@ -6299,6 +6300,40 @@ public:
         post([this, parent, job = std::move(job)]() mutable { run_print(parent, job); });
     }
 
+    // The default printer's settings, movable memory for PRINTDLGEX, turned
+    // to `orientation`; null without a default printer.
+    static HGLOBAL default_devmode(page_orientation orientation)
+    {
+        DWORD size = 0;
+        GetDefaultPrinterW(nullptr, &size);
+        if (!size) return nullptr;
+        std::wstring name(size, L'\0');
+        if (!GetDefaultPrinterW(name.data(), &size)) return nullptr;
+        name.resize(wcslen(name.c_str()));
+        HANDLE printer = nullptr;
+        if (!OpenPrinterW(name.data(), &printer, nullptr)) return nullptr;
+        HGLOBAL mem = nullptr;
+        if (const LONG bytes = DocumentPropertiesW(nullptr, printer, name.data(), nullptr, nullptr, 0); bytes > 0)
+            if ((mem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, size_t(bytes))))
+            {
+                auto* dm = static_cast<DEVMODEW*>(GlobalLock(mem));
+                if (DocumentPropertiesW(nullptr, printer, name.data(), dm, nullptr, DM_OUT_BUFFER) == IDOK)
+                {
+                    dm->dmFields |= DM_ORIENTATION;
+                    dm->dmOrientation = orientation == page_orientation::landscape ? DMORIENT_LANDSCAPE : DMORIENT_PORTRAIT;
+                    GlobalUnlock(mem);
+                }
+                else
+                {
+                    GlobalUnlock(mem);
+                    GlobalFree(mem);
+                    mem = nullptr;
+                }
+            }
+        ClosePrinter(printer);
+        return mem;
+    }
+
     void run_print(rap::window* parent, print_job& job)
     {
         const auto finish = [&](bool ok, std::string error)
@@ -6316,19 +6351,11 @@ public:
 
         PRINTDLGEXW pd{};
         pd.lStructSize = sizeof pd;
-        pd.hwndOwner = parent ? static_cast<window_impl*>(parent)->hwnd() : messages_;
-        // The default printer's settings first, to start in the job's orientation.
-        pd.Flags = PD_RETURNDEFAULT;
-        if (FAILED(PrintDlgExW(&pd)) || !pd.hDevMode) return finish(false, rap::i18n::tr("rapport", "there's no printer"));
-        if (job.orientation != page_orientation::automatic)
-            if (auto* dm = static_cast<DEVMODEW*>(GlobalLock(pd.hDevMode)))
-            {
-                dm->dmFields |= DM_ORIENTATION;
-                dm->dmOrientation = job.orientation == page_orientation::landscape
-                                        ? DMORIENT_LANDSCAPE
-                                        : DMORIENT_PORTRAIT;
-                GlobalUnlock(pd.hDevMode);
-            }
+        // A dialog needs a real window to belong to (not the message-only one).
+        pd.hwndOwner = parent ? static_cast<window_impl*>(parent)->hwnd() : GetDesktopWindow();
+        // The default printer's settings, from the spooler, to start the dialog
+        // in the job's orientation; without one it starts as the system has it.
+        pd.hDevMode = job.orientation == page_orientation::automatic ? nullptr : default_devmode(job.orientation);
         const DWORD last = job.pages > 0 ? DWORD(job.pages) : 9999;  // unknown until on_begin: any
         PRINTPAGERANGE range{1, last};
         pd.Flags = PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE | PD_NOSELECTION | PD_NOCURRENTPAGE |
@@ -6349,7 +6376,10 @@ public:
         if (FAILED(hr) || pd.dwResultAction != PD_RESULT_PRINT || !pd.hDC)
         {
             release();
-            return finish(false, FAILED(hr) ? rap::i18n::tr("rapport", "the print dialog failed") : "");
+            // Cancelled is no error; a dialog that couldn't open says why.
+            return finish(false, FAILED(hr) ? rap::i18n::format(rap::i18n::tr("rapport", "the print dialog failed ({0})"),
+                                                                std::format("0x{:08X}", uint32_t(hr)))
+                                            : std::string());
         }
 
         // Only the pages chosen (one range: nMaxPageRanges is 1), else all.
