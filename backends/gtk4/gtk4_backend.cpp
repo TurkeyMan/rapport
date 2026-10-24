@@ -3202,6 +3202,15 @@ public:
         g_bytes_unref(bytes);
     }
 
+    // Not yet: the dialog and pages come with this backend's print support.
+    void print(rap::window*, print_job job) override
+    {
+        post(
+            [job = std::move(job)]
+            {
+                if (job.done) job.done(false, "printing isn't available with this toolkit yet");
+            });
+    }
     void set_clipboard(const std::string& s) override
     {
         if (GdkDisplay* d = gdk_display_get_default())

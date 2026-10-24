@@ -599,6 +599,15 @@ public:
         if (done) done({});
     }
 
+    // Not yet: the dialog and pages come with this backend's print support.
+    void print(rap::window*, print_job job) override
+    {
+        post(
+            [job = std::move(job)]
+            {
+                if (job.done) job.done(false, "printing isn't available with this toolkit yet");
+            });
+    }
     void set_clipboard(const std::string&) override {}
     void set_clipboard_image(int, int, pixel_format, const uint8_t*, size_t) override {}
     bool save_snapshot(const std::string&) override { return false; }

@@ -383,7 +383,7 @@ color d2d_painter::resolve(const paint& p) const
     if (const color* c = std::get_if<color>(&p)) return *c;
     const theme_color role = std::get<theme_color>(p);
     if (auto it = overrides_.find(int(role)); it != overrides_.end()) return it->second;
-    return theme_color_of(role);
+    return printing_ ? print_color(role) : theme_color_of(role);
 }
 
 ID2D1SolidColorBrush* d2d_painter::brush(const paint& p)

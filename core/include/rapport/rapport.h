@@ -72,6 +72,8 @@ public:
     {
         backend_->choose_files(parent, f, std::move(done));
     }
+    // The platform's print dialog, then the job's pages (see print_job).
+    void print(window* parent, print_job job) { backend_->print(parent, std::move(job)); }
     void set_clipboard(const std::string& s) { backend_->set_clipboard(s); }
     void set_clipboard_image(int width, int height, pixel_format format, const uint8_t* pixels,
                            size_t stride)

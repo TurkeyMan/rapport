@@ -3964,6 +3964,15 @@ public:
         gtk_native_dialog_show(GTK_NATIVE_DIALOG(dlg));
     }
 
+    // Not yet: the dialog and pages come with this backend's print support.
+    void print(rap::window*, print_job job) override
+    {
+        post(
+            [job = std::move(job)]
+            {
+                if (job.done) job.done(false, "printing isn't available with this toolkit yet");
+            });
+    }
     void set_clipboard(const std::string& s) override
     {
         gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), s.c_str(),

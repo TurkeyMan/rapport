@@ -3908,6 +3908,15 @@ public:
 
     bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
 
+    // Not yet: the dialog and pages come with this backend's print support.
+    void print(rap::window*, print_job job) override
+    {
+        post(
+            [job = std::move(job)]
+            {
+                if (job.done) job.done(false, "printing isn't available with this toolkit yet");
+            });
+    }
     void set_clipboard(const std::string& s) override
     {
         QGuiApplication::clipboard()->setText(qs(s));

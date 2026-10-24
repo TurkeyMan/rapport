@@ -77,6 +77,31 @@ enum class theme_color
 // Either a fixed colour or a theme role resolved at paint time.
 using paint = std::variant<theme_color, color>;
 
+// The theme roles on paper: a light palette whatever the screen's theme, so
+// a dark-mode window doesn't print white text on white. Every backend's
+// painter resolves theme colours with this while printing.
+inline color print_color(theme_color c)
+{
+    switch (c)
+    {
+    case theme_color::window:
+    case theme_color::base: return {255, 255, 255};
+    case theme_color::alternate_base: return {245, 245, 245};
+    case theme_color::window_text:
+    case theme_color::text:
+    case theme_color::highlight_text: return {0, 0, 0};
+    case theme_color::placeholder_text: return {128, 128, 128};
+    case theme_color::highlight: return {215, 215, 215};
+    case theme_color::mid: return {160, 160, 160};
+    case theme_color::accent: return {0, 90, 180};
+    case theme_color::link: return {0, 0, 200};
+    case theme_color::positive: return {26, 127, 55};
+    case theme_color::negative: return {207, 34, 46};
+    case theme_color::neutral: return {101, 109, 118};
+    }
+    return {0, 0, 0};
+}
+
 struct text_style
 {
     std::optional<paint> fg, bg;

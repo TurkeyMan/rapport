@@ -178,6 +178,8 @@ public:
 
     // Colours that replace a theme role while painting (list selection).
     void override_color(theme_color role, color c) { overrides_[int(role)] = c; }
+    // On paper: theme roles are print_color()'s, whatever the screen's theme.
+    void set_printing() { printing_ = true; }
 
 private:
     ID2D1SolidColorBrush* brush(const paint& p);
@@ -193,6 +195,7 @@ private:
     com<ID2D1StrokeStyle> round_;
     int clips_ = 0;
     std::map<int, color> overrides_;
+    bool printing_ = false;
 };
 
 // Renders an icon (named icons have no theme on Windows: drawn ones only)

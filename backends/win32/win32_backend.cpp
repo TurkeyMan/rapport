@@ -7,12 +7,13 @@
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
+#include <oleacc.h>
 #include <richedit.h>
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
-#include <oleacc.h>
 #include <vssym32.h>
+#include <winspool.h>
 
 // SysLink's ideal size (Vista and later; MinGW declares it only for a newer
 // _WIN32_WINNT): the same message as LM_GETIDEALHEIGHT.
@@ -4922,6 +4923,29 @@ private:
 
 // -- window -------------------------------------------------------------------
 
+// 32-bit BGRA rows (top-down) as a PNG, alpha set opaque (GDI leaves it
+// undefined).
+static bool write_opaque_png(const std::string& path, uint8_t* px, int width, int height)
+{
+    for (int i = 0; i < width * height; ++i) px[i * 4 + 3] = 255;
+    com<IWICBitmapEncoder> enc;
+    com<IWICStream> stream;
+    if (!wic_factory() || FAILED(wic_factory()->CreateStream(stream.put())) ||
+        FAILED(stream->InitializeFromFilename(wide(path).c_str(), GENERIC_WRITE)) ||
+        FAILED(wic_factory()->CreateEncoder(GUID_ContainerFormatPng, nullptr, enc.put())) ||
+        FAILED(enc->Initialize(stream.get(), WICBitmapEncoderNoCache)))
+        return false;
+    com<IWICBitmapFrameEncode> frame;
+    if (FAILED(enc->CreateNewFrame(frame.put(), nullptr)) || FAILED(frame->Initialize(nullptr)))
+        return false;
+    frame->SetSize(UINT(width), UINT(height));
+    WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
+    frame->SetPixelFormat(&fmt);
+    return SUCCEEDED(
+               frame->WritePixels(UINT(height), UINT(width) * 4, UINT(width * height * 4), px)) &&
+           SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit());
+}
+
 class window_impl : public rap::window, public win_context
 {
 public:
@@ -5402,26 +5426,7 @@ public:
         HGDIOBJ old = SelectObject(dc, bmp);
         PrintWindow(w->hwnd_, dc, 2 /* PW_RENDERFULLCONTENT */);
         SelectObject(dc, old);
-        // Opaque: PrintWindow leaves alpha undefined.
-        auto* px = static_cast<uint8_t*>(bits);
-        for (int i = 0; i < width * height; ++i) px[i * 4 + 3] = 255;
-        com<IWICBitmapEncoder> enc;
-        com<IWICStream> stream;
-        if (wic_factory() && SUCCEEDED(wic_factory()->CreateStream(stream.put())) &&
-            SUCCEEDED(stream->InitializeFromFilename(wide(path).c_str(), GENERIC_WRITE)) &&
-            SUCCEEDED(wic_factory()->CreateEncoder(GUID_ContainerFormatPng, nullptr, enc.put())) &&
-            SUCCEEDED(enc->Initialize(stream.get(), WICBitmapEncoderNoCache)))
-        {
-            com<IWICBitmapFrameEncode> frame;
-            if (SUCCEEDED(enc->CreateNewFrame(frame.put(), nullptr)) && SUCCEEDED(frame->Initialize(nullptr)))
-            {
-                frame->SetSize(UINT(width), UINT(height));
-                WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
-                frame->SetPixelFormat(&fmt);
-                ok = SUCCEEDED(frame->WritePixels(UINT(height), UINT(width) * 4, UINT(width * height * 4), px)) &&
-                     SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit());
-            }
-        }
+        ok = write_opaque_png(path, static_cast<uint8_t*>(bits), width, height);
         DeleteObject(bmp);
         DeleteDC(dc);
         ReleaseDC(nullptr, screen);
@@ -6113,6 +6118,245 @@ public:
     }
 
     bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
+
+    // -- printing ----------------------------------------------------------------
+
+    // Page `page` of `job` into a 32-bit DIB on a memory DC (w x h pixels at
+    // `dpi`), through a Direct2D target bound to it: the painter is the
+    // screen's, its unit the point. False if it couldn't.
+    static bool draw_page_bitmap(HDC mem, int w, int h, float dpi, print_job& job, int page,
+                                 size_f printable)
+    {
+        const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+        com<ID2D1DCRenderTarget> rt;
+        if (!d2d_factory() || FAILED(d2d_factory()->CreateDCRenderTarget(&props, rt.put())))
+            return false;
+        const RECT r{0, 0, w, h};
+        if (FAILED(rt->BindDC(mem, &r))) return false;
+        rt->BeginDraw();
+        rt->Clear(D2D1::ColorF(1, 1, 1));
+        {
+            d2d_painter p(rt.get(), dpi / 72.f,
+                          0);  // images get a bitmap for this target, not kept
+            p.set_printing();
+            job.draw_page(p, page, printable);
+        }
+        return SUCCEEDED(rt->EndDraw());
+    }
+
+    // A page as pixels on a DIB section: what draw_page_bitmap draws into.
+    struct page_bitmap
+    {
+        HDC dc = nullptr;
+        HBITMAP bmp = nullptr;
+        HGDIOBJ old = nullptr;
+        void* bits = nullptr;
+        BITMAPINFO info{};
+        page_bitmap(int w, int h)
+        {
+            HDC screen = GetDC(nullptr);
+            dc = CreateCompatibleDC(screen);
+            ReleaseDC(nullptr, screen);
+            info.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+            bmp = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+            if (bmp) old = SelectObject(dc, bmp);
+        }
+        ~page_bitmap()
+        {
+            if (bmp)
+            {
+                SelectObject(dc, old);
+                DeleteObject(bmp);
+            }
+            DeleteDC(dc);
+        }
+    };
+
+    // Page `page` onto a printer's DC (w x h pixels at `dpi`): drawn at up to
+    // 300 dpi, then stretched to the page. Direct2D's DC target won't bind a
+    // printer's DC, and every driver takes a bitmap.
+    static bool draw_print_page(HDC dc, int w, int h, float dpi, print_job& job, int page,
+                                size_f printable)
+    {
+        const float rdpi = std::min(dpi, 300.f);
+        const int rw = std::max(1, int(std::lround(w * rdpi / dpi))),
+                  rh = std::max(1, int(std::lround(h * rdpi / dpi)));
+        page_bitmap b(rw, rh);
+        if (!b.bmp || !draw_page_bitmap(b.dc, rw, rh, rdpi, job, page, printable)) return false;
+        SetStretchBltMode(dc, HALFTONE);
+        return StretchDIBits(dc, 0, 0, w, h, 0, 0, rw, rh, b.bits, &b.info, DIB_RGB_COLORS,
+                             SRCCOPY) != GDI_ERROR;
+    }
+
+    // RAPPORT_PRINT_TO=out.png: each page as A4 at 144 dpi, no dialog
+    // (out.png, out-2.png...), for tests.
+    static void print_to_png(const std::string& path, print_job& job)
+    {
+        const bool landscape = job.orientation == page_orientation::landscape;
+        const size_f paper = landscape ? size_f{842, 595} : size_f{595, 842};
+        const float dpi = 144;
+        const int w = int(std::lround(paper.w * dpi / 72)),
+                  h = int(std::lround(paper.h * dpi / 72));
+        int pages = job.pages;
+        if (job.on_begin)
+            if (const int n = job.on_begin(paper); n >= 0) pages = n;
+        bool ok = true;
+        for (int page = 0; page < pages && ok; ++page)
+        {
+            page_bitmap b(w, h);
+            ok = b.bmp && draw_page_bitmap(b.dc, w, h, dpi, job, page, paper);
+            std::string out = path;
+            if (page > 0)
+            {
+                const size_t dot = path.find_last_of('.');
+                const std::string n = "-" + std::to_string(page + 1);
+                out = dot == std::string::npos ? path + n
+                                               : path.substr(0, dot) + n + path.substr(dot);
+            }
+            ok = ok && write_opaque_png(out, static_cast<uint8_t*>(b.bits), w, h);
+        }
+        if (job.done) job.done(ok, ok ? "" : "couldn't write " + path);
+    }
+
+    void print(rap::window* parent, print_job job) override
+    {
+        // Once the caller has returned, as everywhere: the dialog is modal.
+        post([this, parent, job = std::move(job)]() mutable { run_print(parent, job); });
+    }
+
+    void run_print(rap::window* parent, print_job& job)
+    {
+        const auto finish = [&](bool ok, std::string error)
+        {
+            if (job.done) job.done(ok, std::move(error));
+        };
+        if (!job.draw_page) return finish(false, "nothing to print");
+        if (const char* to = std::getenv("RAPPORT_PRINT_TO"); to && *to)
+        {
+            const std::string path = to;
+            const bool pdf =
+                path.size() > 4 && _stricmp(path.c_str() + path.size() - 4, ".pdf") == 0;
+            return pdf ? print_to_pdf(path, job) : print_to_png(path, job);
+        }
+
+        PRINTDLGEXW pd{};
+        pd.lStructSize = sizeof pd;
+        pd.hwndOwner = parent ? static_cast<window_impl*>(parent)->hwnd() : messages_;
+        // The default printer's settings first, to start in the job's orientation.
+        pd.Flags = PD_RETURNDEFAULT;
+        if (FAILED(PrintDlgExW(&pd)) || !pd.hDevMode) return finish(false, "there's no printer");
+        if (job.orientation != page_orientation::automatic)
+            if (auto* dm = static_cast<DEVMODEW*>(GlobalLock(pd.hDevMode)))
+            {
+                dm->dmFields |= DM_ORIENTATION;
+                dm->dmOrientation = job.orientation == page_orientation::landscape
+                                        ? DMORIENT_LANDSCAPE
+                                        : DMORIENT_PORTRAIT;
+                GlobalUnlock(pd.hDevMode);
+            }
+        const DWORD last = job.pages > 0 ? DWORD(job.pages) : 9999;  // unknown until on_begin: any
+        PRINTPAGERANGE range{1, last};
+        pd.Flags = PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE | PD_NOSELECTION | PD_NOCURRENTPAGE |
+                   (last == 1 ? PD_NOPAGENUMS : 0);
+        pd.nMaxPageRanges = 1;
+        pd.lpPageRanges = &range;
+        pd.nMinPage = 1;
+        pd.nMaxPage = last;
+        pd.nCopies = 1;
+        pd.nStartPage = START_PAGE_GENERAL;
+        const HRESULT hr = PrintDlgExW(&pd);
+        const auto release = [&]
+        {
+            if (pd.hDC) DeleteDC(pd.hDC);
+            if (pd.hDevMode) GlobalFree(pd.hDevMode);
+            if (pd.hDevNames) GlobalFree(pd.hDevNames);
+        };
+        if (FAILED(hr) || pd.dwResultAction != PD_RESULT_PRINT || !pd.hDC)
+        {
+            release();
+            return finish(false, FAILED(hr) ? "the print dialog failed" : "");
+        }
+
+        // Only the pages chosen (one range: nMaxPageRanges is 1), else all.
+        const bool some = pd.Flags & PD_PAGENUMS;
+        std::string error = print_on_dc(pd.hDC, job, some ? int(range.nFromPage) : 1,
+                                        some ? int(range.nToPage) : INT_MAX, nullptr);
+        release();
+        finish(error.empty(), error);
+    }
+
+    // The job's pages `from`..`to` (from 1, clamped to the count) as a
+    // document on a printer's DC, to `output` (a file) when given. An error,
+    // or empty.
+    static std::string print_on_dc(HDC dc, print_job& job, int from, int to, const wchar_t* output)
+    {
+        const float dpi = float(GetDeviceCaps(dc, LOGPIXELSX));
+        const int w = GetDeviceCaps(dc, HORZRES), h = GetDeviceCaps(dc, VERTRES);
+        const size_f printable{w * 72 / dpi, h * 72 / dpi};
+        int pages = job.pages;
+        if (job.on_begin)
+            if (const int n = job.on_begin(printable); n >= 0) pages = n;
+        const std::wstring title = wide(job.title.empty() ? std::string("Document") : job.title);
+        DOCINFOW doc{};
+        doc.cbSize = sizeof doc;
+        doc.lpszDocName = title.c_str();
+        doc.lpszOutput = output;
+        if (StartDocW(dc, &doc) <= 0) return "the printer didn't start the document";
+        bool ok = true;
+        for (int page = std::max(1, from); ok && page <= std::min(to, pages); ++page)
+            ok = StartPage(dc) > 0 && draw_print_page(dc, w, h, dpi, job, page - 1, printable) &&
+                 EndPage(dc) > 0;
+        if (!ok)
+        {
+            AbortDoc(dc);
+            return "printing failed";
+        }
+        EndDoc(dc);
+        return {};
+    }
+
+    // RAPPORT_PRINT_TO=out.pdf: through Windows' own PDF printer, no dialog.
+    static void print_to_pdf(const std::string& path, print_job& job)
+    {
+        const wchar_t* printer = L"Microsoft Print to PDF";
+        std::string error;
+        HDC dc = nullptr;
+        HANDLE h = nullptr;
+        std::vector<uint8_t> mode;
+        if (OpenPrinterW(const_cast<wchar_t*>(printer), &h, nullptr))
+        {
+            const LONG size =
+                DocumentPropertiesW(nullptr, h, const_cast<wchar_t*>(printer), nullptr, nullptr, 0);
+            if (size > 0)
+            {
+                mode.resize(size_t(size));
+                auto* dm = reinterpret_cast<DEVMODEW*>(mode.data());
+                if (DocumentPropertiesW(nullptr, h, const_cast<wchar_t*>(printer), dm, nullptr,
+                                        DM_OUT_BUFFER) == IDOK &&
+                    job.orientation != page_orientation::automatic)
+                {
+                    dm->dmFields |= DM_ORIENTATION;
+                    dm->dmOrientation = job.orientation == page_orientation::landscape
+                                            ? DMORIENT_LANDSCAPE
+                                            : DMORIENT_PORTRAIT;
+                }
+            }
+            ClosePrinter(h);
+            dc = CreateDCW(L"WINSPOOL", printer, nullptr,
+                           mode.empty() ? nullptr : reinterpret_cast<DEVMODEW*>(mode.data()));
+        }
+        if (!dc)
+            error = "there's no Microsoft Print to PDF printer";
+        else
+        {
+            const std::wstring out = wide(path);
+            error = print_on_dc(dc, job, 1, INT_MAX, out.c_str());
+            DeleteDC(dc);
+        }
+        if (job.done) job.done(error.empty(), error);
+    }
 
     void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels, size_t stride) override
     {

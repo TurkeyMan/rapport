@@ -16,7 +16,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 37;
+inline constexpr int abi_version = 38;
 
 // For list::set_column_order: whether `order` names each of `n` columns once.
 inline bool is_column_order(const std::vector<size_t>& order, size_t n)
@@ -64,6 +64,35 @@ struct file_dialog_spec
     std::vector<filter> filters;
 };
 
+// A document to print, through the platform's own print dialog (printer,
+// copies, pages, paper; its own preview where it has one).
+//
+// The painter in draw_page is the screen's kind: its unit is the point
+// (1/72 inch), device_scale() is the printer's dots per inch over 72, and
+// theme colours resolve to print_color(). Images from ui::create_image
+// draw in it. draw_page is called only for the pages being printed, as
+// many times as the copies need where the printer doesn't make them.
+enum class page_orientation
+{
+    automatic,  // the platform's default
+    portrait,
+    landscape,
+};
+struct print_job
+{
+    std::string title;  // the document's name in the print queue
+    int pages = 1;
+    page_orientation orientation = page_orientation::automatic;  // the dialog's starting choice
+    // Once the printer and paper are chosen, before any page: the area the
+    // pages may draw in, after the paper's margins (points), and the page
+    // count for that size, or -1 to keep `pages`. Optional.
+    std::function<int(size_f printable)> on_begin;
+    // Page `page` (from 0), its printable area's top-left at (0, 0).
+    std::function<void(painter&, int page, size_f printable)> draw_page;
+    // When it's spooled, cancelled (printed false, no error) or failed.
+    std::function<void(bool printed, std::string error)> done;
+};
+
 // Backend reports each widget it creates so the core can apply callbacks,
 // binds and common state. The sink outlives every window, so a backend may
 // keep it to build content later (lazy tab pages).
@@ -99,6 +128,10 @@ public:
     virtual void message(window* parent, const message_spec&, std::function<void(dialog_role)>) = 0;
     virtual void choose_files(window* parent, const file_dialog_spec&,
                              std::function<void(std::vector<std::string>)>) = 0;
+    // Shows the print dialog over `parent` and prints the job; async, ends
+    // with job.done. With RAPPORT_PRINT_TO set (a .png, or a .pdf where the
+    // toolkit writes PDF), prints there without a dialog, for tests.
+    virtual void print(window* parent, print_job job) = 0;
     virtual void set_clipboard(const std::string&) = 0;
     // An image on the clipboard (copied now; the caller keeps its pixels).
     virtual void set_clipboard_image(int width, int height, pixel_format, const uint8_t* pixels,
