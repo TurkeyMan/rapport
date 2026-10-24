@@ -106,9 +106,10 @@ public:
     {
         if (held_.empty()) return std::nullopt;
         auto earliest = clock::time_point::max();
-        for (auto& [path, h] : held_) earliest = std::min(earliest, h.last + settle_);
+        // ((std::min): windows.h may define min and max as macros.)
+        for (auto& [path, h] : held_) earliest = (std::min)(earliest, h.last + settle_);
         const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(earliest - clock::now());
-        return std::max(wait, std::chrono::milliseconds(0));
+        return (std::max)(wait, std::chrono::milliseconds(0));
     }
 
 private:
