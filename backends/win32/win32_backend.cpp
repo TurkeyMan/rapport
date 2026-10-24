@@ -5644,7 +5644,11 @@ private:
             [&win = win_, &sink = sink_, box, parent, make = s.deferred, dir = s.dir]
             {
                 box->children.push_back(builder(win, sink).build(make(), parent, dir));
-                win.relayout();
+                // Showing now, the window grows if the content doesn't fit.
+                if (box->visible)
+                    win.relayout_at_once();
+                else
+                    win.relayout();
             });
         win_.deferred.push_back(pending);
         handle(n, box, std::move(pending));
