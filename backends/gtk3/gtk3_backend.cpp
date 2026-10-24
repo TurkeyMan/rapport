@@ -3755,6 +3755,13 @@ public:
         // set last (often nothing) over the window. Wayland can't place
         // windows, but WSL is for testing.
         if (!gtk_init_check(argc, &argv)) return nullptr;
+        // Dark when the desktop says so: the theme's dark variant.
+        follow_color_scheme(
+            +[](int scheme)
+            {
+                g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme",
+                             scheme == 1, nullptr);
+            });
         init_metrics();
         return new gtk3_backend;
     }

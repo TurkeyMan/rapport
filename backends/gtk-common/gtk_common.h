@@ -66,6 +66,83 @@ inline guint16 u16(uint8_t v)
     return guint16(v * 257);
 }
 
+// The desktop's colour scheme, which plain GTK doesn't follow (libadwaita
+// does): the Settings portal's org.freedesktop.appearance color-scheme,
+// else GNOME's own key where there's no portal. `apply` gets 0 (no
+// preference), 1 (dark) or 2 (light) now, before anything is shown, and
+// again on every change.
+inline void follow_color_scheme(void (*apply)(int scheme))
+{
+    static void (*on_change)(int) = apply;
+    GError* error = nullptr;
+    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+    g_clear_error(&error);
+    if (bus)
+    {
+        // ReadOne (portal version 2), else Read, whose value is wrapped once more.
+        for (const char* method : {"ReadOne", "Read"})
+        {
+            GVariant* reply = g_dbus_connection_call_sync(
+                bus, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Settings", method,
+                g_variant_new("(ss)", "org.freedesktop.appearance", "color-scheme"),
+                G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 500, nullptr, &error);
+            g_clear_error(&error);
+            if (!reply) continue;
+            GVariant* value = nullptr;
+            g_variant_get(reply, "(v)", &value);
+            g_variant_unref(reply);
+            while (value && g_variant_is_of_type(value, G_VARIANT_TYPE_VARIANT))
+            {
+                GVariant* inner = g_variant_get_variant(value);
+                g_variant_unref(value);
+                value = inner;
+            }
+            const bool known = value && g_variant_is_of_type(value, G_VARIANT_TYPE_UINT32);
+            if (known) apply(int(g_variant_get_uint32(value)));
+            if (value) g_variant_unref(value);
+            if (!known) continue;
+            g_dbus_connection_signal_subscribe(
+                bus, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Settings",
+                "SettingChanged", "/org/freedesktop/portal/desktop", "org.freedesktop.appearance",
+                G_DBUS_SIGNAL_FLAGS_NONE,
+                +[](GDBusConnection*, const gchar*, const gchar*, const gchar*, const gchar*,
+                    GVariant* params, gpointer)
+                {
+                    const gchar* ns = nullptr;
+                    const gchar* key = nullptr;
+                    GVariant* v = nullptr;
+                    g_variant_get(params, "(&s&sv)", &ns, &key, &v);
+                    if (g_strcmp0(key, "color-scheme") == 0 && g_variant_is_of_type(v, G_VARIANT_TYPE_UINT32))
+                        on_change(int(g_variant_get_uint32(v)));
+                    if (v) g_variant_unref(v);
+                },
+                nullptr, nullptr);
+            return;  // the bus stays referenced for the subscription
+        }
+        g_object_unref(bus);
+    }
+    GSettingsSchemaSource* source = g_settings_schema_source_get_default();
+    GSettingsSchema* schema =
+        source ? g_settings_schema_source_lookup(source, "org.gnome.desktop.interface", true) : nullptr;
+    const bool has_key = schema && g_settings_schema_has_key(schema, "color-scheme");
+    if (schema) g_settings_schema_unref(schema);
+    if (!has_key) return;
+    GSettings* gnome = g_settings_new("org.gnome.desktop.interface");  // kept for the process
+    auto read = +[](GSettings* s)
+    {
+        gchar* v = g_settings_get_string(s, "color-scheme");
+        const int scheme = g_strcmp0(v, "prefer-dark") == 0 ? 1 : g_strcmp0(v, "prefer-light") == 0 ? 2 : 0;
+        g_free(v);
+        return scheme;
+    };
+    apply(read(gnome));
+    g_signal_connect(gnome, "changed::color-scheme",
+                     G_CALLBACK(+[](GSettings* s, gchar*, gpointer f)
+                                { on_change(reinterpret_cast<int (*)(GSettings*)>(f)(s)); }),
+                     reinterpret_cast<gpointer>(read));
+}
+
 // Defined by each backend: theme lookup differs between GTK 3 and 4.
 color theme_color_of(GtkWidget*, theme_color);
 

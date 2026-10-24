@@ -2897,6 +2897,23 @@ public:
         // vanish over the window. (Its X11 does draw faster: 23 against 20 fps
         // for a panning canvas; gtk3 39 against 29.)
         if (!gtk_init_check()) return nullptr;
+        // Dark when the desktop says so: GTK 4.20's interface colour scheme
+        // where there is one, and the theme's dark variant either way.
+        follow_color_scheme(
+            +[](int scheme)
+            {
+                GtkSettings* settings = gtk_settings_get_default();
+                if (g_object_class_find_property(G_OBJECT_GET_CLASS(settings),
+                                                 "gtk-interface-color-scheme"))
+                    g_object_set(settings, "gtk-interface-color-scheme",
+                                 scheme == 1   ? 2   // GTK_INTERFACE_COLOR_SCHEME_DARK
+                                 : scheme == 2 ? 3   // _LIGHT
+                                               : 1,  // _DEFAULT
+                                 nullptr);
+                G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+                g_object_set(settings, "gtk-application-prefer-dark-theme", scheme == 1, nullptr);
+                G_GNUC_END_IGNORE_DEPRECATIONS
+            });
         init_metrics();
         return new gtk4_backend;
     }
