@@ -4580,7 +4580,24 @@ public:
             EnableWindow(parent->hwnd_, FALSE);
         }
         const bool snapshot = std::getenv("RAPPORT_SNAPSHOT") != nullptr;
+        // The first time, shown cloaked (live, but kept off the screen by
+        // the compositor) and painted, controls and all, before it's
+        // uncloaked: it appears complete, not as a frame its contents fill
+        // in a moment later.
+        const bool cloak = !painted_once_;
+        if (cloak)
+        {
+            const BOOL on = TRUE;
+            DwmSetWindowAttribute(hwnd_, DWMWA_CLOAK, &on, sizeof on);
+        }
         ShowWindow(hwnd_, snapshot ? SW_SHOWNOACTIVATE : SW_SHOW);
+        if (cloak)
+        {
+            painted_once_ = true;
+            RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            const BOOL off = FALSE;
+            DwmSetWindowAttribute(hwnd_, DWMWA_CLOAK, &off, sizeof off);
+        }
         if (!snapshot) SetForegroundWindow(hwnd_);
         last_shown() = this;
         snapshot_if_asked();
@@ -5034,6 +5051,7 @@ private:
     HWND hwnd_ = nullptr;
     bool dialog_, margins_, modal_spec_;
     bool modal_ = false, finished_ = false, shown_once_ = false, fullscreen_ = false, relayout_pending_ = false;
+    bool painted_once_ = false;  // shown cloaked and painted the first time (see show)
     std::optional<SIZE> requested_;  // client size from resize() before the first show
     struct bar_menu
     {
