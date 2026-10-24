@@ -219,6 +219,18 @@ void lower_thread_priority();
 // Memory the system could hand out without swapping; 0 if unknown.
 std::size_t available_memory();
 
+// -- the desktop --------------------------------------------------------------
+
+// Opens a file or folder with its default program, without waiting.
+bool open_path(const std::filesystem::path&);
+// The system's "Open with" chooser for a file. Windows only (Linux desktops
+// have no common one): false elsewhere.
+bool open_with(const std::filesystem::path&);
+// Shows the file manager at the item, selected where the platform can
+// (Explorer; FileManager1 on Linux: Dolphin, Nautilus, Nemo, Thunar),
+// else at its folder.
+bool reveal(const std::filesystem::path&);
+
 // -- http ---------------------------------------------------------------------
 
 using http_headers = std::vector<std::pair<std::string, std::string>>;

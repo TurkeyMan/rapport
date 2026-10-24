@@ -821,4 +821,117 @@ std::size_t available_memory()
 #endif
 }
 
+// -- the desktop --------------------------------------------------------------
+
+#ifdef _WIN32
+
+namespace
+{
+
+bool shell_execute(const wchar_t* verb, const std::wstring& file, const std::wstring& params = {})
+{
+    SHELLEXECUTEINFOW info{.cbSize = sizeof info};
+    info.fMask = SEE_MASK_NOASYNC;
+    info.lpVerb = verb;
+    info.lpFile = file.c_str();
+    info.lpParameters = params.empty() ? nullptr : params.c_str();
+    info.nShow = SW_SHOWNORMAL;
+    return ShellExecuteExW(&info);
+}
+
+}  // namespace
+
+bool open_path(const fs::path& p)
+{
+    return shell_execute(nullptr, fs::absolute(p).make_preferred().wstring());
+}
+
+bool open_with(const fs::path& p)
+{
+    return shell_execute(L"openas", fs::absolute(p).make_preferred().wstring());
+}
+
+bool reveal(const fs::path& p)
+{
+    return shell_execute(nullptr, L"explorer.exe",
+                         L"/select,\"" + fs::absolute(p).make_preferred().wstring() + L"\"");
+}
+
+#else
+
+namespace
+{
+
+// Starts a program and doesn't wait for it, without fork() (unsafe with
+// other threads running: only async-signal-safe calls may follow it). A
+// shell is spawned to background the program and exits at once, so the
+// program is reparented to init and nothing is left to reap; the arguments
+// stay argv, so nothing needs quoting. A program not found fails (127).
+bool spawn_detached(const std::vector<std::string>& argv)
+{
+    std::vector<std::string> owned{
+        "/bin/sh", "-c",
+        "command -v \"$0\" >/dev/null 2>&1 || exit 127\n"
+        "exec </dev/null >/dev/null 2>&1\n"
+        "if command -v setsid >/dev/null; then setsid \"$0\" \"$@\" & else \"$0\" \"$@\" & fi"};
+    owned.insert(owned.end(), argv.begin(), argv.end());
+    std::vector<char*> args;
+    for (std::string& a : owned) args.push_back(a.data());
+    args.push_back(nullptr);
+    pid_t sh;
+    if (posix_spawn(&sh, "/bin/sh", nullptr, nullptr, args.data(), environ) != 0) return false;
+    int status = 0;
+    while (waitpid(sh, &status, 0) < 0 && errno == EINTR)
+    {
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+std::string file_uri(const fs::path& p)
+{
+    static const char* hex = "0123456789ABCDEF";
+    std::string out = "file://";
+    for (unsigned char c : fs::absolute(p).lexically_normal().string())
+        if (std::isalnum(c) || std::strchr("/-._~", c))
+            out += char(c);
+        else
+            out += {'%', hex[c >> 4], hex[c & 15]};
+    return out;
+}
+
+}  // namespace
+
+bool open_path(const fs::path& p)
+{
+    return spawn_detached({"xdg-open", fs::absolute(p).string()});
+}
+
+bool open_with(const fs::path&)
+{
+    return false;
+}
+
+bool reveal(const fs::path& p)
+{
+    // The freedesktop FileManager1 interface selects the item; dbus-send or
+    // gdbus, whichever is installed.
+    const std::string uri = file_uri(p);
+    auto ran = [](std::string_view program, std::vector<std::string> args)
+    {
+        auto r = process::run(program, args, {.merge_stderr = false});
+        return r && r->exit_code == 0;
+    };
+    if (ran("dbus-send", {"--session", "--print-reply", "--dest=org.freedesktop.FileManager1",
+                          "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems",
+                          "array:string:" + uri, "string:"}))
+        return true;
+    if (ran("gdbus", {"call", "--session", "--dest", "org.freedesktop.FileManager1",
+                      "--object-path", "/org/freedesktop/FileManager1", "--method",
+                      "org.freedesktop.FileManager1.ShowItems", "['" + uri + "']", ""}))
+        return true;
+    return open_path(fs::absolute(p).parent_path());
+}
+
+#endif
+
 }  // namespace rap::sys
