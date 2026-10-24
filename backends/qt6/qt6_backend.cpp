@@ -2318,7 +2318,8 @@ public:
     {
         fonts_.clear();
         const QFontMetrics fm(view_->font());
-        row_height_ = std::max(fm.height() + (compact_ ? 2 : 6), compact_ ? 18 : 22);
+        // Compact is a smaller font, not less space round it.
+        row_height_ = std::max(fm.height() + 6, 22);
         icon_size_ = std::min(16, row_height_ - 1);
         delegate_->height = row_height_;
         view_->doItemsLayout();

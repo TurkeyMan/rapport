@@ -1876,7 +1876,6 @@ private:
             {
                 GtkCellRenderer* box = gtk_cell_renderer_toggle_new();
                 g_object_set(box, "activatable", TRUE, nullptr);
-                if (compact_) g_object_set(box, "ypad", 0, nullptr);
                 gtk_tree_view_column_pack_start(col, box, false);
                 gtk_tree_view_column_set_cell_data_func(
                     col, box,
@@ -1904,7 +1903,6 @@ private:
             // An icon before the text, when the model gives one (a file's
             // type); hidden otherwise.
             GtkCellRenderer* icon = gtk_cell_renderer_pixbuf_new();
-            if (compact_) g_object_set(icon, "ypad", 0, nullptr);
             gtk_tree_view_column_pack_start(col, icon, false);
             gtk_tree_view_column_set_cell_data_func(col, icon, &list_impl::icon_cell, ctx.get(), nullptr);
 
@@ -1914,7 +1912,6 @@ private:
                          : c.align == align::end  ? 1.0f
                                                   : 0.0f,
                          nullptr);
-            if (compact_) g_object_set(r, "ypad", 0, nullptr);
             gtk_tree_view_column_pack_start(col, r, true);
             gtk_tree_view_column_set_cell_data_func(col, r, &list_impl::text_cell, ctx.get(), nullptr);
         }

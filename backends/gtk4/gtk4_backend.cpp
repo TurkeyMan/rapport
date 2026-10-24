@@ -1278,10 +1278,11 @@ public:
             if (!installed)
             {
                 std::string px = std::to_string(compact_font(w_).px) + "px";
+                // Only the font: the row padding is the theme's (data-table
+                // below), so rows aren't squeezed past what it allows.
                 std::string rule =
                     "columnview.rapport-compact, textview.rapport-compact { font-size: " + px +
-                    "; } columnview.rapport-compact row cell { padding-top: 0; "
-                    "padding-bottom: 0; }";
+                    "; }";
                 GtkCssProvider* css = gtk_css_provider_new();
                 gtk_css_provider_load_from_string(css, rule.c_str());
                 gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
@@ -1291,6 +1292,9 @@ public:
                 installed = true;
             }
             gtk_widget_add_css_class(w_, "rapport-compact");
+            // The theme's own dense rows for tables of data: a little
+            // padding rather than a rich list's, and none taken away.
+            gtk_widget_add_css_class(w_, "data-table");
         }
         if (s.soft_selection)
         {
