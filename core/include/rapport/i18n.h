@@ -37,7 +37,10 @@ namespace rap::i18n
 // tells the platform, so text it draws follows (the toolkit's own dialogs;
 // on Windows, message boxes and common dialogs where the language is
 // installed) and so do child processes (LANGUAGE, which git and other
-// gettext programs read).
+// gettext programs read). On Windows that's the process environment, which
+// children inherit; a module with its own static C runtime (an MSVC
+// librapport.dll) has its own getenv copy, so read it back there with
+// GetEnvironmentVariableW.
 void set_languages(std::vector<std::string> preferred, bool override = false);
 const std::vector<std::string>& languages();
 
