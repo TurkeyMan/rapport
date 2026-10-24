@@ -4703,8 +4703,10 @@ private:
         case cursor::grab:
         case cursor::grabbing:
         case cursor::move: id = IDC_SIZEALL; break;
+        // Windows has no zoom cursor: the arrow, as for anything clickable
+        // without one of its own (a crosshair says "pick a point").
         case cursor::zoom_in:
-        case cursor::zoom_out: id = IDC_CROSS; break;
+        case cursor::zoom_out: id = IDC_ARROW; break;
         case cursor::wait: id = IDC_WAIT; break;
         case cursor::hidden: SetCursor(nullptr); return;
         case cursor::resize_ew: id = IDC_SIZEWE; break;
