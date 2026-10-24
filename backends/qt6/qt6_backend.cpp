@@ -244,6 +244,69 @@ size_t utf8_at(const QString& s, qsizetype pos)
     return size_t(QStringView(s).left(std::clamp<qsizetype>(pos, 0, s.size())).toUtf8().size());
 }
 
+// Qt's GTK 3 theme can give QComboBox a palette of its own whose text
+// barely shows (white on near-white under Numix) while the application's
+// is right. Where a combo's text is below 3:1 against its background
+// (WCAG's floor for large text), it takes the application palette's roles:
+// the theme's colours, not ours. Checked once polished, when the class
+// palette arrives, and again whenever the theme or style changes.
+double luminance(const QColor& c)
+{
+    auto channel = [](double v)
+    { return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * channel(c.redF()) + 0.7152 * channel(c.greenF()) + 0.0722 * channel(c.blueF());
+}
+
+double contrast(const QColor& a, const QColor& b)
+{
+    const double la = luminance(a), lb = luminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+class readable_combo : public QObject
+{
+public:
+    explicit readable_combo(QComboBox* c)
+        : QObject(c)
+        , combo_(c)
+    {
+        c->installEventFilter(this);
+    }
+
+    bool eventFilter(QObject*, QEvent* e) override
+    {
+        const auto t = e->type();
+        if (t == QEvent::Polish || t == QEvent::ApplicationPaletteChange ||
+            t == QEvent::StyleChange)
+            QTimer::singleShot(0, this, [this] { check(); });
+        return false;
+    }
+
+private:
+    void check()
+    {
+        // The theme's palette again, then corrected only where it needs it.
+        if (fixed_) combo_->setPalette(QPalette());
+        fixed_ = false;
+        QPalette p = combo_->palette();
+        const QPalette app = QApplication::palette();
+        for (auto group : {QPalette::Active, QPalette::Inactive})
+            for (auto [text, back] : {std::pair{QPalette::ButtonText, QPalette::Button},
+                                      std::pair{QPalette::Text, QPalette::Base}})
+                if (contrast(p.color(group, text), p.color(group, back)) < 3)
+                {
+                    p.setColor(group, text, app.color(group, text));
+                    if (contrast(p.color(group, text), p.color(group, back)) < 3)
+                        p.setColor(group, back, app.color(group, back));
+                    fixed_ = true;
+                }
+        if (fixed_) combo_->setPalette(p);
+    }
+
+    QComboBox* combo_;
+    bool fixed_ = false;
+};
+
 // Selected rows in a light tint of the accent, with normal text: on light
 // themes the accent's hue at Explorer's lightness, as on win32 (#0078D7
 // becomes #CCE8FF); on dark ones a mix into the base colour, as on GTK.
@@ -928,6 +991,7 @@ public:
     explicit drop_down_impl(const spec::drop_down& s)
         : widget_base(new QComboBox)
     {
+        new readable_combo(combo());
         set_items(s.items);
         set_current(s.current);
         QObject::connect(combo(), &QComboBox::currentIndexChanged, combo(),
@@ -959,6 +1023,7 @@ public:
     explicit combo_impl(const spec::combo& s)
         : widget_base(new QComboBox)
     {
+        new readable_combo(combo());
         combo()->setEditable(true);
         combo()->setInsertPolicy(QComboBox::NoInsert);
         set_items(s.items);
