@@ -1270,6 +1270,26 @@ public:
         }
         auto* view = GTK_COLUMN_VIEW(w_);
         gtk_column_view_set_show_column_separators(view, true);
+        {
+            // Rows a line of text and a little, as Windows' list views have
+            // them, rather than a rich list's: the cells have no vertical
+            // padding, so painted cells (a log's graph) fill the row and meet
+            // the next one's, and text cells take their space as margins.
+            static bool installed = false;
+            if (!installed)
+            {
+                GtkCssProvider* css = gtk_css_provider_new();
+                gtk_css_provider_load_from_string(
+                    css, "columnview.rapport-list > listview > row > cell { padding-top: 0; "
+                         "padding-bottom: 0; }");
+                gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
+                                                           GTK_STYLE_PROVIDER(css),
+                                                           GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+                g_object_unref(css);
+                installed = true;
+            }
+            gtk_widget_add_css_class(w_, "rapport-list");
+        }
         if (s.compact)
         {
             // TODO(tortilla): untested without GTK 4 headers. One display-wide
@@ -1768,6 +1788,7 @@ private:
             gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(child),
                                                 int(g_metrics.line_height + 0.5f));
             gtk_widget_set_hexpand(child, true);
+            gtk_widget_set_vexpand(child, true);
             gtk_drawing_area_set_draw_func(
                 GTK_DRAWING_AREA(child),
                 +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
@@ -1788,6 +1809,8 @@ private:
             GtkWidget* image = gtk_image_new();
             gtk_widget_set_visible(image, false);
             child = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+            gtk_widget_set_margin_top(child, 2);
+            gtk_widget_set_margin_bottom(child, 2);
             if (checks_ && ctx.column == 0)
             {
                 // The row's checkbox. bind_cell sets it from the model with
