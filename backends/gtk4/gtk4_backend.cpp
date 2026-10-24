@@ -1995,6 +1995,19 @@ public:
             +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
             {
                 auto* self = static_cast<canvas_impl*>(p);
+                // A new device scale is a resize in device pixels
+                // (canvas::on_resize), told before the frame that uses it.
+                // GTK has no signal for a fractional one: the widget's scale
+                // factor is rounded (1.5 and 2 both read 2), and the surface
+                // only exists once realized. It changes when the compositor's
+                // fractional scale arrives after the window maps, and on a
+                // move to another monitor.
+                const float scale = device_scale_of(GTK_WIDGET(area));
+                if (self->scale_ > 0 && scale != self->scale_)
+                {
+                    self->scale_ = scale;
+                    if (self->resize_) self->resize_({float(w), float(h)});
+                }
                 if (!self->paint_) return;
                 cairo_painter painter(cr, GTK_WIDGET(area));
                 self->paint_(painter, {float(w), float(h)});
@@ -2005,6 +2018,7 @@ public:
             +[](GtkDrawingArea*, int w, int h, gpointer p)
             {
                 auto* self = static_cast<canvas_impl*>(p);
+                self->scale_ = device_scale_of(self->w_);
                 if (self->resize_) self->resize_({float(w), float(h)});
             },
             this);
@@ -2087,6 +2101,7 @@ protected:
     }
 
 private:
+    float scale_ = 0;  // the device scale the app last heard of
     // A raw event's position, from its surface to this widget.
     point_f widget_pos(GdkEvent* e) const
     {
