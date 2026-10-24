@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -158,6 +159,61 @@ public:
 private:
     struct impl;
     explicit process(std::unique_ptr<impl>);
+    std::unique_ptr<impl> impl_;
+};
+
+// -- watching folders ---------------------------------------------------------
+
+// What changed in a watched folder, file by file.
+struct file_event
+{
+    enum class kind
+    {
+        added,     // a new file (or folder), or one moved into the folder
+        removed,   // deleted, or moved out of the folder
+        modified,  // its content (or size, or time) changed
+        renamed,   // within the folder: old_path to path
+    };
+    kind what = kind::modified;
+    std::filesystem::path path;      // absolute
+    std::filesystem::path old_path;  // renamed: the name before
+};
+
+struct watch_batch
+{
+    std::vector<file_event> events;
+    // The system dropped events (its buffer overflowed): what's in the
+    // folder must be looked at again.
+    bool overflow = false;
+};
+
+struct watch_options
+{
+    bool recursive = false;  // the folders inside too
+    // Events of a file are held until it has been quiet this long, then
+    // arrive as one: a file being written comes once, when it's done. Its
+    // first kind holds (added, then modified, arrives as added); added then
+    // removed comes to nothing. Zero passes events as they come.
+    std::chrono::milliseconds settle{0};
+};
+
+// A folder watched for changes (ReadDirectoryChangesW on Windows, inotify
+// on Linux) until the watch is destroyed. The callback runs on the watch's
+// own thread: post to the UI from it. A move across the folder's edge is
+// removed or added.
+class directory_watch
+{
+public:
+    static std::expected<std::unique_ptr<directory_watch>, std::string>
+    start(const std::filesystem::path& folder, const watch_options&, std::function<void(watch_batch)> changed);
+    ~directory_watch();
+    directory_watch(const directory_watch&) = delete;
+    directory_watch& operator=(const directory_watch&) = delete;
+
+    struct impl;
+
+private:
+    explicit directory_watch(std::unique_ptr<impl>);
     std::unique_ptr<impl> impl_;
 };
 
