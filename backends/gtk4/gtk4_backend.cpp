@@ -2897,12 +2897,14 @@ public:
         // vanish over the window. (Its X11 does draw faster: 23 against 20 fps
         // for a panning canvas; gtk3 39 against 29.)
         if (!gtk_init_check()) return nullptr;
-        // Dark when the desktop says so: GTK 4.20's interface colour scheme
-        // where there is one, and the theme's dark variant either way.
+        // Dark when the desktop says so, as the user's theme draws it.
         follow_color_scheme(
             +[](int scheme)
             {
                 GtkSettings* settings = gtk_settings_get_default();
+                // 4.20 and later: the interface colour scheme, which also
+                // picks the theme's dark variant (the older property now
+                // warns at run time); before, that property.
                 if (g_object_class_find_property(G_OBJECT_GET_CLASS(settings),
                                                  "gtk-interface-color-scheme"))
                     g_object_set(settings, "gtk-interface-color-scheme",
@@ -2910,9 +2912,9 @@ public:
                                  : scheme == 2 ? 3   // _LIGHT
                                                : 1,  // _DEFAULT
                                  nullptr);
-                G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-                g_object_set(settings, "gtk-application-prefer-dark-theme", scheme == 1, nullptr);
-                G_GNUC_END_IGNORE_DEPRECATIONS
+                else
+                    g_object_set(settings, "gtk-application-prefer-dark-theme", scheme == 1,
+                                 nullptr);
             });
         init_metrics();
         return new gtk4_backend;
@@ -3219,14 +3221,12 @@ public:
         g_bytes_unref(bytes);
     }
 
-    // Not yet: the dialog and pages come with this backend's print support.
-    void print(rap::window*, print_job job) override
+    // GTK's print operation (gtk-common), once the caller has returned.
+    void print(rap::window* parent, print_job job) override
     {
-        post(
-            [job = std::move(job)]
-            {
-                if (job.done) job.done(false, "printing isn't available with this toolkit yet");
-            });
+        GtkWindow* over =
+            parent ? GTK_WINDOW(static_cast<window_impl*>(parent)->gtk_window()) : nullptr;
+        post([over, job = std::move(job)]() mutable { run_print_operation(over, std::move(job)); });
     }
     void set_clipboard(const std::string& s) override
     {

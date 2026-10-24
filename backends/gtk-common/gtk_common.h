@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -432,6 +433,17 @@ public:
     // Replaces a theme colour for this painter (a list's soft selection).
     void override_color(theme_color role, color c) { overrides_.push_back({role, c}); }
 
+    // On paper (print_job): no widget, so text is in `font` laid out at 72
+    // dpi (the cairo unit is the point), theme colours are print_color()'s,
+    // and the device has `scale` dots per point.
+    void for_print(const PangoFontDescription* font, float scale)
+    {
+        print_font_ = font;
+        print_scale_ = scale;
+        for (int r = 0; r <= int(theme_color::neutral); ++r)
+            override_color(theme_color(r), print_color(theme_color(r)));
+    }
+
     void line(point_f a, point_f b, const paint& p, float width, line_cap cap) override
     {
         source(p);
@@ -523,7 +535,10 @@ public:
         cairo_restore(cr_);
     }
 
-    float device_scale() const override { return float(gtk_widget_get_scale_factor(w_)); }
+    float device_scale() const override
+    {
+        return print_font_ ? print_scale_ : float(gtk_widget_get_scale_factor(w_));
+    }
 
     void push_clip(rect_f r) override
     {
@@ -562,7 +577,17 @@ public:
 private:
     PangoLayout* make_layout(const std::string& s, text_style style) const
     {
-        PangoLayout* layout = gtk_widget_create_pango_layout(w_, s.c_str());
+        PangoLayout* layout = nullptr;
+        if (print_font_)
+        {
+            layout = pango_cairo_create_layout(cr_);
+            pango_cairo_context_set_resolution(pango_layout_get_context(layout), 72);
+            pango_layout_context_changed(layout);
+            pango_layout_set_font_description(layout, print_font_);
+            pango_layout_set_text(layout, s.c_str(), -1);
+        }
+        else
+            layout = gtk_widget_create_pango_layout(w_, s.c_str());
         style.fg.reset();  // colours are drawn with cairo
         style.bg.reset();
         if (PangoAttrList* attrs = pango_attrs(w_, style))
@@ -602,7 +627,194 @@ private:
     cairo_t* cr_;
     GtkWidget* w_;
     paint default_text_;
+    const PangoFontDescription* print_font_ = nullptr;
+    float print_scale_ = 1;
 };
+
+// -- printing -----------------------------------------------------------------
+
+// The desktop's UI font, for text on paper.
+inline PangoFontDescription* print_font()
+{
+    gchar* name = nullptr;
+    g_object_get(gtk_settings_get_default(), "gtk-font-name", &name, nullptr);
+    PangoFontDescription* font = pango_font_description_from_string(name && *name ? name : "Sans 10");
+    g_free(name);
+    return font;
+}
+
+// "out.png", page 2: "out-2.png".
+inline std::string numbered(const std::string& path, int page)
+{
+    if (page == 0) return path;
+    const size_t dot = path.find_last_of('.');
+    const std::string n = "-" + std::to_string(page + 1);
+    return dot == std::string::npos ? path + n : path.substr(0, dot) + n + path.substr(dot);
+}
+
+// RAPPORT_PRINT_TO=out.png: each page as A4 at 144 dpi, no dialog, as on
+// Windows: for tests.
+inline bool print_to_png(const std::string& path, print_job& job, const PangoFontDescription* font)
+{
+    const bool landscape = job.orientation == page_orientation::landscape;
+    const size_f paper = landscape ? size_f{842, 595} : size_f{595, 842};
+    const float dpi = 144;
+    int pages = job.pages;
+    if (job.on_begin)
+        if (const int n = job.on_begin(paper); n >= 0) pages = n;
+    bool ok = true;
+    for (int page = 0; page < pages && ok; ++page)
+    {
+        cairo_surface_t* surface = cairo_image_surface_create(
+            CAIRO_FORMAT_RGB24, int(std::lround(paper.w * dpi / 72)), int(std::lround(paper.h * dpi / 72)));
+        cairo_t* cr = cairo_create(surface);
+        cairo_set_source_rgb(cr, 1, 1, 1);
+        cairo_paint(cr);
+        cairo_scale(cr, dpi / 72, dpi / 72);
+        {
+            cairo_painter p(cr, nullptr);
+            p.for_print(font, dpi / 72);
+            job.draw_page(p, page, paper);
+        }
+        cairo_destroy(cr);
+        ok = cairo_surface_write_to_png(surface, numbered(path, page).c_str()) == CAIRO_STATUS_SUCCESS;
+        cairo_surface_destroy(surface);
+    }
+    return ok;
+}
+
+// GTK's print operation, the same in GTK 3 and 4: its dialog (or, with
+// RAPPORT_PRINT_TO=out.pdf, an export without one), then the pages GTK asks
+// for, in points.
+inline void run_print_operation(GtkWindow* parent, print_job job)
+{
+    struct state
+    {
+        print_job job;
+        PangoFontDescription* font = print_font();
+        size_f printable;
+        bool returned = false, finished = false;
+        GtkPrintOperationResult result = GTK_PRINT_OPERATION_RESULT_ERROR;
+        std::string error;
+    };
+    auto* st = new state{std::move(job)};
+    auto finish = [](state* s, bool ok, std::string error)
+    {
+        if (s->job.done) s->job.done(ok, std::move(error));
+        pango_font_description_free(s->font);
+        delete s;
+    };
+    if (!st->job.draw_page) return finish(st, false, i18n::tr("rapport", "nothing to print"));
+    const char* env = std::getenv("RAPPORT_PRINT_TO");
+    const std::string to = env ? env : "";
+    auto ends = [&](const char* ext)
+    {
+        return to.size() > 4 && g_ascii_strcasecmp(to.c_str() + to.size() - 4, ext) == 0;
+    };
+    if (ends(".png"))
+    {
+        const bool ok = print_to_png(to, st->job, st->font);
+        return finish(st, ok, ok ? "" : i18n::format(i18n::tr("rapport", "couldn't write {0}"), to));
+    }
+
+    GtkPrintOperation* op = gtk_print_operation_new();
+    gtk_print_operation_set_job_name(
+        op, st->job.title.empty() ? i18n::tr("rapport", "Document") : st->job.title.c_str());
+    gtk_print_operation_set_n_pages(op, std::max(st->job.pages, 1));
+    gtk_print_operation_set_unit(op, GTK_UNIT_POINTS);
+    gtk_print_operation_set_embed_page_setup(op, true);
+    if (st->job.orientation != page_orientation::automatic)
+    {
+        GtkPageSetup* setup = gtk_page_setup_new();
+        gtk_page_setup_set_orientation(setup, st->job.orientation == page_orientation::landscape
+                                                  ? GTK_PAGE_ORIENTATION_LANDSCAPE
+                                                  : GTK_PAGE_ORIENTATION_PORTRAIT);
+        gtk_print_operation_set_default_page_setup(op, setup);
+        g_object_unref(setup);
+    }
+    g_signal_connect(op, "begin-print",
+                     G_CALLBACK((+[](GtkPrintOperation* op, GtkPrintContext* ctx, gpointer p)
+                                {
+                                    auto* s = static_cast<state*>(p);
+                                    GtkPageSetup* setup = gtk_print_context_get_page_setup(ctx);
+                                    s->printable = {float(gtk_page_setup_get_page_width(setup, GTK_UNIT_POINTS)),
+                                                    float(gtk_page_setup_get_page_height(setup, GTK_UNIT_POINTS))};
+                                    if (s->job.on_begin)
+                                        if (const int n = s->job.on_begin(s->printable); n >= 0)
+                                            gtk_print_operation_set_n_pages(op, std::max(n, 1));
+                                })),
+                     st);
+    g_signal_connect(op, "draw-page",
+                     G_CALLBACK((+[](GtkPrintOperation*, GtkPrintContext* ctx, gint page, gpointer p)
+                                {
+                                    auto* s = static_cast<state*>(p);
+                                    cairo_painter painter(gtk_print_context_get_cairo_context(ctx), nullptr);
+                                    painter.for_print(s->font, float(gtk_print_context_get_dpi_x(ctx) / 72));
+                                    s->job.draw_page(painter, page, s->printable);
+                                })),
+                     st);
+    // "done" can come during the run or after it: whichever is second ends.
+    g_signal_connect(op, "done",
+                     G_CALLBACK((+[](GtkPrintOperation* op, GtkPrintOperationResult result, gpointer p)
+                                {
+                                    auto* s = static_cast<state*>(p);
+                                    s->result = result;
+                                    s->finished = true;
+                                    if (result == GTK_PRINT_OPERATION_RESULT_ERROR)
+                                    {
+                                        GError* e = nullptr;
+                                        gtk_print_operation_get_error(op, &e);
+                                        s->error = e ? e->message : i18n::tr("rapport", "printing failed");
+                                        g_clear_error(&e);
+                                    }
+                                })),
+                     st);
+    GtkPrintOperationAction action = GTK_PRINT_OPERATION_ACTION_PRINT_DIALOG;
+    if (ends(".pdf"))
+    {
+        gtk_print_operation_set_export_filename(op, to.c_str());
+        action = GTK_PRINT_OPERATION_ACTION_EXPORT;
+    }
+    gtk_print_operation_set_allow_async(op, true);
+    GError* error = nullptr;
+    const GtkPrintOperationResult r = gtk_print_operation_run(op, action, parent, &error);
+    if (error)
+    {
+        st->result = GTK_PRINT_OPERATION_RESULT_ERROR;
+        st->error = error->message;
+        st->finished = true;
+        g_clear_error(&error);
+    }
+    if (r != GTK_PRINT_OPERATION_RESULT_IN_PROGRESS && !st->finished)
+    {
+        st->result = r;
+        st->finished = true;
+    }
+    auto conclude = [](state* s, GtkPrintOperation* op, auto finish)
+    {
+        g_signal_handlers_disconnect_by_data(op, s);
+        const bool ok = s->result == GTK_PRINT_OPERATION_RESULT_APPLY;
+        finish(s, ok, ok || s->result == GTK_PRINT_OPERATION_RESULT_CANCEL ? std::string() : s->error);
+        g_object_unref(op);
+    };
+    if (st->finished) return conclude(st, op, finish);
+    // In progress: the dialog's answer, then the pages, arrive later.
+    g_signal_connect(op, "done",
+                     G_CALLBACK((+[](GtkPrintOperation* op, GtkPrintOperationResult, gpointer p)
+                                {
+                                    auto* s = static_cast<state*>(p);
+                                    g_signal_handlers_disconnect_by_data(op, s);
+                                    const bool ok = s->result == GTK_PRINT_OPERATION_RESULT_APPLY;
+                                    if (s->job.done)
+                                        s->job.done(ok, ok || s->result == GTK_PRINT_OPERATION_RESULT_CANCEL
+                                                            ? std::string()
+                                                            : s->error);
+                                    pango_font_description_free(s->font);
+                                    delete s;
+                                    g_object_unref(op);
+                                })),
+                     st);
+}
 
 // Tracks signal connections so a window can cut them all before it
 // destroys its GTK widgets; app callbacks must not fire during teardown.
