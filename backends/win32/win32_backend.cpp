@@ -9,6 +9,7 @@
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
+#include <oleacc.h>
 #include <vssym32.h>
 
 // SysLink's ideal size (Vista and later; MinGW declares it only for a newer
@@ -1741,6 +1742,31 @@ void forget_group_themes(HWND h)
     auto& frames = group_item::frames_of();
     if (auto it = frames.find(h); it != frames.end())
         for (group_item* g : it->second) g->forget_theme();
+}
+
+// Names `h` for screen readers after the frame around it, as Windows did
+// when frames were controls (the control after a group box took its title),
+// for the kinds of control that take their names from a label.
+void name_from_frame(HWND h, const std::wstring& title)
+{
+    static const wchar_t* const takes_label[] = {L"Edit", L"RICHEDIT50W", L"SysListView32", L"ComboBox",
+                                                 L"SysDateTimePick32", L"SysTreeView32"};
+    wchar_t cls[32];
+    GetClassNameW(h, cls, 32);
+    if (std::none_of(std::begin(takes_label), std::end(takes_label), [&](const wchar_t* c) { return !wcscmp(c, cls); }))
+        return;
+    // CLSID_AccPropServices, IID_IAccPropServices and PROPID_ACC_NAME:
+    // declared here, as MinGW and the SDK put them in different libraries.
+    static const GUID clsid{0xb5f8350b, 0x0548, 0x48b1, {0xa6, 0xee, 0x88, 0xbd, 0x00, 0xb4, 0xa5, 0xe7}};
+    static const GUID iid{0x6e26e776, 0x04f0, 0x495d, {0x80, 0xe4, 0x33, 0x30, 0x35, 0x2e, 0x31, 0x69}};
+    static const GUID name{0x608d3df8, 0x8128, 0x4aa7, {0xa4, 0x28, 0xf5, 0x5e, 0x49, 0x26, 0x72, 0x91}};
+    static IAccPropServices* services = []
+    {
+        IAccPropServices* s = nullptr;
+        CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, iid, reinterpret_cast<void**>(&s));
+        return s;
+    }();
+    if (services) services->SetHwndPropStr(h, DWORD(OBJID_CLIENT), CHILDID_SELF, name, title.c_str());
 }
 
 bool paint_group_frames(HWND h, HDC dc)
@@ -5095,7 +5121,12 @@ private:
     item* make(const node& n, const spec::group& s, HWND parent, orientation)
     {
         auto* g = own<group_item>(win_, parent, s.title);
+        // The first control the content makes follows the last one before it.
+        HWND first = GetWindow(parent, GW_CHILD);
+        HWND before = first ? GetWindow(first, GW_HWNDLAST) : nullptr;
         if (!s.content.empty()) g->content = build(s.content.front(), parent, orientation::vertical);
+        if (HWND made = before ? GetWindow(before, GW_HWNDNEXT) : GetWindow(parent, GW_CHILD))
+            name_from_frame(made, wide(s.title));
         handle(n, g);
         return g;
     }
