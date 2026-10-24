@@ -70,6 +70,9 @@ struct box
     // a window that has margins off (a status line): the full margin at its
     // ends and half of it along its sides.
     bool margins = false;
+    // Set by layout::deferred: builds the box's one item later (the backend
+    // decides when), in place of `items`.
+    std::function<node()> deferred;
 };
 // Label/field pairs; the backend applies its own label alignment rules.
 // An empty label makes the field span both columns.
@@ -419,6 +422,21 @@ public:
         s().margins = on;
         return *this;
     }
+};
+
+// A box whose content is built after the window first appears, when the UI
+// is next idle, or at once if the box is shown before then: for a part of
+// the window that starts hidden and is slow to make (a big list). Backends
+// that make controls cheaply build it with the window. The contract:
+// - Its widgets, and so its binds and callbacks, may not exist yet: code
+//   that reads them checks. Content fed from a model needs no care, as it
+//   reads the model when built.
+// - Until built it measures nothing; give it a size if that matters.
+// A vertical box; its handle (common.handle) shows and hides it as usual.
+class deferred : public builder<deferred, spec::box>
+{
+public:
+    explicit deferred(std::function<node()> build) { s() = {vertical, {}, false, std::move(build)}; }
 };
 
 struct form_row

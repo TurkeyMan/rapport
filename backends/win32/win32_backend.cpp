@@ -30,6 +30,7 @@
 #include <future>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 namespace rap::win32
 {
@@ -653,19 +654,42 @@ protected:
     HWND h_ = nullptr;
 };
 
+// A deferred box's content (layout::deferred), built once: when the window
+// is first idle after it paints, or when the box is shown before then.
+class deferred_build
+{
+public:
+    explicit deferred_build(std::function<void()> build)
+        : build_(std::move(build))
+    {
+    }
+    void run()
+    {
+        if (!build_) return;
+        const auto build = std::move(build_);
+        build_ = nullptr;
+        build();
+    }
+
+private:
+    std::function<void()> build_;
+};
+
 // A container laid out as an Item but with no interface of its own; a
 // handle on it gets this.
 class plain_widget : public widget
 {
 public:
-    plain_widget(item& item, win_context& win)
+    plain_widget(item& item, win_context& win, std::shared_ptr<deferred_build> pending = nullptr)
         : item_(item)
         , win_(win)
+        , pending_(std::move(pending))
     {
     }
     void set_enabled(bool) override {}
     void set_visible(bool v) override
     {
+        if (v && pending_) pending_->run();
         if (item_.visible == v) return;
         item_.visible = v;
         win_.relayout();
@@ -677,6 +701,7 @@ public:
 private:
     item& item_;
     win_context& win_;
+    std::shared_ptr<deferred_build> pending_;
 };
 
 // -- layout containers --------------------------------------------------------
@@ -4540,6 +4565,7 @@ public:
     std::vector<item_ptr> items;
     std::vector<std::unique_ptr<widget>> widgets;  // plain handles for containers
     std::vector<button_impl*> role_buttons;
+    std::vector<std::shared_ptr<deferred_build>> deferred;  // built when first idle (see show)
 
     void set_title(const std::string& t) override { SetWindowTextW(hwnd_, wide(t).c_str()); }
     void show() override
@@ -4597,6 +4623,9 @@ public:
             RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
             const BOOL off = FALSE;
             DwmSetWindowAttribute(hwnd_, DWMWA_CLOAK, &off, sizeof off);
+            // Deferred boxes are built once nothing else is waiting: a
+            // timer's message comes only when the queue is otherwise empty.
+            if (!deferred.empty()) SetTimer(hwnd_, deferred_timer, USER_TIMER_MINIMUM, nullptr);
         }
         if (!snapshot) SetForegroundWindow(hwnd_);
         last_shown() = this;
@@ -5021,6 +5050,12 @@ private:
                     take_snapshot();
                     return 0;
                 }
+                if (wp == deferred_timer)
+                {
+                    KillTimer(h, wp);
+                    for (auto& d : std::exchange(self->deferred, {})) d->run();
+                    return 0;
+                }
                 break;
             case WM_DESTROY:
                 if (last_shown() == self) last_shown() = nullptr;
@@ -5052,6 +5087,7 @@ private:
     bool dialog_, margins_, modal_spec_;
     bool modal_ = false, finished_ = false, shown_once_ = false, fullscreen_ = false, relayout_pending_ = false;
     bool painted_once_ = false;  // shown cloaked and painted the first time (see show)
+    static constexpr UINT_PTR deferred_timer = 0xDEF;
     std::optional<SIZE> requested_;  // client size from resize() before the first show
     struct bar_menu
     {
@@ -5143,10 +5179,10 @@ private:
         sink_.created(n, *w);
         return w;
     }
-    void handle(const node& n, item* item)
+    void handle(const node& n, item* item, std::shared_ptr<deferred_build> pending = nullptr)
     {
         if (!n.common.handle && n.common.visible) return;
-        auto w = std::make_unique<plain_widget>(*item, win_);
+        auto w = std::make_unique<plain_widget>(*item, win_, std::move(pending));
         sink_.created(n, *w);
         win_.widgets.push_back(std::move(w));
     }
@@ -5155,7 +5191,20 @@ private:
     {
         auto* box = own<box_item>(s.dir, metrics_.spacing, s.margins ? metrics_.margin : 0);
         for (const node& c : s.items) box->children.push_back(build(c, parent, s.dir));
-        handle(n, box);
+        if (!s.deferred)
+        {
+            handle(n, box);
+            return box;
+        }
+        // Built later; a first ListView alone costs ~15 ms.
+        auto pending = std::make_shared<deferred_build>(
+            [&win = win_, &sink = sink_, box, parent, make = s.deferred, dir = s.dir]
+            {
+                box->children.push_back(builder(win, sink).build(make(), parent, dir));
+                win.relayout();
+            });
+        win_.deferred.push_back(pending);
+        handle(n, box, std::move(pending));
         return box;
     }
     item* make(const node& n, const spec::form& s, HWND parent, orientation)

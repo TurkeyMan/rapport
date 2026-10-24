@@ -16,7 +16,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 33;
+inline constexpr int abi_version = 34;
 
 // For list::set_column_order: whether `order` names each of `n` columns once.
 inline bool is_column_order(const std::vector<size_t>& order, size_t n)
@@ -87,8 +87,8 @@ public:
     // button. Containers (Box, Form, Group, Toolbar) with a common.handle
     // also get created(), with a plain Widget for the container.
     // The spec is only valid during the call, except that a Tabs' lazy page
-    // builders may be kept and called (on the UI thread) when a page is
-    // first shown; the Nodes they return go through the sink the same way.
+    // builders and a deferred Box's builder may be kept and called (on the
+    // UI thread) later; the Nodes they return go through the sink the same way.
     virtual std::unique_ptr<window> create_window(const window_spec&, window* parent, build_sink&) = 0;
 
     virtual int run() = 0;  // main loop; returns the quit() code
