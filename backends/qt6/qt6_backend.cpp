@@ -830,6 +830,7 @@ public:
     void set_text(const std::string& t) override { edit()->setText(qs(t)); }
     void set_placeholder(const std::string& t) override { edit()->setPlaceholderText(qs(t)); }
     void set_read_only(bool v) override { edit()->setReadOnly(v); }
+    void set_frame(bool v) override { edit()->setFrame(v); }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
 

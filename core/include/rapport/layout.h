@@ -193,6 +193,7 @@ struct entry
     std::string text, placeholder;
     bool read_only = false;
     bool password = false;  // shows dots for the characters typed
+    bool frame = true;
     std::function<void(const std::string&)> on_changed;
     std::function<void()> on_activate;
     rap::entry** bind = nullptr;
@@ -658,6 +659,13 @@ public:
     entry& read_only(bool v = true)
     {
         s().read_only = v;
+        return *this;
+    }
+    // Without the toolkit's frame: a read-only entry then reads as text that
+    // can still be selected, as TortoiseGit shows the branch it commits to.
+    entry& frame(bool v = true)
+    {
+        s().frame = v;
         return *this;
     }
     // Hides what's typed (a password, a passphrase): the toolkit's own

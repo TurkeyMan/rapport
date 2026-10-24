@@ -530,6 +530,8 @@ public:
     virtual void set_placeholder(const std::string&) = 0;
     // Shows its text (selectable, copyable) without letting it be edited.
     virtual void set_read_only(bool) {}
+    // The toolkit's frame round it, or none (spec::entry::frame).
+    virtual void set_frame(bool) {}
     virtual void on_changed(std::function<void(const std::string&)>) = 0;
     virtual void on_activate(std::function<void()>) = 0;  // Enter pressed
 };

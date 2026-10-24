@@ -436,7 +436,7 @@ private:
     }
     void visit(const node& n, const spec::entry& s, int)
     {
-        std::printf("entry \"%s\"", s.text.c_str());
+        std::printf("entry \"%s\"%s", s.text.c_str(), s.frame ? "" : " frameless");
         suffix(n);
         make<null_entry>(n);
     }

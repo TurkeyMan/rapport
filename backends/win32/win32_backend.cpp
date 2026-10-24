@@ -1163,6 +1163,17 @@ public:
         quiet_ = false;
     }
     void set_read_only(bool v) override { SendMessageW(h_, EM_SETREADONLY, v, 0); }
+    // The themed border is drawn in the non-client area WS_EX_CLIENTEDGE
+    // makes, so without it there's none, as for the selectable label's EDIT;
+    // read-only, it then takes the window's background (WM_CTLCOLORSTATIC).
+    void set_frame(bool v) override
+    {
+        const LONG_PTR ex = GetWindowLongPtrW(h_, GWL_EXSTYLE);
+        SetWindowLongPtrW(h_, GWL_EXSTYLE,
+                          v ? ex | WS_EX_CLIENTEDGE : ex & ~LONG_PTR(WS_EX_CLIENTEDGE));
+        SetWindowPos(h_, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
     void set_placeholder(const std::string& p) override
     {
         SendMessageW(h_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(wide(p).c_str()));

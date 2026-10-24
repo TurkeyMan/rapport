@@ -211,6 +211,8 @@ int main(int argc, char** argv)
                  vbox{
                      form{
                          {"Entry", entry{"some text"}.placeholder("type here")},
+                         {"Read-only",
+                          entry{"selectable, without a frame"}.read_only().frame(false)},
                          {"Select",
                           drop_down{{"pick", "reword", "edit", "squash", "fixup", "drop"}, 0}
                               .on_changed([&](int i) { say("select " + std::to_string(i)); })},
