@@ -260,6 +260,8 @@ public:
     using widget_base::widget_base;
 };
 
+GtkWidget* icon_widget(const icon& icon, int size);
+
 class label_impl : public widget_base<rap::label>
 {
 public:
@@ -285,6 +287,7 @@ public:
                                         }),
                              this);
         }
+        if (s.icon) add_icon(s.icon);
     }
 
     void set_text(const std::string& t) override
@@ -297,6 +300,43 @@ public:
     }
 
 private:
+    // The icon before the text, in a box that becomes the outer widget; on a
+    // link it takes the link's click and pointer (an event box, as GTK 3's
+    // images have no window of their own).
+    void add_icon(const icon& icon)
+    {
+        GtkWidget* img = icon_widget(icon, 16);
+        if (!img) return;
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+        GtkWidget* holder = img;
+        if (link_)
+        {
+            holder = gtk_event_box_new();
+            gtk_container_add(GTK_CONTAINER(holder), img);
+            gtk_widget_add_events(holder, GDK_BUTTON_RELEASE_MASK);
+            g_signal_connect(holder, "button-release-event",
+                             G_CALLBACK(+[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
+                                        {
+                                            auto* self = static_cast<label_impl*>(p);
+                                            if (e->button == 1 && self->on_click_) self->on_click_();
+                                            return true;
+                                        }),
+                             this);
+            g_signal_connect(holder, "realize",
+                             G_CALLBACK(+[](GtkWidget* w, gpointer)
+                                        {
+                                            GdkCursor* c = gdk_cursor_new_from_name(gtk_widget_get_display(w), "pointer");
+                                            gdk_window_set_cursor(gtk_widget_get_window(w), c);
+                                            if (c) g_object_unref(c);
+                                        }),
+                             nullptr);
+        }
+        gtk_box_pack_start(GTK_BOX(box), holder, false, false, 0);
+        gtk_box_pack_start(GTK_BOX(box), w_, true, true, 0);
+        gtk_widget_show_all(box);
+        outer_ = box;
+    }
+
     bool link_ = false;
     std::function<void()> on_click_;
 };

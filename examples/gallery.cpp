@@ -213,6 +213,10 @@ int main(int argc, char** argv)
                          {"Entry", entry{"some text"}.placeholder("type here")},
                          {"Read-only",
                           entry{"selectable, without a frame"}.read_only().frame(false)},
+                         {"Link",
+                          label{"with an icon"}
+                              .link([&] { say("link"); })
+                              .icon(rap::icon{.name = "go-next"})},
                          {"Select",
                           drop_down{{"pick", "reword", "edit", "squash", "fixup", "drop"}, 0}
                               .on_changed([&](int i) { say("select " + std::to_string(i)); })},

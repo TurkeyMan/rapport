@@ -415,7 +415,7 @@ private:
     }
     void visit(const node& n, const spec::label& s, int)
     {
-        std::printf("label \"%s\"", s.text.c_str());
+        std::printf("label \"%s\"%s", s.text.c_str(), s.icon ? " with icon" : "");
         suffix(n);
         make<null_label>(n);
     }

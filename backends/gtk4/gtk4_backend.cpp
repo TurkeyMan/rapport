@@ -143,6 +143,7 @@ public:
                                         }),
                              this);
         }
+        if (s.icon) add_icon(s.icon);
     }
 
     void set_text(const std::string& t) override
@@ -155,11 +156,36 @@ public:
     }
 
 private:
+    // The icon before the text, in a box that becomes the outer widget; on a
+    // link it takes the link's click and pointer.
+    void add_icon(const icon& icon);
+
     bool link_ = false;
     std::function<void()> on_click_;
 };
 
 GtkWidget* icon_widget(const icon& icon, int size);
+
+void label_impl::add_icon(const icon& icon)
+{
+    GtkWidget* img = icon_widget(icon, 16);
+    if (!img) return;
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_append(GTK_BOX(box), img);
+    gtk_box_append(GTK_BOX(box), w_);
+    outer_ = box;
+    if (!link_) return;
+    gtk_widget_set_cursor_from_name(img, "pointer");
+    GtkGesture* click = gtk_gesture_click_new();
+    g_signal_connect(click, "released",
+                     G_CALLBACK(+[](GtkGestureClick*, int, double, double, gpointer p)
+                                {
+                                    auto* self = static_cast<label_impl*>(p);
+                                    if (self->on_click_) self->on_click_();
+                                }),
+                     this);
+    gtk_widget_add_controller(img, GTK_EVENT_CONTROLLER(click));
+}
 
 // A button's content: its text, or its icon (named or drawn), or the icon
 // before the text in a box, as GTK 3's image buttons show them (GTK 4's

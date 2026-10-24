@@ -129,6 +129,9 @@ struct label
     // links, a branch name that opens Switch): each toolkit's own link.
     bool link = false;
     std::function<void()> on_click;
+    // Drawn before the text; on a link it's part of the link (its click and
+    // pointer), so an icon and its words read as one.
+    rap::icon icon;
     rap::label** bind = nullptr;
 };
 struct button
@@ -586,6 +589,11 @@ public:
     {
         s().link = true;
         s().on_click = std::move(on_click);
+        return *this;
+    }
+    label& icon(rap::icon i)
+    {
+        s().icon = std::move(i);
         return *this;
     }
     label& bind(rap::label*& h)

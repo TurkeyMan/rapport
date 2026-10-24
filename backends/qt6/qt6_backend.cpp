@@ -599,7 +599,7 @@ class label_impl : public widget_base<rap::label>
 {
 public:
     explicit label_impl(const spec::label& s)
-        : widget_base(new elided_label(s.ellipsize))
+        : widget_base(with_icon(new elided_label(s.ellipsize), s))
     {
         if (s.link)
         {
@@ -632,7 +632,57 @@ public:
     }
 
 private:
-    elided_label* label() const { return static_cast<elided_label*>(w_); }
+    // With an icon, the label sits after it in a row of its own; on a link
+    // the icon takes the link's click and pointer.
+    static QWidget* with_icon(elided_label* text, const spec::label& s)
+    {
+        if (!s.icon) return text;
+        const QIcon icon = to_q_icon(s.icon, 16, nullptr);
+        if (icon.isNull()) return text;
+        auto* row = new QWidget;
+        auto* layout = new QHBoxLayout(row);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(4);
+        auto* image = new QLabel;
+        image->setPixmap(icon.pixmap(QSize(16, 16), qApp->devicePixelRatio()));
+        layout->addWidget(image);
+        layout->addWidget(text, 1);
+        if (s.link && s.on_click)
+        {
+            image->setCursor(Qt::PointingHandCursor);
+            image->installEventFilter(new click_filter(image, s.on_click));
+        }
+        return row;
+    }
+    // A press and release of the left button on the icon.
+    class click_filter : public QObject
+    {
+    public:
+        click_filter(QObject* parent, std::function<void()> f)
+            : QObject(parent)
+            , f_(std::move(f))
+        {
+        }
+        bool eventFilter(QObject*, QEvent* e) override
+        {
+            if (e->type() != QEvent::MouseButtonRelease ||
+                static_cast<QMouseEvent*>(e)->button() != Qt::LeftButton)
+                return false;
+            f_();
+            return true;
+        }
+
+    private:
+        std::function<void()> f_;
+    };
+    elided_label* label() const
+    {
+        if (auto* l = dynamic_cast<elided_label*>(w_)) return l;
+        // No moc, so findChild can't name elided_label: its QLabels, cast.
+        for (QLabel* l : w_->findChildren<QLabel*>())
+            if (auto* e = dynamic_cast<elided_label*>(l)) return e;
+        return nullptr;
+    }
     bool link_ = false;
 };
 
