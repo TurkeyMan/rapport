@@ -25,8 +25,14 @@ void print(const std::vector<rap::shell::menu_item>& items, int depth)
         if (!item.id.empty()) std::printf("  [%s]", item.id.c_str());
         if (!item.icon.empty())
         {
-            const bool found = std::filesystem::exists(rap::shell::resource_dir() / item.icon);
-            std::printf("  icon %s%s", item.icon.c_str(), found ? "" : " MISSING");
+            // A bare name is the icon theme's on Linux (menu_item::icon), not a file.
+            if (item.icon.find_first_of("/.") == std::string::npos)
+                std::printf("  theme icon %s", item.icon.c_str());
+            else
+            {
+                const bool found = std::filesystem::exists(rap::shell::resource_dir() / item.icon);
+                std::printf("  icon %s%s", item.icon.c_str(), found ? "" : " MISSING");
+            }
         }
         std::printf("\n");
         print(item.submenu, depth + 1);
