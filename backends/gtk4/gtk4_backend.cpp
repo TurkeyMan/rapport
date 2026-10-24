@@ -2023,6 +2023,16 @@ public:
             },
             this);
         focusable_ = s.focusable;
+        // GTK replays the last drawing at a new surface scale without calling
+        // the draw func, so the check there wouldn't run: the surface's
+        // scale changing asks for a draw. Watched while realized, since the
+        // surface lives only that long.
+        connect(
+            w_, "realize",
+            +[](GtkWidget*, gpointer p) { static_cast<canvas_impl*>(p)->watch_scale(); }, this);
+        connect(
+            w_, "unrealize",
+            +[](GtkWidget*, gpointer p) { static_cast<canvas_impl*>(p)->unwatch_scale(); }, this);
 
         GtkEventController* legacy = gtk_event_controller_legacy_new();
         connect(legacy, "event", +[](GtkEventControllerLegacy*, GdkEvent* e, gpointer p) -> gboolean
@@ -2094,6 +2104,7 @@ public:
 protected:
     void on_disconnect() override
     {
+        unwatch_scale();
         if (!*alive_) return;
         *alive_ = false;
         for (guint id : ticks_) gtk_widget_remove_tick_callback(w_, id);
@@ -2102,6 +2113,30 @@ protected:
 
 private:
     float scale_ = 0;  // the device scale the app last heard of
+    GdkSurface* scale_surface_ = nullptr;
+    gulong scale_handler_ = 0;
+
+    void watch_scale()
+    {
+        unwatch_scale();
+#if GTK_CHECK_VERSION(4, 12, 0)
+        GtkNative* native = gtk_widget_get_native(w_);
+        scale_surface_ = native ? gtk_native_get_surface(native) : nullptr;
+        if (scale_surface_)
+            scale_handler_ = g_signal_connect(
+                scale_surface_, "notify::scale",
+                G_CALLBACK(+[](GdkSurface*, GParamSpec*, gpointer p)
+                           { gtk_widget_queue_draw(static_cast<canvas_impl*>(p)->w_); }),
+                this);
+#endif
+    }
+    void unwatch_scale()
+    {
+        if (scale_surface_ && scale_handler_)
+            g_signal_handler_disconnect(scale_surface_, scale_handler_);
+        scale_surface_ = nullptr;
+        scale_handler_ = 0;
+    }
     // A raw event's position, from its surface to this widget.
     point_f widget_pos(GdkEvent* e) const
     {
