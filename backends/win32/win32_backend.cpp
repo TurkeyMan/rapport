@@ -2698,6 +2698,25 @@ private:
             clip.top = std::max(clip.top, hr.bottom);
             if (clip.top >= clip.bottom) return;
         }
+        // Below the last row is only background: GDI fills it, and Direct2D
+        // (whose software target costs by the area it's bound to) draws the
+        // rows alone.
+        {
+            const int count = int(model_->row_count());
+            RECT last{};
+            const long rows_bottom =
+                count && ListView_GetItemRect(h_, count - 1, &last, LVIR_BOUNDS) ? last.bottom : clip.top;
+            if (rows_bottom < clip.bottom)
+            {
+                const color base = theme_color_of(theme_color::base);
+                HBRUSH brush = CreateSolidBrush(RGB(base.r, base.g, base.b));
+                RECT rest{clip.left, std::max(clip.top, rows_bottom), clip.right, clip.bottom};
+                FillRect(dc, &rest, brush);
+                DeleteObject(brush);
+                clip.bottom = std::max(clip.top, rows_bottom);
+                if (clip.top >= clip.bottom) return;
+            }
+        }
         if (!row_target_)
         {
             const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
