@@ -25,6 +25,11 @@ else()
     add_library(rapport_qt6 MODULE qt6_backend.cpp)
 endif()
 add_library(rapport::backend_qt6 ALIAS rapport_qt6)
+# Linked into one executable, a backend needs the core after it on the link
+# line (its strings, from rapport::i18n); a module finds it loaded already.
+if(RAPPORT_STATIC)
+    target_link_libraries(rapport_qt6 PRIVATE rapport::rapport)
+endif()
 target_link_libraries(rapport_qt6 PRIVATE rapport::headers Qt6::Widgets)
 target_include_directories(rapport_qt6 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 set_target_properties(rapport_qt6 PROPERTIES

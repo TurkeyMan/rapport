@@ -26,6 +26,11 @@ else()
     add_library(rapport_gtk3 MODULE gtk3_backend.cpp)
 endif()
 add_library(rapport::backend_gtk3 ALIAS rapport_gtk3)
+# Linked into one executable, a backend needs the core after it on the link
+# line (its strings, from rapport::i18n); a module finds it loaded already.
+if(RAPPORT_STATIC)
+    target_link_libraries(rapport_gtk3 PRIVATE rapport::rapport)
+endif()
 target_include_directories(rapport_gtk3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../gtk-common)
 target_link_libraries(rapport_gtk3 PRIVATE rapport::headers PkgConfig::GTK3)
 set_target_properties(rapport_gtk3 PROPERTIES

@@ -12,5 +12,10 @@ else()
     add_library(rapport_null MODULE null_backend.cpp)
 endif()
 add_library(rapport::backend_null ALIAS rapport_null)
+# Linked into one executable, a backend needs the core after it on the link
+# line (its strings, from rapport::i18n); a module finds it loaded already.
+if(RAPPORT_STATIC)
+    target_link_libraries(rapport_null PRIVATE rapport::rapport)
+endif()
 target_link_libraries(rapport_null PRIVATE rapport::headers)
 set_target_properties(rapport_null PROPERTIES PREFIX "" CXX_VISIBILITY_PRESET hidden)

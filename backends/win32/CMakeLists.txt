@@ -17,6 +17,11 @@ else()
     add_library(rapport_win32 MODULE ${sources})
 endif()
 add_library(rapport::backend_win32 ALIAS rapport_win32)
+# Linked into one executable, a backend needs the core after it on the link
+# line (its strings, from rapport::i18n); a module finds it loaded already.
+if(RAPPORT_STATIC)
+    target_link_libraries(rapport_win32 PRIVATE rapport::rapport)
+endif()
 target_link_libraries(rapport_win32 PRIVATE rapport::headers)
 target_include_directories(rapport_win32 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 target_link_libraries(rapport_win32 PUBLIC user32 gdi32 comctl32 comdlg32 d2d1 d3d11 dxgi dwrite windowscodecs ole32 uuid dwmapi shell32 uxtheme)
