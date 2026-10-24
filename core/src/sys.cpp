@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <ctime>
 #include <mutex>
 #include <system_error>
@@ -271,6 +272,56 @@ fs::path data_dir(std::string_view app)
 #else
     return ensure(xdg("XDG_DATA_HOME", ".local/share") / path_from_utf8(app));
 #endif
+}
+
+// -- language -----------------------------------------------------------------
+
+std::vector<std::string> ui_languages()
+{
+    std::vector<std::string> out;
+    auto add = [&](std::string tag)
+    {
+        if (!tag.empty() && std::ranges::find(out, tag) == out.end()) out.push_back(std::move(tag));
+    };
+#ifdef _WIN32
+    ULONG count = 0, size = 0;
+    if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, nullptr, &size) && size)
+    {
+        std::wstring list(size, L'\0');
+        if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, list.data(), &size))
+            for (const wchar_t* p = list.c_str(); *p; p += std::wcslen(p) + 1)
+                add(path_to_utf8(fs::path(p)));
+    }
+#else
+    // POSIX locale names to tags: "pt_BR.UTF-8@euro" is "pt-BR".
+    auto tag_of = [](std::string_view name) -> std::string
+    {
+        name = name.substr(0, name.find_first_of(".@"));
+        if (name.empty() || name == "C" || name == "POSIX") return {};
+        std::string tag(name);
+        std::ranges::replace(tag, '_', '-');
+        return tag;
+    };
+    auto env = [](const char* name) -> std::string_view
+    {
+        const char* v = std::getenv(name);
+        return v ? v : "";
+    };
+    // The locale in force, as gettext decides it; LANGUAGE is a list that
+    // only counts when that isn't "C".
+    std::string_view locale = env("LC_ALL");
+    if (locale.empty()) locale = env("LC_MESSAGES");
+    if (locale.empty()) locale = env("LANG");
+    if (!tag_of(locale).empty())
+        for (std::string_view list = env("LANGUAGE"); !list.empty();)
+        {
+            const size_t colon = list.find(':');
+            add(tag_of(list.substr(0, colon)));
+            list = colon == std::string_view::npos ? std::string_view() : list.substr(colon + 1);
+        }
+    add(tag_of(locale));
+#endif
+    return out;
 }
 
 // -- shared libraries ---------------------------------------------------------

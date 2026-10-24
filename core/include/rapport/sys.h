@@ -66,6 +66,14 @@ std::filesystem::path config_dir(std::string_view app);
 std::filesystem::path cache_dir(std::string_view app);
 std::filesystem::path data_dir(std::string_view app);
 
+// -- language -----------------------------------------------------------------
+
+// The user's languages for the UI, most preferred first, as BCP 47 tags
+// ("de-AT", "en-US"): Windows' preferred UI languages; elsewhere LANGUAGE,
+// then LC_ALL, LC_MESSAGES and LANG ("C" and "POSIX" are none). Empty when
+// nothing says.
+std::vector<std::string> ui_languages();
+
 // -- shared libraries ---------------------------------------------------------
 
 // A dynamically loaded library (dlopen / LoadLibrary). Move-only; unloads

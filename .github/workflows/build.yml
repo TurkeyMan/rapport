@@ -36,6 +36,9 @@ jobs:
       - name: Shell probe
         run: build/bin/rapport-shell-example-probe --extended .
 
+      - name: Translations
+        run: build/bin/rapport-i18n-test tests/i18n
+
   # MSVC with the static runtime, as the apps ship: as plugins and statically
   # linked. The examples must run, and the shell extension must load into
   # Explorer's way of calling it and need nothing but Windows.
@@ -64,6 +67,11 @@ jobs:
           $env:RAPPORT_SNAPSHOT_DELAY = "500"
           $p = Start-Process .\rapport-gallery.exe -PassThru -Wait
           if ($p.ExitCode -ne 0 -or -not (Test-Path $env:RAPPORT_SNAPSHOT)) { throw "rapport-gallery didn't snapshot" }
+
+      - name: Translations
+        run: |
+          build/bin/Release/rapport-i18n-test.exe tests/i18n
+          if ($LASTEXITCODE) { throw 'rapport-i18n-test failed' }
 
       - name: Shell extension
         working-directory: build/bin/Release

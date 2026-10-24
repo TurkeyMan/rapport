@@ -1,0 +1,8 @@
+msgid ""
+msgstr "Plural-Forms: nplurals=3; plural=(n==1 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+
+msgid "{0} file"
+msgid_plural "{0} files"
+msgstr[0] "{0} plik"
+msgstr[1] "{0} pliki"
+msgstr[2] "{0} plików"

@@ -28,6 +28,7 @@ option(RAPPORT_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 # registers its backends with RAPPORT_BUILTIN_BACKEND. Default: shared core,
 # backends as dlopened plugins.
 option(RAPPORT_STATIC "Build static libraries instead of a shared core and plugins" OFF)
+option(RAPPORT_TESTS "Build the core's tests" ${PROJECT_IS_TOP_LEVEL})
 
 add_subdirectory(core)
 
@@ -56,4 +57,7 @@ endif()
 
 if(RAPPORT_EXAMPLES)
     add_subdirectory(examples)
+endif()
+if(RAPPORT_TESTS)
+    add_subdirectory(tests)
 endif()

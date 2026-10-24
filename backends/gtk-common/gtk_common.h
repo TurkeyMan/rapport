@@ -5,6 +5,7 @@
 #pragma once
 
 #include "rapport/backend.h"
+#include "rapport/i18n.h"
 
 #include <gtk/gtk.h>
 
@@ -239,21 +240,10 @@ inline PangoAttrList* pango_attrs(GtkWidget* w, const text_style& s)
     return list;
 }
 
-inline const char* stock_label(dialog_role r)
+// A dialog button's label, translated ("_OK"; '_' marks the access key, as GTK's).
+inline std::string stock_label(dialog_role r)
 {
-    switch (r)
-    {
-    case dialog_role::ok: return "_OK";
-    case dialog_role::cancel: return "_Cancel";
-    case dialog_role::apply: return "_Apply";
-    case dialog_role::close: return "_Close";
-    case dialog_role::yes: return "_Yes";
-    case dialog_role::no: return "_No";
-    case dialog_role::help: return "_Help";
-    case dialog_role::reset: return "_Reset";
-    case dialog_role::none: break;
-    }
-    return "";
+    return rap::i18n::stock_label(r);
 }
 
 // GNOME order: help at the start, affirmative action last.

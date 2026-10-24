@@ -1,0 +1,38 @@
+# German test catalog
+#, fuzzy
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Commit"
+msgstr "Commit"
+
+msgctxt "state"
+msgid "Open"
+msgstr "Offen"
+
+msgid "Open"
+msgstr "Öffnen"
+
+msgid "{0} of {1}"
+msgstr "{1} davon {0}"
+
+msgid "{0} file"
+msgid_plural "{0} files"
+msgstr[0] "{0} Datei"
+msgstr[1] "{0} Dateien"
+
+#, fuzzy
+msgid "Push"
+msgstr "Schieben"
+
+msgid "Untranslated"
+msgstr ""
+
+msgid ""
+"multi "
+"line\n"
+msgstr ""
+"mehr"
+"zeilig\n"

@@ -1,0 +1,12 @@
+msgid ""
+msgstr "Plural-Forms: nplurals=2; plural=n != 1;\n"
+
+msgctxt "button"
+msgid "_Cancel"
+msgstr "_Abbrechen"
+
+msgid "Ctrl"
+msgstr "Strg"
+
+msgid "Shift"
+msgstr "Umschalt"

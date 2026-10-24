@@ -369,12 +369,13 @@ private:
 bool confirm_replace(GtkWindow* parent, const std::string& path)
 {
     gchar* name = g_path_get_basename(path.c_str());
+    const std::string question = rap::i18n::format(
+        rap::i18n::tr("rapport", "A file named \u201c{0}\u201d already exists. Replace it?"), name);
     GtkWidget* msg = gtk_message_dialog_new(parent, GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
-                                            GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
-                                            "A file named \u201c%s\u201d already exists. Replace it?", name);
+                                            GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "%s", question.c_str());
     g_free(name);
-    gtk_dialog_add_buttons(GTK_DIALOG(msg), "_Cancel", GTK_RESPONSE_CANCEL, "_Replace", GTK_RESPONSE_ACCEPT,
-                           nullptr);
+    gtk_dialog_add_buttons(GTK_DIALOG(msg), stock_label(dialog_role::cancel).c_str(), GTK_RESPONSE_CANCEL,
+                           rap::i18n::tr_ctx("rapport", "button", "_Replace"), GTK_RESPONSE_ACCEPT, nullptr);
     gtk_dialog_set_default_response(GTK_DIALOG(msg), GTK_RESPONSE_CANCEL);
     const bool replace = gtk_dialog_run(GTK_DIALOG(msg)) == GTK_RESPONSE_ACCEPT;
     gtk_widget_destroy(msg);
@@ -3789,7 +3790,7 @@ public:
         for (auto r : ordered)
         {
             auto i = std::ranges::find(ctx->roles, r) - ctx->roles.begin();
-            gtk_dialog_add_button(GTK_DIALOG(dlg), stock_label(r), int(i));
+            gtk_dialog_add_button(GTK_DIALOG(dlg), stock_label(r).c_str(), int(i));
         }
 
         g_signal_connect_data(

@@ -5,6 +5,7 @@
 //
 // No moc: signals go to lambdas, and events to overrides and event filters.
 #include "rapport/backend.h"
+#include "rapport/i18n.h"
 #include "qt_painter.h"
 
 #include "builtin_icons.h"
@@ -32,6 +33,7 @@
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLibraryInfo>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
@@ -52,6 +54,7 @@
 #include <QTabWidget>
 #include <QTextBlock>
 #include <QTimer>
+#include <QTranslator>
 #include <QTreeView>
 #include <QDateTime>
 #include <QCursor>
@@ -3639,6 +3642,17 @@ public:
 #endif
             // Keeps argc: the caller's, alive for the program.
             app = new QApplication(*argc, argv);
+            // Qt's own text (standard buttons, its dialogs) in the chosen
+            // language, from the translations Qt installs.
+            if (!rap::i18n::languages().empty())
+            {
+                QStringList tags;
+                for (const std::string& tag : rap::i18n::languages()) tags << QString::fromStdString(tag);
+                auto* qt = new QTranslator(app);
+                if (qt->load(QLocale(tags.front()), "qtbase", "_",
+                             QLibraryInfo::path(QLibraryInfo::TranslationsPath)))
+                    app->installTranslator(qt);
+            }
         }
         // Outside a desktop that sets one, Qt's icon theme is just hicolor,
         // which has no MIME or action icons.

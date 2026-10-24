@@ -2892,9 +2892,13 @@ public:
             if (path == typed || !g_file_test(path.c_str(), G_FILE_TEST_EXISTS)) return finish({path});
             gchar* name = g_path_get_basename(path.c_str());
             GtkAlertDialog* alert =
-                gtk_alert_dialog_new("A file named \u201c%s\u201d already exists. Replace it?", name);
+                gtk_alert_dialog_new("%s", rap::i18n::format(rap::i18n::tr("rapport", "A file named \u201c{0}\u201d "
+                                                                                     "already exists. Replace it?"),
+                                                             name)
+                                               .c_str());
             g_free(name);
-            const char* buttons[] = {"_Cancel", "_Replace", nullptr};
+            const std::string cancel = stock_label(dialog_role::cancel);
+            const char* buttons[] = {cancel.c_str(), rap::i18n::tr_ctx("rapport", "button", "_Replace"), nullptr};
             gtk_alert_dialog_set_buttons(alert, buttons);
             gtk_alert_dialog_set_cancel_button(alert, 0);
             gtk_alert_dialog_set_default_button(alert, 0);
