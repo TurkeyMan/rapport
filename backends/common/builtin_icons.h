@@ -120,4 +120,26 @@ inline bool draw_builtin_icon(const std::string& full_name, painter& p, size_f s
     return true;
 }
 
+// Whether there's a drawing for `name`, without drawing it.
+inline bool has_builtin_icon(const std::string& name)
+{
+    struct no_ink : painter
+    {
+        color resolve(const paint&) const override { return {}; }
+        void line(point_f, point_f, const paint&, float, line_cap) override {}
+        void curve(point_f, point_f, point_f, point_f, const paint&, float) override {}
+        void circle(point_f, float, std::optional<paint>, std::optional<paint>) override {}
+        void rect(rect_f, float, std::optional<paint>, std::optional<paint>) override {}
+        void polygon(const std::vector<point_f>&, std::optional<paint>, std::optional<paint>, float) override {}
+        void arc(point_f, float, float, float, const paint&, float, line_cap) override {}
+        void image(const rap::image&, rect_f, rect_f, filter, float) override {}
+        float device_scale() const override { return 1; }
+        void push_clip(rect_f) override {}
+        void pop_clip() override {}
+        void text(point_f, const std::string&, const text_style&) override {}
+        size_f measure(const std::string&, const text_style&) const override { return {}; }
+    } probe;
+    return draw_builtin_icon(name, probe, {16, 16});
+}
+
 }  // namespace rap::builtin

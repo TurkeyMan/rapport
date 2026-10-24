@@ -31,7 +31,8 @@ add_library(rapport::backend_gtk3 ALIAS rapport_gtk3)
 if(RAPPORT_STATIC)
     target_link_libraries(rapport_gtk3 PRIVATE rapport::rapport)
 endif()
-target_include_directories(rapport_gtk3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../gtk-common)
+target_include_directories(rapport_gtk3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../gtk-common
+                                                   ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 target_link_libraries(rapport_gtk3 PRIVATE rapport::headers PkgConfig::GTK3)
 set_target_properties(rapport_gtk3 PROPERTIES
     PREFIX ""

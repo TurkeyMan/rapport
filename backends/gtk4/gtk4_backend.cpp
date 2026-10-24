@@ -5,6 +5,7 @@
 // rap::list_model at bind time. Painted columns are GtkDrawingAreas.
 #include <gtk/gtk.h>
 
+#include "builtin_icons.h"
 #include "gtk_common.h"
 
 #include <memory>
@@ -158,11 +159,33 @@ private:
     std::function<void()> on_click_;
 };
 
+GtkWidget* icon_widget(const icon& icon, int size);
+
+// A button's content: its text, or its icon (named or drawn), or the icon
+// before the text in a box, as GTK 3's image buttons show them (GTK 4's
+// button holds one child).
+GtkWidget* icon_and_text(const icon& icon, const std::string& text)
+{
+    GtkWidget* img = icon ? icon_widget(icon, 16) : nullptr;
+    if (!img)
+    {
+        GtkWidget* label = gtk_label_new_with_mnemonic(text.c_str());
+        return label;
+    }
+    if (text.empty()) return img;
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(box), img);
+    gtk_box_append(GTK_BOX(box), gtk_label_new_with_mnemonic(text.c_str()));
+    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+    return box;
+}
+
 class button_impl : public widget_base<rap::button>
 {
 public:
     explicit button_impl(const std::string& text)
         : widget_base(gtk_button_new_with_mnemonic(text.c_str()))
+        , text_(text)
     {
         connect(
             w_, "clicked",
@@ -174,32 +197,48 @@ public:
             this);
     }
 
-    void set_text(const std::string& t) override { gtk_button_set_label(GTK_BUTTON(w_), t.c_str()); }
-    // TODO(tortilla): drawn icons (icon::draw); named ones only for now.
+    void set_text(const std::string& t) override
+    {
+        text_ = t;
+        update();
+    }
+    // Named or drawn: a named icon the theme lacks falls back to the drawing.
     void set_icon(const icon& icon) override
     {
-        if (!icon.name.empty()) gtk_button_set_icon_name(GTK_BUTTON(w_), icon.name.c_str());
+        icon_ = icon;
+        update();
     }
     void on_click(std::function<void()> f) override { click_ = std::move(f); }
 
 private:
+    void update() { gtk_button_set_child(GTK_BUTTON(w_), icon_and_text(icon_, text_)); }
+
+    std::string text_;
+    icon icon_;
     std::function<void()> click_;
 };
 
-// A named icon the theme has; otherwise a drawing area that runs icon::draw
-// whenever it paints, so drawn icons follow scale and theme (the area takes
-// its button's CSS colour, greyed when insensitive). Null for neither.
+// A named icon the theme has; otherwise a drawing area (rapport's own
+// drawing of that name, else icon::draw) that runs whenever it paints, so
+// drawn icons follow scale and theme (the area takes its button's CSS
+// colour, greyed when insensitive); else the theme's image-missing, never
+// a blank. Null for no icon at all.
 GtkWidget* icon_widget(const icon& icon, int size)
 {
     GtkIconTheme* theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
-    if (!icon.name.empty() && gtk_icon_theme_has_icon(theme, icon.name.c_str()))
+    auto named = [&](const char* name)
     {
-        GtkWidget* img = gtk_image_new_from_icon_name(icon.name.c_str());
+        GtkWidget* img = gtk_image_new_from_icon_name(name);
         gtk_image_set_pixel_size(GTK_IMAGE(img), size);
         return img;
-    }
-    if (!icon.draw) return nullptr;
+    };
+    if (!icon.name.empty() && gtk_icon_theme_has_icon(theme, icon.name.c_str()))
+        return named(icon.name.c_str());
     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
+    draw_fn draw = icon.draw;
+    if (!icon.name.empty() && builtin::has_builtin_icon(icon.name))
+        draw = [name = icon.name](rap::painter& p, rap::size_f s) { builtin::draw_builtin_icon(name, p, s); };
+    if (!draw) return icon.name.empty() ? nullptr : named("image-missing");
     GtkWidget* area = gtk_drawing_area_new();
     gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(area), size);
     gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), size);
@@ -213,7 +252,7 @@ GtkWidget* icon_widget(const icon& icon, int size)
             cairo_painter painter(cr, GTK_WIDGET(a));
             (*static_cast<draw_fn*>(p))(painter, {float(w), float(h)});
         },
-        new draw_fn(icon.draw), +[](gpointer p) { delete static_cast<draw_fn*>(p); });
+        new draw_fn(std::move(draw)), +[](gpointer p) { delete static_cast<draw_fn*>(p); });
     return area;
 }
 
@@ -517,18 +556,31 @@ public:
     {
         gtk_menu_button_set_use_underline(GTK_MENU_BUTTON(w_), true);  // "_View": V is the access key
         set_text(s.text);
+        if (s.icon) set_icon(s.icon);
         attach_menu(GTK_MENU_BUTTON(w_), &actions_, &menu_fn_);
     }
 
     void set_text(const std::string& t) override
     {
-        gtk_menu_button_set_label(GTK_MENU_BUTTON(w_), t.c_str());
+        text_ = t;
+        if (icon_)
+            set_icon(icon_);
+        else
+            gtk_menu_button_set_label(GTK_MENU_BUTTON(w_), t.c_str());
     }
-    void set_icon(const icon&) override {}  // TODO(tortilla)
+    void set_icon(const icon& icon) override
+    {
+        icon_ = icon;
+        // Its own child for the icon; the arrow stays, as for a text one.
+        gtk_menu_button_set_child(GTK_MENU_BUTTON(w_), icon_and_text(icon_, text_));
+        gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(w_), true);
+    }
     void set_pushed(bool) override {}
     void on_menu(std::function<menu()> f) override { menu_fn_ = std::move(f); }
 
 private:
+    std::string text_;
+    icon icon_;
     std::function<menu()> menu_fn_;
     menu_actions actions_;
 };

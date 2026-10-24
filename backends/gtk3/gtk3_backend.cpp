@@ -6,6 +6,7 @@
 // ever touched. Painted columns use a custom cell renderer.
 #include <gtk/gtk.h>
 
+#include "builtin_icons.h"
 #include "gtk_common.h"
 
 #include <cmath>
@@ -300,19 +301,26 @@ private:
     std::function<void()> on_click_;
 };
 
-// A GtkImage for a named icon the theme has; otherwise a drawing area that
-// runs icon::draw whenever it paints, so drawn icons follow scale and theme
-// (the area inherits its parent's CSS colour, e.g. greyed when insensitive).
+// A GtkImage for a named icon the theme has; otherwise a drawing area
+// (rapport's own drawing of that name, else icon::draw) that runs whenever
+// it paints, so drawn icons follow scale and theme (the area inherits its
+// parent's CSS colour, e.g. greyed when insensitive); else the theme's
+// image-missing, never a blank. Null for no icon at all.
 GtkWidget* icon_widget(const icon& icon, int size)
 {
-    if (!icon.name.empty() &&
-        gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), icon.name.c_str()))
+    auto named = [&](const char* name)
     {
-        GtkWidget* img = gtk_image_new_from_icon_name(icon.name.c_str(), GTK_ICON_SIZE_BUTTON);
+        GtkWidget* img = gtk_image_new_from_icon_name(name, GTK_ICON_SIZE_BUTTON);
         gtk_image_set_pixel_size(GTK_IMAGE(img), size);
         return img;
-    }
-    if (!icon.draw) return nullptr;
+    };
+    if (!icon.name.empty() &&
+        gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), icon.name.c_str()))
+        return named(icon.name.c_str());
+    std::function<void(rap::painter&, rap::size_f)> draw = icon.draw;
+    if (!icon.name.empty() && builtin::has_builtin_icon(icon.name))
+        draw = [name = icon.name](rap::painter& p, rap::size_f s) { builtin::draw_builtin_icon(name, p, s); };
+    if (!draw) return icon.name.empty() ? nullptr : named("image-missing");
     GtkWidget* area = gtk_drawing_area_new();
     gtk_widget_set_size_request(area, size, size);
     // Square and centred, however tall the toolbar row is.
@@ -328,7 +336,7 @@ GtkWidget* icon_widget(const icon& icon, int size)
                                      float(gtk_widget_get_allocated_height(w))});
                        return true;
                    }),
-        new std::function<void(rap::painter&, rap::size_f)>(icon.draw),
+        new std::function<void(rap::painter&, rap::size_f)>(std::move(draw)),
         +[](gpointer p, GClosure*)
         { delete static_cast<std::function<void(rap::painter&, rap::size_f)>*>(p); },
         GConnectFlags(0));

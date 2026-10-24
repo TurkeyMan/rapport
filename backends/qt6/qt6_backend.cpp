@@ -435,6 +435,9 @@ QIcon to_q_icon(const icon& icon, int size, const QWidget* w)
     }
     if (!icon.file.empty()) return file_type_icon(icon.file);
     if (icon.draw) return drawn_icon(icon.draw, size, w);
+    // A name nothing has: the theme's image-missing, as GTK shows, never a
+    // blank icon-only button.
+    if (!icon.name.empty()) return theme_icon("image-missing");
     return {};
 }
 
