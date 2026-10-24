@@ -10,6 +10,12 @@
 #include <shobjidl.h>
 #include <uxtheme.h>
 #include <vssym32.h>
+
+// SysLink's ideal size (Vista and later; MinGW declares it only for a newer
+// _WIN32_WINNT): the same message as LM_GETIDEALHEIGHT.
+#ifndef LM_GETIDEALSIZE
+#define LM_GETIDEALSIZE (WM_USER + 0x301)
+#endif
 #include <windowsx.h>
 
 #include <array>
@@ -846,8 +852,13 @@ public:
     label_impl(win_context& win, HWND parent, const spec::label& s)
         : leaf(win)
         , ellipsize_(s.ellipsize)
+        , link_(s.link)
+        , on_click_(s.on_click)
     {
-        if (s.selectable)
+        if (link_)
+            // The system's link control: its colour, focus and Enter.
+            adopt(create_control(win, parent, WC_LINK, link_markup(s.text), WS_TABSTOP));
+        else if (s.selectable)
             adopt(create_control(win, parent, L"EDIT", wide(s.text), ES_READONLY | ES_AUTOHSCROLL));
         else
             adopt(create_control(win, parent, L"STATIC", wide(s.text),
@@ -855,11 +866,23 @@ public:
     }
     void set_text(const std::string& t) override
     {
-        SetWindowTextW(h_, wide(t).c_str());
+        SetWindowTextW(h_, link_ ? link_markup(t).c_str() : wide(t).c_str());
         if (!ellipsize_) win_.relayout();
+    }
+    LRESULT notify(NMHDR* n, bool& handled) override
+    {
+        handled = link_ && n->hwndFrom == h_ && (n->code == NM_CLICK || n->code == NM_RETURN);
+        if (handled && on_click_) on_click_();
+        return 0;
     }
     SIZE measure() override
     {
+        if (link_)
+        {
+            SIZE ideal{};
+            SendMessageW(h_, LM_GETIDEALSIZE, WPARAM(px(2000)), reinterpret_cast<LPARAM>(&ideal));
+            return ideal;
+        }
         // Line breaks in the text are lines (measured single-line, the
         // label asked for one line's height and showed only the first).
         const std::wstring text = window_text(h_);
@@ -875,8 +898,18 @@ public:
     bool expands_in_form() const override { return ellipsize_; }
 
 private:
+    // SysLink takes its text as markup: <a> around it, & doubled (it marks
+    // a mnemonic; SysLink knows no entities).
+    static std::wstring link_markup(const std::string& text)
+    {
+        std::wstring out = L"<a>";
+        for (wchar_t c : wide(text)) out += c == L'&' ? std::wstring(L"&&") : std::wstring(1, c);
+        return out + L"</a>";
+    }
     bool ellipsize_;
     long full_cx_ = 0;
+    bool link_;
+    std::function<void()> on_click_;
 };
 
 class button_impl : public leaf<rap::button>
@@ -4911,9 +4944,10 @@ public:
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         enable_visual_styles();
         g_comctl.resolve();
-        INITCOMMONCONTROLSEX icc{sizeof icc, ICC_WIN95_CLASSES | ICC_DATE_CLASSES | ICC_PROGRESS_CLASS |
-                                                 ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES |
-                                                 ICC_UPDOWN_CLASS | ICC_STANDARD_CLASSES};
+        INITCOMMONCONTROLSEX icc{sizeof icc,
+                                 ICC_WIN95_CLASSES | ICC_DATE_CLASSES | ICC_PROGRESS_CLASS |
+                                     ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES |
+                                     ICC_UPDOWN_CLASS | ICC_STANDARD_CLASSES | ICC_LINK_CLASS};
         InitCommonControlsEx(&icc);
         if (!d2d_factory() || !dwrite_factory()) return nullptr;
         return new win32_backend;

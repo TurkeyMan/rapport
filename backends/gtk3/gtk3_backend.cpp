@@ -268,9 +268,36 @@ public:
         gtk_label_set_xalign(GTK_LABEL(w_), 0);
         gtk_label_set_selectable(GTK_LABEL(w_), s.selectable);
         if (s.ellipsize) gtk_label_set_ellipsize(GTK_LABEL(w_), PANGO_ELLIPSIZE_END);
+        if (s.link)
+        {
+            // A link in the label's markup: GTK's own link look, focus and
+            // keyboard activation; activate-link runs it instead of a URI.
+            link_ = true;
+            on_click_ = s.on_click;
+            set_text(s.text);
+            g_signal_connect(w_, "activate-link",
+                             G_CALLBACK(+[](GtkLabel*, gchar*, gpointer p) -> gboolean
+                                        {
+                                            auto* self = static_cast<label_impl*>(p);
+                                            if (self->on_click_) self->on_click_();
+                                            return true;
+                                        }),
+                             this);
+        }
     }
 
-    void set_text(const std::string& t) override { gtk_label_set_text(GTK_LABEL(w_), t.c_str()); }
+    void set_text(const std::string& t) override
+    {
+        if (!link_) return gtk_label_set_text(GTK_LABEL(w_), t.c_str());
+        gchar* escaped = g_markup_escape_text(t.c_str(), -1);
+        gtk_label_set_markup(GTK_LABEL(w_),
+                             (std::string("<a href=\"rapport:\">") + escaped + "</a>").c_str());
+        g_free(escaped);
+    }
+
+private:
+    bool link_ = false;
+    std::function<void()> on_click_;
 };
 
 // A GtkImage for a named icon the theme has; otherwise a drawing area that

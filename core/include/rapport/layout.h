@@ -122,6 +122,10 @@ struct label
     // Cut long text with "..." instead of widening the window to fit it
     // (status lines).
     bool ellipsize = false;
+    // A hyperlink that runs on_click (TortoiseGit's "Check: All None ..."
+    // links, a branch name that opens Switch): each toolkit's own link.
+    bool link = false;
+    std::function<void()> on_click;
     rap::label** bind = nullptr;
 };
 struct button
@@ -555,6 +559,12 @@ public:
     label& ellipsize(bool v = true)
     {
         s().ellipsize = v;
+        return *this;
+    }
+    label& link(std::function<void()> on_click)
+    {
+        s().link = true;
+        s().on_click = std::move(on_click);
         return *this;
     }
     label& bind(rap::label*& h)

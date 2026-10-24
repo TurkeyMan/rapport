@@ -595,18 +595,39 @@ public:
     explicit label_impl(const spec::label& s)
         : widget_base(new elided_label(s.ellipsize))
     {
-        if (s.selectable)
+        if (s.link)
+        {
+            // A rich-text link: the style's link colour, focus and Enter.
+            link_ = true;
+            label()->setTextFormat(Qt::RichText);
+            label()->setTextInteractionFlags(Qt::LinksAccessibleByMouse |
+                                             Qt::LinksAccessibleByKeyboard);
+            QObject::connect(label(), &QLabel::linkActivated, label(),
+                             [f = s.on_click](const QString&)
+                             {
+                                 if (f) f();
+                             });
+        }
+        else if (s.selectable)
         {
             label()->setTextInteractionFlags(Qt::TextSelectableByMouse |
                                              Qt::TextSelectableByKeyboard);
             label()->setCursor(Qt::IBeamCursor);
         }
-        label()->set_full_text(qs(s.text));
+        set_text(s.text);
     }
-    void set_text(const std::string& t) override { label()->set_full_text(qs(t)); }
+    void set_text(const std::string& t) override
+    {
+        if (link_)
+            // Through the full text the label re-applies on resize.
+            label()->set_full_text("<a href=\"rapport:\">" + qs(t).toHtmlEscaped() + "</a>");
+        else
+            label()->set_full_text(qs(t));
+    }
 
 private:
     elided_label* label() const { return static_cast<elided_label*>(w_); }
+    bool link_ = false;
 };
 
 class button_impl : public widget_base<rap::button>
