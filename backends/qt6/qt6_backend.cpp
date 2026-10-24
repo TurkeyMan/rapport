@@ -1538,6 +1538,10 @@ public:
         case cursor::move: w_->setCursor(Qt::SizeAllCursor); break;
         case cursor::wait: w_->setCursor(Qt::WaitCursor); break;
         case cursor::hidden: w_->setCursor(Qt::BlankCursor); break;
+        case cursor::resize_ew: w_->setCursor(Qt::SizeHorCursor); break;
+        case cursor::resize_ns: w_->setCursor(Qt::SizeVerCursor); break;
+        case cursor::resize_nwse: w_->setCursor(Qt::SizeFDiagCursor); break;
+        case cursor::resize_nesw: w_->setCursor(Qt::SizeBDiagCursor); break;
         }
     }
     void on_paint(std::function<void(rap::painter&, rap::size_f)> f) override { paint_ = std::move(f); }

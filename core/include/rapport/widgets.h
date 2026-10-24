@@ -757,6 +757,12 @@ enum class cursor
     move,
     wait,
     hidden,
+    // Dragging an edge or corner: left-right, up-down, and the diagonals
+    // (top-left to bottom-right, top-right to bottom-left).
+    resize_ew,
+    resize_ns,
+    resize_nwse,
+    resize_nesw,
 };
 
 // A surface the app draws itself (an image view, a chart). Everything else

@@ -2458,6 +2458,10 @@ const char* cursor_name(cursor c)
     case cursor::move: return "move";
     case cursor::wait: return "wait";
     case cursor::hidden: return "none";
+    case cursor::resize_ew: return "ew-resize";
+    case cursor::resize_ns: return "ns-resize";
+    case cursor::resize_nwse: return "nwse-resize";
+    case cursor::resize_nesw: return "nesw-resize";
     }
     return "default";
 }

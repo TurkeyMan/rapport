@@ -4704,6 +4704,10 @@ private:
         case cursor::zoom_out: id = IDC_CROSS; break;
         case cursor::wait: id = IDC_WAIT; break;
         case cursor::hidden: SetCursor(nullptr); return;
+        case cursor::resize_ew: id = IDC_SIZEWE; break;
+        case cursor::resize_ns: id = IDC_SIZENS; break;
+        case cursor::resize_nwse: id = IDC_SIZENWSE; break;
+        case cursor::resize_nesw: id = IDC_SIZENESW; break;
         }
         SetCursor(LoadCursorW(nullptr, id));
     }

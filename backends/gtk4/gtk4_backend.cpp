@@ -1864,9 +1864,9 @@ public:
     float device_scale() const override { return float(gtk_widget_get_scale_factor(w_)); }
     void set_cursor(cursor c) override
     {
-        static const char* names[] = {"default", "pointer",  "text",    "crosshair",
-                                      "grab",    "grabbing", "zoom-in", "zoom-out",
-                                      "move",    "wait",     "none"};
+        static const char* names[] = {"default",   "pointer",   "text",        "crosshair",  "grab",
+                                      "grabbing",  "zoom-in",   "zoom-out",    "move",       "wait",
+                                      "none",      "ew-resize", "ns-resize",   "nwse-resize", "nesw-resize"};
         gtk_widget_set_cursor_from_name(w_, c == cursor::default_ ? nullptr : names[int(c)]);
     }
 
