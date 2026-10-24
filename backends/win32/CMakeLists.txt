@@ -18,8 +18,9 @@ else()
 endif()
 add_library(rapport::backend_win32 ALIAS rapport_win32)
 # Linked into one executable, a backend needs the core after it on the link
-# line (its strings, from rapport::i18n); a module finds it loaded already.
-if(RAPPORT_STATIC)
+# line (its strings, from rapport::i18n). A module finds it loaded already,
+# except on Windows, where a DLL resolves every symbol when it's linked.
+if(RAPPORT_STATIC OR WIN32)
     target_link_libraries(rapport_win32 PRIVATE rapport::rapport)
 endif()
 target_link_libraries(rapport_win32 PRIVATE rapport::headers)
