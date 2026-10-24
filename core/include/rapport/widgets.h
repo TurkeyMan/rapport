@@ -653,6 +653,9 @@ public:
     // A divider dragged by the user, once the drag ends; not layout, the
     // window resizing or set_sizes(). For saving a size the user chose.
     virtual void on_moved(std::function<void()>) = 0;
+    // How wide a divider is across the split, in logical pixels: what a pane
+    // shown adds besides its own size (to grow the window by just that).
+    virtual float divider() const = 0;
 };
 
 class tabs : public widget

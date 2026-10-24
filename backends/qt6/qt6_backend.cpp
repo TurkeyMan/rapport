@@ -1065,6 +1065,7 @@ public:
                  });
     }
 
+    float divider() const override { return float(splitter()->handleWidth()); }
     std::vector<float> sizes() const override
     {
         std::vector<float> out;

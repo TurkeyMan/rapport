@@ -3999,6 +3999,7 @@ public:
     void focus() override {}
     bool has_focus() const override { return false; }
     void on_moved(std::function<void()> f) override { moved_ = std::move(f); }
+    float divider() const override { return float(bar()) / win_.scale(); }
     std::vector<float> sizes() const override
     {
         std::vector<float> out;

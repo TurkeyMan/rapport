@@ -1195,6 +1195,12 @@ public:
         }
     }
 
+    float divider() const override
+    {
+        int handle = 0;
+        gtk_widget_style_get(w_, "handle-size", &handle, nullptr);
+        return float(handle);
+    }
     std::vector<float> sizes() const override
     {
         bool vertical =

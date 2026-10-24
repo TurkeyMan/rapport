@@ -158,6 +158,7 @@ class null_splitter : public stub<rap::splitter>
 {
 public:
     std::vector<float> sizes() const override { return {}; }
+    float divider() const override { return 0; }
     void on_moved(std::function<void()>) override {}
     void set_sizes(const std::vector<float>&) override {}
 };

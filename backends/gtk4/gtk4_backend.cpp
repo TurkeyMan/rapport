@@ -883,6 +883,8 @@ public:
         }
     }
 
+    // GTK 4 has no property for it: the theme's separator, 1 px, or 5 wide.
+    float divider() const override { return gtk_paned_get_wide_handle(GTK_PANED(w_)) ? 5.f : 1.f; }
     std::vector<float> sizes() const override
     {
         bool vertical =
