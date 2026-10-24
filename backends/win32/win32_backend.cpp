@@ -3,6 +3,8 @@
 // has none), per-monitor DPI awareness.
 #include "win32_common.h"
 
+#include "rapport/i18n.h"
+
 #include <commdlg.h>
 #include <d3d11.h>
 #include <dwmapi.h>
@@ -434,7 +436,7 @@ void fill_menu(HMENU m, const menu& items, std::vector<std::function<void()>>& a
             continue;
         }
         std::wstring label = mnemonic(it.label);
-        if (!it.shortcut.empty()) label += L"\t" + wide(it.shortcut);
+        if (!it.shortcut.empty()) label += L"\t" + wide(rap::i18n::shortcut_label(it.shortcut));
         UINT flags = MF_STRING | (it.checked && *it.checked ? MF_CHECKED : 0);
         if (!it.children.empty())
         {
@@ -5677,20 +5679,14 @@ private:
 
 // -- builder ------------------------------------------------------------------
 
-const wchar_t* stock_label(dialog_role r)
+// A dialog button's label in the user's language. OK, Cancel and Close
+// have no access key in Windows dialogs (Enter and Esc are theirs).
+std::string stock_label(dialog_role r)
 {
-    switch (r)
-    {
-    case dialog_role::ok: return L"OK";
-    case dialog_role::cancel: return L"Cancel";
-    case dialog_role::apply: return L"&Apply";
-    case dialog_role::close: return L"Close";
-    case dialog_role::yes: return L"&Yes";
-    case dialog_role::no: return L"&No";
-    case dialog_role::help: return L"&Help";
-    case dialog_role::reset: return L"&Reset";
-    default: return L"";
-    }
+    std::string s = rap::i18n::stock_label(r);
+    if (r == dialog_role::ok || r == dialog_role::cancel || r == dialog_role::close)
+        std::erase(s, '_');
+    return s;
 }
 
 // Windows order: OK Cancel Apply, right-aligned; Help and Reset on the left.
@@ -5941,7 +5937,7 @@ private:
                 row->children.push_back(own<spacer_item>());
                 spaced = true;
             }
-            const std::string text = b->text.empty() ? narrow(stock_label(b->role)) : b->text;
+            const std::string text = b->text.empty() ? stock_label(b->role) : b->text;
             const bool is_default = b->role == dialog_role::ok || b->role == dialog_role::yes;
             auto* w = own<button_impl>(win_, parent, text, is_default ? BS_DEFPUSHBUTTON : 0);
             w->is_default = is_default;
@@ -6294,7 +6290,7 @@ public:
             }
             ok = ok && write_opaque_png(out, static_cast<uint8_t*>(b.bits), w, h);
         }
-        if (job.done) job.done(ok, ok ? "" : "couldn't write " + path);
+        if (job.done) job.done(ok, ok ? "" : rap::i18n::format(rap::i18n::tr("rapport", "couldn't write {0}"), path));
     }
 
     void print(rap::window* parent, print_job job) override
@@ -6309,7 +6305,7 @@ public:
         {
             if (job.done) job.done(ok, std::move(error));
         };
-        if (!job.draw_page) return finish(false, "nothing to print");
+        if (!job.draw_page) return finish(false, rap::i18n::tr("rapport", "nothing to print"));
         if (const char* to = std::getenv("RAPPORT_PRINT_TO"); to && *to)
         {
             const std::string path = to;
@@ -6323,7 +6319,7 @@ public:
         pd.hwndOwner = parent ? static_cast<window_impl*>(parent)->hwnd() : messages_;
         // The default printer's settings first, to start in the job's orientation.
         pd.Flags = PD_RETURNDEFAULT;
-        if (FAILED(PrintDlgExW(&pd)) || !pd.hDevMode) return finish(false, "there's no printer");
+        if (FAILED(PrintDlgExW(&pd)) || !pd.hDevMode) return finish(false, rap::i18n::tr("rapport", "there's no printer"));
         if (job.orientation != page_orientation::automatic)
             if (auto* dm = static_cast<DEVMODEW*>(GlobalLock(pd.hDevMode)))
             {
@@ -6353,7 +6349,7 @@ public:
         if (FAILED(hr) || pd.dwResultAction != PD_RESULT_PRINT || !pd.hDC)
         {
             release();
-            return finish(false, FAILED(hr) ? "the print dialog failed" : "");
+            return finish(false, FAILED(hr) ? rap::i18n::tr("rapport", "the print dialog failed") : "");
         }
 
         // Only the pages chosen (one range: nMaxPageRanges is 1), else all.
@@ -6375,12 +6371,12 @@ public:
         int pages = job.pages;
         if (job.on_begin)
             if (const int n = job.on_begin(printable); n >= 0) pages = n;
-        const std::wstring title = wide(job.title.empty() ? std::string("Document") : job.title);
+        const std::wstring title = wide(job.title.empty() ? std::string(rap::i18n::tr("rapport", "Document")) : job.title);
         DOCINFOW doc{};
         doc.cbSize = sizeof doc;
         doc.lpszDocName = title.c_str();
         doc.lpszOutput = output;
-        if (StartDocW(dc, &doc) <= 0) return "the printer didn't start the document";
+        if (StartDocW(dc, &doc) <= 0) return rap::i18n::tr("rapport", "the printer didn't start the document");
         bool ok = true;
         for (int page = std::max(1, from); ok && page <= std::min(to, pages); ++page)
             ok = StartPage(dc) > 0 && draw_print_page(dc, w, h, dpi, job, page - 1, printable) &&
@@ -6388,7 +6384,7 @@ public:
         if (!ok)
         {
             AbortDoc(dc);
-            return "printing failed";
+            return rap::i18n::tr("rapport", "printing failed");
         }
         EndDoc(dc);
         return {};
@@ -6425,7 +6421,7 @@ public:
                            mode.empty() ? nullptr : reinterpret_cast<DEVMODEW*>(mode.data()));
         }
         if (!dc)
-            error = "there's no Microsoft Print to PDF printer";
+            error = rap::i18n::tr("rapport", "there's no Microsoft Print to PDF printer");
         else
         {
             const std::wstring out = wide(path);
