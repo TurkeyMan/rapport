@@ -186,6 +186,8 @@ class handler
 public:
     virtual ~handler() = default;
     virtual void command(WORD /*code*/) {}
+    // With the sender's id, for a control that sends several (a toolbar).
+    virtual void command(WORD code, WORD /*id*/) { command(code); }
     virtual LRESULT notify(NMHDR*, bool& handled)
     {
         handled = false;
@@ -224,7 +226,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         if (lp)
             if (handler* h = handler_of(reinterpret_cast<HWND>(lp)))
             {
-                h->command(HIWORD(wp));
+                h->command(HIWORD(wp), LOWORD(wp));
                 result = 0;
                 return true;
             }
@@ -480,6 +482,8 @@ public:
     virtual void relayout() = 0;
     // Lays out and repaints now, in one go (a different tab page showing).
     virtual void relayout_at_once() = 0;
+    // A layout still to come, now: for a size asked for before it.
+    virtual void flush_layout() {}
     float scale() const { return scale_of(hwnd()); }
     UINT dpi() const { return dpi_of(hwnd()); }
     int px(float logical) const { return int(std::lround(logical * scale())); }
@@ -2294,6 +2298,275 @@ private:
     std::function<void()> click_;
     std::function<void(bool)> toggled_;
 };
+
+// -- toolbar ------------------------------------------------------------------
+
+// A run of a toolbar's buttons and separators, as one native toolbar control
+// (one window, not one per button; ~1 ms apiece to make). Other items in a
+// toolbar (a slider, a box of them) sit between runs, placed as in a box.
+class tool_strip;
+
+// An entry in a strip. Its visibility is its item's, as for any control,
+// and the strip applies it when laid out.
+class strip_entry : public item
+{
+public:
+    SIZE measure() override { return {0, 0}; }
+    void place(RECT) override {}
+    void show_all(bool) override {}
+};
+
+class strip_button : public rap::tool_button, public strip_entry
+{
+public:
+    strip_button(tool_strip& strip, int id, const spec::tool_button& s)
+        : strip_(strip)
+        , id_(id)
+        , icon_(s.icon)
+        , toggle_(s.toggle)
+        , checked_(s.toggle && s.checked)
+    {
+    }
+    void set_enabled(bool e) override;
+    void set_visible(bool v) override;
+    void set_tooltip(const std::string& t) override;
+    void focus() override {}
+    bool has_focus() const override { return false; }
+    void set_icon(const icon& icon) override;
+    bool checked() const override { return checked_; }
+    void set_checked(bool c) override;
+    void on_click(std::function<void()> f) override { click_ = std::move(f); }
+    void on_toggled(std::function<void(bool)> f) override { toggled_ = std::move(f); }
+
+    void clicked(bool checked)
+    {
+        if (toggle_)
+        {
+            checked_ = checked;
+            if (toggled_) toggled_(checked_);
+        }
+        if (click_) click_();
+    }
+    int id() const { return id_; }
+    const icon& image() const { return icon_; }
+    bool toggle() const { return toggle_; }
+
+private:
+    tool_strip& strip_;
+    int id_;
+    icon icon_;
+    bool toggle_, checked_;
+    std::function<void()> click_;
+    std::function<void(bool)> toggled_;
+};
+
+class tool_strip : public leaf<widget>
+{
+public:
+    tool_strip(win_context& win, HWND parent)
+        : leaf(win)
+    {
+        // Icons only: a button's text is its tooltip (asked for, below).
+        adopt(create_control(win, parent, TOOLBARCLASSNAMEW, L"",
+                             TBSTYLE_FLAT | TBSTYLE_TRANSPARENT | TBSTYLE_TOOLTIPS | CCS_NORESIZE | CCS_NOPARENTALIGN |
+                                 CCS_NODIVIDER));
+        SendMessageW(h_, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+        SendMessageW(h_, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DOUBLEBUFFER);
+        // A DPI change refonts every control: the icons follow.
+        SetWindowSubclass(
+            h_,
+            [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
+            {
+                if (msg == WM_SETFONT) reinterpret_cast<tool_strip*>(data)->rescale();
+                return DefSubclassProc(h, msg, wp, lp);
+            },
+            1, reinterpret_cast<DWORD_PTR>(this));
+    }
+    ~tool_strip() override
+    {
+        for (HIMAGELIST l : images_)
+            if (l) ImageList_Destroy(l);
+    }
+
+    void add_separator(strip_entry* e) { entries_.push_back({e, nullptr, L""}); }
+    strip_button* add_button(const spec::tool_button& s)
+    {
+        auto* b = new strip_button(*this, int(entries_.size()) + 1, s);
+        entries_.push_back({b, b, wide(s.label)});
+        return b;
+    }
+    // Once its entries are in (their items are owned by the window).
+    void finish()
+    {
+        std::vector<TBBUTTON> buttons;
+        int image = 0;
+        for (entry& e : entries_)
+        {
+            TBBUTTON b{};
+            if (e.button)
+            {
+                b.iBitmap = image++;
+                b.idCommand = e.button->id();
+                b.fsState = TBSTATE_ENABLED | (e.button->checked() ? TBSTATE_CHECKED : 0);
+                b.fsStyle = BTNS_BUTTON | (e.button->toggle() ? BTNS_CHECK : 0);
+                b.iString = -1;
+            }
+            else
+                b.fsStyle = BTNS_SEP;
+            buttons.push_back(b);
+        }
+        rescale();
+        SendMessageW(h_, TB_ADDBUTTONSW, WPARAM(buttons.size()), reinterpret_cast<LPARAM>(buttons.data()));
+        size_buttons();
+        shown_.assign(entries_.size(), true);
+    }
+
+    void set_enabled(int id, bool e) { SendMessageW(h_, TB_ENABLEBUTTON, WPARAM(id), MAKELPARAM(e, 0)); }
+    void set_checked(int id, bool c) { SendMessageW(h_, TB_CHECKBUTTON, WPARAM(id), MAKELPARAM(c, 0)); }
+    void set_text(int id, const std::string& text) { entries_[size_t(id) - 1].text = wide(text); }
+    void set_icon(int id)
+    {
+        int image = 0;
+        for (size_t i = 0; i + 1 < size_t(id); ++i) image += entries_[i].button != nullptr;
+        if (!images_[0]) return;
+        for (int state = 0; state < 2; ++state)
+            if (HBITMAP bmp = render_icon(entries_[size_t(id) - 1].button->image(), icon_px_, win_.scale(), ink(state)))
+            {
+                ImageList_Replace(images_[state], image, bmp, nullptr);
+                DeleteObject(bmp);
+            }
+        InvalidateRect(h_, nullptr, FALSE);
+    }
+    void relayout() { win_.relayout(); }
+
+    LRESULT notify(NMHDR* n, bool& handled) override
+    {
+        handled = n->code == TBN_GETINFOTIPW;
+        if (!handled) return 0;
+        auto* tip = reinterpret_cast<NMTBGETINFOTIPW*>(n);
+        if (tip->iItem >= 1 && size_t(tip->iItem) <= entries_.size() && tip->cchTextMax > 0)
+        {
+            const std::wstring& text = entries_[size_t(tip->iItem) - 1].text;
+            const size_t len = std::min(text.size(), size_t(tip->cchTextMax) - 1);
+            text.copy(tip->pszText, len);
+            tip->pszText[len] = 0;
+        }
+        return 0;
+    }
+    void command(WORD, WORD id) override
+    {
+        if (id < 1 || id > entries_.size() || !entries_[id - 1u].button) return;
+        const bool checked = SendMessageW(h_, TB_ISBUTTONCHECKED, id, 0) != 0;
+        entries_[id - 1u].button->clicked(checked);
+    }
+
+    SIZE measure() override
+    {
+        sync();
+        SIZE s{0, 0};
+        SendMessageW(h_, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&s));
+        return {s.cx, std::max<long>(s.cy, button_px())};
+    }
+    void place(RECT r) override
+    {
+        sync();
+        leaf::place(r);
+    }
+    void show_all(bool shown) override
+    {
+        bool any = false;
+        for (const entry& e : entries_) any |= e.item->visible;
+        show_control(h_, shown && visible && any);
+    }
+
+private:
+    struct entry
+    {
+        strip_entry* item;
+        strip_button* button;  // null for a separator
+        std::wstring text;
+    };
+
+    int button_px() const { return px(28); }
+
+    // Hides the entries whose items are hidden.
+    void sync()
+    {
+        for (size_t i = 0; i < entries_.size(); ++i)
+            if (shown_[i] != entries_[i].item->visible)
+            {
+                shown_[i] = entries_[i].item->visible;
+                // A separator's id is 0, so it goes by index.
+                TBBUTTONINFOW info{sizeof info, TBIF_BYINDEX | TBIF_STATE};
+                SendMessageW(h_, TB_GETBUTTONINFOW, i, reinterpret_cast<LPARAM>(&info));
+                info.fsState = shown_[i] ? info.fsState & ~TBSTATE_HIDDEN : info.fsState | TBSTATE_HIDDEN;
+                SendMessageW(h_, TB_SETBUTTONINFOW, i, reinterpret_cast<LPARAM>(&info));
+            }
+    }
+
+    // Enabled, then disabled: the toolbar doesn't grey an icon with alpha.
+    static color ink(int state)
+    {
+        return theme_color_of(state ? theme_color::placeholder_text : theme_color::window_text);
+    }
+
+    // The icons and buttons at the window's scale.
+    void rescale()
+    {
+        const int size = px(16);
+        if (images_[0] && size == icon_px_) return;
+        icon_px_ = size;
+        for (int state = 0; state < 2; ++state)
+        {
+            HIMAGELIST old = images_[state];
+            images_[state] = ImageList_Create(size, size, ILC_COLOR32, int(entries_.size()), 0);
+            for (const entry& e : entries_)
+            {
+                if (!e.button) continue;
+                HBITMAP bmp = render_icon(e.button->image(), size, win_.scale(), ink(state));
+                ImageList_Add(images_[state], bmp, nullptr);
+                if (bmp) DeleteObject(bmp);
+            }
+            SendMessageW(h_, state ? TB_SETDISABLEDIMAGELIST : TB_SETIMAGELIST, 0,
+                         reinterpret_cast<LPARAM>(images_[state]));
+            if (old) ImageList_Destroy(old);
+        }
+        size_buttons();
+    }
+    // Square buttons, sized once they're in (adding them resizes them).
+    void size_buttons()
+    {
+        // The padding is what the icon leaves of a button.
+        const int pad = button_px() - px(16);
+        SendMessageW(h_, TB_SETPADDING, 0, MAKELPARAM(pad, pad));
+        SendMessageW(h_, TB_SETBUTTONSIZE, 0, MAKELPARAM(button_px(), button_px()));
+    }
+
+    std::vector<entry> entries_;
+    std::vector<bool> shown_;
+    HIMAGELIST images_[2] = {};
+    int icon_px_ = 0;
+};
+
+void strip_button::set_enabled(bool e) { strip_.set_enabled(id_, e); }
+void strip_button::set_visible(bool v)
+{
+    if (visible == v) return;
+    visible = v;
+    strip_.relayout();
+}
+void strip_button::set_tooltip(const std::string& t) { strip_.set_text(id_, t); }
+void strip_button::set_icon(const icon& icon)
+{
+    icon_ = icon;
+    strip_.set_icon(id_);
+}
+void strip_button::set_checked(bool c)
+{
+    if (!toggle_) return;
+    checked_ = c;
+    strip_.set_checked(id_, c);
+}
 
 // -- list ---------------------------------------------------------------------
 
@@ -4190,6 +4463,7 @@ public:
     void invalidate() override { InvalidateRect(h_, nullptr, FALSE); }
     size_f size() const override
     {
+        win_.flush_layout();
         RECT r;
         GetClientRect(h_, &r);
         const float s = win_.scale();
@@ -4568,6 +4842,29 @@ public:
     std::vector<std::shared_ptr<deferred_build>> deferred;  // built when first idle (see show)
 
     void set_title(const std::string& t) override { SetWindowTextW(hwnd_, wide(t).c_str()); }
+    void flush_layout() override
+    {
+        if (relayout_pending_) layout_now();
+    }
+    // The spec's size, but never smaller than the content.
+    SIZE first_size()
+    {
+        const SIZE n = root ? root->natural() : SIZE{200, 100};
+        const int m = margin();
+        return {std::max<long>(n.cx + 2 * m, extent_px(hwnd_, initial_w_, false)),
+                std::max<long>(n.cy + 2 * m, extent_px(hwnd_, initial_h_, true))};
+    }
+    // Once built: sized and laid out, still hidden, so what's in it has its
+    // size before the window shows (a program fitting the window to its content).
+    void lay_out_hidden()
+    {
+        const SIZE s = first_size();
+        RECT r{0, 0, s.cx, s.cy};
+        AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), GetMenu(hwnd_) != nullptr,
+                           DWORD(GetWindowLongPtrW(hwnd_, GWL_EXSTYLE)));
+        SetWindowPos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        layout_now();
+    }
     void show() override
     {
         finished_ = false;
@@ -4577,10 +4874,7 @@ public:
             // First size: one set by resize() before showing (a restored
             // size) as it is; otherwise the spec's, but never smaller than
             // the content.
-            const SIZE n = root ? root->natural() : SIZE{200, 100};
-            const int m = margin();
-            long w = std::max<long>(n.cx + 2 * m, extent_px(hwnd_, initial_w_, false));
-            long h = std::max<long>(n.cy + 2 * m, extent_px(hwnd_, initial_h_, true));
+            auto [w, h] = first_size();
             if (requested_) w = requested_->cx, h = requested_->cy;
             RECT r{0, 0, w, h};
             AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), GetMenu(hwnd_) != nullptr,
@@ -4963,7 +5257,9 @@ private:
             case WM_SIZE:
                 if (self->root) self->layout_now();
                 return 0;
-            case wm_rapport_relayout: self->layout_now(); return 0;
+            case wm_rapport_relayout:
+                if (self->relayout_pending_) self->layout_now();
+                return 0;
             case WM_GETMINMAXINFO:
             {
                 auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
@@ -5293,12 +5589,34 @@ private:
     item* make(const node& n, const spec::toolbar& s, HWND parent, orientation)
     {
         auto* box = own<box_item>(orientation::horizontal, win_.px(2));
+        // Each run of buttons and separators is one native toolbar.
+        tool_strip* strip = nullptr;
         for (const node& c : s.items)
         {
+            const auto* b = std::get_if<spec::tool_button>(&c.spec);
+            if (b || std::holds_alternative<spec::separator>(c.spec))
+            {
+                if (!strip) box->children.push_back(strip = own<tool_strip>(win_, parent));
+                if (b)
+                {
+                    strip_button* button = strip->add_button(*b);
+                    win_.items.emplace_back(static_cast<strip_entry*>(button));
+                    sink_.created(c, *button);
+                }
+                else
+                {
+                    auto* sep = own<strip_entry>();
+                    strip->add_separator(sep);
+                    handle(c, sep);
+                }
+                continue;
+            }
+            if (strip) strip->finish(), strip = nullptr;
             item* it = build(c, parent, orientation::horizontal);
             if (std::holds_alternative<spec::spacer>(c.spec)) it->stretch = 1;
             box->children.push_back(it);
         }
+        if (strip) strip->finish();
         handle(n, box);
         return box;
     }
@@ -5426,6 +5744,7 @@ public:
         auto win = std::make_unique<window_impl>(spec, static_cast<window_impl*>(parent));
         win->set_menu_bar(spec.menu_bar);
         win->root = builder(*win, sink).build(spec.content, win->hwnd(), orientation::vertical);
+        win->lay_out_hidden();
         return win;
     }
 

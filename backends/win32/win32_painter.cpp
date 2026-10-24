@@ -564,7 +564,12 @@ com<IWICBitmap> icon_bitmap(const icon& icon, int px, float scale, color ink)
 
 HBITMAP render_icon(const icon& icon, int px, float scale)
 {
-    com<IWICBitmap> wic = icon_bitmap(icon, px, scale, theme_color_of(theme_color::window_text));
+    return render_icon(icon, px, scale, theme_color_of(theme_color::window_text));
+}
+
+HBITMAP render_icon(const icon& icon, int px, float scale, color ink)
+{
+    com<IWICBitmap> wic = icon_bitmap(icon, px, scale, ink);
     if (!wic) return nullptr;
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof bi.bmiHeader;
