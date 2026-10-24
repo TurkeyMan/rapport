@@ -883,8 +883,25 @@ public:
         }
     }
 
-    // GTK 4 has no property for it: the theme's separator, 1 px, or 5 wide.
-    float divider() const override { return gtk_paned_get_wide_handle(GTK_PANED(w_)) ? 5.f : 1.f; }
+    // The handle is a child of its own between the panes (CSS node
+    // "separator"), measured as the theme draws it; it needs the paned in a
+    // window, else Adwaita's 1 px, or 5 wide.
+    float divider() const override
+    {
+        GtkPaned* paned = GTK_PANED(w_);
+        const GtkWidget* start = gtk_paned_get_start_child(paned);
+        const GtkWidget* end = gtk_paned_get_end_child(paned);
+        const GtkOrientation along = gtk_orientable_get_orientation(GTK_ORIENTABLE(w_));
+        if (gtk_widget_get_root(w_))
+            for (GtkWidget* c = gtk_widget_get_first_child(w_); c; c = gtk_widget_get_next_sibling(c))
+                if (c != start && c != end)
+                {
+                    int min = 0, natural = 0;
+                    gtk_widget_measure(c, along, -1, &min, &natural, nullptr, nullptr);
+                    return float(std::max(min, natural));
+                }
+        return gtk_paned_get_wide_handle(paned) ? 5.f : 1.f;
+    }
     std::vector<float> sizes() const override
     {
         bool vertical =
