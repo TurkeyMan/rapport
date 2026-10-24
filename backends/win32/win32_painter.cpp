@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <set>
 #include <thread>
 #include <tuple>
 
@@ -313,31 +314,58 @@ void d2d_image::update(const uint8_t* pixels, size_t stride)
             row[x * 4 + 3] = uint8_t(a);
         }
     }
-    for (auto& [rt, stale] : stale_) stale = true;
+    for (auto& [key, c] : bitmaps_) c.stale = true;
 }
 
-ID2D1Bitmap* d2d_image::bitmap_for(ID2D1RenderTarget* rt) const
+namespace
 {
-    auto& bmp = bitmaps_[rt];
-    if (!bmp)
+std::set<uint64_t>& live_keys()
+{
+    static std::set<uint64_t> keys;
+    return keys;
+}
+}  // namespace
+
+uint64_t new_resource_key()
+{
+    static uint64_t next = 0;
+    live_keys().insert(++next);
+    return next;
+}
+void retire_resource_key(uint64_t key) { live_keys().erase(key); }
+bool resource_key_alive(uint64_t key) { return live_keys().count(key) != 0; }
+
+com<ID2D1Bitmap> d2d_image::bitmap_for(ID2D1RenderTarget* rt, uint64_t key) const
+{
+    auto make = [&]
     {
+        com<ID2D1Bitmap> bmp;
         const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
         rt->CreateBitmap(D2D1::SizeU(UINT32(w_), UINT32(h_)), px_.data(), UINT32(w_) * 4, props, bmp.put());
-        stale_[rt] = false;
-    }
-    else if (stale_[rt])
+        return bmp;
+    };
+    if (!key) return make();
+    auto it = bitmaps_.find(key);
+    if (it == bitmaps_.end())
     {
-        bmp->CopyFromMemory(nullptr, px_.data(), UINT32(w_) * 4);
-        stale_[rt] = false;
+        // Those of targets and devices gone (a lost GPU's) go too.
+        std::erase_if(bitmaps_, [](const auto& kv) { return !resource_key_alive(kv.first); });
+        it = bitmaps_.emplace(key, cached{make()}).first;
     }
-    return bmp.get();
+    else if (it->second.stale)
+    {
+        it->second.bitmap->CopyFromMemory(nullptr, px_.data(), UINT32(w_) * 4);
+        it->second.stale = false;
+    }
+    return it->second.bitmap;
 }
 
 // -- painter ------------------------------------------------------------------
 
-d2d_painter::d2d_painter(ID2D1RenderTarget* rt, float scale)
+d2d_painter::d2d_painter(ID2D1RenderTarget* rt, float scale, uint64_t resources)
     : rt_(rt)
+    , resources_(resources)
     , scale_(scale)
 {
     rt_->GetFactory(factory_.put());
@@ -462,9 +490,9 @@ void d2d_painter::arc(point_f c, float r, float start, float end, const paint& p
 void d2d_painter::image(const rap::image& img, rect_f src, rect_f dst, filter filter, float alpha)
 {
     if (src.w <= 0 || src.h <= 0 || dst.w <= 0 || dst.h <= 0) return;
-    ID2D1Bitmap* bmp = static_cast<const d2d_image&>(img).bitmap_for(rt_);
+    const com<ID2D1Bitmap> bmp = static_cast<const d2d_image&>(img).bitmap_for(rt_, resources_);
     if (!bmp) return;
-    rt_->DrawBitmap(bmp, D2D1::RectF(dst.x, dst.y, dst.x + dst.w, dst.y + dst.h), alpha,
+    rt_->DrawBitmap(bmp.get(), D2D1::RectF(dst.x, dst.y, dst.x + dst.w, dst.y + dst.h), alpha,
                     filter == filter::nearest ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
                                               : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                     D2D1::RectF(src.x, src.y, src.x + src.w, src.y + src.h));

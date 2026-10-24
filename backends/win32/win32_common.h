@@ -11,7 +11,7 @@
 #include <windows.h>
 
 #include <commctrl.h>
-#include <d2d1.h>
+#include <d2d1_1.h>
 #include <dwrite.h>
 #include <wincodec.h>
 
@@ -116,8 +116,16 @@ inline D2D1_COLOR_F d2d_color(color c)
 
 // -- images -------------------------------------------------------------------
 
+// What a Direct2D bitmap belongs to (a CPU target, or the GPU's device,
+// whose bitmaps every canvas on it shares), as a key that's never reused:
+// a target or device made where a lost one was mustn't find its bitmaps.
+// UI thread only.
+uint64_t new_resource_key();
+void retire_resource_key(uint64_t key);  // its bitmaps go
+bool resource_key_alive(uint64_t key);
+
 // Pixels kept in memory (premultiplied BGRA) plus a Direct2D bitmap per
-// render target that has drawn them, created on first use.
+// resource key (see above) that has drawn them, created on first use.
 class d2d_image : public image
 {
 public:
@@ -126,15 +134,20 @@ public:
     int height() const override { return h_; }
     void update(const uint8_t* pixels, size_t stride) override;
 
-    ID2D1Bitmap* bitmap_for(ID2D1RenderTarget* rt) const;
+    // Key 0: a bitmap for this one use, not kept.
+    com<ID2D1Bitmap> bitmap_for(ID2D1RenderTarget* rt, uint64_t key) const;
     const std::vector<uint8_t>& pixels() const { return px_; }
 
 private:
     int w_, h_;
     pixel_format format_;
     std::vector<uint8_t> px_;
-    mutable std::map<ID2D1RenderTarget*, com<ID2D1Bitmap>> bitmaps_;
-    mutable std::map<ID2D1RenderTarget*, bool> stale_;
+    struct cached
+    {
+        com<ID2D1Bitmap> bitmap;
+        bool stale = false;
+    };
+    mutable std::map<uint64_t, cached> bitmaps_;
 };
 
 // -- painter ------------------------------------------------------------------
@@ -143,8 +156,9 @@ class d2d_painter : public painter
 {
 public:
     // `scale`: device px per logical px; the target's DPI is set to match so
-    // all coordinates here are logical px (DIPs).
-    d2d_painter(ID2D1RenderTarget* rt, float scale);
+    // all coordinates here are logical px (DIPs). `resources`: the target's
+    // key for images' bitmaps (0: not kept, for a target used once).
+    d2d_painter(ID2D1RenderTarget* rt, float scale, uint64_t resources = 0);
     ~d2d_painter() override;
 
     color resolve(const paint& p) const override;
@@ -172,6 +186,7 @@ private:
     void finish(ID2D1Geometry* g, const std::optional<paint>& fill, const std::optional<paint>& stroke, float width);
 
     ID2D1RenderTarget* rt_;
+    uint64_t resources_;
     com<ID2D1Factory> factory_;  // the target's: geometry must come from the factory it was made by
     float scale_;
     com<ID2D1SolidColorBrush> brush_;

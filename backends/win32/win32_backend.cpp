@@ -4,7 +4,9 @@
 #include "win32_common.h"
 
 #include <commdlg.h>
+#include <d3d11.h>
 #include <dwmapi.h>
+#include <dxgi1_2.h>
 #include <richedit.h>
 #include <shellapi.h>
 #include <shobjidl.h>
@@ -4436,6 +4438,153 @@ frame_clock* g_frames = nullptr;
 
 // -- canvas -------------------------------------------------------------------
 
+// -- GPU ----------------------------------------------------------------------
+
+// One Direct3D device, and Direct2D's over it, for every canvas: an image is
+// uploaded once for all of them. Made on a thread: it costs a couple of
+// hundred milliseconds the first time, and loading the driver holds the
+// process's loader lock all along, so it starts once a first frame is up
+// (on the CPU), and canvases take it at their next paint after it's ready.
+// When it's lost (a driver update, a GPU reset), it's dropped, the
+// canvases go back to the CPU, and a new one is made. UI thread only.
+struct gpu_device
+{
+    com<ID3D11Device> d3d;
+    com<IDXGIFactory2> dxgi;
+    com<ID2D1Device> d2d;
+    uint64_t key = 0;  // its bitmaps' (see new_resource_key)
+};
+
+class gpu
+{
+public:
+    // The device, or null while there's none (yet); with `start`, one is
+    // made if there isn't.
+    static std::shared_ptr<gpu_device> device(bool start)
+    {
+        state& s = get();
+        if (!s.current && s.pending.valid() && s.pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        {
+            s.current = s.pending.get();
+            if (s.current)
+                s.current->key = new_resource_key();
+            else
+                s.failed_at = GetTickCount64();
+        }
+        // After a failure (no usable GPU, or one mid-reset), a while before the next try.
+        if (start && !s.current && !s.pending.valid() && (!s.failed_at || GetTickCount64() - s.failed_at > 10000))
+            s.pending = std::async(std::launch::async, make);
+        return s.current;
+    }
+    static void lost(const std::shared_ptr<gpu_device>& d)
+    {
+        state& s = get();
+        if (!d || s.current != d) return;
+        retire_resource_key(d->key);
+        s.current.reset();
+    }
+
+private:
+    struct state
+    {
+        std::shared_ptr<gpu_device> current;
+        std::future<std::shared_ptr<gpu_device>> pending;
+        ULONGLONG failed_at = 0;
+    };
+    static state& get()
+    {
+        static state s;
+        return s;
+    }
+    static std::shared_ptr<gpu_device> make()
+    {
+        auto d = std::make_shared<gpu_device>();
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                     nullptr, 0, D3D11_SDK_VERSION, d->d3d.put(), nullptr, nullptr)))
+            return nullptr;
+        com<IDXGIDevice> dxgi_device;
+        com<IDXGIAdapter> adapter;
+        com<ID2D1Factory1> factory;
+        // Its own factory: the shared one would hold the UI up meanwhile.
+        if (FAILED(d->d3d->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(dxgi_device.put()))) ||
+            FAILED(dxgi_device->GetAdapter(adapter.put())) ||
+            FAILED(adapter->GetParent(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(d->dxgi.put()))) ||
+            FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), nullptr,
+                                     reinterpret_cast<void**>(factory.put()))) ||
+            FAILED(factory->CreateDevice(dxgi_device.get(), d->d2d.put())))
+            return nullptr;
+        return d;  // used on the UI thread from here on
+    }
+};
+
+// A canvas's drawing on the GPU's device: a swap chain for its window.
+class gpu_target
+{
+public:
+    static std::unique_ptr<gpu_target> make(std::shared_ptr<gpu_device> dev, HWND h, UINT w, UINT hgt)
+    {
+        auto t = std::unique_ptr<gpu_target>(new gpu_target(std::move(dev)));
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        desc.Width = w;
+        desc.Height = hgt;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = 2;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        if (FAILED(t->dev_->dxgi->CreateSwapChainForHwnd(t->dev_->d3d.get(), h, &desc, nullptr, nullptr, t->swap_.put())) ||
+            FAILED(t->dev_->d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, t->dc_.put())) ||
+            !t->bind())
+            return nullptr;
+        t->w_ = w, t->h_ = hgt;
+        return t;
+    }
+    const std::shared_ptr<gpu_device>& device() const { return dev_; }
+    ID2D1DeviceContext* begin(UINT w, UINT h)
+    {
+        if (w != w_ || h != h_)
+        {
+            dc_->SetTarget(nullptr);
+            if (FAILED(swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)) || !bind()) return nullptr;
+            w_ = w, h_ = h;
+        }
+        dc_->BeginDraw();
+        return dc_.get();
+    }
+    // False when the device is lost.
+    bool end()
+    {
+        if (dc_->EndDraw() == D2DERR_RECREATE_TARGET) return false;
+        const HRESULT hr = swap_->Present(0, 0);
+        return hr != DXGI_ERROR_DEVICE_REMOVED && hr != DXGI_ERROR_DEVICE_RESET;
+    }
+
+private:
+    explicit gpu_target(std::shared_ptr<gpu_device> dev)
+        : dev_(std::move(dev))
+    {
+    }
+    bool bind()
+    {
+        com<IDXGISurface> surface;
+        com<ID2D1Bitmap1> bitmap;
+        const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+        if (FAILED(swap_->GetBuffer(0, __uuidof(IDXGISurface), reinterpret_cast<void**>(surface.put()))) ||
+            FAILED(dc_->CreateBitmapFromDxgiSurface(surface.get(), &props, bitmap.put())))
+            return false;
+        dc_->SetTarget(bitmap.get());
+        return true;
+    }
+
+    std::shared_ptr<gpu_device> dev_;
+    com<IDXGISwapChain1> swap_;
+    com<ID2D1DeviceContext> dc_;
+    UINT w_ = 0, h_ = 0;
+};
+
 class canvas_impl : public leaf<rap::canvas>
 {
 public:
@@ -4458,7 +4607,11 @@ public:
         adopt(CreateWindowExW(0, L"rapportCanvas", L"", WS_CHILD | (s.focusable ? WS_TABSTOP : 0), 0, 0, 0, 0, parent,
                               nullptr, instance(), this));
     }
-    ~canvas_impl() override { *alive_ = false; }
+    ~canvas_impl() override
+    {
+        *alive_ = false;
+        if (cpu_key_) retire_resource_key(cpu_key_);
+    }
 
     void invalidate() override { InvalidateRect(h_, nullptr, FALSE); }
     size_f size() const override
@@ -4570,7 +4723,7 @@ private:
         }
         case WM_ERASEBKGND: return 1;
         case WM_SIZE:
-            if (rt_) rt_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
+            if (cpu_) cpu_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));  // the GPU's resizes as it draws
             if (resize_) resize_(size());
             return 0;
         case WM_LBUTTONDOWN:
@@ -4637,80 +4790,74 @@ private:
         return 0;
     }
 
+    // On the GPU's device when there is one (see gpu), on the CPU until then.
     void render()
     {
         RECT r;
         GetClientRect(h_, &r);
-        // On the CPU until the GPU's target is ready (see start_gpu_target),
-        // then that. The CPU target is kept, not freed: images cache their
-        // bitmaps by target, and a new one at its address mustn't find them.
-        if (gpu_target_.valid() && gpu_target_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-            if (com<ID2D1HwndRenderTarget> gpu = gpu_target_.get())
-            {
-                retired_ = std::move(rt_);
-                rt_ = std::move(gpu);
-                rt_->Resize(D2D1::SizeU(UINT32(r.right), UINT32(r.bottom)));
-            }
-        if (!rt_)
+        const UINT w = UINT(std::max<LONG>(r.right, 1)), h = UINT(std::max<LONG>(r.bottom, 1));
+        // The first frame doesn't wait for the GPU: it's on the CPU, and the
+        // GPU's device starts after it.
+        const std::shared_ptr<gpu_device> dev = gpu::device(painted_);
+        if (gpu_ && gpu_->device() != dev) gpu_.reset();  // lost, by another canvas
+        if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h)))
+            drop_cpu();
+        if (gpu_)
         {
-            // The first, or one to replace a lost GPU target: the CPU's,
-            // which can't be lost.
+            if (ID2D1DeviceContext* dc = gpu_->begin(w, h))
+            {
+                draw(dc, dev->key);
+                if (gpu_->end())
+                {
+                    painted_ = true;
+                    return;
+                }
+            }
+            // Lost: on the CPU for now, and a new device is on its way.
+            gpu::lost(gpu_->device());
+            gpu_.reset();
+        }
+        if (!cpu_)
+        {
             const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
                 D2D1_RENDER_TARGET_TYPE_SOFTWARE,
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
             d2d_factory()->CreateHwndRenderTarget(
-                props, D2D1::HwndRenderTargetProperties(h_, D2D1::SizeU(UINT32(r.right), UINT32(r.bottom)),
-                                                        D2D1_PRESENT_OPTIONS_IMMEDIATELY),
-                rt_.put());
-            if (!rt_) return;
+                props, D2D1::HwndRenderTargetProperties(h_, D2D1::SizeU(w, h), D2D1_PRESENT_OPTIONS_IMMEDIATELY),
+                cpu_.put());
+            if (!cpu_) return;
+            cpu_key_ = new_resource_key();
         }
-        rt_->BeginDraw();
-        rt_->Clear(d2d_color(theme_color_of(theme_color::window)));
+        cpu_->BeginDraw();
+        draw(cpu_.get(), cpu_key_);
+        if (cpu_->EndDraw() == D2DERR_RECREATE_TARGET) drop_cpu();
+        if (!painted_)
+        {
+            painted_ = true;
+            gpu::device(true);
+        }
+    }
+    void draw(ID2D1RenderTarget* rt, uint64_t key)
+    {
+        rt->Clear(d2d_color(theme_color_of(theme_color::window)));
         if (paint_)
         {
-            d2d_painter p(rt_.get(), win_.scale());
+            d2d_painter p(rt, win_.scale(), key);
             paint_(p, size());
         }
-        if (rt_->EndDraw() == D2DERR_RECREATE_TARGET) rt_.reset();
-        if (!gpu_started_)
-            start_gpu_target();
     }
-
-    // The GPU's target, made on a thread with a factory of its own (the
-    // shared one would hold the UI up meanwhile). It costs a Direct3D device
-    // and swap chain, a couple of hundred milliseconds the first time, and
-    // loading the driver holds the process's loader lock all along: so it
-    // starts once the first frame is up (on the CPU), not before, and takes
-    // over at the next paint after it's ready.
-    void start_gpu_target()
+    void drop_cpu()
     {
-        gpu_started_ = true;
-        gpu_target_ = std::async(std::launch::async,
-                                 [hwnd = h_]
-                                 {
-                                     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-                                     com<ID2D1Factory> factory;
-                                     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), nullptr,
-                                                       reinterpret_cast<void**>(factory.put()));
-                                     com<ID2D1HwndRenderTarget> rt;
-                                     const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-                                         D2D1_RENDER_TARGET_TYPE_HARDWARE,
-                                         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-                                     if (factory)
-                                         factory->CreateHwndRenderTarget(
-                                             props,
-                                             D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(1, 1), D2D1_PRESENT_OPTIONS_IMMEDIATELY),
-                                             rt.put());
-                                     CoUninitialize();
-                                     return rt;  // holds its factory; used on the UI thread from here on
-                                 });
+        cpu_.reset();
+        if (cpu_key_) retire_resource_key(cpu_key_);
+        cpu_key_ = 0;
     }
 
     bool focusable_;
-    com<ID2D1HwndRenderTarget> rt_;
-    com<ID2D1HwndRenderTarget> retired_;  // the CPU target, once the GPU's took over
-    std::future<com<ID2D1HwndRenderTarget>> gpu_target_;  // until it's taken
-    bool gpu_started_ = false;
+    std::unique_ptr<gpu_target> gpu_;
+    com<ID2D1HwndRenderTarget> cpu_;
+    uint64_t cpu_key_ = 0;
+    bool painted_ = false;
     cursor cursor_ = cursor::default_;
     bool inside_ = false;
     int clicks_ = 0, last_button_ = 0;
