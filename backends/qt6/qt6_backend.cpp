@@ -814,6 +814,7 @@ public:
     explicit entry_impl(const spec::entry& s)
         : widget_base(new QLineEdit(qs(s.text)))
     {
+        if (s.password) edit()->setEchoMode(QLineEdit::Password);
         edit()->setPlaceholderText(qs(s.placeholder));
         QObject::connect(edit(), &QLineEdit::textChanged, edit(),
                          [this](const QString& t)

@@ -189,6 +189,7 @@ struct entry
 {
     std::string text, placeholder;
     bool read_only = false;
+    bool password = false;  // shows dots for the characters typed
     std::function<void(const std::string&)> on_changed;
     std::function<void()> on_activate;
     rap::entry** bind = nullptr;
@@ -639,6 +640,13 @@ public:
     entry& read_only(bool v = true)
     {
         s().read_only = v;
+        return *this;
+    }
+    // Hides what's typed (a password, a passphrase): the toolkit's own
+    // password field, which also keeps it from the clipboard.
+    entry& password(bool v = true)
+    {
+        s().password = v;
         return *this;
     }
     entry& placeholder(std::string p)

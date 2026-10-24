@@ -602,6 +602,11 @@ public:
     explicit entry_impl(const spec::entry& s)
         : widget_base(gtk_entry_new())
     {
+        if (s.password)
+        {
+            gtk_entry_set_visibility(GTK_ENTRY(w_), false);
+            gtk_entry_set_input_purpose(GTK_ENTRY(w_), GTK_INPUT_PURPOSE_PASSWORD);
+        }
         gtk_editable_set_text(GTK_EDITABLE(w_), s.text.c_str());
         if (!s.placeholder.empty()) set_placeholder(s.placeholder);
         connect(

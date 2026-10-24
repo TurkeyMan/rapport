@@ -1118,7 +1118,8 @@ public:
     entry_impl(win_context& win, HWND parent, const spec::entry& s)
         : leaf(win)
     {
-        adopt(create_control(win, parent, L"EDIT", wide(s.text), ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE));
+        adopt(create_control(win, parent, L"EDIT", wide(s.text),
+                             ES_AUTOHSCROLL | WS_TABSTOP | (s.password ? ES_PASSWORD : 0), WS_EX_CLIENTEDGE));
         set_placeholder(s.placeholder);
         SetWindowSubclass(h_, enter_subclass, 1, reinterpret_cast<DWORD_PTR>(&activate_));
     }

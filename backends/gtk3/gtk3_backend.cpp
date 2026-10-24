@@ -917,6 +917,11 @@ public:
     explicit entry_impl(const spec::entry& s)
         : widget_base(gtk_entry_new())
     {
+        if (s.password)
+        {
+            gtk_entry_set_visibility(GTK_ENTRY(w_), false);
+            gtk_entry_set_input_purpose(GTK_ENTRY(w_), GTK_INPUT_PURPOSE_PASSWORD);
+        }
         gtk_entry_set_text(GTK_ENTRY(w_), s.text.c_str());
         // Enter presses the dialog's default button (OK), as on Windows,
         // unless the app handles Enter itself (a find box).
