@@ -105,7 +105,7 @@ public:
     std::optional<std::chrono::milliseconds> next_due() const
     {
         if (held_.empty()) return std::nullopt;
-        auto earliest = clock::time_point::max();
+        auto earliest = (clock::time_point::max)();
         // ((std::min): windows.h may define min and max as macros.)
         for (auto& [path, h] : held_) earliest = (std::min)(earliest, h.last + settle_);
         const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(earliest - clock::now());
