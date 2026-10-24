@@ -27,6 +27,7 @@
 #include <cstring>
 #include <mutex>
 #include <set>
+#include <future>
 #include <thread>
 #include <unordered_map>
 
@@ -4341,10 +4342,23 @@ private:
     {
         RECT r;
         GetClientRect(h_, &r);
+        // On the CPU until the GPU's target is ready (see start_gpu_target),
+        // then that. The CPU target is kept, not freed: images cache their
+        // bitmaps by target, and a new one at its address mustn't find them.
+        if (gpu_target_.valid() && gpu_target_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            if (com<ID2D1HwndRenderTarget> gpu = gpu_target_.get())
+            {
+                retired_ = std::move(rt_);
+                rt_ = std::move(gpu);
+                rt_->Resize(D2D1::SizeU(UINT32(r.right), UINT32(r.bottom)));
+            }
         if (!rt_)
         {
+            // The first, or one to replace a lost GPU target: the CPU's,
+            // which can't be lost.
             const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-                D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
             d2d_factory()->CreateHwndRenderTarget(
                 props, D2D1::HwndRenderTargetProperties(h_, D2D1::SizeU(UINT32(r.right), UINT32(r.bottom)),
                                                         D2D1_PRESENT_OPTIONS_IMMEDIATELY),
@@ -4359,10 +4373,45 @@ private:
             paint_(p, size());
         }
         if (rt_->EndDraw() == D2DERR_RECREATE_TARGET) rt_.reset();
+        if (!gpu_started_)
+            start_gpu_target();
+    }
+
+    // The GPU's target, made on a thread with a factory of its own (the
+    // shared one would hold the UI up meanwhile). It costs a Direct3D device
+    // and swap chain, a couple of hundred milliseconds the first time, and
+    // loading the driver holds the process's loader lock all along: so it
+    // starts once the first frame is up (on the CPU), not before, and takes
+    // over at the next paint after it's ready.
+    void start_gpu_target()
+    {
+        gpu_started_ = true;
+        gpu_target_ = std::async(std::launch::async,
+                                 [hwnd = h_]
+                                 {
+                                     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                                     com<ID2D1Factory> factory;
+                                     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), nullptr,
+                                                       reinterpret_cast<void**>(factory.put()));
+                                     com<ID2D1HwndRenderTarget> rt;
+                                     const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                                         D2D1_RENDER_TARGET_TYPE_HARDWARE,
+                                         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                                     if (factory)
+                                         factory->CreateHwndRenderTarget(
+                                             props,
+                                             D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(1, 1), D2D1_PRESENT_OPTIONS_IMMEDIATELY),
+                                             rt.put());
+                                     CoUninitialize();
+                                     return rt;  // holds its factory; used on the UI thread from here on
+                                 });
     }
 
     bool focusable_;
     com<ID2D1HwndRenderTarget> rt_;
+    com<ID2D1HwndRenderTarget> retired_;  // the CPU target, once the GPU's took over
+    std::future<com<ID2D1HwndRenderTarget>> gpu_target_;  // until it's taken
+    bool gpu_started_ = false;
     cursor cursor_ = cursor::default_;
     bool inside_ = false;
     int clicks_ = 0, last_button_ = 0;
@@ -5292,6 +5341,7 @@ public:
         wc.lpszClassName = L"rapportMessages";
         RegisterClassExW(&wc);
         messages_ = CreateWindowExW(0, L"rapportMessages", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance(), this);
+        warm_d2d();
         frames_ = std::make_unique<frame_clock>(messages_);
         g_frames = frames_.get();
     }

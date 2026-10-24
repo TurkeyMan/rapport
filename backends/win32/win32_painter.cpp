@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <thread>
 #include <tuple>
 
 namespace rap::win32
@@ -79,6 +80,48 @@ ID2D1Factory* d2d_factory()
         return p;
     }();
     return f;
+}
+
+void warm_d2d()
+{
+    std::thread(
+        []
+        {
+            // A factory of its own (the shared one is single-threaded): what
+            // it loads and starts is the process's, which is what's wanted.
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            com<ID2D1Factory> factory;
+            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), nullptr,
+                              reinterpret_cast<void**>(factory.put()));
+            HDC dc = factory ? CreateCompatibleDC(nullptr) : nullptr;
+            BITMAPINFO bi{};
+            bi.bmiHeader = {sizeof(BITMAPINFOHEADER), 8, -8, 1, 32, BI_RGB};
+            void* bits = nullptr;
+            HBITMAP bmp = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+            com<ID2D1DCRenderTarget> rt;
+            const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            if (bmp && SUCCEEDED(factory->CreateDCRenderTarget(&props, rt.put())))
+            {
+                const HGDIOBJ old = SelectObject(dc, bmp);
+                RECT r{0, 0, 8, 8};
+                if (SUCCEEDED(rt->BindDC(dc, &r)))
+                {
+                    rt->BeginDraw();
+                    rt->Clear(D2D1::ColorF(0, 0));
+                    rt->EndDraw();
+                }
+                SelectObject(dc, old);
+            }
+            rt = {};
+            if (bmp)
+                DeleteObject(bmp);
+            if (dc)
+                DeleteDC(dc);
+            factory = {};
+            CoUninitialize();
+        })
+        .detach();
 }
 
 IDWriteFactory* dwrite_factory()
@@ -297,6 +340,7 @@ d2d_painter::d2d_painter(ID2D1RenderTarget* rt, float scale)
     : rt_(rt)
     , scale_(scale)
 {
+    rt_->GetFactory(factory_.put());
     rt_->SetDpi(96.f * scale, 96.f * scale);
     rt_->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0), brush_.put());
 }
@@ -327,7 +371,7 @@ ID2D1StrokeStyle* d2d_painter::stroke(line_cap cap)
     {
         const D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(
             D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND);
-        d2d_factory()->CreateStrokeStyle(props, nullptr, 0, round_.put());
+        factory_->CreateStrokeStyle(props, nullptr, 0, round_.put());
     }
     return round_.get();
 }
@@ -340,7 +384,7 @@ void d2d_painter::line(point_f a, point_f b, const paint& p, float width, line_c
 void d2d_painter::curve(point_f a, point_f c1, point_f c2, point_f b, const paint& p, float width)
 {
     com<ID2D1PathGeometry> g;
-    d2d_factory()->CreatePathGeometry(g.put());
+    factory_->CreatePathGeometry(g.put());
     com<ID2D1GeometrySink> sink;
     g->Open(sink.put());
     sink->BeginFigure(D2D1::Point2F(a.x, a.y), D2D1_FIGURE_BEGIN_HOLLOW);
@@ -384,7 +428,7 @@ void d2d_painter::polygon(const std::vector<point_f>& pts, std::optional<paint> 
 {
     if (pts.empty()) return;
     com<ID2D1PathGeometry> g;
-    d2d_factory()->CreatePathGeometry(g.put());
+    factory_->CreatePathGeometry(g.put());
     com<ID2D1GeometrySink> sink;
     g->Open(sink.put());
     sink->BeginFigure(D2D1::Point2F(pts[0].x, pts[0].y), D2D1_FIGURE_BEGIN_FILLED);
@@ -402,7 +446,7 @@ void d2d_painter::arc(point_f c, float r, float start, float end, const paint& p
         return;
     }
     com<ID2D1PathGeometry> g;
-    d2d_factory()->CreatePathGeometry(g.put());
+    factory_->CreatePathGeometry(g.put());
     com<ID2D1GeometrySink> sink;
     g->Open(sink.put());
     const D2D1_POINT_2F p0 = D2D1::Point2F(c.x + r * std::cos(start), c.y + r * std::sin(start));
@@ -498,7 +542,7 @@ com<IWICBitmap> icon_bitmap(const icon& icon, int px, float scale, color ink)
         return {};
     com<ID2D1RenderTarget> rt;
     const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
     if (FAILED(d2d_factory()->CreateWicBitmapRenderTarget(wic.get(), props, rt.put()))) return {};
     rt->BeginDraw();
@@ -558,8 +602,10 @@ HICON render_icon_handle(const icon& icon, int px, float scale)
 void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink)
 {
     if (!icon) return;
+    // On the CPU: an icon is a few hundred pixels, and a GPU target's first
+    // costs far more than drawing it.
     const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
         96, 96);
     com<ID2D1DCRenderTarget> rt;
     if (FAILED(d2d_factory()->CreateDCRenderTarget(&props, rt.put()))) return;

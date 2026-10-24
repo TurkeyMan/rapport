@@ -76,6 +76,12 @@ private:
 };
 
 ID2D1Factory* d2d_factory();
+// Direct2D's CPU rasteriser (WARP) costs a few milliseconds to start, the
+// first time in the process: warm_d2d() pays that on a thread of its own,
+// started with the backend, while the UI is built. (Small owner-drawn
+// things draw on the CPU; a canvas starts there while its GPU target is
+// made, which is slower still: see canvas_impl.)
+void warm_d2d();
 IDWriteFactory* dwrite_factory();
 IWICImagingFactory* wic_factory();
 
@@ -166,6 +172,7 @@ private:
     void finish(ID2D1Geometry* g, const std::optional<paint>& fill, const std::optional<paint>& stroke, float width);
 
     ID2D1RenderTarget* rt_;
+    com<ID2D1Factory> factory_;  // the target's: geometry must come from the factory it was made by
     float scale_;
     com<ID2D1SolidColorBrush> brush_;
     com<ID2D1StrokeStyle> round_;
