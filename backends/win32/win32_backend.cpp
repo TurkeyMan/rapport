@@ -2518,16 +2518,18 @@ private:
         const int size = px(16);
         if (images_[0] && size == icon_px_) return;
         icon_px_ = size;
+        std::vector<const icon*> icons;
+        for (const entry& e : entries_)
+            if (e.button) icons.push_back(&e.button->image());
         for (int state = 0; state < 2; ++state)
         {
             HIMAGELIST old = images_[state];
-            images_[state] = ImageList_Create(size, size, ILC_COLOR32, int(entries_.size()), 0);
-            for (const entry& e : entries_)
+            images_[state] = ImageList_Create(size, size, ILC_COLOR32, int(icons.size()), 0);
+            // All in one bitmap, drawn at once: a render target apiece cost ~0.5 ms each.
+            if (HBITMAP bmp = render_icons(icons, size, win_.scale(), ink(state)))
             {
-                if (!e.button) continue;
-                HBITMAP bmp = render_icon(e.button->image(), size, win_.scale(), ink(state));
                 ImageList_Add(images_[state], bmp, nullptr);
-                if (bmp) DeleteObject(bmp);
+                DeleteObject(bmp);
             }
             SendMessageW(h_, state ? TB_SETDISABLEDIMAGELIST : TB_SETIMAGELIST, 0,
                          reinterpret_cast<LPARAM>(images_[state]));

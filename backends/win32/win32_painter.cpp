@@ -595,6 +595,61 @@ HBITMAP render_icon(const icon& icon, int px, float scale)
     return render_icon(icon, px, scale, theme_color_of(theme_color::window_text));
 }
 
+HBITMAP render_icons(const std::vector<const icon*>& icons, int px, float scale, color ink)
+{
+    const int w = px * int(icons.size());
+    if (w <= 0) return nullptr;
+    com<IWICBitmap> wic;
+    if (!wic_factory() ||
+        FAILED(wic_factory()->CreateBitmap(UINT(w), UINT(px), GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, wic.put())))
+        return nullptr;
+    com<ID2D1RenderTarget> rt;
+    const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
+    if (FAILED(d2d_factory()->CreateWicBitmapRenderTarget(wic.get(), props, rt.put()))) return nullptr;
+    rt->BeginDraw();
+    rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+    {
+        d2d_painter p(rt.get(), scale);
+        p.override_color(theme_color::window_text, ink);
+        p.override_color(theme_color::text, ink);
+        const size_f size{px / scale, px / scale};
+        for (size_t i = 0; i < icons.size(); ++i)
+        {
+            // Each in its own square, kept to it.
+            const float x = float(i) * px / scale;
+            rt->SetTransform(D2D1::Matrix3x2F::Translation(x, 0));
+            p.push_clip({0, 0, size.w, size.h});
+            if (icons[i]->draw)
+                icons[i]->draw(p, size);
+            else
+                builtin::draw_builtin_icon(icons[i]->name, p, size);
+            p.pop_clip();
+        }
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+    }
+    rt->EndDraw();
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -px;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp && bits)
+    {
+        wic->CopyPixels(nullptr, UINT(w) * 4, UINT(w) * UINT(px) * 4, static_cast<BYTE*>(bits));
+        // Image lists want straight alpha; Direct2D drew premultiplied.
+        auto* p = static_cast<uint8_t*>(bits);
+        for (int i = 0; i < w * px; ++i, p += 4)
+            if (const unsigned a = p[3]; a && a < 255)
+                for (int c = 0; c < 3; ++c) p[c] = uint8_t(std::min(255u, (p[c] * 255 + a / 2) / a));
+    }
+    return bmp;
+}
+
 HBITMAP render_icon(const icon& icon, int px, float scale, color ink)
 {
     com<IWICBitmap> wic = icon_bitmap(icon, px, scale, ink);

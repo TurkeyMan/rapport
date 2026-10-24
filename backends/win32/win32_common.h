@@ -199,6 +199,9 @@ private:
 // to a 32-bpp premultiplied DIB of `px` device pixels square, in `ink`.
 HBITMAP render_icon(const icon& icon, int px, float scale);
 HBITMAP render_icon(const icon& icon, int px, float scale, color ink);
+// Several icons side by side in one bitmap (px * count wide), drawn through
+// one render target: for an image list, which splits it into its icons.
+HBITMAP render_icons(const std::vector<const icon*>& icons, int px, float scale, color ink);
 HICON render_icon_handle(const icon& icon, int px, float scale);
 // Draws an icon with a Painter onto an HDC rectangle (owner-drawn buttons).
 void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink);
