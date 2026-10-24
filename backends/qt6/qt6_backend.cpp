@@ -1632,6 +1632,7 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override;
     void resizeEvent(QResizeEvent*) override;
+    void showEvent(QShowEvent*) override;
     void mousePressEvent(QMouseEvent* e) override { press(e); }
     // Qt's second press of a double click.
     void mouseDoubleClickEvent(QMouseEvent* e) override { press(e); }
@@ -1686,7 +1687,13 @@ public:
     }
 
     void invalidate() override { w_->update(); }
-    size_f size() const override { return {float(w_->width()), float(w_->height())}; }
+    // Nothing until it has been laid out and shown, as on GTK: before that a
+    // Qt widget has a placeholder size (640x480), which an app sizing its
+    // window round the canvas would take for real.
+    size_f size() const override
+    {
+        return laid_out_ ? size_f{float(w_->width()), float(w_->height())} : size_f{};
+    }
     float device_scale() const override { return float(w_->devicePixelRatioF()); }
     void set_cursor(cursor c) override
     {
@@ -1744,7 +1751,14 @@ public:
     }
     void resized()
     {
-        if (resize_) resize_(size());
+        if (laid_out_ && resize_) resize_(size());
+    }
+    // Shown, so laid out: its size is real from now on.
+    void shown()
+    {
+        if (laid_out_) return;
+        laid_out_ = true;
+        resized();
     }
     bool pointer(const pointer_event& e) { return pointer_ && pointer_(e); }
     bool scroll(const scroll_event& e) { return scroll_ && scroll_(e); }
@@ -1765,6 +1779,7 @@ public:
     }
 
 private:
+    bool laid_out_ = false;
     canvas_widget* canvas() const { return static_cast<canvas_widget*>(w_); }
     void tick()
     {
@@ -1798,6 +1813,11 @@ void canvas_widget::paintEvent(QPaintEvent*)
 void canvas_widget::resizeEvent(QResizeEvent*)
 {
     if (owner) owner->resized();
+}
+
+void canvas_widget::showEvent(QShowEvent*)
+{
+    if (owner) owner->shown();
 }
 
 void canvas_widget::press(QMouseEvent* e)
