@@ -9,8 +9,10 @@
 #include <vector>
 
 #ifdef _WIN32
-#include <shlobj.h>
 #include <windows.h>
+// After windows.h; not part of it under WIN32_LEAN_AND_MEAN (ShellExecuteEx).
+#include <shellapi.h>
+#include <shlobj.h>
 #else
 #include <dlfcn.h>
 #include <fcntl.h>
