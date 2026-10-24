@@ -939,6 +939,7 @@ public:
 
     std::string text() const override { return gtk_entry_get_text(GTK_ENTRY(w_)); }
     void set_text(const std::string& t) override { gtk_entry_set_text(GTK_ENTRY(w_), t.c_str()); }
+    void set_read_only(bool v) override { gtk_editable_set_editable(GTK_EDITABLE(w_), !v); }
     void set_placeholder(const std::string& t) override
     {
         gtk_entry_set_placeholder_text(GTK_ENTRY(w_), t.c_str());

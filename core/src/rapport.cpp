@@ -164,6 +164,7 @@ private:
     static void apply(const spec::entry& s, widget& w)
     {
         auto& e = static_cast<entry&>(w);
+        if (s.read_only) e.set_read_only(true);
         if (s.on_changed) e.on_changed(s.on_changed);
         if (s.on_activate) e.on_activate(s.on_activate);
         bind(s.bind, w);

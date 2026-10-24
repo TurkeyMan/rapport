@@ -528,6 +528,8 @@ public:
     virtual std::string text() const = 0;
     virtual void set_text(const std::string&) = 0;
     virtual void set_placeholder(const std::string&) = 0;
+    // Shows its text (selectable, copyable) without letting it be edited.
+    virtual void set_read_only(bool) {}
     virtual void on_changed(std::function<void(const std::string&)>) = 0;
     virtual void on_activate(std::function<void()>) = 0;  // Enter pressed
 };

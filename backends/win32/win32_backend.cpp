@@ -1052,6 +1052,7 @@ public:
         SetWindowTextW(h_, wide(t).c_str());
         quiet_ = false;
     }
+    void set_read_only(bool v) override { SendMessageW(h_, EM_SETREADONLY, v, 0); }
     void set_placeholder(const std::string& p) override
     {
         SendMessageW(h_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(wide(p).c_str()));

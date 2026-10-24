@@ -188,6 +188,7 @@ struct check
 struct entry
 {
     std::string text, placeholder;
+    bool read_only = false;
     std::function<void(const std::string&)> on_changed;
     std::function<void()> on_activate;
     rap::entry** bind = nullptr;
@@ -635,6 +636,11 @@ class entry : public builder<entry, spec::entry>
 {
 public:
     explicit entry(std::string text = {}) { s().text = std::move(text); }
+    entry& read_only(bool v = true)
+    {
+        s().read_only = v;
+        return *this;
+    }
     entry& placeholder(std::string p)
     {
         s().placeholder = std::move(p);
