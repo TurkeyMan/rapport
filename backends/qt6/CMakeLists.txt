@@ -31,6 +31,12 @@ if(RAPPORT_STATIC)
     target_link_libraries(rapport_qt6 PRIVATE rapport::rapport)
 endif()
 target_link_libraries(rapport_qt6 PRIVATE rapport::headers Qt6::Widgets)
+# Printing, where Qt's print support is installed (it comes with qtbase).
+find_package(Qt6 QUIET COMPONENTS PrintSupport)
+if(Qt6PrintSupport_FOUND)
+    target_link_libraries(rapport_qt6 PRIVATE Qt6::PrintSupport)
+    target_compile_definitions(rapport_qt6 PRIVATE RAPPORT_QT_PRINT=1)
+endif()
 target_include_directories(rapport_qt6 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 set_target_properties(rapport_qt6 PROPERTIES
     PREFIX ""

@@ -146,6 +146,18 @@ public:
     // Replaces a theme colour for this painter (a list's soft selection).
     void override_color(theme_color role, color c) { overrides_.push_back({role, c}); }
 
+    // On paper (print_job), with the QPainter scaled to points: theme
+    // colours are print_color()'s, the device has `scale` dots per point,
+    // and font sizes are kept from being scaled twice (the device's dpi
+    // already converts points, then the painter's scale would again).
+    void for_print(float scale, float font_scale)
+    {
+        print_scale_ = scale;
+        font_scale_ = font_scale;
+        for (int r = 0; r <= int(theme_color::neutral); ++r)
+            override_color(theme_color(r), print_color(theme_color(r)));
+    }
+
     void line(point_f a, point_f b, const paint& paint, float width, line_cap cap) override
     {
         p_.setPen(pen(paint, width, cap));
@@ -212,7 +224,11 @@ public:
         p_.restore();
     }
 
-    float device_scale() const override { return w_ ? float(w_->devicePixelRatioF()) : 1.f; }
+    float device_scale() const override
+    {
+        if (print_scale_ > 0) return print_scale_;
+        return w_ ? float(w_->devicePixelRatioF()) : 1.f;
+    }
 
     void push_clip(rect_f r) override
     {
@@ -250,6 +266,7 @@ private:
         if (style.size > 0) f.setPointSizeF(style.size);
         if (style.bold) f.setBold(true);
         if (style.italic) f.setItalic(true);
+        if (font_scale_ != 1) f.setPointSizeF(f.pointSizeF() * font_scale_);
         return f;
     }
 
@@ -282,6 +299,8 @@ private:
     const QWidget* w_;
     paint default_text_;
     std::vector<std::pair<theme_color, color>> overrides_;
+    float print_scale_ = 0;  // 0: not printing
+    float font_scale_ = 1;
 };
 
 }  // namespace rap::qt6

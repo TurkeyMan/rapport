@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: rapport\n"
 "Report-Msgid-Bugs-To: https://github.com/TurkeyMan/rapport/issues\n"
-"POT-Creation-Date: 2026-10-24 16:39+0000\n"
+"POT-Creation-Date: 2026-10-24 16:51+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -17,23 +17,39 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: backends/gtk3/gtk3_backend.cpp:421 backends/gtk4/gtk4_backend.cpp:3044
-#, c++-format
-msgid "A file named “{0}” already exists. Replace it?"
+#: backends/gtk-common/gtk_common.h:707 backends/qt6/qt6_backend.cpp:3928
+#: backends/win32/win32_backend.cpp:6308
+msgid "nothing to print"
 msgstr ""
 
-#: backends/gtk3/gtk3_backend.cpp:426 backends/gtk4/gtk4_backend.cpp:3050
-msgctxt "button"
-msgid "_Replace"
-msgstr ""
-
+#: backends/gtk-common/gtk_common.h:717 backends/qt6/qt6_backend.cpp:4014
 #: backends/win32/win32_backend.cpp:6293
 #, c++-format
 msgid "couldn't write {0}"
 msgstr ""
 
-#: backends/win32/win32_backend.cpp:6308
-msgid "nothing to print"
+#: backends/gtk-common/gtk_common.h:722 backends/qt6/qt6_backend.cpp:3933
+#: backends/win32/win32_backend.cpp:6374
+msgid "Document"
+msgstr ""
+
+#: backends/gtk-common/gtk_common.h:767 backends/qt6/qt6_backend.cpp:3961
+#: backends/qt6/qt6_backend.cpp:3974 backends/win32/win32_backend.cpp:6387
+msgid "printing failed"
+msgstr ""
+
+#: backends/gtk3/gtk3_backend.cpp:421 backends/gtk4/gtk4_backend.cpp:3046
+#, c++-format
+msgid "A file named “{0}” already exists. Replace it?"
+msgstr ""
+
+#: backends/gtk3/gtk3_backend.cpp:426 backends/gtk4/gtk4_backend.cpp:3052
+msgctxt "button"
+msgid "_Replace"
+msgstr ""
+
+#: backends/qt6/qt6_backend.cpp:3977
+msgid "printing isn't available with this toolkit yet"
 msgstr ""
 
 #: backends/win32/win32_backend.cpp:6322
@@ -44,16 +60,8 @@ msgstr ""
 msgid "the print dialog failed"
 msgstr ""
 
-#: backends/win32/win32_backend.cpp:6374
-msgid "Document"
-msgstr ""
-
 #: backends/win32/win32_backend.cpp:6379
 msgid "the printer didn't start the document"
-msgstr ""
-
-#: backends/win32/win32_backend.cpp:6387
-msgid "printing failed"
 msgstr ""
 
 #: backends/win32/win32_backend.cpp:6424

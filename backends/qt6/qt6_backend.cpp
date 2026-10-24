@@ -33,6 +33,10 @@
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
+#if RAPPORT_QT_PRINT
+#include <QPrintDialog>
+#include <QPrinter>
+#endif
 #include <QLibraryInfo>
 #include <QLineEdit>
 #include <QListWidget>
@@ -3908,14 +3912,106 @@ public:
 
     bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
 
-    // Not yet: the dialog and pages come with this backend's print support.
-    void print(rap::window*, print_job job) override
+    // Qt's print dialog and QPrinter, once the caller has returned. With
+    // RAPPORT_PRINT_TO, a .pdf (QPrinter's own) or .png pages, no dialog.
+    void print(rap::window* parent, print_job job) override
     {
-        post(
-            [job = std::move(job)]
+        QWidget* over = parent ? static_cast<window_impl*>(parent)->frame() : nullptr;
+        post([over, job = std::move(job)]() mutable { run_print(over, job); });
+    }
+    static void run_print(QWidget* parent, print_job& job)
+    {
+        auto finish = [&](bool ok, std::string error)
+        {
+            if (job.done) job.done(ok, std::move(error));
+        };
+        if (!job.draw_page) return finish(false, i18n::tr("rapport", "nothing to print"));
+        const QString to = qEnvironmentVariable("RAPPORT_PRINT_TO");
+        if (to.endsWith(".png", Qt::CaseInsensitive)) return print_to_png(to, job, finish);
+#if RAPPORT_QT_PRINT
+        QPrinter printer(QPrinter::HighResolution);
+        printer.setDocName(job.title.empty() ? QString(i18n::tr("rapport", "Document")) : qs(job.title));
+        if (job.orientation != page_orientation::automatic)
+            printer.setPageOrientation(job.orientation == page_orientation::landscape
+                                           ? QPageLayout::Landscape
+                                           : QPageLayout::Portrait);
+        if (to.endsWith(".pdf", Qt::CaseInsensitive))
+        {
+            printer.setOutputFormat(QPrinter::PdfFormat);
+            printer.setOutputFileName(to);
+        }
+        else
+        {
+            QPrintDialog dialog(&printer, parent);
+            if (dialog.exec() != QDialog::Accepted) return finish(false, {});
+        }
+        const QRectF area = printer.pageRect(QPrinter::Point);
+        const size_f printable{float(area.width()), float(area.height())};
+        int pages = job.pages;
+        if (job.on_begin)
+            if (const int n = job.on_begin(printable); n >= 0) pages = n;
+        // The dialog's page range, from 1; none is all of them.
+        int first = 0, last = pages - 1;
+        if (printer.fromPage() > 0)
+        {
+            first = std::max(printer.fromPage() - 1, 0);
+            last = std::min(printer.toPage() - 1, pages - 1);
+        }
+        QPainter qp;
+        if (!qp.begin(&printer)) return finish(false, i18n::tr("rapport", "printing failed"));
+        const float dpi = float(printer.resolution());
+        for (int page = first; page <= last; ++page)
+        {
+            if (page > first) printer.newPage();
+            qp.save();
+            qp.scale(dpi / 72, dpi / 72);
+            qt_painter p(qp, nullptr);
+            p.for_print(dpi / 72, 72.f / float(printer.logicalDpiY()));
+            job.draw_page(p, page, printable);
+            qp.restore();
+        }
+        const bool ok = qp.end();
+        finish(ok, ok ? std::string() : std::string(i18n::tr("rapport", "printing failed")));
+#else
+        (void)parent;
+        finish(false, i18n::tr("rapport", "printing isn't available with this toolkit yet"));
+#endif
+    }
+    // RAPPORT_PRINT_TO=out.png: each page as A4 at 144 dpi, no dialog, as on
+    // Windows: for tests.
+    template <class Finish>
+    static void print_to_png(const QString& path, print_job& job, Finish& finish)
+    {
+        const bool landscape = job.orientation == page_orientation::landscape;
+        const size_f paper = landscape ? size_f{842, 595} : size_f{595, 842};
+        const float dpi = 144;
+        int pages = job.pages;
+        if (job.on_begin)
+            if (const int n = job.on_begin(paper); n >= 0) pages = n;
+        bool ok = true;
+        for (int page = 0; page < pages && ok; ++page)
+        {
+            QImage image(int(std::lround(paper.w * dpi / 72)), int(std::lround(paper.h * dpi / 72)),
+                         QImage::Format_RGB32);
+            image.fill(Qt::white);
             {
-                if (job.done) job.done(false, "printing isn't available with this toolkit yet");
-            });
+                QPainter qp(&image);
+                qp.scale(dpi / 72, dpi / 72);
+                qt_painter p(qp, nullptr);
+                p.for_print(dpi / 72, 72.f / float(image.logicalDpiY()));
+                job.draw_page(p, page, paper);
+            }
+            QString out = path;
+            if (page > 0)
+            {
+                const int dot = path.lastIndexOf('.');
+                const QString n = "-" + QString::number(page + 1);
+                out = dot < 0 ? path + n : path.left(dot) + n + path.mid(dot);
+            }
+            ok = image.save(out);
+        }
+        finish(ok, ok ? std::string()
+                      : i18n::format(i18n::tr("rapport", "couldn't write {0}"), path.toStdString()));
     }
     void set_clipboard(const std::string& s) override
     {
