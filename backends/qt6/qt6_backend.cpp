@@ -1745,6 +1745,17 @@ public:
     // From canvas_widget.
     void paint(QPainter& qp)
     {
+        // A new device scale is a resize in device pixels (canvas::on_resize),
+        // told before the frame that uses it. Qt sends child widgets nothing
+        // when it changes: on Wayland the compositor's fractional scale
+        // arrives after the window shows, replacing the whole number Qt
+        // starts with, and it changes on a move to another monitor.
+        const float scale = float(w_->devicePixelRatioF());
+        if (laid_out_ && scale != scale_)
+        {
+            scale_ = scale;
+            resized();
+        }
         if (!paint_) return;
         qt_painter p(qp, w_);
         paint_(p, size());
@@ -1758,6 +1769,7 @@ public:
     {
         if (laid_out_) return;
         laid_out_ = true;
+        scale_ = float(w_->devicePixelRatioF());
         resized();
     }
     bool pointer(const pointer_event& e) { return pointer_ && pointer_(e); }
@@ -1780,6 +1792,7 @@ public:
 
 private:
     bool laid_out_ = false;
+    float scale_ = 0;  // the device scale the app last heard of
     canvas_widget* canvas() const { return static_cast<canvas_widget*>(w_); }
     void tick()
     {
