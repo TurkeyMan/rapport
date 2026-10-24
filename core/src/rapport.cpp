@@ -97,6 +97,7 @@ public:
     void created(const node& n, widget& w) override
     {
         if (!n.common.enabled) w.set_enabled(false);
+        if (!n.common.visible) w.set_visible(false);
         if (!n.common.tooltip.empty()) w.set_tooltip(n.common.tooltip);
         if (n.common.handle) *n.common.handle = &w;
         std::visit([&](const auto& s) { apply(s, w); }, n.spec);

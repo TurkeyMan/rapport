@@ -520,6 +520,9 @@ public:
         // shows with its parent anyway.
         if (v && !w_->parentWidget()) return;
         w_->setVisible(v);
+        // A form field's row label goes with it.
+        if (auto* label = qobject_cast<QWidget*>(w_->property("rapport-form-label").value<QObject*>()))
+            label->setVisible(v);
     }
     void set_tooltip(const std::string& t) override { w_->setToolTip(qs(t)); }
     void focus() override { w_->setFocus(Qt::OtherFocusReason); }
@@ -3166,7 +3169,8 @@ public:
                                std::holds_alternative<spec::group>(n.spec) ||
                                std::holds_alternative<spec::scroll>(n.spec) ||
                                std::holds_alternative<spec::toolbar>(n.spec);
-        if (container && n.common.handle) add<plain_impl>(n, w);
+        // A widget for a container with a handle, or one created hidden.
+        if (container && (n.common.handle || !n.common.visible)) add<plain_impl>(n, w);
         if (int width = px(n.common.width); width > 0) w->setMinimumWidth(width);
         if (int height = px(n.common.height); height > 0) w->setMinimumHeight(height);
         return w;
@@ -3273,6 +3277,9 @@ private:
             {
                 auto* label = new QLabel(qs(s.labels[i]));
                 label->setTextFormat(Qt::PlainText);
+                // set_visible on the field shows and hides its label too.
+                field->setProperty("rapport-form-label", QVariant::fromValue<QObject*>(label));
+                if (!s.fields[i].common.visible) label->setVisible(false);
                 l->addRow(label, field);
             }
         }

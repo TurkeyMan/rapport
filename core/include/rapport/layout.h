@@ -52,6 +52,7 @@ struct common
     int stretch = 0;  // share of spare space along the parent box/splitter
     extent width, height;
     bool enabled = true;
+    bool visible = true;  // false: created hidden (shown later with set_visible)
     std::string tooltip;
     // Filled with the node's widget, for hiding/disabling any node, boxes
     // and toolbars included (they have no interface of their own).
@@ -353,6 +354,13 @@ public:
     Self& enabled(bool e)
     {
         node_.common.enabled = e;
+        return self();
+    }
+    // Created hidden: a part of a window shown only in some state (a field
+    // for one choice of a drop-down), shown later with set_visible.
+    Self& visible(bool v)
+    {
+        node_.common.visible = v;
         return self();
     }
     Self& tooltip(std::string t)

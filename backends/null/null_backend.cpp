@@ -324,7 +324,7 @@ public:
                                std::holds_alternative<spec::group>(n.spec) ||
                                std::holds_alternative<spec::scroll>(n.spec) ||
                                std::holds_alternative<spec::toolbar>(n.spec);
-        if (container && n.common.handle) make<stub<rap::widget>>(n);
+        if (container && (n.common.handle || !n.common.visible)) make<stub<rap::widget>>(n);
     }
 
 private:

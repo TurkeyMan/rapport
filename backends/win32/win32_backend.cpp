@@ -4607,7 +4607,7 @@ private:
     }
     void handle(const node& n, item* item)
     {
-        if (!n.common.handle) return;
+        if (!n.common.handle && n.common.visible) return;
         auto w = std::make_unique<plain_widget>(*item, win_);
         sink_.created(n, *w);
         win_.widgets.push_back(std::move(w));

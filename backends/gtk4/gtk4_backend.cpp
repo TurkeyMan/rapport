@@ -2254,7 +2254,8 @@ public:
                                std::holds_alternative<spec::group>(n.spec) ||
                                std::holds_alternative<spec::scroll>(n.spec) ||
                                std::holds_alternative<spec::toolbar>(n.spec);
-        if (container && n.common.handle) add<plain_impl>(n, w);
+        // A widget for a container with a handle, or one created hidden.
+        if (container && (n.common.handle || !n.common.visible)) add<plain_impl>(n, w);
         int width = px(n.common.width), height = px(n.common.height);
         if (width > 0 || height > 0) gtk_widget_set_size_request(w, width, height);
         if (n.common.stretch > 0)
@@ -2326,6 +2327,9 @@ private:
             GtkWidget* label = gtk_label_new(s.labels[i].c_str());
             gtk_label_set_xalign(GTK_LABEL(label), 1);
             gtk_widget_add_css_class(label, "dim-label");
+            // set_visible on the field shows and hides its label too.
+            g_object_set_data(G_OBJECT(field), "rapport-form-label", label);
+            if (!s.fields[i].common.visible) gtk_widget_set_visible(label, false);
             gtk_grid_attach(GTK_GRID(grid), label, 0, int(i), 1, 1);
             gtk_grid_attach(GTK_GRID(grid), field, 1, int(i), 1, 1);
         }

@@ -583,7 +583,27 @@ public:
     }
 
     void set_enabled(bool e) override { gtk_widget_set_sensitive(outer_, e); }
-    void set_visible(bool v) override { gtk_widget_set_visible(outer_, v); }
+    void set_visible(bool v) override
+    {
+        show(outer_, v);
+        // A form field's row label goes with it.
+        if (auto* label = static_cast<GtkWidget*>(g_object_get_data(G_OBJECT(outer_), "rapport-form-label")))
+            show(label, v);
+    }
+    static void show(GtkWidget* w, bool v)
+    {
+#if GTK_MAJOR_VERSION >= 4
+        gtk_widget_set_visible(w, v);
+#else
+        // Hidden, it stays hidden when its window shows everything; shown,
+        // its children show too (they were never shown with the window).
+        gtk_widget_set_no_show_all(w, !v);
+        if (v)
+            gtk_widget_show_all(w);
+        else
+            gtk_widget_hide(w);
+#endif
+    }
     void set_tooltip(const std::string& t) override { gtk_widget_set_tooltip_text(w_, t.c_str()); }
     void focus() override { gtk_widget_grab_focus(w_); }
     bool has_focus() const override
