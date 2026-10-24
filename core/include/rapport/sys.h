@@ -23,6 +23,11 @@
 #include <utility>
 #include <vector>
 
+namespace rap
+{
+enum class pixel_format;  // widgets.h
+}
+
 namespace rap::sys
 {
 
@@ -319,5 +324,21 @@ struct http_options
 // and redirects are the platform's: WinHTTP on Windows; elsewhere libcurl,
 // loaded when first used (without it, the response says so).
 http_response http_get(const std::string& url, const http_options& = {});
+
+// -- images -------------------------------------------------------------------
+
+struct decoded_image
+{
+    int width = 0, height = 0;
+    rap::pixel_format format{};  // as the platform decodes it; ui::create_image takes either
+    std::vector<uint8_t> pixels;  // rows of width * 4 bytes, top first
+};
+
+// PNG, JPEG, GIF, BMP, ... in memory, decoded by the platform: WIC on
+// Windows; elsewhere gdk-pixbuf, loaded on first use (without it, nullopt).
+// For bytes from anywhere, the network included: an image over 8192 px on a
+// side or 64 Mpx is refused before its pixels are allocated. The first frame
+// only; EXIF orientation isn't applied. Any thread.
+std::optional<decoded_image> decode_image(std::span<const uint8_t> bytes);
 
 }  // namespace rap::sys
