@@ -3291,9 +3291,8 @@ public:
         }
     }
     std::vector<item*> pages;
-    // Lazy pages: their builders until built, and whether each page is one.
+    // Lazy pages: their builders until built.
     std::vector<std::function<node()>> lazy;
-    std::vector<bool> isLazy;
     std::function<item*(const node&)> buildPage;
 
     int current() const override { return TabCtrl_GetCurSel(h_); }
@@ -3332,7 +3331,9 @@ public:
         SIZE in{0, 0};
         for (size_t i = 0; i < pages.size(); ++i)
         {
-            if (i < isLazy.size() && isLazy[i]) continue;  // they take the area they're given
+            // An unbuilt page takes the area it's given; once built it has
+            // a size like any other.
+            if (i < lazy.size() && lazy[i]) continue;
             const SIZE s = pages[i]->natural();
             in.cx = std::max(in.cx, s.cx);
             in.cy = std::max(in.cy, s.cy);
@@ -3387,7 +3388,6 @@ public:
     }
     std::vector<item*> pages;
     std::vector<std::function<node()>> lazy;
-    std::vector<bool> isLazy;
     std::function<item*(const node&)> buildPage;
 
     int current() const override { return std::max(0, int(SendMessageW(h_, LB_GETCURSEL, 0, 0))); }
@@ -3439,7 +3439,9 @@ public:
         SIZE in{0, 0};
         for (size_t i = 0; i < pages.size(); ++i)
         {
-            if (i < isLazy.size() && isLazy[i]) continue;  // they take the area they're given
+            // An unbuilt page takes the area it's given; once built it has
+            // a size like any other.
+            if (i < lazy.size() && lazy[i]) continue;
             const SIZE s = pages[i]->natural();
             in.cx = std::max(in.cx, s.cx);
             in.cy = std::max(in.cy, s.cy);
@@ -4269,9 +4271,26 @@ public:
             return;
         }
         SendMessageW(hwnd_, WM_SETREDRAW, FALSE, 0);
+        grow_to_content();
         layout_now();
         SendMessageW(hwnd_, WM_SETREDRAW, TRUE, 0);
         RedrawWindow(hwnd_, nullptr, nullptr, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
+    // A window made smaller than content it has since gained (a page built
+    // the first time it's shown) grows to fit it, as resizing would.
+    void grow_to_content()
+    {
+        if (!root || IsZoomed(hwnd_) || IsIconic(hwnd_)) return;
+        RECT c;
+        GetClientRect(hwnd_, &c);
+        const SIZE n = root->natural();
+        const int m = margin();
+        const long w = std::max<long>(c.right, n.cx + 2 * m), h = std::max<long>(c.bottom, n.cy + 2 * m);
+        if (w == c.right && h == c.bottom) return;
+        RECT r{0, 0, w, h};
+        adjust(r);
+        SetWindowPos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     void layout_now()
     {
@@ -4946,7 +4965,6 @@ private:
     {
         for (const node& p : s.pages) t->pages.push_back(build(p, parent, orientation::vertical));
         t->lazy = s.lazy;
-        for (const auto& l : s.lazy) t->isLazy.push_back(bool(l));
         t->buildPage = [&win = win_, &sink = sink_, parent](const node& page)
         { return builder(win, sink).build(page, parent, orientation::vertical); };
         return t;
