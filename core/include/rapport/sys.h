@@ -299,6 +299,9 @@ std::size_t available_memory();
 
 // Opens a file or folder with its default program, without waiting.
 bool open_path(const std::filesystem::path&);
+// Opens a web address (https:, mailto:) in the user's browser or mail
+// program, without waiting.
+bool open_url(std::string_view url);
 // The system's "Open with" chooser for a file. Windows only (Linux desktops
 // have no common one): false elsewhere.
 bool open_with(const std::filesystem::path&);
