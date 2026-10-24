@@ -323,6 +323,62 @@ HWND make_host(HWND parent, DWORD style = 0)
                            0, parent, nullptr, instance(), nullptr);
 }
 
+// -- flicker-free painting ----------------------------------------------------
+
+// A control that paints through an off-screen buffer: its erase is skipped
+// and WM_PAINT renders it (WM_PRINTCLIENT) into a buffer that reaches the
+// screen in one step. For controls that erase and then draw, and so flash
+// whenever a layout moves or resizes them: group boxes, links, list headers.
+enum class buffer_bg
+{
+    own,     // the control fills its own background
+    parent,  // the buffer starts as the parent's background (a link)
+    // The parent's background, leaving out the controls lying over it (a
+    // group box draws only its frame and title, and created before its
+    // contents it's above them in z-order: its paint would cover them until
+    // they repainted, and they would flash).
+    frame,
+};
+
+void paint_buffered(HWND h, buffer_bg bg)
+{
+    static const bool ready = SUCCEEDED(BufferedPaintInit());
+    if (!ready) return;
+    SetWindowSubclass(
+        h,
+        [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
+        {
+            if (msg == WM_ERASEBKGND) return 1;
+            if (msg != WM_PAINT) return DefSubclassProc(h, msg, wp, lp);
+            const auto bg = static_cast<buffer_bg>(data);
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            RECT r;
+            GetClientRect(h, &r);
+            if (bg == buffer_bg::frame)
+                for (HWND s = GetWindow(GetParent(h), GW_CHILD); s; s = GetWindow(s, GW_HWNDNEXT))
+                {
+                    if (s == h || !IsWindowVisible(s)) continue;
+                    RECT sr;
+                    GetWindowRect(s, &sr);
+                    MapWindowPoints(nullptr, h, reinterpret_cast<POINT*>(&sr), 2);
+                    ExcludeClipRect(dc, sr.left, sr.top, sr.right, sr.bottom);
+                }
+            HDC mem = nullptr;
+            if (HPAINTBUFFER buffer = BeginBufferedPaint(dc, &r, BPBF_COMPATIBLEBITMAP, nullptr, &mem))
+            {
+                if (bg != buffer_bg::own) DrawThemeParentBackground(h, mem, &r);
+                DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND);
+                EndBufferedPaint(buffer, TRUE);
+            }
+            else
+                DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT | PRF_ERASEBKGND);
+            EndPaint(h, &ps);
+            return 0;
+        },
+        0x42, DWORD_PTR(bg));
+}
+
 // -- tooltips -----------------------------------------------------------------
 
 void set_tooltip_text(HWND control, const std::string& text)
@@ -856,8 +912,11 @@ public:
         , on_click_(s.on_click)
     {
         if (link_)
+        {
             // The system's link control: its colour, focus and Enter.
             adopt(create_control(win, parent, WC_LINK, link_markup(s.text), WS_TABSTOP));
+            paint_buffered(h_, buffer_bg::parent);
+        }
         else if (s.selectable)
             adopt(create_control(win, parent, L"EDIT", wide(s.text), ES_READONLY | ES_AUTOHSCROLL));
         else
@@ -1524,8 +1583,11 @@ public:
     group_item(win_context& win, HWND parent, const std::string& title)
         : win_(win)
     {
-        // Created first so the controls inside sit above it in z-order.
-        h_ = create_control(win, parent, L"BUTTON", wide(title), BS_GROUPBOX, WS_EX_TRANSPARENT);
+        // Created first so the controls inside sit above it in z-order; it
+        // paints around them (WS_CLIPSIBLINGS), buffered, so resizing it in
+        // a layout doesn't flash.
+        h_ = create_control(win, parent, L"BUTTON", wide(title), BS_GROUPBOX | WS_CLIPSIBLINGS);
+        paint_buffered(h_, buffer_bg::frame);
     }
     ~group_item() override { DestroyWindow(h_); }
     item* content = nullptr;
@@ -2063,6 +2125,9 @@ public:
         if (!s.headers) style |= LVS_NOCOLUMNHEADER;
         adopt(create_control(win, parent, WC_LISTVIEWW, L"", style, WS_EX_CLIENTEDGE));
         ListView_SetExtendedListViewStyle(h_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP);
+        // LVS_EX_DOUBLEBUFFER covers the rows, not the header: it flashed
+        // whenever the list was resized.
+        if (HWND header = ListView_GetHeader(h_)) paint_buffered(header, buffer_bg::own);
         visible_.assign(columns_.size(), true);
         for (size_t i = 0; i < columns_.size(); ++i)
         {
@@ -3500,18 +3565,54 @@ public:
                     sz[i] = dir_ == orientation::horizontal ? n.cx : n.cy;
                     fixed += sz[i];
                 }
-            for (size_t i : shown)
-                if (panes[i]->stretch) sz[i] = stretch_sum ? (rest - fixed) * panes[i]->stretch / stretch_sum : 0;
-        }
-        else
-        {
-            long given = 0;
-            for (size_t k = 1; k < shown.size(); ++k)
+            if (stretch_sum)
+                for (size_t i : shown)
+                    if (panes[i]->stretch) sz[i] = (rest - fixed) * panes[i]->stretch / stretch_sum;
+            // None stretches: the room left over is shared in proportion to
+            // their natural sizes (as Qt's splitter starts), not left empty.
+            if (!stretch_sum && fixed > 0 && rest > fixed)
             {
-                sz[shown[k]] = sizes_[shown[k]];
-                given += sz[shown[k]];
+                long given = 0;
+                for (size_t k = 0; k < shown.size(); ++k)
+                {
+                    const size_t i = shown[k];
+                    const long add = k + 1 < shown.size() ? (rest - fixed) * sz[i] / fixed : rest - fixed - given;
+                    sz[i] += add;
+                    given += add;
+                }
             }
-            if (!shown.empty()) sz[shown[0]] = std::max(0L, rest - given);
+        }
+        else if (!shown.empty())
+        {
+            // The pane that stretches (else the first) takes what the window
+            // gains or loses; the others keep the sizes they were dragged to,
+            // down to their natural sizes if the window gets too small for that.
+            size_t flex = shown[0];
+            for (size_t i : shown)
+                if (panes[i]->stretch > 0)
+                {
+                    flex = i;
+                    break;
+                }
+            long given = 0;
+            for (size_t i : shown)
+                if (i != flex)
+                {
+                    sz[i] = sizes_[i];
+                    given += sz[i];
+                }
+            sz[flex] = rest - given;
+            long short_by = natural_along(flex) - sz[flex];
+            for (size_t k = shown.size(); short_by > 0 && k-- > 0;)
+            {
+                const size_t i = shown[k];
+                if (i == flex) continue;
+                const long take = std::clamp(sz[i] - natural_along(i), 0L, short_by);
+                sz[i] -= take;
+                sz[flex] += take;
+                short_by -= take;
+            }
+            sz[flex] = std::max(0L, sz[flex]);
         }
         long pos = dir_ == orientation::horizontal ? r.left : r.top;
         size_t b = 0;
@@ -3545,6 +3646,11 @@ public:
 
 private:
     int bar() const { return win_.px(5); }
+    long natural_along(size_t i) const
+    {
+        const SIZE n = panes[i]->natural();
+        return dir_ == orientation::horizontal ? n.cx : n.cy;
+    }
     LRESULT bar_message(size_t index, HWND h, UINT msg, LPARAM lp, bool& handled)
     {
         handled = true;
@@ -3559,8 +3665,10 @@ private:
             pressed_ = sizes_;
             return 0;
         case WM_LBUTTONUP:
-            ReleaseCapture();
+        case WM_CAPTURECHANGED:
+            if (!dragging_) break;
             dragging_ = false;
+            if (msg == WM_LBUTTONUP) ReleaseCapture();
             if (sizes_ != pressed_ && moved_) moved_();
             return 0;
         case WM_MOUSEMOVE:
@@ -3593,9 +3701,17 @@ private:
         long bar_start = dir_ == orientation::horizontal ? rect_.left : rect_.top;
         for (size_t k = 0; k <= index; ++k) bar_start += sz[k] + (k < index ? bar() : 0);
         long delta = at - bar() / 2 - bar_start;
+        // No pane goes below its natural size: its content doesn't shrink,
+        // so less would overlap the next pane or run past the window.
+        std::vector<long> least(sz.size());
+        for (size_t k = 0; k < sz.size(); ++k)
+        {
+            const SIZE n = panes[shown[k]]->natural();
+            least[k] = std::min(sz[k], dir_ == orientation::horizontal ? n.cx : n.cy);
+        }
         long below = 0;  // what the panes after the bar can give up
-        for (size_t k = index + 1; k < sz.size(); ++k) below += sz[k];
-        delta = std::clamp(delta, -sz[index], below);
+        for (size_t k = index + 1; k < sz.size(); ++k) below += sz[k] - least[k];
+        delta = std::clamp(delta, least[index] - sz[index], std::max(0L, below));
         if (delta == 0) return;
 
         sz[index] += delta;
@@ -3603,7 +3719,7 @@ private:
         else
             for (size_t k = sz.size() - 1; delta > 0 && k > index; --k)
             {
-                const long take = std::min(delta, sz[k]);
+                const long take = std::min(delta, sz[k] - least[k]);
                 sz[k] -= take;
                 delta -= take;
             }
@@ -4556,7 +4672,16 @@ private:
             case WM_GETMINMAXINFO:
             {
                 auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
+                // Never smaller than the content (as GTK and Qt windows),
+                // nor than an explicit minimum.
                 RECT rc{0, 0, self->px(self->min_size_.w), self->px(self->min_size_.h)};
+                if (self->root)
+                {
+                    const SIZE n = self->root->natural();
+                    const int m = self->margin();
+                    rc.right = std::max<LONG>(rc.right, n.cx + 2 * m);
+                    rc.bottom = std::max<LONG>(rc.bottom, n.cy + 2 * m);
+                }
                 if (rc.right > 0 || rc.bottom > 0)
                 {
                     self->adjust(rc);
