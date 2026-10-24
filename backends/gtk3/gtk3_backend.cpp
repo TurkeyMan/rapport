@@ -1366,6 +1366,7 @@ public:
         // Windows don't have it; Shift/Ctrl-click select ranges and sets.
         gtk_tree_view_set_rubber_banding(view, false);
         compact_ = s.compact;
+        checks_ = s.checkboxes;
         if ((auto_scroll_ = s.auto_scroll))
         {
             auto_lists().insert(this);
@@ -1450,6 +1451,19 @@ public:
         connect(
             w_, "button-release-event", +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
             { return static_cast<list_impl*>(p)->drag_released(e); }, this);
+        // Space toggles the cursor row's box (GTK would toggle its selection).
+        connect(
+            w_, "key-press-event",
+            +[](GtkWidget*, GdkEventKey* e, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<list_impl*>(p);
+                if (!self->checks_ || !self->model_ || e->keyval != GDK_KEY_space ||
+                    (e->state & gtk_accelerator_get_default_mod_mask()))
+                    return false;
+                if (auto row = self->cursor_row()) self->model_->toggle_checked(*row);
+                return true;
+            },
+            this);
         connect(
             w_, "popup-menu",
             +[](GtkWidget*, gpointer p) -> gboolean
@@ -1740,6 +1754,36 @@ private:
         }
         else
         {
+            // The row's checkbox: GTK's own toggle cell, first in column 0.
+            if (checks_ && index == 0)
+            {
+                GtkCellRenderer* box = gtk_cell_renderer_toggle_new();
+                g_object_set(box, "activatable", TRUE, nullptr);
+                if (compact_) g_object_set(box, "ypad", 0, nullptr);
+                gtk_tree_view_column_pack_start(col, box, false);
+                gtk_tree_view_column_set_cell_data_func(
+                    col, box,
+                    +[](GtkTreeViewColumn*, GtkCellRenderer* r, GtkTreeModel*, GtkTreeIter* iter,
+                        gpointer p)
+                    {
+                        auto* self = static_cast<column_ctx*>(p)->list;
+                        const size_t row = row_of(iter);
+                        const check_state st = self->model_ && row < self->model_->row_count()
+                                                   ? self->model_->checked(row)
+                                                   : check_state::unchecked;
+                        g_object_set(r, "active", st == check_state::checked, "inconsistent",
+                                     st == check_state::indeterminate, nullptr);
+                    },
+                    ctx.get(), nullptr);
+                connect(
+                    box, "toggled",
+                    +[](GtkCellRendererToggle*, gchar* path, gpointer p)
+                    {
+                        auto* self = static_cast<list_impl*>(p);
+                        if (self->model_) self->model_->toggle_checked(size_t(std::atoi(path)));
+                    },
+                    this);
+            }
             // An icon before the text, when the model gives one (a file's
             // type); hidden otherwise.
             GtkCellRenderer* icon = gtk_cell_renderer_pixbuf_new();
@@ -2309,6 +2353,7 @@ private:
     bool alive_ = true;
     bool fitted_ = false;  // stretch columns have had their share of the width
     bool compact_ = false;
+    bool checks_ = false;                          // a toggle cell at the start of column 0
     std::optional<std::pair<color, color>> soft_;  // selection background, text
     float compact_scale_ = 1;
 

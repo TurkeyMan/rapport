@@ -232,6 +232,9 @@ struct list
     // small dead zone around the anchor, which is marked while held).
     // Release, or Esc, stops. Opt-in, for long lists (a history).
     bool auto_scroll = false;
+    // A checkbox in each row's first cell: list_model::checked and
+    // toggle_checked.
+    bool checkboxes = false;
     std::function<void()> on_selection_changed;
     std::function<void(size_t)> on_activate;
     std::function<void(size_t, sort_order)> on_sort_requested;
@@ -736,6 +739,11 @@ public:
     list& selection(selection_mode m)
     {
         s().selection = m;
+        return *this;
+    }
+    list& checkboxes(bool v = true)
+    {
+        s().checkboxes = v;
         return *this;
     }
     list& soft_selection(bool v = true)

@@ -1010,6 +1010,7 @@ class list_impl : public widget_base<rap::list>, public list_observer
 public:
     explicit list_impl(const spec::list& s)
         : widget_base(nullptr, gtk_scrolled_window_new())
+        , checks_(s.checkboxes)
     {
         rows_ = RAPPORT_ROWS(g_object_new(rapport_rows_get_type(), nullptr));
         auto* rows = G_LIST_MODEL(rows_);  // ownership passes to the selection model
@@ -1028,6 +1029,30 @@ public:
         }
 
         w_ = gtk_column_view_new(GTK_SELECTION_MODEL(g_object_ref(sel_)));
+        if (checks_)
+        {
+            // Space toggles the selected row's box (the column view has no
+            // cursor to ask; the model applies it to the selection).
+            GtkEventController* space = gtk_event_controller_key_new();
+            gtk_event_controller_set_propagation_phase(space, GTK_PHASE_CAPTURE);
+            g_signal_connect(
+                space, "key-pressed",
+                G_CALLBACK(+[](GtkEventControllerKey*, guint key, guint, GdkModifierType mods,
+                               gpointer p) -> gboolean
+                           {
+                               auto* self = static_cast<list_impl*>(p);
+                               if (key != GDK_KEY_space ||
+                                   (mods & gtk_accelerator_get_default_mod_mask()) || !self->model_)
+                                   return false;
+                               GtkBitset* sel = gtk_selection_model_get_selection(self->sel_);
+                               if (!gtk_bitset_is_empty(sel))
+                                   self->model_->toggle_checked(gtk_bitset_get_minimum(sel));
+                               gtk_bitset_unref(sel);
+                               return true;
+                           }),
+                this);
+            gtk_widget_add_controller(w_, space);
+        }
         auto* view = GTK_COLUMN_VIEW(w_);
         gtk_column_view_set_show_column_separators(view, true);
         if (s.compact)
@@ -1544,6 +1569,27 @@ private:
             GtkWidget* image = gtk_image_new();
             gtk_widget_set_visible(image, false);
             child = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+            if (checks_ && ctx.column == 0)
+            {
+                // The row's checkbox. bind_cell sets it from the model with
+                // "rapport-binding" set, so only the user's clicks reach the model.
+                GtkWidget* check = gtk_check_button_new();
+                gtk_widget_set_focusable(check, false);
+                gtk_box_append(GTK_BOX(child), check);
+                g_object_set_data(G_OBJECT(child), "rapport-check", check);
+                g_signal_connect(
+                    check, "toggled",
+                    G_CALLBACK(+[](GtkCheckButton* b, gpointer p)
+                               {
+                                   if (g_object_get_data(G_OBJECT(b), "rapport-binding")) return;
+                                   auto* self = static_cast<column_ctx*>(p)->list;
+                                   GtkWidget* cell = gtk_widget_get_parent(GTK_WIDGET(b));
+                                   const size_t tagged = row_of(cell);
+                                   if (self->model_ && tagged > 0)
+                                       self->model_->toggle_checked(tagged - 1);
+                               }),
+                    &ctx);
+            }
             gtk_box_append(GTK_BOX(child), image);
             gtk_box_append(GTK_BOX(child), label);
             g_object_set_data(G_OBJECT(child), "rapport-label", label);
@@ -1581,6 +1627,15 @@ private:
         }
         auto* label = GTK_LABEL(g_object_get_data(G_OBJECT(child), "rapport-label"));
         auto* image = GTK_IMAGE(g_object_get_data(G_OBJECT(child), "rapport-image"));
+        if (auto* check =
+                static_cast<GtkCheckButton*>(g_object_get_data(G_OBJECT(child), "rapport-check")))
+        {
+            const check_state st = model_->checked(row);
+            g_object_set_data(G_OBJECT(check), "rapport-binding", GINT_TO_POINTER(1));
+            gtk_check_button_set_inconsistent(check, st == check_state::indeterminate);
+            gtk_check_button_set_active(check, st == check_state::checked);
+            g_object_set_data(G_OBJECT(check), "rapport-binding", nullptr);
+        }
         const icon icon = model_->icon(row, ctx.column);
         GIcon* gicon = !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
         gtk_image_set_from_gicon(image, gicon);
@@ -1657,6 +1712,7 @@ private:
     std::vector<std::unique_ptr<column_ctx>> ctxs_;
     bool suppress_sort_ = false;
     bool alive_ = true;
+    bool checks_ = false;  // a check button at the start of column 0
 
     std::function<void()> sel_changed_;
     std::function<void(size_t)> activate_;

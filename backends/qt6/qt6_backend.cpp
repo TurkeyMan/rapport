@@ -1809,6 +1809,7 @@ public:
         , cols_(s.columns)
         , compact_(s.compact)
         , auto_scroll_(s.auto_scroll)
+        , checks_(s.checkboxes)
     {
         view_ = static_cast<list_view*>(w_);
         view_->owner = this;
@@ -2188,6 +2189,18 @@ public:
             start_auto_scroll(e->position().toPoint());
             return;
         }
+        // A click on a row's box toggles it and leaves the selection.
+        if (checks_ && e->button() == Qt::LeftButton && model_)
+        {
+            const QModelIndex i = view_->indexAt(e->position().toPoint());
+            if (i.isValid() && i.column() == 0 &&
+                check_rect(view_->visualRect(i)).contains(e->position().toPoint()))
+            {
+                model_->toggle_checked(size_t(i.row()));
+                e->accept();
+                return;
+            }
+        }
         if (cell_pressed(e))
         {
             view_->base_mouse_press(e);  // selects as usual; dragging begins on motion
@@ -2282,6 +2295,12 @@ public:
         if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter)
         {
             if (auto row = current(); row && activate_) activate_(*row);
+            e->accept();
+            return;
+        }
+        if (checks_ && e->key() == Qt::Key_Space && !e->modifiers() && model_)
+        {
+            if (auto row = current()) model_->toggle_checked(*row);
             e->accept();
             return;
         }
@@ -2386,6 +2405,7 @@ private:
         if (style.bg && !selected) p->fillRect(cell, qcolor(resolve(view_, *style.bg)));
         const int pad = compact_ ? 3 : 4;
         QRect area = cell.adjusted(pad, 0, -pad, 0);
+        if (checks_ && c == 0) area.setLeft(draw_check(p, cell, row) + 4);
         if (const icon icon = model_->icon(row, c))
         {
             const QIcon qi = to_q_icon(icon, icon_size_, view_);
@@ -2401,6 +2421,33 @@ private:
         const QString text = qs(model_->text(row, c));
         p->drawText(area, qt_align(cols_[c].align) | Qt::AlignVCenter | Qt::TextSingleLine,
                     fm.elidedText(text, Qt::ElideRight, area.width()));
+    }
+
+    // The style's own item check box, at the start of column 0's cell.
+    QRect check_rect(const QRect& cell) const
+    {
+        QStyleOptionViewItem opt;
+        opt.initFrom(view_);
+        opt.rect = cell;
+        opt.features = QStyleOptionViewItem::HasCheckIndicator;
+        QRect r =
+            view_->style()->subElementRect(QStyle::SE_ItemViewItemCheckIndicator, &opt, view_);
+        const int pad = compact_ ? 3 : 4;
+        r.moveTo(cell.left() + pad, cell.top() + (cell.height() - r.height()) / 2);
+        return r;
+    }
+    // Returns the box's right edge.
+    int draw_check(QPainter* p, const QRect& cell, size_t row) const
+    {
+        QStyleOptionViewItem opt;
+        opt.initFrom(view_);
+        opt.rect = check_rect(cell);
+        const check_state st = model_->checked(row);
+        opt.state |= st == check_state::checked         ? QStyle::State_On
+                     : st == check_state::indeterminate ? QStyle::State_NoChange
+                                                        : QStyle::State_Off;
+        view_->style()->drawPrimitive(QStyle::PE_IndicatorItemViewItemCheck, &opt, p, view_);
+        return opt.rect.right();
     }
 
     void paint_cell(QPainter* p, const QRect& cell, size_t row, size_t c, bool selected,
@@ -2632,6 +2679,7 @@ private:
     list_model* model_ = nullptr;
     std::vector<column> cols_;
     bool compact_;
+    bool checks_ = false;  // a checkbox at the start of column 0
     bool auto_scroll_;
     std::optional<soft_colors> soft_;
     int first_text_column_ = 0;

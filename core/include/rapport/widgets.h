@@ -332,6 +332,13 @@ public:
 
 // Virtual list model: the view pulls only what is visible.
 // Rows have uniform height so backends can use fixed-height fast paths.
+enum class check_state
+{
+    unchecked,
+    checked,
+    indeterminate,  // the "mixed" mark; set by the app, clicks only toggle on/off
+};
+
 class list_model
 {
 public:
@@ -347,6 +354,12 @@ public:
     // Called for columns declared `painted`; text() is still used for
     // accessibility, type-ahead and copy.
     virtual void paint(size_t /*row*/, size_t /*column*/, painter&, const cell_info&) const {}
+    // For a list made with checkboxes: each row's box, in the first column.
+    virtual check_state checked(size_t /*row*/) const { return check_state::unchecked; }
+    // The user clicked a row's box (or pressed Space on it). The model
+    // decides what that means (TortoiseGit's lists apply it to the whole
+    // selection when the row is selected) and reports what changed.
+    virtual void toggle_checked(size_t /*row*/) {}
 
     void add_observer(list_observer* o) { observers_.push_back(o); }
     void remove_observer(list_observer* o) { std::erase(observers_, o); }
@@ -462,13 +475,6 @@ public:
     virtual rap::color color() const = 0;
     virtual void set_color(rap::color) = 0;  // doesn't fire on_changed
     virtual void on_changed(std::function<void(rap::color)>) = 0;
-};
-
-enum class check_state
-{
-    unchecked,
-    checked,
-    indeterminate,  // the "mixed" mark; set by the app, clicks only toggle on/off
 };
 
 class check : public widget

@@ -4,12 +4,15 @@
 #include "win32_common.h"
 
 #include <commdlg.h>
-#include <richedit.h>
 #include <dwmapi.h>
+#include <richedit.h>
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <uxtheme.h>
+#include <vssym32.h>
 #include <windowsx.h>
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -2042,6 +2045,8 @@ public:
         }
         set_model(s.model);
         soft_ = s.soft_selection;
+        checks_ = s.checkboxes;
+        if (checks_) SetWindowSubclass(h_, check_proc, 9, reinterpret_cast<DWORD_PTR>(this));
         if (s.auto_scroll) SetWindowSubclass(h_, auto_scroll_proc, 7, reinterpret_cast<DWORD_PTR>(this));
         if (soft_) SetWindowSubclass(h_, hot_proc, 3, reinterpret_cast<DWORD_PTR>(this));
         SetWindowSubclass(h_, selection_proc, 4, reinterpret_cast<DWORD_PTR>(this));
@@ -2455,6 +2460,97 @@ private:
     // for the row target: per extension ("/" for folders), made once and
     // dropped with the target. Shell icons are straight-alpha BGRA, so WIC
     // converts them to premultiplied first.
+    // A row's checkbox: the theme's own, drawn once per state into a bitmap
+    // (or the classic one without a theme). `size` and `gap` in device px.
+    int check_size() const { return px(13); }
+    int check_lead() const { return checks_ ? px(4) + check_size() + px(3) : 0; }
+    ID2D1Bitmap* check_bitmap(ID2D1RenderTarget* rt, check_state state)
+    {
+        com<ID2D1Bitmap>& out = check_bitmaps_[size_t(state)];
+        if (out) return out.get();
+        const int n = check_size();
+        BITMAPINFO bi{};
+        bi.bmiHeader = {.biSize = sizeof(BITMAPINFOHEADER),
+                        .biWidth = n,
+                        .biHeight = -n,
+                        .biPlanes = 1,
+                        .biBitCount = 32,
+                        .biCompression = BI_RGB};
+        void* bits = nullptr;
+        HDC dc = CreateCompatibleDC(nullptr);
+        HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!bmp)
+        {
+            DeleteDC(dc);
+            return nullptr;
+        }
+        HGDIOBJ old = SelectObject(dc, bmp);
+        RECT r{0, 0, n, n};
+        auto* px32 = static_cast<uint32_t*>(bits);
+        if (HTHEME theme = OpenThemeData(h_, L"BUTTON"))
+        {
+            const int part_state = state == check_state::checked         ? CBS_CHECKEDNORMAL
+                                   : state == check_state::indeterminate ? CBS_MIXEDNORMAL
+                                                                         : CBS_UNCHECKEDNORMAL;
+            DrawThemeBackground(theme, dc, BP_CHECKBOX, part_state, &r, nullptr);
+            CloseThemeData(theme);
+        }
+        else
+        {
+            DrawFrameControl(dc, &r, DFC_BUTTON,
+                             DFCS_BUTTONCHECK |
+                                 (state != check_state::unchecked ? DFCS_CHECKED : 0) |
+                                 (state == check_state::indeterminate ? DFCS_INACTIVE : 0));
+            for (int i = 0; i < n * n; ++i) px32[i] |= 0xFF000000u;  // GDI leaves alpha 0
+        }
+        GdiFlush();
+        float dpi_x = 96, dpi_y = 96;
+        rt->GetDpi(&dpi_x, &dpi_y);
+        const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), dpi_x,
+            dpi_y);
+        rt->CreateBitmap(D2D1::SizeU(UINT32(n), UINT32(n)), bits, UINT32(n * 4), &props, out.put());
+        SelectObject(dc, old);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+        return out.get();
+    }
+    // A press on a row's box toggles it (the selection stays); Space toggles
+    // the focused row's.
+    static LRESULT CALLBACK check_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                       DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<list_impl*>(data);
+        if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) && self->model_)
+        {
+            LVHITTESTINFO hit{};
+            hit.pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (ListView_SubItemHitTest(h, &hit) >= 0 && hit.iSubItem == 0)
+            {
+                RECT cell{};
+                ListView_GetSubItemRect(h, hit.iItem, 0, LVIR_BOUNDS, &cell);
+                // Column 0's LVIR_BOUNDS is the whole row: its own width is the column's.
+                cell.right = cell.left + ListView_GetColumnWidth(h, 0);
+                const int left = cell.left + self->px(4);
+                if (hit.pt.x >= left && hit.pt.x < left + self->check_size() &&
+                    hit.pt.x < cell.right)
+                {
+                    self->model_->toggle_checked(size_t(hit.iItem));
+                    return 0;
+                }
+            }
+        }
+        if (msg == WM_KEYDOWN && wp == VK_SPACE && self->model_ && GetKeyState(VK_CONTROL) >= 0 &&
+            GetKeyState(VK_MENU) >= 0)
+        {
+            const int focused = ListView_GetNextItem(h, -1, LVNI_FOCUSED);
+            if (focused >= 0) self->model_->toggle_checked(size_t(focused));
+            return 0;
+        }
+        if (msg == WM_CHAR && wp == L' ') return 0;  // no type-ahead or beep for it
+        return DefSubclassProc(h, msg, wp, lp);
+    }
+
     ID2D1Bitmap* file_icon(ID2D1RenderTarget* rt, const std::string& name)
     {
         const bool folder = !name.empty() && name.back() == '/';
@@ -2592,15 +2688,28 @@ private:
                         continue;
                     }
                     float icon_space = 0;
+                    if (checks_ && sp.col == 0)
+                        if (ID2D1Bitmap* bmp = check_bitmap(rt, model_->checked(size_t(row))))
+                        {
+                            const D2D1_SIZE_F sz = bmp->GetSize();
+                            const float x = dip(cell.left + px(4)),
+                                        y = dip(cell.top) +
+                                            (dip(cell.bottom - cell.top) - sz.height) / 2;
+                            rt->SetTransform(origin);
+                            rt->DrawBitmap(bmp, D2D1::RectF(x, y, x + sz.width, y + sz.height));
+                            icon_space = dip(check_lead()) - 4;
+                        }
                     if (const icon icon = model_->icon(size_t(row), sp.col); !icon.file.empty())
                         if (ID2D1Bitmap* bmp = file_icon(rt, icon.file))
                         {
                             // The shell's icon for the file's type, before the text.
                             const D2D1_SIZE_F sz = bmp->GetSize();  // DIPs at the target's DPI
-                            const float x = dip(cell.left) + 4, y = dip(cell.top) + (dip(cell.bottom - cell.top) - sz.height) / 2;
+                            const float x = dip(cell.left) + 4 + icon_space,
+                                        y = dip(cell.top) +
+                                            (dip(cell.bottom - cell.top) - sz.height) / 2;
                             rt->SetTransform(origin);
                             rt->DrawBitmap(bmp, D2D1::RectF(x, y, x + sz.width, y + sz.height));
-                            icon_space = sz.width + 2;
+                            icon_space += sz.width + 2;
                         }
                     const std::wstring text = wide(model_->text(size_t(row), sp.col));
                     if (text.empty()) continue;
@@ -2650,6 +2759,7 @@ private:
         {
             row_target_.reset();
             file_icons_.clear();  // bitmaps belong to the target
+            for (auto& b : check_bitmaps_) b.reset();
         }
     }
 
@@ -3048,6 +3158,8 @@ private:
     bool sel_pending_ = false;  // a selection change is posted, not yet reported
     com<ID2D1DCRenderTarget> row_target_;
     std::map<std::string, com<ID2D1Bitmap>> file_icons_;  // per extension, for row_target_
+    bool checks_ = false;                                 // a checkbox at the start of column 0
+    std::array<com<ID2D1Bitmap>, 3> check_bitmaps_;       // per check_state, for row_target_
     std::map<int, com<IDWriteTextFormat>> formats_;  // by style and alignment
     bool soft_ = false;
     int hot_ = -1;  // the row under the pointer
