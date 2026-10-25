@@ -2617,6 +2617,16 @@ public:
     }
 
 private:
+    static bool is_line_control(const rap::node_spec& s)
+    {
+        return std::holds_alternative<spec::label>(s) || std::holds_alternative<spec::button>(s) ||
+               std::holds_alternative<spec::check>(s) || std::holds_alternative<spec::entry>(s) ||
+               std::holds_alternative<spec::drop_down>(s) || std::holds_alternative<spec::combo>(s) ||
+               std::holds_alternative<spec::menu_button>(s) ||
+               std::holds_alternative<spec::progress_bar>(s) ||
+               std::holds_alternative<spec::date_picker>(s);
+    }
+
     static bool fills_form_row(const rap::node_spec& s)
     {
         return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
@@ -2641,7 +2651,15 @@ private:
         // Controls here are cheap to make: a deferred box is built now.
         if (s.deferred) return make(n, spec::box{s.dir, {s.deferred()}, s.margins, {}}, o);
         GtkWidget* box = gtk_box_new(gtk_orientation(s.dir), 6);
-        for (auto& c : s.items) gtk_box_append(GTK_BOX(box), build(c, s.dir));
+        for (auto& c : s.items)
+        {
+            GtkWidget* w = build(c, s.dir);
+            // Single-line controls keep their natural height when a taller
+            // sibling (a stack of checkboxes) sets the row height.
+            if (s.dir == orientation::horizontal && is_line_control(c.spec))
+                gtk_widget_set_valign(w, GTK_ALIGN_CENTER);
+            gtk_box_append(GTK_BOX(box), w);
+        }
         if (s.margins)
         {
             // A bar along a window edge: the full margin at its ends, half along its sides.
