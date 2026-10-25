@@ -2948,6 +2948,7 @@ public:
             +[](GtkWidget*, GdkRectangle* a, gpointer p)
             {
                 auto* self = static_cast<canvas_impl*>(p);
+                self->allocated_ = true;
                 self->scale_ = device_scale_of(self->w_);
                 if (self->resize_) self->resize_({float(a->width), float(a->height)});
                 self->target_changed();
@@ -3024,8 +3025,12 @@ public:
     ~canvas_impl() override { on_disconnect(); }
 
     void invalidate() override { gtk_widget_queue_draw(w_); }
+    // Nothing until it has been allocated, as on GTK 4: before that GTK 3
+    // reports 1x1, which an app sizing its window round the canvas would
+    // take for real.
     size_f size() const override
     {
+        if (!allocated_) return {};
         return {float(gtk_widget_get_allocated_width(w_)),
                 float(gtk_widget_get_allocated_height(w_))};
     }
@@ -3088,6 +3093,7 @@ protected:
 
 private:
     float scale_ = 0;  // the device scale the app last heard of
+    bool allocated_ = false;
     bool pointer(const pointer_event& e) { return pointer_ && pointer_(e); }
 
     static gboolean button(GtkWidget*, GdkEventButton* e, gpointer p)
