@@ -8,6 +8,16 @@ include(CMakePackageConfigHelpers)
 
 include(cmake/RapportShaders.cmake)
 
+# Where the core library and its backends (<dir>/rapport) install, under the
+# prefix. A system rapport uses the libdir. An app that ships its own copy
+# gives it a folder of its own (lib/<app>), so that two apps on different
+# rapport versions don't replace each other's library; the app's
+# executables then need an RPATH to that folder.
+set(RAPPORT_INSTALL_LIBDIR ${CMAKE_INSTALL_LIBDIR} CACHE STRING
+    "Where rapport's core library and backends install, under the prefix")
+cmake_path(ABSOLUTE_PATH RAPPORT_INSTALL_LIBDIR BASE_DIRECTORY ${CMAKE_INSTALL_PREFIX}
+           OUTPUT_VARIABLE rapport_full_libdir)
+
 add_library(rapport_headers INTERFACE)
 add_library(rapport::headers ALIAS rapport_headers)
 target_include_directories(rapport_headers INTERFACE
@@ -49,7 +59,7 @@ if(NOT WIN32)
 endif()
 
 target_compile_definitions(rapport PRIVATE
-    RAPPORT_INSTALL_PLUGIN_DIR="${CMAKE_INSTALL_FULL_LIBDIR}/rapport")
+    RAPPORT_INSTALL_PLUGIN_DIR="${rapport_full_libdir}/rapport")
 set_target_properties(rapport PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 0
@@ -59,7 +69,7 @@ set_target_properties(rapport PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 install(TARGETS rapport EXPORT rapportTargets
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT core NAMELINK_COMPONENT dev)
+    LIBRARY DESTINATION ${RAPPORT_INSTALL_LIBDIR} COMPONENT core NAMELINK_COMPONENT dev)
 install(TARGETS rapport_headers EXPORT rapportTargets)
 install(DIRECTORY include/rapport DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT dev)
 install(EXPORT rapportTargets NAMESPACE rapport::
@@ -67,7 +77,7 @@ install(EXPORT rapportTargets NAMESPACE rapport::
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/rapportConfig.cmake
     "include(\${CMAKE_CURRENT_LIST_DIR}/rapportTargets.cmake)\n"
     "include(\${CMAKE_CURRENT_LIST_DIR}/RapportShaders.cmake)\n"
-    "set(RAPPORT_PLUGIN_DIR \"${CMAKE_INSTALL_LIBDIR}/rapport\")\n")
+    "set(RAPPORT_PLUGIN_DIR \"${RAPPORT_INSTALL_LIBDIR}/rapport\")\n")
 write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/rapportConfigVersion.cmake
     COMPATIBILITY ExactVersion)
 install(FILES cmake/RapportShaders.cmake cmake/RapportShaderEmbed.cmake

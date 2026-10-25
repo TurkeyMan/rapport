@@ -40,4 +40,9 @@ set_target_properties(rapport_gtk4 PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
 
-install(TARGETS rapport_gtk4 LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/rapport COMPONENT gtk4)
+# Beside the core (RAPPORT_INSTALL_LIBDIR, core/CMakeLists.txt); built
+# standalone, in the libdir.
+if(NOT DEFINED RAPPORT_INSTALL_LIBDIR)
+    set(RAPPORT_INSTALL_LIBDIR ${CMAKE_INSTALL_LIBDIR})
+endif()
+install(TARGETS rapport_gtk4 LIBRARY DESTINATION ${RAPPORT_INSTALL_LIBDIR}/rapport COMPONENT gtk4)

@@ -78,4 +78,9 @@ else()
     target_link_libraries(rapport_gtk3 PRIVATE PkgConfig::GTK3_WAYLAND)
 endif()
 
-install(TARGETS rapport_gtk3 LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/rapport COMPONENT gtk3)
+# Beside the core (RAPPORT_INSTALL_LIBDIR, core/CMakeLists.txt); built
+# standalone, in the libdir.
+if(NOT DEFINED RAPPORT_INSTALL_LIBDIR)
+    set(RAPPORT_INSTALL_LIBDIR ${CMAKE_INSTALL_LIBDIR})
+endif()
+install(TARGETS rapport_gtk3 LIBRARY DESTINATION ${RAPPORT_INSTALL_LIBDIR}/rapport COMPONENT gtk3)
