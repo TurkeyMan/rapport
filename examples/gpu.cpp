@@ -193,6 +193,7 @@ int main(int argc, char** argv)
                 .on_paint(
                     [&](painter& p, size_f)
                     {
+                        if (!dev) render();  // the canvas's device may have come since: it redraws when it does
                         p.rect({140, 20, 420, 28}, 4, color{0, 0, 0, 160}, std::nullopt);
                         p.text({150, 26}, status, {.fg = color{255, 255, 255}});
                     })

@@ -3072,7 +3072,24 @@ public:
     }
     // The process's shared device; its textures are shown by reading them
     // back (gpu_readback.h) until this backend takes them as they are.
-    std::shared_ptr<rap::gpu::device> gpu_device() const override { return frames::shared_gpu_device(); }
+    std::shared_ptr<rap::gpu::device> gpu_device() const override
+    {
+        // Redrawn when it arrives: an app drawing on it takes it then.
+        return readback_.device(
+            [](std::function<void()> f)
+              {
+                  g_idle_add_full(
+                      G_PRIORITY_DEFAULT,
+                      +[](gpointer p) -> gboolean
+                      {
+                          (*static_cast<std::function<void()>*>(p))();
+                          return G_SOURCE_REMOVE;
+                      },
+                      new std::function<void()>(std::move(f)),
+                      +[](gpointer p) { delete static_cast<std::function<void()>*>(p); });
+              },
+            [this] { gtk_widget_queue_draw(w_); });
+    }
     void present(rap::gpu::texture_ptr texture, rap::gpu::ticket, frame_color color) override
     {
         readback_.present(

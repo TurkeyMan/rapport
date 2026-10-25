@@ -1874,7 +1874,13 @@ public:
     }
     // The process's shared device; its textures are shown by reading them
     // back (gpu_readback.h) until this backend takes them as they are.
-    std::shared_ptr<rap::gpu::device> gpu_device() const override { return frames::shared_gpu_device(); }
+    std::shared_ptr<rap::gpu::device> gpu_device() const override
+    {
+        // Redrawn when it arrives: an app drawing on it takes it then.
+        return readback_.device(
+            [](std::function<void()> f) { QMetaObject::invokeMethod(qApp, [f = std::move(f)] { f(); }, Qt::QueuedConnection); },
+            [this] { w_->update(); });
+    }
     void present(rap::gpu::texture_ptr texture, rap::gpu::ticket, frame_color color) override
     {
         readback_.present(

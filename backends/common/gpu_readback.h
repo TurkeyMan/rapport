@@ -12,17 +12,50 @@
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace rap::frames
 {
 
-// The process's device for canvases without one of their own: made when
-// first asked for.
-inline std::shared_ptr<gpu::device> shared_gpu_device()
+// The process's device for canvases without one of their own. Made on a
+// thread the first time it's asked for: loading a GPU driver takes tens to
+// hundreds of milliseconds, which would hold up the first paint. Null until
+// it's there (and if it can't be made); `ready`, if given, is called then,
+// on that thread.
+inline std::shared_ptr<gpu::device> shared_gpu_device(std::function<void()> ready = {})
 {
-    static std::shared_ptr<gpu::device> d = gpu::device::headless();
-    return d;
+    struct state
+    {
+        std::mutex m;
+        std::shared_ptr<gpu::device> device;
+        bool started = false, done = false;
+        std::vector<std::function<void()>> waiting;
+    };
+    static state& s = *new state;  // never destroyed: the thread may outlive static destruction
+    std::lock_guard<std::mutex> l(s.m);
+    if (s.done) return s.device;
+    if (ready) s.waiting.push_back(std::move(ready));
+    if (!s.started)
+    {
+        s.started = true;
+        std::thread(
+            []
+            {
+                std::shared_ptr<gpu::device> d = gpu::device::headless();
+                std::vector<std::function<void()>> waiting;
+                {
+                    std::lock_guard<std::mutex> l(s.m);
+                    s.device = std::move(d);
+                    s.done = true;
+                    waiting.swap(s.waiting);
+                }
+                for (auto& f : waiting) f();
+            })
+            .detach();
+    }
+    return nullptr;
 }
 
 class gpu_readback
@@ -32,7 +65,23 @@ public:
     using make_fn = std::function<std::shared_ptr<const image>(int w, int h, pixel_format, const uint8_t*, size_t stride)>;
     using show_fn = std::function<void(std::shared_ptr<const image>, frame_color)>;
 
-    ~gpu_readback() { cancel(); }
+    ~gpu_readback()
+    {
+        *alive_ = false;
+        cancel();
+    }
+
+    // The canvas's device (the process's shared one): null while it's being
+    // made, and `redraw` runs on the UI thread once it's there. UI thread.
+    std::shared_ptr<gpu::device> device(post_fn post, std::function<void()> redraw) const
+    {
+        std::function<void()> ready;
+        if (!asked_)
+            ready = [alive = alive_, post = std::move(post), redraw = std::move(redraw)]
+            { post([alive, redraw] { if (*alive) redraw(); }); };
+        asked_ = true;
+        return shared_gpu_device(std::move(ready));
+    }
 
     // Anything read back from now on is stale (a CPU frame, clear_frame, the
     // canvas going).
@@ -72,6 +121,8 @@ public:
     }
 
 private:
+    mutable bool asked_ = false;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // read on the UI thread only
     std::shared_ptr<std::atomic<uint64_t>> serial_ = std::make_shared<std::atomic<uint64_t>>(0);
 };
 
