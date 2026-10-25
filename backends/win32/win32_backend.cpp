@@ -5174,11 +5174,6 @@ private:
             if (cpu_) cpu_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));  // the GPU's resizes as it draws
             if (resize_) resize_(size());
             if (frame_target_) frame_target_(target());
-            // Painted at the new size now, not when the queue empties enough
-            // for WM_PAINT: until a frame this size is presented, the
-            // compositor shows the last one stretched to it.
-            if (wp != SIZE_MINIMIZED && LOWORD(lp) > 0 && HIWORD(lp) > 0)
-                RedrawWindow(h_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOCHILDREN);
             return 0;
         case WM_LBUTTONDOWN:
         case WM_LBUTTONDBLCLK: press(lp, 1); return 0;
@@ -5691,6 +5686,12 @@ public:
         adjust(r);
         RECT now;
         GetWindowRect(hwnd_, &now);
+        // What's waiting to be painted (a new image, say, at the old size)
+        // is painted first: while the resize goes through, the compositor
+        // shows the last frame for a refresh or two, and it should be the
+        // new content, not what came before it. (Painting during the resize
+        // doesn't help: that frame shows, then the old one, then it again.)
+        RedrawWindow(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
         place_on_screen(now.left, now.top, r.right - r.left, r.bottom - r.top);
     }
     void set_min_size(size_f s) override { min_size_ = s; }
