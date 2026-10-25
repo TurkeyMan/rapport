@@ -4583,8 +4583,10 @@ struct gpu_shared
     com<ID2D1Device> d2d;
     uint64_t key = 0;   // its bitmaps' (see new_resource_key)
     uint64_t luid = 0;  // its adapter's, for frame_target::device
-    // rap::gpu over the same device, for apps' passes (made multithreaded:
-    // their workers and Direct2D take turns through the factory's lock).
+    // rap::gpu over the same device, for apps' passes, made when an app
+    // first asks for it (canvas::gpu_device; UI thread). The factory is
+    // multithreaded from the start: their workers and Direct2D take turns
+    // through its lock.
     com<ID2D1Multithread> lock;
     std::shared_ptr<rap::gpu::device> api;
 };
@@ -4648,7 +4650,6 @@ private:
             FAILED(factory->CreateDevice(dxgi_device.get(), d->d2d.put())) ||
             FAILED(factory->QueryInterface(__uuidof(ID2D1Multithread), reinterpret_cast<void**>(d->lock.put()))))
             return nullptr;
-        d->api = rap::gpu::d3d11::wrap(d->d3d.get(), d->lock.get());
         DXGI_ADAPTER_DESC desc{};
         if (SUCCEEDED(adapter->GetDesc(&desc)))
             d->luid = uint64_t(desc.AdapterLuid.LowPart) | uint64_t(uint32_t(desc.AdapterLuid.HighPart)) << 32;
@@ -4802,6 +4803,7 @@ public:
     std::shared_ptr<rap::gpu::device> gpu_device() const override
     {
         const std::shared_ptr<gpu_shared> d = gpu_ ? gpu_->device() : gpu::device(false);
+        if (d && !d->api) d->api = rap::gpu::d3d11::wrap(d->d3d.get(), d->lock.get());
         return d ? d->api : nullptr;
     }
     void present(rap::gpu::texture_ptr texture, rap::gpu::ticket, frame_color) override

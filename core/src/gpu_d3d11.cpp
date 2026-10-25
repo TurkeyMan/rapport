@@ -193,7 +193,17 @@ public:
 
     static std::shared_ptr<d3d_device> make(ID3D11Device* d3d, ID2D1Multithread* lock, std::string* error)
     {
-        auto d = std::shared_ptr<d3d_device>(new d3d_device);
+        // The last reference can go on the device's own worker (an app's
+        // readback callback letting go): it's deleted from another thread
+        // then, which joins the worker once it's done with that item.
+        auto d = std::shared_ptr<d3d_device>(new d3d_device,
+                                             [](d3d_device* p)
+                                             {
+                                                 if (p->worker_.get_id() == std::this_thread::get_id())
+                                                     std::thread([p] { delete p; }).detach();
+                                                 else
+                                                     delete p;
+                                             });
         d->d3d_ = d3d;
         d->d2d_lock_ = lock;
         d3d->GetImmediateContext(d->ctx_.GetAddressOf());
@@ -247,7 +257,7 @@ public:
             stop_ = true;
         }
         work_cv_.notify_all();
-        if (worker_.joinable()) worker_.join();
+        if (worker_.joinable()) worker_.join();  // never the worker itself: see make()
     }
 
     std::string_view api() const override { return "d3d11"; }
