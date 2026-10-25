@@ -245,6 +245,63 @@ private:
     std::function<void()> click_;
 };
 
+// Where a widget falls on its surface's device pixels. GTK 4 lays widgets
+// out in logical pixels, so at a fractional scale one can start part way
+// into a device pixel (y 57 at 1.25 is 71.25), and drawing there straddles
+// pixels: soft, with a 1:1 frame's edge rows half blended. Painting moved
+// by `shift` starts on the next whole pixel, and `size` is the whole pixels
+// inside the widget. Whole at a whole scale, and wherever the origin
+// happens to land on a pixel.
+struct device_span
+{
+    point_f shift;  // logical, each under one device pixel
+    size_f size;    // logical
+    int width = 0, height = 0;  // `size` in device pixels
+
+    bool operator==(const device_span& o) const
+    {
+        return width == o.width && height == o.height && shift.x == o.shift.x && shift.y == o.shift.y;
+    }
+};
+
+device_span device_span_of(GtkWidget* w, float scale)
+{
+    const float lw = float(gtk_widget_get_width(w)), lh = float(gtk_widget_get_height(w));
+    device_span span{{}, {lw, lh}, int(std::lround(lw * scale)), int(std::lround(lh * scale))};
+    GtkNative* native = gtk_widget_get_native(w);
+    if (!native || scale <= 0) return span;
+    double sx = 0, sy = 0;
+    gtk_native_get_surface_transform(native, &sx, &sy);
+    double x = 0, y = 0;
+#if GTK_CHECK_VERSION(4, 12, 0)
+    graphene_point_t in = GRAPHENE_POINT_INIT(0, 0), out;
+    if (!gtk_widget_compute_point(w, GTK_WIDGET(native), &in, &out)) return span;
+    x = out.x;
+    y = out.y;
+#else
+    if (!gtk_widget_translate_coordinates(w, GTK_WIDGET(native), 0, 0, &x, &y)) return span;
+#endif
+    // Float noise mustn't cost a pixel: 71.0001 is on the grid.
+    constexpr double eps = 1e-3;
+    const double ox = (x + sx) * scale, oy = (y + sy) * scale;
+    const double x0 = std::ceil(ox - eps), y0 = std::ceil(oy - eps);
+    const double x1 = std::floor(ox + lw * scale + eps), y1 = std::floor(oy + lh * scale + eps);
+    span.width = int(std::max(0.0, x1 - x0));
+    span.height = int(std::max(0.0, y1 - y0));
+    span.shift = {float(std::max(0.0, x0 - ox) / scale), float(std::max(0.0, y0 - oy) / scale)};
+    span.size = {float(span.width / scale), float(span.height / scale)};
+    return span;
+}
+
+// Moves a drawing area's painting onto whole device pixels, for crisp
+// edges and pixel_grid snapping. Its size stays the area's: a list cell's
+// painting runs to the row's edge, where the next row's carries on.
+void snap_to_device(cairo_t* cr, GtkWidget* w)
+{
+    const device_span span = device_span_of(w, device_scale_of(w));
+    cairo_translate(cr, span.shift.x, span.shift.y);
+}
+
 // A named icon the theme has; otherwise a drawing area (rapport's own
 // drawing of that name, else icon::draw) that runs whenever it paints, so
 // drawn icons follow scale and theme (the area takes its button's CSS
@@ -276,6 +333,7 @@ GtkWidget* icon_widget(const icon& icon, int size)
         GTK_DRAWING_AREA(area),
         +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
         {
+            snap_to_device(cr, GTK_WIDGET(a));
             cairo_painter painter(cr, GTK_WIDGET(a));
             (*static_cast<draw_fn*>(p))(painter, {float(w), float(h)});
         },
@@ -1686,10 +1744,18 @@ public:
             +[](GtkSorter* sorter, GtkSorterChange, gpointer p)
             { static_cast<list_impl*>(p)->sort_changed(GTK_COLUMN_VIEW_SORTER(sorter)); },
             this);
+        // Scrolling moves rows without redrawing them, so painted cells
+        // drawn on whole device pixels (snap_to_device) would sit off them
+        // at a fractional scale: once the scrolling stops, they redraw.
+        for (GtkAdjustment* adj : {gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(outer_)),
+                                   gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(outer_))})
+            connect(adj, "value-changed",
+                    +[](GtkAdjustment*, gpointer p) { static_cast<list_impl*>(p)->resnap_later(); }, this);
     }
 
     ~list_impl() override
     {
+        if (resnap_) g_source_remove(resnap_);
         if (model_) model_->remove_observer(this);
         g_object_unref(sel_);
     }
@@ -1939,6 +2005,7 @@ protected:
     void on_disconnect() override
     {
         alive_ = false;
+        if (resnap_) g_source_remove(std::exchange(resnap_, 0));
         if (popover_) gtk_widget_unparent(popover_);
         popover_ = nullptr;
     }
@@ -2191,12 +2258,31 @@ private:
         if (attrs) pango_attr_list_unref(attrs);
     }
 
+    guint resnap_ = 0;
+    void resnap_later()
+    {
+        if (!alive_ || device_scale_of(w_) == std::floor(device_scale_of(w_))) return;
+        if (resnap_) g_source_remove(resnap_);
+        resnap_ = g_timeout_add(
+            100,
+            +[](gpointer p) -> gboolean
+            {
+                auto* self = static_cast<list_impl*>(p);
+                self->resnap_ = 0;
+                for (auto [li, ctx] : self->bound_)
+                    if (ctx->painted) gtk_widget_queue_draw(gtk_list_item_get_child(li));
+                return G_SOURCE_REMOVE;
+            },
+            this);
+    }
+
     void draw_cell(GtkDrawingArea* area, cairo_t* cr, int w, int h, column_ctx& ctx)
     {
         size_t tagged = row_of(area);
         if (!alive_ || !model_ || tagged == 0) return;
         size_t row = tagged - 1;
         if (row >= model_->row_count()) return;
+        snap_to_device(cr, GTK_WIDGET(area));
         cairo_painter painter(cr, GTK_WIDGET(area));
         cell_info info{{float(w), float(h)},
                       bool(gtk_selection_model_is_selected(sel_, guint(row))),
@@ -2312,10 +2398,21 @@ public:
                     if (self->resize_) self->resize_({float(w), float(h)});
                     self->target_changed();
                 }
+                // The frame and the painting go on the whole device pixels;
+                // the slivers round them are under a pixel, and show the
+                // window behind, the frame's own background.
+                const device_span span = device_span_of(GTK_WIDGET(area), scale);
+                if (span.width != self->span_.width || span.height != self->span_.height)
+                {
+                    self->span_ = span;
+                    self->target_changed();
+                }
+                self->span_ = span;
                 if (!self->paint_ && !self->frame_) return;
+                cairo_translate(cr, span.shift.x, span.shift.y);
                 cairo_painter painter(cr, GTK_WIDGET(area));
-                self->frame_.paint(painter, {float(w), float(h)});
-                if (self->paint_) self->paint_(painter, {float(w), float(h)});
+                self->frame_.paint(painter, span.size);
+                if (self->paint_) self->paint_(painter, span.size);
             },
             this, nullptr);
         connect(
@@ -2384,7 +2481,17 @@ public:
     void on_scroll(std::function<bool(const scroll_event&)> f) override { scroll_ = std::move(f); }
     void on_key(std::function<bool(const key_event&)> f) override { key_ = std::move(f); }
 
-    rap::frame_target target() const override { return frames::pixels_target(size(), device_scale_of(w_)); }
+    // The whole device pixels inside the canvas, where its frame is drawn.
+    rap::frame_target target() const override
+    {
+        const float scale = device_scale_of(w_);
+        const device_span span = device_span_of(w_, scale);
+        frame_target t;
+        t.width = span.width;
+        t.height = span.height;
+        t.scale = scale;
+        return t;
+    }
     void on_frame_target(std::function<void(const rap::frame_target&)> f) override { frame_target_ = std::move(f); }
     void present(std::shared_ptr<const rap::image> pixels, frame_color color) override
     {
@@ -2433,6 +2540,9 @@ private:
     float scale_ = 0;  // the device scale the app last heard of
     GdkSurface* scale_surface_ = nullptr;
     gulong scale_handler_ = 0;
+    GdkFrameClock* layout_clock_ = nullptr;
+    gulong layout_handler_ = 0;
+    device_span span_;  // where the last drawing went
 
     void watch_scale()
     {
@@ -2447,6 +2557,20 @@ private:
                            { gtk_widget_queue_draw(static_cast<canvas_impl*>(p)->w_); }),
                 this);
 #endif
+        // A move that keeps the size reuses the last drawing without calling
+        // the draw func, so the snapping to device pixels would go stale:
+        // after each layout, a canvas that has moved off its pixels redraws.
+        layout_clock_ = gtk_widget_get_frame_clock(w_);
+        if (layout_clock_)
+            layout_handler_ = g_signal_connect(
+                layout_clock_, "layout",
+                G_CALLBACK(+[](GdkFrameClock*, gpointer p)
+                           {
+                               auto* self = static_cast<canvas_impl*>(p);
+                               if (device_span_of(self->w_, device_scale_of(self->w_)) != self->span_)
+                                   gtk_widget_queue_draw(self->w_);
+                           }),
+                this);
     }
     void unwatch_scale()
     {
@@ -2454,6 +2578,9 @@ private:
             g_signal_handler_disconnect(scale_surface_, scale_handler_);
         scale_surface_ = nullptr;
         scale_handler_ = 0;
+        if (layout_clock_ && layout_handler_) g_signal_handler_disconnect(layout_clock_, layout_handler_);
+        layout_clock_ = nullptr;
+        layout_handler_ = 0;
     }
     // A raw event's position, from its surface to this widget.
     point_f widget_pos(GdkEvent* e) const

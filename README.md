@@ -53,6 +53,12 @@ int main(int argc, char** argv)
 - GTK 3 on Wayland at fractional scales draws at the next whole scale and
   the compositor scales it down: the right size, slightly soft. GTK 4 and Qt
   are exact. See [docs/gtk3-fractional-scale.md](docs/gtk3-fractional-scale.md).
+- GTK 4 lays widgets out in logical pixels, so at a fractional scale one can
+  start part way into a device pixel. rapport moves canvas, list cell and
+  icon painting onto whole pixels, but GTK clips each cell at its own
+  edges: where two painted rows meet inside a pixel, that pixel row is
+  blended (a faint seam in a line running down a column). Rows partly
+  scrolled out of view can stay off the grid until they next draw.
 
 ## Licence
 
