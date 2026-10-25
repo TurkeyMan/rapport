@@ -318,6 +318,9 @@ std::expected<std::unique_ptr<ui>, std::string> ui::load(int& argc, char** argv,
         }
         std::string file = "rapport_" + name + plugin_suffix;
         bool found = false;
+        // A copy that fails isn't the end of this backend: a later folder can
+        // hold the right one (an old package's copy left in a shared folder,
+        // another app's of another version).
         for (auto& dir : dirs)
         {
             auto path = dir / file;
@@ -329,20 +332,19 @@ std::expected<std::unique_ptr<ui>, std::string> ui::load(int& argc, char** argv,
             if (!lib)
             {
                 errors += "  " + name + ": " + lib.error() + "\n";
-                break;
+                continue;
             }
             auto* create = lib->function<create_backend_fn>(create_backend_symbol(name).c_str());
             if (!create)
             {
                 errors += "  " + name + ": " + sys::path_to_utf8(path) + " is not a rapport backend\n";
-                break;
+                continue;
             }
             // Never unload: toolkits register atexit handlers and TLS.
             lib->release();
             if (rap::backend* b = create(abi_version, &argc, argv))
                 return std::unique_ptr<ui>(new ui(std::unique_ptr<rap::backend>(b)));
-            errors += "  " + name + ": failed to start (ABI mismatch or no display)\n";
-            break;
+            errors += "  " + name + ": " + sys::path_to_utf8(path) + " failed to start (ABI mismatch or no display)\n";
         }
         if (!found) errors += "  " + name + ": " + file + " not found\n";
     }
