@@ -265,6 +265,10 @@ public:
     // max_groups.
     virtual buffer_ptr create_buffer(size_t bytes) = 0;
     virtual ticket clear(const buffer_ptr&, uint32_t value = 0) = 0;
+    // `data` into the buffer from byte `offset` on (both multiples of 4),
+    // after what's queued: the inputs of a compute (a compressed stream,
+    // lookup tables). Nothing when it doesn't fit.
+    virtual ticket upload(const buffer_ptr&, std::span<const std::byte> data, size_t offset = 0) = 0;
     virtual ticket readback(const buffer_ptr&, std::span<std::byte> out, std::function<void()> done = {}) = 0;
     virtual program_result compute_program(const shader& compute) = 0;
     virtual ticket run(std::span<const dispatch>) = 0;

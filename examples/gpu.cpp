@@ -183,7 +183,28 @@ int run_check(std::FILE* log)
         else
             say("compute: setup failed: %s%s\n", count.error.c_str(), show.error.c_str());
     }
-    return worst <= 1 && level_ok && compute_ok ? 0 : 2;  // one step: a driver's float rounding (see gpu.h)
+    // A buffer's words uploaded into its middle: the rest stays as cleared.
+    bool upload_ok = false;
+    if (auto words = dev->create_buffer(64 * 4))
+    {
+        std::vector<uint32_t> in(32);
+        for (size_t i = 0; i < in.size(); ++i)
+            in[i] = uint32_t(0x9E3779B9u * (i + 1));
+        dev->clear(words, 0xAAAAAAAAu);
+        dev->upload(words, std::as_bytes(std::span(in)), 16 * 4);
+        std::vector<std::byte> out(64 * 4);
+        dev->readback(words, out).wait();
+        int wrong = 0;
+        for (size_t i = 0; i < 64; ++i)
+        {
+            uint32_t got;
+            std::memcpy(&got, out.data() + i * 4, 4);
+            wrong += got != (i >= 16 && i < 48 ? in[i - 16] : 0xAAAAAAAAu);
+        }
+        say("buffer upload: 32 words at word 16 of 64: %d of 64 wrong\n", wrong);
+        upload_ok = wrong == 0;
+    }
+    return worst <= 1 && level_ok && compute_ok && upload_ok ? 0 : 2;  // one step: a driver's float rounding (see gpu.h)
 }
 
 }  // namespace

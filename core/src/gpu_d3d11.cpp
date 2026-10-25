@@ -468,6 +468,17 @@ public:
         return ticket(line_, signal());
     }
 
+    ticket upload(const buffer_ptr& bp, std::span<const std::byte> data, size_t offset) override
+    {
+        auto* b = mine(bp);
+        if (!b || offset % 4 || data.size() % 4 || offset > b->bytes || data.size() > b->bytes - offset) return {};
+        if (data.empty()) return {};
+        const D3D11_BOX box{UINT(offset), 0, 0, UINT(offset + data.size()), 1, 1};
+        lock_t l(*this);
+        ctx_->UpdateSubresource(b->buf.Get(), 0, &box, data.data(), 0, 0);
+        return ticket(line_, signal());
+    }
+
     ticket readback(const buffer_ptr& bp, std::span<std::byte> out, std::function<void()> done) override
     {
         auto* b = mine(bp);

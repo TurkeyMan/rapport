@@ -757,6 +757,25 @@ public:
                                  {bp}));
     }
 
+    ticket upload(const buffer_ptr& bp, std::span<const std::byte> data, size_t offset) override
+    {
+        auto* b = mine(bp);
+        if (!b || offset % 4 || data.size() % 4 || offset > b->bytes || data.size() > b->bytes - offset || data.empty()) return {};
+        auto staging = host_buffer::make(c_, data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        if (!staging) return {};
+        std::memcpy(staging->mapped, data.data(), data.size());
+        const core& c = *c_;
+        return ticket(line_, submit(
+                                 [&](VkCommandBuffer cmd)
+                                 {
+                                     memory_barrier(c, cmd);
+                                     const VkBufferCopy copy{0, offset, data.size()};
+                                     c.vkCmdCopyBuffer(cmd, staging->buffer, b->buf, 1, &copy);
+                                     memory_barrier(c, cmd);
+                                 },
+                                 {staging, bp}));
+    }
+
     ticket readback(const buffer_ptr& bp, std::span<std::byte> out, std::function<void()> done) override
     {
         auto* b = mine(bp);
