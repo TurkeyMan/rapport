@@ -9,6 +9,7 @@
 #include "qt_painter.h"
 
 #include "builtin_icons.h"
+#include "frame_layer.h"
 
 #include <QAbstractTableModel>
 #include <QAction>
@@ -1723,6 +1724,21 @@ public:
     void on_key(std::function<bool(const key_event&)> f) override { key_ = std::move(f); }
 
     // Frames at the screen's refresh rate while anyone's subscribed.
+    rap::frame_target target() const override
+    {
+        return frames::pixels_target(size(), float(w_->devicePixelRatioF()));
+    }
+    void on_frame_target(std::function<void(const rap::frame_target&)> f) override { frame_target_ = std::move(f); }
+    void present(std::shared_ptr<const rap::image> pixels, frame_color color) override
+    {
+        frame_ = {std::move(pixels), color};
+        w_->update();
+    }
+    void clear_frame() override
+    {
+        frame_ = {};
+        w_->update();
+    }
     subscription on_frame(std::function<void(double)> f) override
     {
         const int id = ++next_frame_;
@@ -1756,13 +1772,16 @@ public:
             scale_ = scale;
             resized();
         }
-        if (!paint_) return;
+        if (!paint_ && !frame_) return;
         qt_painter p(qp, w_);
-        paint_(p, size());
+        frame_.paint(p, size());
+        if (paint_) paint_(p, size());
     }
     void resized()
     {
-        if (laid_out_ && resize_) resize_(size());
+        if (!laid_out_) return;
+        if (resize_) resize_(size());
+        if (frame_target_) frame_target_(target());
     }
     // Shown, so laid out: its size is real from now on.
     void shown()
@@ -1804,6 +1823,8 @@ private:
 
     std::function<void(rap::painter&, rap::size_f)> paint_;
     std::function<void(size_f)> resize_;
+    frames::frame_layer frame_;
+    std::function<void(const rap::frame_target&)> frame_target_;
     std::function<bool(const pointer_event&)> pointer_;
     std::function<bool(const scroll_event&)> scroll_;
     std::function<bool(const key_event&)> key_;

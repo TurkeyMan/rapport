@@ -238,6 +238,10 @@ public:
     void on_scroll(std::function<bool(const scroll_event&)>) override {}
     void on_key(std::function<bool(const key_event&)>) override {}
     subscription on_frame(std::function<void(double)>) override { return {}; }
+    rap::frame_target target() const override { return {}; }
+    void on_frame_target(std::function<void(const rap::frame_target&)>) override {}
+    void present(std::shared_ptr<const rap::image>, frame_color) override {}
+    void clear_frame() override {}
 };
 
 // Keeps its size; there is nothing to draw on.

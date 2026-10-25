@@ -4,6 +4,9 @@ target_link_libraries(rapport-demo PRIVATE rapport::rapport)
 add_executable(rapport-canvas canvas.cpp)
 target_link_libraries(rapport-canvas PRIVATE rapport::rapport)
 
+add_executable(rapport-frame frame.cpp)
+target_link_libraries(rapport-frame PRIVATE rapport::rapport)
+
 add_executable(rapport-print print.cpp)
 target_link_libraries(rapport-print PRIVATE rapport::rapport)
 
@@ -27,7 +30,7 @@ if(RAPPORT_STATIC)
         endif()
     endforeach()
     file(GENERATE OUTPUT ${builtins_cpp} CONTENT "${builtins}")
-    foreach(example rapport-demo rapport-gallery rapport-canvas rapport-print)
+    foreach(example rapport-demo rapport-gallery rapport-canvas rapport-frame rapport-print)
         target_sources(${example} PRIVATE ${builtins_cpp})
         target_link_libraries(${example} PRIVATE ${backend_targets})
     endforeach()

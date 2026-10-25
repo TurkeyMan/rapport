@@ -3,6 +3,8 @@
 // has none), per-monitor DPI awareness.
 #include "win32_common.h"
 
+#include "frame_layer.h"
+
 #include "rapport/i18n.h"
 
 #include <commdlg.h>
@@ -4763,6 +4765,18 @@ public:
     {
         return g_frames ? g_frames->subscribe(std::move(f)) : subscription();
     }
+    rap::frame_target target() const override { return frames::pixels_target(size(), win_.scale()); }
+    void on_frame_target(std::function<void(const rap::frame_target&)> f) override { frame_target_ = std::move(f); }
+    void present(std::shared_ptr<const rap::image> pixels, frame_color color) override
+    {
+        frame_ = {std::move(pixels), color};
+        invalidate();
+    }
+    void clear_frame() override
+    {
+        frame_ = {};
+        invalidate();
+    }
 
     bool fills() const override { return true; }
     bool expands_in_form() const override { return true; }
@@ -4855,6 +4869,7 @@ private:
         case WM_SIZE:
             if (cpu_) cpu_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));  // the GPU's resizes as it draws
             if (resize_) resize_(size());
+            if (frame_target_) frame_target_(target());
             return 0;
         case WM_LBUTTONDOWN:
         case WM_LBUTTONDBLCLK: press(lp, 1); return 0;
@@ -4970,10 +4985,11 @@ private:
     void draw(ID2D1RenderTarget* rt, uint64_t key)
     {
         rt->Clear(d2d_color(theme_color_of(theme_color::window)));
-        if (paint_)
+        if (paint_ || frame_)
         {
             d2d_painter p(rt, win_.scale(), key);
-            paint_(p, size());
+            frame_.paint(p, size());
+            if (paint_) paint_(p, size());
         }
     }
     void drop_cpu()
@@ -4999,6 +5015,8 @@ private:
     std::function<bool(const pointer_event&)> pointer_;
     std::function<bool(const scroll_event&)> scroll_;
     std::function<bool(const key_event&)> key_;
+    frames::frame_layer frame_;
+    std::function<void(const rap::frame_target&)> frame_target_;
 };
 
 // -- window -------------------------------------------------------------------

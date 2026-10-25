@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -803,6 +804,95 @@ enum class cursor
     resize_nesw,
 };
 
+// -- frames: an image layer under a canvas's painting -------------------------
+//
+// A canvas can show a frame the app made under what on_paint draws: an image
+// viewer renders on its own (on a GPU worker, or the CPU) and presents the
+// result, and the overlay (text, selection, a HUD) is painted over it.
+
+// How a frame's values map to colour. sRGB now; the rest are for HDR.
+enum class transfer
+{
+    srgb,    // the sRGB curve, 0..1
+    linear,  // scRGB: linear, 1.0 = SDR white, may go past 1 and below 0
+    pq,      // SMPTE ST 2084
+    hlg,     // ARIB STD-B67
+};
+enum class primaries
+{
+    bt709,  // sRGB's
+    display_p3,
+    bt2020,
+};
+struct frame_color
+{
+    rap::transfer curve = transfer::srgb;
+    rap::primaries gamut = primaries::bt709;
+    float sdr_white_nits = 203;  // what 1.0 (linear) or SDR white (pq, hlg) means
+    bool premultiplied = true;   // alpha; opaque frames ignore it
+};
+
+// What a canvas's frames should be: their exact size, and where and how the
+// app can render them for the canvas to take without a copy.
+struct frame_target
+{
+    // The pixels a frame covering the whole canvas has: the toolkit's own
+    // rounding of size() at `scale`, which can differ from device_scale()
+    // (GTK 3 draws at 2 where the display shows 1.5).
+    int width = 0, height = 0;
+    float scale = 1;  // frame pixels per logical pixel
+
+    enum class api
+    {
+        pixels,  // CPU pixels only: present(image)
+        dmabuf,  // Linux
+        d3d11,   // Windows
+    } kind = api::pixels;
+    // The GPU the canvas is shown on: Linux, the DRM render node's dev_t;
+    // Windows, the adapter LUID (LowPart | HighPart << 32). 0 when unknown.
+    uint64_t device = 0;
+    struct format
+    {
+        uint32_t code = 0;                // DRM fourcc (dmabuf) or DXGI_FORMAT (d3d11)
+        std::vector<uint64_t> modifiers;  // dmabuf: importable modifiers; d3d11: empty
+    };
+    std::vector<format> formats;  // in the toolkit's order of preference
+    bool hdr = false;             // the output shows frame_color beyond sRGB as such
+};
+
+// A frame on the GPU. The app keeps ownership of the buffer and its
+// handles; rapport duplicates what it keeps past present(). Rows run top
+// first, as they're shown: a GL app renders flipped (a framebuffer is bottom
+// first), and no backend flips.
+struct gpu_frame
+{
+    int width = 0, height = 0;  // pixels
+    frame_color color;
+
+    struct dmabuf
+    {
+        uint32_t fourcc = 0;
+        uint64_t modifier = 0;
+        int planes = 1;
+        int fd[4] = {-1, -1, -1, -1};
+        uint32_t offset[4] = {}, stride[4] = {};
+        int acquire_fence = -1;  // a sync_file signalled when the frame's rendered; -1: implicit sync
+    };
+    struct d3d11
+    {
+        void* shared_handle = nullptr;  // NT handle of an ID3D11Texture2D (MISC_SHARED_NTHANDLE)
+        uint32_t dxgi_format = 0;
+        void* fence_handle = nullptr;  // a shared ID3D11Fence to wait on; nullptr: none
+        uint64_t fence_value = 0;
+    };
+    std::variant<dmabuf, d3d11> handle;
+
+    // On the UI thread, exactly once, when rapport has stopped reading the
+    // frame (it was replaced or copied, the canvas went, or it couldn't be
+    // used); the app may then reuse or free the buffer.
+    std::function<void()> release;
+};
+
 // A surface the app draws itself (an image view, a chart). Everything else
 // in a window should stay a native widget.
 class canvas : public widget
@@ -813,7 +903,8 @@ public:
     virtual float device_scale() const = 0;
     virtual void set_cursor(cursor) = 0;
 
-    // Paint handler: draws the whole canvas.
+    // Paint handler: draws the whole canvas, or over a presented frame only
+    // what goes on top of it.
     virtual void on_paint(std::function<void(rap::painter&, rap::size_f)>) = 0;
     // Size changed, or the device scale did (moved to another monitor).
     virtual void on_resize(std::function<void(size_f)>) = 0;
@@ -825,6 +916,27 @@ public:
     // Called once per displayed frame (paced by the display) with the frame
     // time in seconds, until the subscription is dropped. For animation.
     [[nodiscard]] virtual subscription on_frame(std::function<void(double)>) = 0;
+
+    // Frames (see frame_target): what to render them as, and when that
+    // changes (a resize, a new scale, another GPU).
+    virtual rap::frame_target target() const = 0;
+    virtual void on_frame_target(std::function<void(const rap::frame_target&)>) = 0;
+    // Shows a frame under on_paint's drawing from the next displayed frame,
+    // replacing the one before (the newest wins; the display paces it). It's
+    // placed at the top left, one frame pixel to one of target()'s, never
+    // scaled: render at target().width x height. Where it doesn't reach (a
+    // resize catching up) rapport fills the canvas's background, and while a
+    // frame is shown on_paint draws only the overlay, leaving it showing. UI
+    // thread only: post from a worker.
+    virtual void present(gpu_frame frame)
+    {
+        // Until a backend takes GPU frames (its target() says so).
+        if (frame.release) frame.release();
+    }
+    // The same from CPU pixels, on every backend; kept until replaced.
+    virtual void present(std::shared_ptr<const rap::image>, frame_color = {}) = 0;
+    // Back to on_paint alone.
+    virtual void clear_frame() = 0;
 };
 
 // -- windows ------------------------------------------------------------------

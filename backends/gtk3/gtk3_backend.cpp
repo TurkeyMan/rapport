@@ -8,6 +8,7 @@
 
 #include "builtin_icons.h"
 #include "gtk_common.h"
+#include "frame_layer.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -2694,10 +2695,12 @@ public:
                 {
                     self->scale_ = scale;
                     if (self->resize_) self->resize_(self->size());
+                    self->target_changed();
                 }
-                if (!self->paint_) return false;
+                if (!self->paint_ && !self->frame_) return false;
                 cairo_painter painter(cr, w);
-                self->paint_(painter, self->size());
+                self->frame_.paint(painter, self->size());
+                if (self->paint_) self->paint_(painter, self->size());
                 return true;
             },
             this);
@@ -2708,6 +2711,7 @@ public:
                 auto* self = static_cast<canvas_impl*>(p);
                 self->scale_ = device_scale_of(self->w_);
                 if (self->resize_) self->resize_({float(a->width), float(a->height)});
+                self->target_changed();
             },
             this);
         connect(
@@ -2728,6 +2732,7 @@ public:
             {
                 auto* self = static_cast<canvas_impl*>(p);
                 if (self->resize_) self->resize_(self->size());
+                self->target_changed();
             },
             this);
         connect(w_, "button-press-event", &canvas_impl::button, this);
@@ -2798,6 +2803,18 @@ public:
     void on_scroll(std::function<bool(const scroll_event&)> f) override { scroll_ = std::move(f); }
     void on_key(std::function<bool(const key_event&)> f) override { key_ = std::move(f); }
 
+    rap::frame_target target() const override { return frames::pixels_target(size(), float(gtk_widget_get_scale_factor(w_))); }
+    void on_frame_target(std::function<void(const rap::frame_target&)> f) override { frame_target_ = std::move(f); }
+    void present(std::shared_ptr<const rap::image> pixels, frame_color color) override
+    {
+        frame_ = {std::move(pixels), color};
+        gtk_widget_queue_draw(w_);
+    }
+    void clear_frame() override
+    {
+        frame_ = {};
+        gtk_widget_queue_draw(w_);
+    }
     subscription on_frame(std::function<void(double)> f) override
     {
         if (!alive_) return {};
@@ -2913,6 +2930,12 @@ private:
 
     std::function<void(rap::painter&, rap::size_f)> paint_;
     std::function<void(size_f)> resize_;
+    frames::frame_layer frame_;
+    std::function<void(const rap::frame_target&)> frame_target_;
+    void target_changed()
+    {
+        if (frame_target_) frame_target_(target());
+    }
     std::function<bool(const pointer_event&)> pointer_;
     std::function<bool(const scroll_event&)> scroll_;
     std::function<bool(const key_event&)> key_;
