@@ -532,6 +532,23 @@ private:
 // popover menus. Built afresh each time a menu opens (so it shows the app's
 // state then); the actions call into the Menu kept here, which lives until
 // the next build. Separators become GMenu sections.
+// Pops up a popover menu once GTK has finished building it. A menu's
+// section separators are shown in an idle after it's made, so popped up at
+// once it's sized without them and cut short (its last items only reached
+// by scrolling).
+void popup_when_built(GtkWidget* popover)
+{
+    g_idle_add_full(
+        G_PRIORITY_DEFAULT_IDLE,
+        +[](gpointer p) -> gboolean
+        {
+            auto* w = static_cast<GtkWidget*>(p);
+            if (gtk_widget_get_parent(w)) gtk_popover_popup(GTK_POPOVER(w));
+            return G_SOURCE_REMOVE;
+        },
+        g_object_ref(popover), g_object_unref);
+}
+
 class menu_actions
 {
 public:
@@ -973,7 +990,7 @@ private:
         gtk_popover_set_has_arrow(GTK_POPOVER(popover_), false);
         gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_BOTTOM);
         gtk_widget_set_halign(popover_, GTK_ALIGN_START);
-        gtk_popover_popup(GTK_POPOVER(popover_));
+        popup_when_built(popover_);
     }
 
     GListStore* root_ = nullptr;
@@ -2330,7 +2347,7 @@ private:
         gtk_popover_set_has_arrow(GTK_POPOVER(popover_), false);
         gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_BOTTOM);
         gtk_widget_set_halign(popover_, GTK_ALIGN_START);
-        gtk_popover_popup(GTK_POPOVER(popover_));
+        popup_when_built(popover_);
     }
 
     RapportRows* rows_ = nullptr;  // owned by sel_
