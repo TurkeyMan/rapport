@@ -6,6 +6,9 @@ target_link_libraries(rapport-canvas PRIVATE rapport::rapport)
 
 add_executable(rapport-frame frame.cpp)
 target_link_libraries(rapport-frame PRIVATE rapport::rapport)
+if(WIN32)
+    target_link_libraries(rapport-frame PRIVATE d3d11 dxgi)
+endif()
 
 add_executable(rapport-print print.cpp)
 target_link_libraries(rapport-print PRIVATE rapport::rapport)

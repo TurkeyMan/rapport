@@ -9,6 +9,7 @@
 
 #include <commdlg.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <format>
@@ -4578,7 +4579,8 @@ struct gpu_device
     com<ID3D11Device> d3d;
     com<IDXGIFactory2> dxgi;
     com<ID2D1Device> d2d;
-    uint64_t key = 0;  // its bitmaps' (see new_resource_key)
+    uint64_t key = 0;   // its bitmaps' (see new_resource_key)
+    uint64_t luid = 0;  // its adapter's, for frame_target::device
 };
 
 class gpu
@@ -4639,6 +4641,9 @@ private:
                                      reinterpret_cast<void**>(factory.put()))) ||
             FAILED(factory->CreateDevice(dxgi_device.get(), d->d2d.put())))
             return nullptr;
+        DXGI_ADAPTER_DESC desc{};
+        if (SUCCEEDED(adapter->GetDesc(&desc)))
+            d->luid = uint64_t(desc.AdapterLuid.LowPart) | uint64_t(uint32_t(desc.AdapterLuid.HighPart)) << 32;
         return d;  // used on the UI thread from here on
     }
 };
@@ -4737,6 +4742,8 @@ public:
     {
         *alive_ = false;
         if (cpu_key_) retire_resource_key(cpu_key_);
+        retire_gpu_frame();
+        finish_reads(true);
     }
 
     void invalidate() override { InvalidateRect(h_, nullptr, FALSE); }
@@ -4765,15 +4772,66 @@ public:
     {
         return g_frames ? g_frames->subscribe(std::move(f)) : subscription();
     }
-    rap::frame_target target() const override { return frames::pixels_target(size(), win_.scale()); }
+    rap::frame_target target() const override
+    {
+        rap::frame_target t = frames::pixels_target(size(), win_.scale());
+        if (gpu_)
+        {
+            // Frames drawn by Direct2D straight from the app's texture.
+            t.kind = rap::frame_target::api::d3d11;
+            t.device = gpu_->device()->luid;
+            t.formats = {{DXGI_FORMAT_B8G8R8A8_UNORM, {}}, {DXGI_FORMAT_R8G8B8A8_UNORM, {}}};
+        }
+        return t;
+    }
     void on_frame_target(std::function<void(const rap::frame_target&)> f) override { frame_target_ = std::move(f); }
     void present(std::shared_ptr<const rap::image> pixels, frame_color color) override
     {
+        retire_gpu_frame();
         frame_ = {std::move(pixels), color};
+        invalidate();
+    }
+    void present(gpu_frame frame) override
+    {
+        auto* handle = std::get_if<gpu_frame::d3d11>(&frame.handle);
+        com<ID3D11Device1> d3d;
+        com<ID3D11Texture2D> texture;
+        if (!handle || !gpu_ ||
+            FAILED(gpu_->device()->d3d->QueryInterface(__uuidof(ID3D11Device1), reinterpret_cast<void**>(d3d.put()))) ||
+            FAILED(d3d->OpenSharedResource1(handle->shared_handle, __uuidof(ID3D11Texture2D),
+                                            reinterpret_cast<void**>(texture.put()))))
+        {
+            if (frame.release) frame.release();  // not one this canvas can show (now)
+            return;
+        }
+        com<ID3D11Fence> fence;
+        if (handle->fence_handle)
+        {
+            com<ID3D11Device5> d3d5;
+            if (FAILED(d3d->QueryInterface(__uuidof(ID3D11Device5), reinterpret_cast<void**>(d3d5.put()))) ||
+                FAILED(d3d5->OpenSharedFence(handle->fence_handle, __uuidof(ID3D11Fence),
+                                             reinterpret_cast<void**>(fence.put()))))
+            {
+                if (frame.release) frame.release();
+                return;
+            }
+        }
+        retire_gpu_frame();
+        frame_ = {};
+        gpu_frame_ = std::make_unique<shown_frame>();
+        gpu_frame_->device = gpu_->device();
+        gpu_frame_->texture = std::move(texture);
+        D3D11_TEXTURE2D_DESC desc{};
+        gpu_frame_->texture->GetDesc(&desc);  // what it is, whatever the frame says
+        gpu_frame_->format = desc.Format;
+        gpu_frame_->fence = std::move(fence);
+        gpu_frame_->fence_value = handle->fence_value;
+        gpu_frame_->release = std::move(frame.release);
         invalidate();
     }
     void clear_frame() override
     {
+        retire_gpu_frame();
         frame_ = {};
         invalidate();
     }
@@ -4863,9 +4921,28 @@ private:
             BeginPaint(h_, &ps);
             render();
             EndPaint(h_, &ps);
+            // On the GPU or off it: frames come as textures or as pixels.
+            if (bool(gpu_) != gpu_reported_)
+            {
+                gpu_reported_ = bool(gpu_);
+                if (frame_target_) frame_target_(target());
+            }
             return 0;
         }
         case WM_ERASEBKGND: return 1;
+        case WM_TIMER:
+            if (wp == k_device_timer)
+            {
+                if (gpu::device(false))
+                {
+                    KillTimer(h_, k_device_timer);
+                    invalidate();
+                }
+                return 0;
+            }
+            if (wp != k_reads_timer) return DefWindowProcW(h_, msg, wp, lp);
+            finish_reads(false);
+            return 0;
         case WM_SIZE:
             if (cpu_) cpu_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));  // the GPU's resizes as it draws
             if (resize_) resize_(size());
@@ -4945,22 +5022,35 @@ private:
         // GPU's device starts after it.
         const std::shared_ptr<gpu_device> dev = gpu::device(painted_);
         if (gpu_ && gpu_->device() != dev) gpu_.reset();  // lost, by another canvas
+        if (gpu_frame_ && (!gpu_ || gpu_frame_->device != gpu_->device())) drop_gpu_frame();
         if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h)))
             drop_cpu();
         if (gpu_)
         {
+            if (gpu_frame_ && gpu_frame_->fence)
+            {
+                // The app's rendering of it first, on the GPU (no wait here).
+                com<ID3D11DeviceContext> context;
+                com<ID3D11DeviceContext4> context4;
+                dev->d3d->GetImmediateContext(context.put());
+                if (SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext4),
+                                                      reinterpret_cast<void**>(context4.put()))))
+                    context4->Wait(gpu_frame_->fence.get(), gpu_frame_->fence_value);
+            }
             if (ID2D1DeviceContext* dc = gpu_->begin(w, h))
             {
-                draw(dc, dev->key);
+                draw(dc, dev->key, dc);
                 if (gpu_->end())
                 {
                     painted_ = true;
+                    finish_reads(false);
                     return;
                 }
             }
             // Lost: on the CPU for now, and a new device is on its way.
             gpu::lost(gpu_->device());
             gpu_.reset();
+            drop_gpu_frame();
         }
         if (!cpu_)
         {
@@ -4981,16 +5071,87 @@ private:
             painted_ = true;
             gpu::device(true);
         }
+        // An app waiting to render frames on the GPU hears of it once the
+        // device is up (canvases otherwise take it at their next paint).
+        if (frame_target_) SetTimer(h_, k_device_timer, 50, nullptr);
     }
-    void draw(ID2D1RenderTarget* rt, uint64_t key)
+    void draw(ID2D1RenderTarget* rt, uint64_t key, ID2D1DeviceContext* gpu = nullptr)
     {
         rt->Clear(d2d_color(theme_color_of(theme_color::window)));
+        if (gpu && gpu_frame_) draw_gpu_frame(gpu);
         if (paint_ || frame_)
         {
             d2d_painter p(rt, win_.scale(), key);
             frame_.paint(p, size());
             if (paint_) paint_(p, size());
         }
+    }
+    // The app's texture, one of its pixels to one of the window's, top left.
+    void draw_gpu_frame(ID2D1DeviceContext* dc)
+    {
+        shown_frame& f = *gpu_frame_;
+        if (!f.bitmap)
+        {
+            com<IDXGISurface> surface;
+            const D2D1_BITMAP_PROPERTIES1 props =
+                D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE, D2D1::PixelFormat(f.format, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            if (FAILED(f.texture->QueryInterface(__uuidof(IDXGISurface), reinterpret_cast<void**>(surface.put()))) ||
+                FAILED(dc->CreateBitmapFromDxgiSurface(surface.get(), &props, f.bitmap.put())))
+                return;
+        }
+        const D2D1_SIZE_U px = f.bitmap->GetPixelSize();
+        dc->SetDpi(96, 96);
+        dc->SetTransform(D2D1::Matrix3x2F::Identity());
+        dc->DrawBitmap(f.bitmap.get(), D2D1::RectF(0, 0, float(px.width), float(px.height)), 1,
+                       D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, nullptr, nullptr);
+    }
+    // The shown texture stops being drawn: it's released once the GPU has
+    // finished what's queued, which includes every read of it.
+    void retire_gpu_frame()
+    {
+        if (!gpu_frame_) return;
+        std::unique_ptr<shown_frame> f = std::move(gpu_frame_);
+        com<ID3D11DeviceContext> context;
+        D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT, 0};
+        com<ID3D11Query> done;
+        f->device->d3d->GetImmediateContext(context.put());
+        if (FAILED(f->device->d3d->CreateQuery(&desc, done.put())))
+        {
+            context->Flush();
+            if (f->release) f->release();  // nothing to wait with: the best there is
+            return;
+        }
+        context->End(done.get());
+        context->Flush();
+        reads_.push_back({std::move(done), std::move(context), std::move(f->release)});
+        SetTimer(h_, k_reads_timer, 1, nullptr);
+    }
+    // Its device is gone, and so are the reads.
+    void drop_gpu_frame()
+    {
+        if (!gpu_frame_) return;
+        if (gpu_frame_->release) gpu_frame_->release();
+        gpu_frame_.reset();
+    }
+    // Releases the frames the GPU has finished reading; `wait`: all of them.
+    void finish_reads(bool wait)
+    {
+        const ULONGLONG until = GetTickCount64() + 250;
+        while (!reads_.empty())
+        {
+            pending_read& r = reads_.front();
+            const HRESULT hr = r.context->GetData(r.done.get(), nullptr, 0, 0);
+            if (hr == S_FALSE && wait && GetTickCount64() < until)
+            {
+                Sleep(0);
+                continue;
+            }
+            if (hr == S_FALSE) break;  // in order: the rest are later still
+            auto release = std::move(r.release);
+            reads_.erase(reads_.begin());
+            if (release) release();
+        }
+        if (reads_.empty() && IsWindow(h_)) KillTimer(h_, k_reads_timer);
     }
     void drop_cpu()
     {
@@ -5017,6 +5178,29 @@ private:
     std::function<bool(const key_event&)> key_;
     frames::frame_layer frame_;
     std::function<void(const rap::frame_target&)> frame_target_;
+
+    // A GPU frame being shown: the app's texture, opened on our device.
+    struct shown_frame
+    {
+        std::shared_ptr<gpu_device> device;
+        com<ID3D11Texture2D> texture;
+        DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        com<ID3D11Fence> fence;
+        uint64_t fence_value = 0;
+        com<ID2D1Bitmap1> bitmap;
+        std::function<void()> release;
+    };
+    std::unique_ptr<shown_frame> gpu_frame_;
+    // Frames no longer shown, released when the GPU has done with them.
+    struct pending_read
+    {
+        com<ID3D11Query> done;
+        com<ID3D11DeviceContext> context;
+        std::function<void()> release;
+    };
+    std::vector<pending_read> reads_;
+    static constexpr UINT_PTR k_reads_timer = 0xf4a3, k_device_timer = 0xf4a4;
+    bool gpu_reported_ = false;
 };
 
 // -- window -------------------------------------------------------------------
