@@ -185,6 +185,7 @@ VkFormat vk_format(format f)
         case format::r32f: return VK_FORMAT_R32_SFLOAT;
         case format::rg32f: return VK_FORMAT_R32G32_SFLOAT;
         case format::rgba32f: return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case format::rgb10a2: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;  // R in the low bits, as DXGI's
     }
     return VK_FORMAT_UNDEFINED;
 }

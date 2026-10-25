@@ -35,6 +35,7 @@ enum class format
     r16_snorm, rg16_snorm, rgba16_snorm,  // -32767..32767 -> -1..1
     r16f, rg16f, rgba16f,
     r32f, rg32f, rgba32f,
+    rgb10a2,  // unorm, 10 bits a colour and 2 of alpha, packed in 32: a 10-bit front buffer (SDR or HDR10)
     // No 3-channel formats: no API renders to them. upload() takes 3-channel
     // sources and expands them (see source_layout).
 };

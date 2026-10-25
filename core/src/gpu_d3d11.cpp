@@ -88,6 +88,7 @@ DXGI_FORMAT dxgi_format(format f)
         case format::r32f: return DXGI_FORMAT_R32_FLOAT;
         case format::rg32f: return DXGI_FORMAT_R32G32_FLOAT;
         case format::rgba32f: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case format::rgb10a2: return DXGI_FORMAT_R10G10B10A2_UNORM;
     }
     return DXGI_FORMAT_UNKNOWN;
 }

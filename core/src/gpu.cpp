@@ -33,6 +33,7 @@ format_info info(format f)
         case format::r32f: return {k::float32, 1};
         case format::rg32f: return {k::float32, 2};
         case format::rgba32f: return {k::float32, 4};
+        case format::rgb10a2: return {k::packed1010102, 1};
     }
     return {k::unorm8, 4};
 }
@@ -179,6 +180,23 @@ void convert(std::span<const std::byte> pixels, const source_layout& layout, int
 {
     const format_info fi = info(target);
     const int c = std::clamp(layout.channels, 1, 4), n = fi.channels;
+    if (fi.sample == format_info::kind::packed1010102)
+    {
+        // Through float, packed R in the low bits as both APIs lay it out.
+        const size_t in_sample = sample_bytes(layout.type), in_pixel = in_sample * size_t(c);
+        const size_t in_stride = layout.stride ? layout.stride : in_pixel * size_t(w);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                const std::byte* src = pixels.data() + size_t(y) * in_stride + size_t(x) * in_pixel;
+                float v[4] = {0, 0, 0, 1};
+                for (int k = 0; k < c; ++k) v[k] = to_float(src + size_t(k) * in_sample, layout.type);
+                const auto q = [](float f, uint32_t max) { return uint32_t(std::lround(std::clamp(f, 0.0f, 1.0f) * float(max))); };
+                const uint32_t word = q(v[0], 1023) | q(v[1], 1023) << 10 | q(v[2], 1023) << 20 | q(v[3], 3) << 30;
+                std::memcpy(out + size_t(y) * out_stride + size_t(x) * 4, &word, 4);
+            }
+        return;
+    }
     const size_t in_sample = sample_bytes(layout.type), out_sample = fi.sample_bytes();
     const size_t in_pixel = in_sample * size_t(c), out_pixel = out_sample * size_t(n);
     const size_t in_stride = layout.stride ? layout.stride : in_pixel * size_t(w);

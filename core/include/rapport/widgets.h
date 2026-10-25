@@ -978,7 +978,7 @@ public:
     // the UI thread. Refused (and logged) when it's another device's, or not
     // one the canvas can draw: rgba8 or rgba16f, one level. The canvas holds
     // it until it's replaced and the GPU has finished drawing it.
-    virtual void present(gpu::texture_ptr, gpu::ticket ready, frame_color = {}) {}
+    virtual void present(gpu::texture_ptr, gpu::ticket /*ready*/, frame_color = {}) {}
     // Back to on_paint alone.
     virtual void clear_frame() = 0;
 };

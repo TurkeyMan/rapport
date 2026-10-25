@@ -26,9 +26,11 @@ struct format_info
         snorm16,
         half,
         float32,
+        packed1010102,  // rgb10a2: four channels in one 32-bit word
     } sample;
     int channels;
-    size_t sample_bytes() const { return sample == kind::unorm8 ? 1 : sample == kind::float32 ? 4 : 2; }
+    // Bytes a channel takes; the packed format's word counts as one 4-byte "channel".
+    size_t sample_bytes() const { return sample == kind::unorm8 ? 1 : sample == kind::float32 || sample == kind::packed1010102 ? 4 : 2; }
 };
 format_info info(format);
 
