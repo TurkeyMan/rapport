@@ -3885,7 +3885,43 @@ public:
         if (GdkDisplay* d = gdk_display_get_default())
             gdk_clipboard_set_text(gdk_display_get_clipboard(d), s.c_str());
     }
+    // Wayland hands the clipboard only to the client with keyboard focus, so
+    // a window just created can't read it yet: wait (polling, 50 ms) until
+    // one of ours is active, then a tick more for the selection to arrive;
+    // after 1.5 s without (no window manager, say), read anyway.
     void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    {
+        struct waiting
+        {
+            std::function<void(std::optional<std::string>)> done;
+            int ticks = 0;
+            bool active = false;
+        };
+        g_timeout_add_full(
+            G_PRIORITY_DEFAULT, 50,
+            +[](gpointer p) -> gboolean
+            {
+                auto* w = static_cast<waiting*>(p);
+                bool active = false;
+                GListModel* windows = gtk_window_get_toplevels();
+                for (guint i = 0, n = g_list_model_get_n_items(windows); i < n && !active; ++i)
+                {
+                    auto* win = static_cast<GtkWindow*>(g_list_model_get_item(windows, i));
+                    active = gtk_window_is_active(win);
+                    g_object_unref(win);
+                }
+                if (!w->active && active && ++w->ticks < 30)
+                {
+                    w->active = true;  // the selection follows the focus: next tick
+                    return G_SOURCE_CONTINUE;
+                }
+                if (!w->active && ++w->ticks < 30) return G_SOURCE_CONTINUE;
+                read_clipboard_now(std::move(w->done));
+                return G_SOURCE_REMOVE;
+            },
+            new waiting{.done = std::move(done)}, +[](gpointer p) { delete static_cast<waiting*>(p); });
+    }
+    static void read_clipboard_now(std::function<void(std::optional<std::string>)> done)
     {
         GdkDisplay* d = gdk_display_get_default();
         if (!d) return done(std::nullopt);

@@ -4454,7 +4454,38 @@ public:
         gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), s.c_str(),
                                int(s.size()));
     }
+    // As in GTK 4: under Wayland only the focused client gets the
+    // clipboard, so wait (polling, 50 ms) for one of our windows to be
+    // active, a tick more, then read; after 1.5 s, read anyway.
     void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    {
+        struct waiting
+        {
+            std::function<void(std::optional<std::string>)> done;
+            int ticks = 0;
+            bool active = false;
+        };
+        g_timeout_add_full(
+            G_PRIORITY_DEFAULT, 50,
+            +[](gpointer p) -> gboolean
+            {
+                auto* w = static_cast<waiting*>(p);
+                bool active = false;
+                GList* windows = gtk_window_list_toplevels();
+                for (GList* l = windows; l && !active; l = l->next) active = gtk_window_is_active(GTK_WINDOW(l->data));
+                g_list_free(windows);
+                if (!w->active && active && ++w->ticks < 30)
+                {
+                    w->active = true;  // the selection follows the focus: next tick
+                    return G_SOURCE_CONTINUE;
+                }
+                if (!w->active && ++w->ticks < 30) return G_SOURCE_CONTINUE;
+                read_clipboard_now(std::move(w->done));
+                return G_SOURCE_REMOVE;
+            },
+            new waiting{.done = std::move(done)}, +[](gpointer p) { delete static_cast<waiting*>(p); });
+    }
+    static void read_clipboard_now(std::function<void(std::optional<std::string>)> done)
     {
         gtk_clipboard_request_text(
             gtk_clipboard_get(GDK_SELECTION_CLIPBOARD),

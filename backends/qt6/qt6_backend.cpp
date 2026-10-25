@@ -4351,11 +4351,36 @@ public:
     {
         QGuiApplication::clipboard()->setText(qs(s));
     }
+    // Under Wayland only the focused client gets the clipboard: wait
+    // (polling, 50 ms) for one of our windows to have the focus, a tick
+    // more, then read; after 1.5 s, read anyway. Elsewhere it's at once.
     void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
     {
-        const QMimeData* data = QGuiApplication::clipboard()->mimeData();
-        if (!data || !data->hasText()) return done(std::nullopt);
-        done(data->text().toStdString());
+        auto read = [](const std::function<void(std::optional<std::string>)>& done)
+        {
+            const QMimeData* data = QGuiApplication::clipboard()->mimeData();
+            if (!data || !data->hasText()) return done(std::nullopt);
+            done(data->text().toStdString());
+        };
+        if (!QGuiApplication::platformName().startsWith("wayland")) return read(done);
+        auto* timer = new QTimer(qApp);
+        auto ticks = std::make_shared<int>(0);
+        auto active = std::make_shared<bool>(false);
+        QObject::connect(timer, &QTimer::timeout, timer,
+                         [timer, ticks, active, read, done = std::move(done)]
+                         {
+                             const bool focused = QGuiApplication::focusWindow() != nullptr;
+                             if (!*active && focused && ++*ticks < 30)
+                             {
+                                 *active = true;  // the selection follows the focus: next tick
+                                 return;
+                             }
+                             if (!*active && ++*ticks < 30) return;
+                             timer->stop();
+                             timer->deleteLater();
+                             read(done);
+                         });
+        timer->start(50);
     }
 
     void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels,
