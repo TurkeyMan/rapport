@@ -978,6 +978,7 @@ public:
     label_impl(win_context& win, HWND parent, const spec::label& s)
         : leaf(win)
         , ellipsize_(s.ellipsize)
+        , wrap_(s.wrap && !s.link && !s.selectable)
         , link_(s.link)
         , on_click_(s.on_click)
         , icon_(s.icon)
@@ -1078,6 +1079,14 @@ public:
         // label asked for one line's height and showed only the first).
         const std::wstring text = window_text(h_);
         SIZE s = text_extent(h_, text, text.find(L'\n') != std::wstring::npos);
+        if (wrap_)
+        {
+            // About 60 characters across, or the text's own width if less; its
+            // height is the lines it takes there. Laid out at least that wide
+            // (a box is as wide as its widest child), so it never needs more.
+            const long across = std::min<long>(s.cx, font_metrics(win_.dpi()).cx * 60);
+            s = text_extent(h_, text, true, int(across));
+        }
         full_cx_ = s.cx;
         if (ellipsize_) s.cx = std::min<long>(s.cx, px(40));
         return s;
@@ -1098,6 +1107,7 @@ private:
         return out + L"</a>";
     }
     bool ellipsize_;
+    bool wrap_;
     long full_cx_ = 0;
     bool link_;
     std::function<void()> on_click_;

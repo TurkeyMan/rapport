@@ -125,6 +125,11 @@ struct label
     // Cut long text with "..." instead of widening the window to fit it
     // (status lines).
     bool ellipsize = false;
+    // Long text goes onto more lines, about 60 characters across (less when
+    // it's shorter; wider if its column is): a paragraph in a dialog, which
+    // reflows in any language. Without it a label is one line per line
+    // break.
+    bool wrap = false;
     // A hyperlink that runs on_click (TortoiseGit's "Check: All None ..."
     // links, a branch name that opens Switch): each toolkit's own link.
     bool link = false;
@@ -586,6 +591,11 @@ public:
     label& selectable(bool v = true)
     {
         s().selectable = v;
+        return *this;
+    }
+    label& wrap(bool v = true)
+    {
+        s().wrap = v;
         return *this;
     }
     label& ellipsize(bool v = true)

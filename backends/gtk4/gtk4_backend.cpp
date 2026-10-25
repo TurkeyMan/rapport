@@ -129,6 +129,13 @@ public:
         gtk_label_set_xalign(GTK_LABEL(w_), 0);
         gtk_label_set_selectable(GTK_LABEL(w_), s.selectable);
         if (s.ellipsize) gtk_label_set_ellipsize(GTK_LABEL(w_), PANGO_ELLIPSIZE_END);
+        if (s.wrap)
+        {
+            // About 60 characters across at most; GTK fits the height.
+            gtk_label_set_wrap(GTK_LABEL(w_), true);
+            gtk_label_set_wrap_mode(GTK_LABEL(w_), PANGO_WRAP_WORD_CHAR);
+            gtk_label_set_max_width_chars(GTK_LABEL(w_), 60);
+        }
         if (s.link)
         {
             // A link in the label's markup: GTK's own link look, focus and

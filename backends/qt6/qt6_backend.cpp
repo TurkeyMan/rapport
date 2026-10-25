@@ -671,6 +671,8 @@ public:
     explicit label_impl(const spec::label& s)
         : widget_base(with_icon(new elided_label(s.ellipsize), s))
     {
+        // Qt fits the height to the width it's given (heightForWidth).
+        if (s.wrap) label()->setWordWrap(true);
         if (s.link)
         {
             // A rich-text link: the style's link colour, focus and Enter.
