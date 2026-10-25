@@ -21,6 +21,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <mutex>
