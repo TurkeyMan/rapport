@@ -1056,9 +1056,10 @@ private:
             GtkTreePath* path = gtk_tree_model_get_path(GTK_TREE_MODEL(store_), &it);
             by_id_[t.id] = gtk_tree_row_reference_new(GTK_TREE_MODEL(store_), path);
             gtk_tree_path_free(path);
-            insert(t.children, &it, open, expand);
+            // Parents first: GTK won't expand a row inside a collapsed one.
             const auto was = open.find(t.id);
             if (!t.children.empty() && (was != open.end() ? was->second : t.expanded)) expand.push_back(t.id);
+            insert(t.children, &it, open, expand);
         }
     }
     void clear_refs()
