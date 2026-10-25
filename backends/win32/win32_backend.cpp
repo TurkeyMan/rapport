@@ -5133,7 +5133,9 @@ private:
         if (gpu_frame_->release) gpu_frame_->release();
         gpu_frame_.reset();
     }
-    // Releases the frames the GPU has finished reading; `wait`: all of them.
+    // Releases the frames the GPU has finished reading. `wait` (the canvas
+    // is going): all of them, after a while even unfinished, since each is
+    // released exactly once and the app wants its buffers back.
     void finish_reads(bool wait)
     {
         const ULONGLONG until = GetTickCount64() + 250;
@@ -5146,7 +5148,7 @@ private:
                 Sleep(0);
                 continue;
             }
-            if (hr == S_FALSE) break;  // in order: the rest are later still
+            if (hr == S_FALSE && !wait) break;  // in order: the rest are later still
             auto release = std::move(r.release);
             reads_.erase(reads_.begin());
             if (release) release();
