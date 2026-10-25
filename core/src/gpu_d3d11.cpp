@@ -144,7 +144,20 @@ class d3d_program : public program
 {
 public:
     const d3d_device* owner = nullptr;
-    ComPtr<ID3D11PixelShader> ps;
+    ComPtr<ID3D11PixelShader> ps;    // a pixel program's
+    ComPtr<ID3D11ComputeShader> cs;  // a compute program's
+};
+
+// Raw words: read by passes through `srv`, written by dispatches through `uav`.
+class d3d_buffer : public buffer
+{
+public:
+    size_t size() const override { return bytes; }
+    const d3d_device* owner = nullptr;
+    ComPtr<ID3D11Buffer> buf;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    ComPtr<ID3D11UnorderedAccessView> uav;
+    size_t bytes = 0;
 };
 
 class d3d_device : public device, public std::enable_shared_from_this<d3d_device>
@@ -370,10 +383,13 @@ public:
         return ticket(flag, 1);
     }
 
-    program_result program(const shader& pixel) override
+    program_result program(const shader& pixel) override { return make_program(pixel, false); }
+    program_result compute_program(const shader& compute) override { return make_program(compute, true); }
+
+    program_result make_program(const shader& sh, bool compute)
     {
         std::string errors;
-        for (const shader::form& f : pixel.forms)
+        for (const shader::form& f : sh.forms)
         {
             ComPtr<ID3DBlob> compiled;
             const void* code = f.code.data();
@@ -387,8 +403,9 @@ public:
                     continue;
                 }
                 ComPtr<ID3DBlob> log;
-                const char* target = d3d_->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_0 ? "ps_5_0" : "ps_4_0";
-                if (FAILED(compile(code, size, pixel.name.c_str(), nullptr, nullptr, pixel.entry.c_str(), target,
+                const bool fl11 = d3d_->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_0;
+                const char* target = compute ? (fl11 ? "cs_5_0" : "cs_4_0") : (fl11 ? "ps_5_0" : "ps_4_0");
+                if (FAILED(compile(code, size, sh.name.c_str(), nullptr, nullptr, sh.entry.c_str(), target,
                                    D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, compiled.GetAddressOf(), log.GetAddressOf())))
                 {
                     errors += "hlsl: ";
@@ -403,12 +420,135 @@ public:
                 continue;
             auto p = std::make_shared<d3d_program>();
             p->owner = this;
-            if (SUCCEEDED(d3d_->CreatePixelShader(code, size, nullptr, p->ps.GetAddressOf())))
+            if (compute ? SUCCEEDED(d3d_->CreateComputeShader(code, size, nullptr, p->cs.GetAddressOf()))
+                        : SUCCEEDED(d3d_->CreatePixelShader(code, size, nullptr, p->ps.GetAddressOf())))
                 return {p, {}};
-            errors += "dxbc: not a pixel shader this device takes; ";
+            errors += compute ? "dxbc: not a compute shader this device takes; " : "dxbc: not a pixel shader this device takes; ";
         }
-        return {nullptr, (pixel.name.empty() ? "shader" : pixel.name) + ": " +
+        return {nullptr, (sh.name.empty() ? "shader" : sh.name) + ": " +
                              (errors.empty() ? std::string("no form Direct3D 11 takes (dxbc or hlsl)") : errors)};
+    }
+
+    buffer_ptr create_buffer(size_t bytes) override
+    {
+        bytes = (std::max<size_t>(bytes, 4) + 3) & ~size_t(3);
+        if (bytes > 128u << 20) return nullptr;  // D3D11's limit for a buffer
+        auto b = std::make_shared<d3d_buffer>();
+        b->owner = this;
+        b->bytes = bytes;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = UINT(bytes);
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+        sd.BufferEx.NumElements = UINT(bytes / 4);
+        sd.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_TYPELESS;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = UINT(bytes / 4);
+        ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        if (FAILED(d3d_->CreateBuffer(&bd, nullptr, b->buf.GetAddressOf())) ||
+            FAILED(d3d_->CreateShaderResourceView(b->buf.Get(), &sd, b->srv.GetAddressOf())) ||
+            FAILED(d3d_->CreateUnorderedAccessView(b->buf.Get(), &ud, b->uav.GetAddressOf())))
+            return nullptr;
+        return b;
+    }
+
+    ticket clear(const buffer_ptr& bp, uint32_t value) override
+    {
+        auto* b = mine(bp);
+        if (!b) return {};
+        const UINT v[4] = {value, value, value, value};
+        lock_t l(*this);
+        ctx_->ClearUnorderedAccessViewUint(b->uav.Get(), v);
+        return ticket(line_, signal());
+    }
+
+    ticket readback(const buffer_ptr& bp, std::span<std::byte> out, std::function<void()> done) override
+    {
+        auto* b = mine(bp);
+        if (!b || out.size() < b->bytes) return {};
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = UINT(b->bytes);
+        bd.Usage = D3D11_USAGE_STAGING;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Buffer> staging;
+        if (FAILED(d3d_->CreateBuffer(&bd, nullptr, staging.GetAddressOf()))) return {};
+        auto flag = std::make_shared<flag_line>();
+        uint64_t value;
+        {
+            lock_t l(*this);
+            ctx_->CopyResource(staging.Get(), b->buf.Get());
+            value = signal();
+        }
+        const size_t bytes = b->bytes;
+        queue(value, [this, staging, out, bytes, flag, done = std::move(done)]
+              {
+                  D3D11_MAPPED_SUBRESOURCE m{};
+                  {
+                      lock_t l(*this);
+                      if (SUCCEEDED(ctx_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
+                      {
+                          std::memcpy(out.data(), m.pData, bytes);
+                          ctx_->Unmap(staging.Get(), 0);
+                      }
+                  }
+                  flag->set();
+                  if (done) done();
+              });
+        return ticket(flag, 1);
+    }
+
+    ticket run(std::span<const dispatch> dispatches) override
+    {
+        std::vector<std::shared_ptr<const void>> held;
+        lock_t l(*this);
+        for (const dispatch& d : dispatches)
+        {
+            auto* prog = dynamic_cast<const d3d_program*>(d.program.get());
+            if (!prog || prog->owner != this || !prog->cs || d.groups[0] < 1 || d.groups[1] < 1 || d.groups[2] < 1 ||
+                d.groups[0] > max_groups || d.groups[1] > max_groups || d.groups[2] > max_groups)
+                continue;
+            ID3D11ShaderResourceView* srvs[max_inputs] = {};
+            ID3D11SamplerState* samplers[max_inputs] = {};
+            const size_t n = std::min<size_t>(max_inputs, d.inputs.size());
+            for (size_t i = 0; i < n; ++i)
+            {
+                if (auto* in = mine(d.inputs[i])) srvs[i] = in->srv.Get();
+                const sampler s = i < d.samplers.size() ? d.samplers[i] : sampler::nearest_clamp;
+                samplers[i] = samplers_[int(s)].Get();
+                held.push_back(d.inputs[i]);
+            }
+            ID3D11UnorderedAccessView* uavs[max_buffers] = {};
+            const size_t nb = std::min<size_t>(max_buffers, d.buffers.size());
+            for (size_t i = 0; i < nb; ++i)
+            {
+                if (auto* b = mine(d.buffers[i])) uavs[i] = b->uav.Get();
+                held.push_back(d.buffers[i]);
+            }
+            ctx_->CSSetShader(prog->cs.Get(), nullptr, 0);
+            ctx_->CSSetShaderResources(0, max_inputs, srvs);
+            ctx_->CSSetSamplers(0, max_inputs, samplers);
+            ctx_->CSSetUnorderedAccessViews(0, max_buffers, uavs, nullptr);
+            if (!d.uniforms.empty() && constants(d.uniforms))
+                ctx_->CSSetConstantBuffers(0, 1, cb_.GetAddressOf());
+            ctx_->Dispatch(UINT(d.groups[0]), UINT(d.groups[1]), UINT(d.groups[2]));
+            held.push_back(d.program);
+        }
+        // Unbound, strictly: a pass reading these buffers or textures would
+        // otherwise find them silently nulled.
+        ID3D11UnorderedAccessView* no_uavs[max_buffers] = {};
+        ID3D11ShaderResourceView* no_srvs[max_inputs] = {};
+        ctx_->CSSetUnorderedAccessViews(0, max_buffers, no_uavs, nullptr);
+        ctx_->CSSetShaderResources(0, max_inputs, no_srvs);
+        ctx_->CSSetShader(nullptr, nullptr, 0);
+        const uint64_t value = signal();
+        if (!held.empty()) queue(value, [held = std::move(held)] {});
+        return ticket(line_, value);
     }
 
     ticket run(std::span<const pass> passes) override
@@ -452,9 +592,9 @@ public:
             ctx_->GSSetShader(nullptr, nullptr, 0);
             ctx_->PSSetShader(prog->ps.Get(), nullptr, 0);
 
-            ID3D11ShaderResourceView* srvs[16] = {};
-            ID3D11SamplerState* samplers[16] = {};
-            const size_t n = std::min<size_t>(16, p.inputs.size());
+            ID3D11ShaderResourceView* srvs[max_inputs + max_buffers] = {};
+            ID3D11SamplerState* samplers[max_inputs] = {};
+            const size_t n = std::min<size_t>(max_inputs, p.inputs.size());
             for (size_t i = 0; i < n; ++i)
             {
                 if (auto* in = mine(p.inputs[i])) srvs[i] = in->srv.Get();
@@ -462,8 +602,13 @@ public:
                 samplers[i] = samplers_[int(s)].Get();
                 held.push_back(p.inputs[i]);
             }
-            ctx_->PSSetShaderResources(0, UINT(std::max<size_t>(n, 1)), srvs);
-            ctx_->PSSetSamplers(0, UINT(std::max<size_t>(n, 1)), samplers);
+            for (size_t i = 0; i < std::min<size_t>(max_buffers, p.buffers.size()); ++i)
+            {
+                if (auto* b = mine(p.buffers[i])) srvs[max_inputs + i] = b->srv.Get();
+                held.push_back(p.buffers[i]);
+            }
+            ctx_->PSSetShaderResources(0, max_inputs + max_buffers, srvs);
+            ctx_->PSSetSamplers(0, max_inputs, samplers);
             if (!p.uniforms.empty() && constants(p.uniforms))
                 ctx_->PSSetConstantBuffers(0, 1, cb_.GetAddressOf());
             ctx_->Draw(3, 0);
@@ -488,6 +633,11 @@ public:
 private:
     d3d_device() = default;
 
+    d3d_buffer* mine(const buffer_ptr& b) const
+    {
+        auto* d = dynamic_cast<d3d_buffer*>(b.get());
+        return d && d->owner == this ? d : nullptr;
+    }
     d3d_texture* mine(const texture_ptr& t) const
     {
         auto* d = dynamic_cast<d3d_texture*>(t.get());

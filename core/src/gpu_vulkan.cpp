@@ -127,7 +127,11 @@ const uint32_t k_fullscreen_vs[] = {
     X(vkCmdPushDescriptorSetKHR)      \
     X(vkCmdSetViewport)               \
     X(vkCmdSetScissor)                \
-    X(vkCmdDraw)
+    X(vkCmdDraw)                      \
+    X(vkCmdDispatch)                  \
+    X(vkCmdFillBuffer)                \
+    X(vkCmdCopyBuffer)                \
+    X(vkCreateComputePipelines)
 
 // The instance and device, and their functions: what every image, buffer
 // and program holds on to, so they can be freed after the rap::gpu::device
@@ -164,6 +168,9 @@ struct core
     }
 };
 using core_ptr = std::shared_ptr<core>;
+
+// rap::gpu's bindings in set 0 (gpu.h).
+constexpr uint32_t kReadBufferBinding = 8, kSamplerBinding = 16, kUniformBinding = 24, kWriteBufferBinding = 25;
 
 VkFormat vk_format(format f)
 {
@@ -232,6 +239,23 @@ struct host_buffer
 
 class vk_device;
 
+// Device memory for compute: storage, cleared, copied out for readback.
+class vk_buffer : public buffer
+{
+public:
+    size_t size() const override { return bytes; }
+    ~vk_buffer() override
+    {
+        if (buf) c->vkDestroyBuffer(c->device, buf, nullptr);
+        if (memory) c->vkFreeMemory(c->device, memory, nullptr);
+    }
+    const vk_device* owner = nullptr;
+    core_ptr c;
+    VkBuffer buf = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    size_t bytes = 0;
+};
+
 class vk_texture : public texture
 {
 public:
@@ -264,6 +288,7 @@ public:
     ~vk_program() override
     {
         for (auto& [format, pipeline] : pipelines) c->vkDestroyPipeline(c->device, pipeline, nullptr);
+        if (compute) c->vkDestroyPipeline(c->device, compute, nullptr);
         if (module) c->vkDestroyShaderModule(c->device, module, nullptr);
     }
     const vk_device* owner = nullptr;
@@ -271,6 +296,7 @@ public:
     VkShaderModule module = VK_NULL_HANDLE;
     std::string entry;
     mutable std::map<VkFormat, VkPipeline> pipelines;  // by target format; under the device's lock
+    VkPipeline compute = VK_NULL_HANDLE;                 // a compute program's
 };
 
 // Done once set: a readback's, finished by the device's thread.
@@ -317,6 +343,17 @@ void barrier(const core& c, VkCommandBuffer cmd, VkImage image, uint32_t level, 
     b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, levels, 0, 1};
     c.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
                            nullptr, 1, &b);
+}
+
+// Everything written before visible to everything after: around dispatches,
+// clears and buffer copies (conservative, and always right).
+void memory_barrier(const core& c, VkCommandBuffer cmd)
+{
+    VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    c.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &b, 0, nullptr,
+                           0, nullptr);
 }
 
 class vk_device : public device, public std::enable_shared_from_this<vk_device>
@@ -530,7 +567,10 @@ public:
         return ticket(flag, 1);
     }
 
-    program_result program(const shader& pixel) override
+    program_result program(const shader& pixel) override { return make_program(pixel, false); }
+    program_result compute_program(const shader& compute) override { return make_program(compute, true); }
+
+    program_result make_program(const shader& pixel, bool compute)
     {
         for (const shader::form& f : pixel.forms)
         {
@@ -544,7 +584,19 @@ public:
             VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
             mi.codeSize = f.code.size();
             mi.pCode = reinterpret_cast<const uint32_t*>(f.code.data());
-            if (c_->vkCreateShaderModule(c_->device, &mi, nullptr, &p->module) == VK_SUCCESS) return {p, {}};
+            if (c_->vkCreateShaderModule(c_->device, &mi, nullptr, &p->module) == VK_SUCCESS)
+            {
+                if (!compute) return {p, {}};
+                VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+                ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+                ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+                ci.stage.module = p->module;
+                ci.stage.pName = p->entry.c_str();
+                ci.layout = layout_;
+                if (c_->vkCreateComputePipelines(c_->device, VK_NULL_HANDLE, 1, &ci, nullptr, &p->compute) == VK_SUCCESS)
+                    return {p, {}};
+                return {nullptr, (pixel.name.empty() ? "shader" : pixel.name) + ": not a compute shader this device takes"};
+            }
             return {nullptr, (pixel.name.empty() ? "shader" : pixel.name) + ": the SPIR-V wasn't taken"};
         }
         return {nullptr, (pixel.name.empty() ? "shader" : pixel.name) + ": no form Vulkan takes (spirv)"};
@@ -588,6 +640,7 @@ public:
                     const int lw = std::max(1, target->w >> level), lh = std::max(1, target->h >> level);
                     const rect r = p.region.empty() ? rect{0, 0, lw, lh} : p.region;
 
+                    memory_barrier(c, cmd);  // what dispatches before wrote, readable
                     barrier(c, cmd, target->image, level, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
                     VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -623,16 +676,30 @@ public:
                         w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
                         w.pImageInfo = &images[k];
                         writes.push_back(w);
-                        w.dstBinding = uint32_t(max_inputs + k);
+                        w.dstBinding = kSamplerBinding + uint32_t(k);
                         w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
                         w.pImageInfo = &samplers[k];
                         writes.push_back(w);
                         held.push_back(p.inputs[k]);
                     }
+                    VkDescriptorBufferInfo reads[max_buffers]{};
+                    for (size_t k = 0; k < std::min<size_t>(max_buffers, p.buffers.size()); ++k)
+                    {
+                        auto* b = mine(p.buffers[k]);
+                        if (!b) continue;
+                        reads[k] = {b->buf, 0, VK_WHOLE_SIZE};
+                        VkWriteDescriptorSet bw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                        bw.dstBinding = kReadBufferBinding + uint32_t(k);
+                        bw.descriptorCount = 1;
+                        bw.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                        bw.pBufferInfo = &reads[k];
+                        writes.push_back(bw);
+                        held.push_back(p.buffers[k]);
+                    }
                     const VkDescriptorBufferInfo ub{uniforms->buffer, offsets[i],
                                                     VkDeviceSize(std::max<size_t>(p.uniforms.size(), 16))};
                     VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                    w.dstBinding = 2 * max_inputs;
+                    w.dstBinding = kUniformBinding;
                     w.descriptorCount = 1;
                     w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
                     w.pBufferInfo = &ub;
@@ -652,8 +719,164 @@ public:
         return ticket(line_, value);
     }
 
+    buffer_ptr create_buffer(size_t bytes) override
+    {
+        const core& c = *c_;
+        auto b = std::make_shared<vk_buffer>();
+        b->owner = this;
+        b->c = c_;
+        b->bytes = (std::max<size_t>(bytes, 4) + 3) & ~size_t(3);
+        VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bi.size = b->bytes;
+        bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (c.vkCreateBuffer(c.device, &bi, nullptr, &b->buf) != VK_SUCCESS) return nullptr;
+        VkMemoryRequirements req;
+        c.vkGetBufferMemoryRequirements(c.device, b->buf, &req);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = c.memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (ai.memoryTypeIndex == UINT32_MAX || c.vkAllocateMemory(c.device, &ai, nullptr, &b->memory) != VK_SUCCESS ||
+            c.vkBindBufferMemory(c.device, b->buf, b->memory, 0) != VK_SUCCESS)
+            return nullptr;
+        return b;
+    }
+
+    ticket clear(const buffer_ptr& bp, uint32_t value) override
+    {
+        auto* b = mine(bp);
+        if (!b) return {};
+        const core& c = *c_;
+        return ticket(line_, submit(
+                                 [&](VkCommandBuffer cmd)
+                                 {
+                                     memory_barrier(c, cmd);
+                                     c.vkCmdFillBuffer(cmd, b->buf, 0, b->bytes, value);
+                                     memory_barrier(c, cmd);
+                                 },
+                                 {bp}));
+    }
+
+    ticket readback(const buffer_ptr& bp, std::span<std::byte> out, std::function<void()> done) override
+    {
+        auto* b = mine(bp);
+        if (!b || out.size() < b->bytes) return {};
+        auto staging = host_buffer::make(c_, b->bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (!staging) return {};
+        const core& c = *c_;
+        const uint64_t value = submit(
+            [&](VkCommandBuffer cmd)
+            {
+                memory_barrier(c, cmd);
+                const VkBufferCopy copy{0, 0, b->bytes};
+                c.vkCmdCopyBuffer(cmd, b->buf, staging->buffer, 1, &copy);
+                memory_barrier(c, cmd);
+            },
+            {bp});
+        auto flag = std::make_shared<flag_line>();
+        const size_t bytes = b->bytes;
+        queue(value, [staging, out, bytes, flag, done = std::move(done)]
+              {
+                  std::memcpy(out.data(), staging->mapped, bytes);
+                  flag->set();
+                  if (done) done();
+              });
+        return ticket(flag, 1);
+    }
+
+    ticket run(std::span<const dispatch> dispatches) override
+    {
+        const core& c = *c_;
+        const VkDeviceSize align = std::max<VkDeviceSize>(16, c.properties.limits.minUniformBufferOffsetAlignment);
+        std::vector<VkDeviceSize> offsets;
+        VkDeviceSize total = 0;
+        for (const dispatch& d : dispatches)
+        {
+            offsets.push_back(total);
+            total += (VkDeviceSize(std::max<size_t>(d.uniforms.size(), 16)) + align - 1) / align * align;
+        }
+        auto uniforms = host_buffer::make(c_, total, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        if (!uniforms) return {};
+        std::memset(uniforms->mapped, 0, size_t(total));
+        for (size_t i = 0; i < dispatches.size(); ++i)
+            std::memcpy(static_cast<std::byte*>(uniforms->mapped) + offsets[i], dispatches[i].uniforms.data(),
+                        dispatches[i].uniforms.size());
+        std::vector<std::shared_ptr<const void>> held{uniforms};
+        const uint64_t value = submit(
+            [&](VkCommandBuffer cmd)
+            {
+                for (size_t i = 0; i < dispatches.size(); ++i)
+                {
+                    const dispatch& d = dispatches[i];
+                    auto* prog = dynamic_cast<const vk_program*>(d.program.get());
+                    if (!prog || prog->owner != this || !prog->compute || d.groups[0] < 1 || d.groups[1] < 1 ||
+                        d.groups[2] < 1 || d.groups[0] > max_groups || d.groups[1] > max_groups || d.groups[2] > max_groups)
+                        continue;
+                    VkDescriptorImageInfo images[max_inputs]{}, samplers[max_inputs]{};
+                    VkDescriptorBufferInfo writes_info[max_buffers]{};
+                    std::vector<VkWriteDescriptorSet> writes;
+                    for (size_t k = 0; k < std::min<size_t>(max_inputs, d.inputs.size()); ++k)
+                    {
+                        auto* in = mine(d.inputs[k]);
+                        if (!in) continue;
+                        images[k] = {VK_NULL_HANDLE, in->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                        const sampler s = k < d.samplers.size() ? d.samplers[k] : sampler::nearest_clamp;
+                        samplers[k] = {samplers_[int(s)], VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+                        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                        w.dstBinding = uint32_t(k);
+                        w.descriptorCount = 1;
+                        w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+                        w.pImageInfo = &images[k];
+                        writes.push_back(w);
+                        w.dstBinding = kSamplerBinding + uint32_t(k);
+                        w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+                        w.pImageInfo = &samplers[k];
+                        writes.push_back(w);
+                        held.push_back(d.inputs[k]);
+                    }
+                    for (size_t k = 0; k < std::min<size_t>(max_buffers, d.buffers.size()); ++k)
+                    {
+                        auto* b = mine(d.buffers[k]);
+                        if (!b) continue;
+                        writes_info[k] = {b->buf, 0, VK_WHOLE_SIZE};
+                        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                        w.dstBinding = kWriteBufferBinding + uint32_t(k);
+                        w.descriptorCount = 1;
+                        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                        w.pBufferInfo = &writes_info[k];
+                        writes.push_back(w);
+                        held.push_back(d.buffers[k]);
+                    }
+                    const VkDescriptorBufferInfo ub{uniforms->buffer, offsets[i],
+                                                    VkDeviceSize(std::max<size_t>(d.uniforms.size(), 16))};
+                    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                    w.dstBinding = kUniformBinding;
+                    w.descriptorCount = 1;
+                    w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                    w.pBufferInfo = &ub;
+                    writes.push_back(w);
+                    memory_barrier(c, cmd);  // what came before (clears, passes, dispatches), visible
+                    c.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prog->compute);
+                    c.vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, uint32_t(writes.size()),
+                                                writes.data());
+                    c.vkCmdDispatch(cmd, uint32_t(d.groups[0]), uint32_t(d.groups[1]), uint32_t(d.groups[2]));
+                    held.push_back(d.program);
+                }
+                memory_barrier(c, cmd);  // and visible to what comes after
+            },
+            {});
+        queue(value, [held = std::move(held)] {});
+        return ticket(line_, value);
+    }
+
 private:
     vk_device() = default;
+
+    vk_buffer* mine(const buffer_ptr& b) const
+    {
+        auto* d = dynamic_cast<vk_buffer*>(b.get());
+        return d && d->owner == this ? d : nullptr;
+    }
 
     // The loader, an instance, and the device: `want` (a DRM render node's
     // dev_t) if it's there, else the first discrete, integrated, virtual,
@@ -793,14 +1016,21 @@ private:
         s.maxLod = VK_LOD_CLAMP_NONE;
         if (c.vkCreateSampler(c.device, &s, nullptr, &samplers_[2]) != VK_SUCCESS) return false;
 
-        // Set 0: textures 0..7, samplers 8..15, the uniform block 16.
+        // Set 0 (gpu.h): textures 0..7, buffers read 8..11, samplers 16..23,
+        // the uniform block 24, buffers written 25..28.
+        const VkShaderStageFlags stages = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
         std::vector<VkDescriptorSetLayoutBinding> bindings;
         for (uint32_t k = 0; k < uint32_t(max_inputs); ++k)
         {
-            bindings.push_back({k, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
-            bindings.push_back({uint32_t(max_inputs) + k, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+            bindings.push_back({k, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, stages, nullptr});
+            bindings.push_back({kSamplerBinding + k, VK_DESCRIPTOR_TYPE_SAMPLER, 1, stages, nullptr});
         }
-        bindings.push_back({uint32_t(2 * max_inputs), VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+        for (uint32_t k = 0; k < uint32_t(max_buffers); ++k)
+        {
+            bindings.push_back({kReadBufferBinding + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr});
+            bindings.push_back({kWriteBufferBinding + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr});
+        }
+        bindings.push_back({kUniformBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stages, nullptr});
         VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
         li.bindingCount = uint32_t(bindings.size());

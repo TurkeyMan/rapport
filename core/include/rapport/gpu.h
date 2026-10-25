@@ -101,6 +101,17 @@ public:
 };
 using texture_ptr = std::shared_ptr<texture>;
 
+// Plain GPU memory, in 32-bit words, for compute: what a dispatch writes
+// (histograms, counts, maxima with atomics) and what it or a later pass
+// reads. Shared and held by in-flight work as textures are.
+class buffer
+{
+public:
+    virtual ~buffer() = default;
+    virtual size_t size() const = 0;  // bytes, a multiple of 4
+};
+using buffer_ptr = std::shared_ptr<buffer>;
+
 // A point on a device's timeline (a D3D11 fence, a Vulkan timeline
 // semaphore): reached when the GPU has done what was queued before it.
 // Backends implement it.
@@ -142,11 +153,15 @@ enum class sampler
 // A fullscreen triangle over `target` (compute later): the pixel shader
 // reads up to max_inputs `inputs` by slot with `samplers` alongside, and one
 // uniform block packed as std140 and cbuffer agree (16-byte rows, no vector
-// straddling them). In HLSL: textures t0..t7, samplers s0..s7, the block b0.
-// In SPIR-V, set 0: textures at bindings 0..7, samplers 8..15, the block 16
-// (DXC: -fvk-t-shift 0 0 -fvk-s-shift 8 0 -fvk-b-shift 16 0; rapport's CMake
-// helper passes these).
+// straddling them), and up to max_buffers buffers to read (what a dispatch
+// wrote). In HLSL: textures t0..t7, those buffers t8..t11 (ByteAddressBuffer),
+// samplers s0..s7, the block b0; a dispatch's buffers to write u0..u3
+// (RWByteAddressBuffer). In SPIR-V, set 0: textures at bindings 0..7, read
+// buffers 8..11, samplers 16..23, the block 24, written buffers 25..28
+// (DXC: -fvk-t-shift 0 0 -fvk-s-shift 16 0 -fvk-b-shift 24 0
+// -fvk-u-shift 25 0; rapport's CMake helper passes these).
 inline constexpr int max_inputs = 8;
+inline constexpr int max_buffers = 4;
 class program;  // a compiled pixel shader, from device::program
 using program_ptr = std::shared_ptr<const program>;
 
@@ -156,11 +171,30 @@ struct pass
     program_ptr program;
     std::vector<texture_ptr> inputs;
     std::vector<sampler> samplers;  // one per input; nearest_clamp when short
+    std::vector<buffer_ptr> buffers;  // read only (t8..t11)
     std::span<const std::byte> uniforms;
     texture_ptr target;
     int target_level = 0;  // the mip level drawn into (the app makes its levels itself)
     rect region;           // only part of the target (a tile), in that level's pixels; empty = all
 };
+
+// A compute shader run over `groups` thread groups: it reads `inputs`
+// (t0..t7, with `samplers`) and the uniform block (b0) as a pass does, and
+// reads and writes `buffers` as RWByteAddressBuffers u0..u3 (InterlockedAdd,
+// InterlockedMax and the rest work on both APIs). Passes and dispatches run
+// in the order they're queued, each seeing what the ones before wrote.
+struct dispatch
+{
+    program_ptr program;  // from device::compute_program
+    std::vector<texture_ptr> inputs;
+    std::vector<sampler> samplers;
+    std::vector<buffer_ptr> buffers;
+    std::span<const std::byte> uniforms;
+    // Thread groups in x, y, z: each at most max_groups (both APIs' limit).
+    // A group's size is the shader's [numthreads]: the app divides by it.
+    int groups[3] = {1, 1, 1};
+};
+inline constexpr int max_groups = 65535;
 
 // -- device -------------------------------------------------------------------
 
@@ -223,6 +257,17 @@ public:
 
     // Queues passes in order; the ticket covers them all.
     virtual ticket run(std::span<const pass>) = 0;
+
+    // Compute. A buffer of `bytes`, rounded up to a multiple of 4 (raw
+    // views address words), null when it can't be made; filled with `value`
+    // in every word; read back as the texture readback is. A compute
+    // program, as program() makes pixel ones. run() skips a dispatch past
+    // max_groups.
+    virtual buffer_ptr create_buffer(size_t bytes) = 0;
+    virtual ticket clear(const buffer_ptr&, uint32_t value = 0) = 0;
+    virtual ticket readback(const buffer_ptr&, std::span<std::byte> out, std::function<void()> done = {}) = 0;
+    virtual program_result compute_program(const shader& compute) = 0;
+    virtual ticket run(std::span<const dispatch>) = 0;
 
     // The device went away (driver reset, eGPU unplugged): every texture and
     // program is dead, and the app makes a new device and starts over.

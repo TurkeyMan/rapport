@@ -12,9 +12,10 @@ endif()
 
 add_executable(rapport-gpu gpu.cpp)
 target_link_libraries(rapport-gpu PRIVATE rapport::rapport)
-foreach(shader scale fill pattern)
+foreach(shader scale fill pattern show_count)
     rapport_add_shader(rapport-gpu NAME ${shader} SOURCE shaders/${shader}.hlsl)
 endforeach()
+rapport_add_shader(rapport-gpu NAME count SOURCE shaders/count.hlsl STAGE compute)
 
 add_executable(rapport-print print.cpp)
 target_link_libraries(rapport-print PRIVATE rapport::rapport)

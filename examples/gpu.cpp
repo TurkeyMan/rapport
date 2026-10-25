@@ -14,7 +14,9 @@
 // The shaders are HLSL (shaders/), compiled for the platform at build time
 // by rapport_add_shader.
 #include "rapport/rapport.h"
+#include "shaders/count.h"
 #include "shaders/fill.h"
+#include "shaders/show_count.h"
 #include "shaders/pattern.h"
 #include "shaders/scale.h"
 
@@ -120,7 +122,68 @@ int run_check(std::FILE* log)
                     std::to_integer<int>(lv[i + 2]) == 191 && std::to_integer<int>(lv[i + 3]) == 255;
     say("mip level 1 (32x24): %s (first pixel %d %d %d %d)\n", level_ok ? "as drawn" : "WRONG",
         std::to_integer<int>(lv[0]), std::to_integer<int>(lv[1]), std::to_integer<int>(lv[2]), std::to_integer<int>(lv[3]));
-    return worst <= 1 && level_ok ? 0 : 2;  // one step: a driver's float rounding (see gpu.h)
+
+    // Compute: a histogram of an 8-bit texture's red, cleared and dispatched
+    // twice in one run (so the clear -> dispatch and dispatch -> dispatch
+    // ordering is exercised), then a pass reading the buffer.
+    bool compute_ok = false;
+    {
+        const int cw = 300, ch = 200;  // not a multiple of the group size
+        std::vector<uint8_t> rgba(size_t(cw) * ch * 4);
+        std::vector<uint32_t> expect(256);
+        for (size_t i = 0; i < size_t(cw) * ch; ++i)
+        {
+            rgba[i * 4] = uint8_t((i * 7919) >> 3);
+            rgba[i * 4 + 3] = 255;
+            expect[rgba[i * 4]] += 2;
+        }
+        auto tex = dev->create({cw, ch, gpu::format::rgba8});
+        auto bins = dev->create_buffer(256 * 4);
+        auto count = dev->compute_program(shaders::count());
+        auto show = dev->program(shaders::show_count());
+        auto row = dev->create({256, 1, gpu::format::rgba8, 1, true});
+        if (tex && bins && count.program && show.program && row)
+        {
+            dev->upload(tex, std::as_bytes(std::span(rgba)), {4, gpu::sample_type::u8});
+            dev->clear(bins, 0);
+            struct
+            {
+                uint32_t w, h, pad[2] = {};
+            } cu{uint32_t(cw), uint32_t(ch)};
+            gpu::dispatch d;
+            d.program = count.program;
+            d.inputs = {tex};
+            d.buffers = {bins};
+            d.uniforms = bytes_of(cu);
+            d.groups[0] = (cw + 15) / 16;
+            d.groups[1] = (ch + 15) / 16;
+            const gpu::dispatch twice[] = {d, d};
+            dev->run(std::span(twice));
+            gpu::pass p;
+            p.program = show.program;
+            p.buffers = {bins};
+            p.target = row;
+            dev->run(std::span(&p, 1));
+            std::vector<std::byte> counts(256 * 4), shown(256 * 4);
+            dev->readback(bins, counts).wait();
+            dev->readback(row, shown, 256 * 4).wait();
+            int wrong = 0, shown_wrong = 0;
+            for (int b = 0; b < 256; ++b)
+            {
+                uint32_t got;
+                std::memcpy(&got, counts.data() + b * 4, 4);
+                wrong += got != expect[size_t(b)];
+                const int want = int(std::lround(std::min(expect[size_t(b)], 1024u) / 1024.0 * 255));
+                shown_wrong += std::abs(std::to_integer<int>(shown[size_t(b) * 4]) - want) > 1;
+            }
+            say("compute: histogram of %dx%d, cleared and dispatched twice: %d of 256 bins wrong; a pass reading it: %d wrong\n",
+                cw, ch, wrong, shown_wrong);
+            compute_ok = wrong == 0 && shown_wrong == 0;
+        }
+        else
+            say("compute: setup failed: %s%s\n", count.error.c_str(), show.error.c_str());
+    }
+    return worst <= 1 && level_ok && compute_ok ? 0 : 2;  // one step: a driver's float rounding (see gpu.h)
 }
 
 }  // namespace

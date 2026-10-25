@@ -1878,14 +1878,22 @@ public:
     {
         // Redrawn when it arrives: an app drawing on it takes it then.
         return readback_.device(
-            [](std::function<void()> f) { QMetaObject::invokeMethod(qApp, [f = std::move(f)] { f(); }, Qt::QueuedConnection); },
+            [app = QPointer<QCoreApplication>(qApp)](std::function<void()> f)
+            {
+                // Taken on the UI thread: a thread posting while the app quits finds it gone.
+                if (app) QMetaObject::invokeMethod(app.data(), [f = std::move(f)] { f(); }, Qt::QueuedConnection);
+            },
             [this] { w_->update(); });
     }
     void present(rap::gpu::texture_ptr texture, rap::gpu::ticket, frame_color color) override
     {
         readback_.present(
             texture, color,
-            [](std::function<void()> f) { QMetaObject::invokeMethod(qApp, [f = std::move(f)] { f(); }, Qt::QueuedConnection); },
+            [app = QPointer<QCoreApplication>(qApp)](std::function<void()> f)
+            {
+                // Taken on the UI thread: a thread posting while the app quits finds it gone.
+                if (app) QMetaObject::invokeMethod(app.data(), [f = std::move(f)] { f(); }, Qt::QueuedConnection);
+            },
             [](int w, int h, pixel_format format, const uint8_t* px, size_t stride) -> std::shared_ptr<const rap::image>
             { return std::make_shared<qt_image>(w, h, format, px, stride); },
             [this](std::shared_ptr<const rap::image> image, frame_color c) { present(std::move(image), c); });
