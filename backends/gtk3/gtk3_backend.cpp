@@ -11,8 +11,15 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <set>
+
+#ifdef RAPPORT_GTK3_FRACTIONAL
+#include <gdk/gdkwayland.h>
+
+#include "fractional-scale-v1-client-protocol.h"
+#endif
 
 // -- RapportTreeRows ----------------------------------------------------------
 
@@ -2544,6 +2551,124 @@ const char* cursor_name(cursor c)
     return "default";
 }
 
+#ifdef RAPPORT_GTK3_FRACTIONAL
+// The compositor's fractional scale for a toplevel (Wayland's
+// fractional-scale protocol), which GTK 3 doesn't read: one per GdkWindow,
+// shared by its canvases, kept in fractional_scale_of()'s key. GTK 3 makes
+// a toplevel's wl_surface when it maps and destroys it when it unmaps, so
+// the scale object lives from map to unmap, destroyed before its surface.
+namespace fractional
+{
+
+constexpr char k_object_key[] = "rapport-fractional-object";
+constexpr char k_hooked_key[] = "rapport-fractional-hooked";
+
+// Bound once per display. The registry roundtrip runs on a queue of our
+// own, so it dispatches none of GDK's events; the manager then moves to
+// GDK's default queue, where its objects' events arrive on the main thread.
+wp_fractional_scale_manager_v1* manager_for(wl_display* display)
+{
+    static wl_display* bound_for = nullptr;
+    static wp_fractional_scale_manager_v1* manager = nullptr;
+    if (bound_for == display) return manager;
+    bound_for = display;
+    manager = nullptr;
+    wl_event_queue* queue = wl_display_create_queue(display);
+    auto* wrapped = static_cast<wl_display*>(wl_proxy_create_wrapper(display));
+    wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(wrapped), queue);
+    wl_registry* registry = wl_display_get_registry(wrapped);
+    static const wl_registry_listener listener{
+        .global =
+            +[](void* data, wl_registry* r, uint32_t name, const char* iface, uint32_t)
+            {
+                if (std::strcmp(iface, wp_fractional_scale_manager_v1_interface.name) == 0)
+                    *static_cast<wp_fractional_scale_manager_v1**>(data) =
+                        static_cast<wp_fractional_scale_manager_v1*>(wl_registry_bind(
+                            r, name, &wp_fractional_scale_manager_v1_interface, 1));
+            },
+        .global_remove = +[](void*, wl_registry*, uint32_t) {},
+    };
+    wl_registry_add_listener(registry, &listener, &manager);
+    wl_display_roundtrip_queue(display, queue);
+    // The roundtrip has dispatched everything queued for it: nothing is left
+    // on the private queue to strand when the manager leaves it.
+    wl_display_dispatch_queue_pending(display, queue);
+    if (manager) wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(manager), nullptr);
+    wl_registry_destroy(registry);
+    wl_proxy_wrapper_destroy(wrapped);
+    wl_event_queue_destroy(queue);
+    return manager;
+}
+
+struct tracker
+{
+    wp_fractional_scale_v1* object = nullptr;
+    GdkWindow* window = nullptr;
+    GtkWidget* top = nullptr;
+};
+
+void start(GtkWidget* top)
+{
+    GdkWindow* win = gtk_widget_get_window(top);
+    if (!win || g_object_get_data(G_OBJECT(win), k_object_key)) return;
+    GdkDisplay* display = gdk_window_get_display(win);
+    if (!GDK_IS_WAYLAND_DISPLAY(display)) return;  // X11, XWayland: whole scales
+    wp_fractional_scale_manager_v1* manager =
+        manager_for(gdk_wayland_display_get_wl_display(display));
+    wl_surface* surface = gdk_wayland_window_get_wl_surface(win);
+    if (!manager || !surface) return;
+    auto* t = new tracker{wp_fractional_scale_manager_v1_get_fractional_scale(manager, surface),
+                          win, top};
+    static const wp_fractional_scale_v1_listener listener{
+        .preferred_scale =
+            +[](void* data, wp_fractional_scale_v1*, uint32_t scale)
+            {
+                auto* t = static_cast<tracker*>(data);
+                g_object_set_data(G_OBJECT(t->window), k_fractional_scale_key,
+                                  GUINT_TO_POINTER(scale));
+                // The canvases notice the new scale as they draw (on_resize).
+                gtk_widget_queue_draw(t->top);
+            },
+    };
+    wp_fractional_scale_v1_add_listener(t->object, &listener, t);
+    g_object_set_data_full(
+        G_OBJECT(win), k_object_key, t,
+        +[](gpointer p)
+        {
+            auto* t = static_cast<tracker*>(p);
+            wp_fractional_scale_v1_destroy(t->object);
+            delete t;
+        });
+}
+
+void stop(GtkWidget* top)
+{
+    if (GdkWindow* win = gtk_widget_get_window(top))
+    {
+        g_object_set_data(G_OBJECT(win), k_object_key, nullptr);  // destroys it
+        g_object_set_data(G_OBJECT(win), k_fractional_scale_key, nullptr);
+    }
+}
+
+// From a canvas's realize: its toplevel's scale is watched while mapped.
+void watch(GtkWidget* canvas)
+{
+    GtkWidget* top = gtk_widget_get_toplevel(canvas);
+    if (!top || !gtk_widget_is_toplevel(top)) return;
+    if (!g_object_get_data(G_OBJECT(top), k_hooked_key))
+    {
+        g_object_set_data(G_OBJECT(top), k_hooked_key, GINT_TO_POINTER(1));
+        g_signal_connect(top, "map", G_CALLBACK(+[](GtkWidget* w, gpointer) { start(w); }),
+                         nullptr);
+        g_signal_connect(top, "unmap", G_CALLBACK(+[](GtkWidget* w, gpointer) { stop(w); }),
+                         nullptr);
+    }
+    if (gtk_widget_get_mapped(top)) start(top);
+}
+
+}  // namespace fractional
+#endif
+
 class canvas_impl : public widget_base<rap::canvas>
 {
 public:
@@ -2561,6 +2686,15 @@ public:
             +[](GtkWidget* w, cairo_t* cr, gpointer p) -> gboolean
             {
                 auto* self = static_cast<canvas_impl*>(p);
+                // A new fractional scale is a resize in device pixels
+                // (canvas::on_resize), told before the frame that uses it;
+                // a whole one also comes as notify::scale-factor.
+                const float scale = device_scale_of(w);
+                if (self->scale_ > 0 && scale != self->scale_)
+                {
+                    self->scale_ = scale;
+                    if (self->resize_) self->resize_(self->size());
+                }
                 if (!self->paint_) return false;
                 cairo_painter painter(cr, w);
                 self->paint_(painter, self->size());
@@ -2572,11 +2706,21 @@ public:
             +[](GtkWidget*, GdkRectangle* a, gpointer p)
             {
                 auto* self = static_cast<canvas_impl*>(p);
+                self->scale_ = device_scale_of(self->w_);
                 if (self->resize_) self->resize_({float(a->width), float(a->height)});
             },
             this);
         connect(
-            w_, "realize", +[](GtkWidget*, gpointer p) { static_cast<canvas_impl*>(p)->apply_cursor(); },
+            w_, "realize",
+            +[](GtkWidget* w, gpointer p)
+            {
+                static_cast<canvas_impl*>(p)->apply_cursor();
+#ifdef RAPPORT_GTK3_FRACTIONAL
+                fractional::watch(w);
+#else
+                (void)w;
+#endif
+            },
             this);
         connect(
             w_, "notify::scale-factor",
@@ -2641,7 +2785,7 @@ public:
         return {float(gtk_widget_get_allocated_width(w_)),
                 float(gtk_widget_get_allocated_height(w_))};
     }
-    float device_scale() const override { return float(gtk_widget_get_scale_factor(w_)); }
+    float device_scale() const override { return device_scale_of(w_); }
     void set_cursor(cursor c) override
     {
         cursor_ = c;
@@ -2687,6 +2831,7 @@ protected:
     }
 
 private:
+    float scale_ = 0;  // the device scale the app last heard of
     bool pointer(const pointer_event& e) { return pointer_ && pointer_(e); }
 
     static gboolean button(GtkWidget*, GdkEventButton* e, gpointer p)

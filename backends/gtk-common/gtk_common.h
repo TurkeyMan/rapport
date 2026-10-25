@@ -265,12 +265,31 @@ inline std::pair<color, color> soft_selection_colors(GtkWidget* w)
 // Device pixels per logical pixel. GTK 4's widget scale factor rounds a
 // fractional scale (150%) up to 2; its surface scale is the true one, and
 // drawing areas are replayed at it, so callers can place pixels 1:1.
+#if !GTK_CHECK_VERSION(4, 0, 0)
+// GTK 3 knows only whole scales and draws at them; the compositor resizes
+// the result to a fractional one (150%). The gtk3 backend reads that scale
+// (Wayland's fractional-scale protocol) into the toplevel's GdkWindow, in
+// 120ths as the protocol sends it; 0 where it isn't known, which includes
+// toplevels with no canvas (it's watched from a canvas's realize).
+inline constexpr char k_fractional_scale_key[] = "rapport-fractional-scale";
+inline float fractional_scale_of(GtkWidget* w)
+{
+    GtkWidget* top = gtk_widget_get_toplevel(w);
+    GdkWindow* win = top ? gtk_widget_get_window(top) : nullptr;
+    if (!win) return 0;
+    return float(GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(win), k_fractional_scale_key))) /
+           120.f;
+}
+#endif
+
 inline float device_scale_of(GtkWidget* w)
 {
 #if GTK_CHECK_VERSION(4, 12, 0)
     if (GtkNative* native = gtk_widget_get_native(w))
         if (GdkSurface* surface = gtk_native_get_surface(native))
             return float(gdk_surface_get_scale(surface));
+#elif !GTK_CHECK_VERSION(4, 0, 0)
+    if (const float f = fractional_scale_of(w); f > 0) return f;
 #endif
     return float(gtk_widget_get_scale_factor(w));
 }
@@ -552,6 +571,13 @@ public:
     {
         return print_font_ ? print_scale_ : device_scale_of(w_);
     }
+#if !GTK_CHECK_VERSION(4, 0, 0)
+    // GTK 3 draws at the whole scale whatever the display's fractional one.
+    float pixel_scale() const override
+    {
+        return print_font_ ? print_scale_ : float(gtk_widget_get_scale_factor(w_));
+    }
+#endif
 
     void push_clip(rect_f r) override
     {

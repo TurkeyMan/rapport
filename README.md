@@ -48,6 +48,12 @@ int main(int argc, char** argv)
 - **Light.** Plain C++ and CMake, with nothing to ship beyond the toolkit the
   platform already has.
 
+## Known limitations
+
+- GTK 3 on Wayland at fractional scales draws at the next whole scale and
+  the compositor scales it down: the right size, slightly soft. GTK 4 and Qt
+  are exact. See [docs/gtk3-fractional-scale.md](docs/gtk3-fractional-scale.md).
+
 ## Licence
 
 MIT: see [LICENSE](LICENSE).

@@ -24,13 +24,15 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates git cmake ninja-build g++ \
-            pkg-config libgtk-3-dev libgtk-4-dev qt6-base-dev
+            pkg-config libgtk-3-dev libgtk-4-dev qt6-base-dev wayland-protocols
 
       - uses: actions/checkout@v4
 
       - name: Build
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRAPPORT_REQUIRE_BACKENDS=ON ${{ matrix.flags }}
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRAPPORT_REQUIRE_BACKENDS=ON ${{ matrix.flags }} | tee configure.log
+          # GTK 3 reads the true fractional scale only with wayland-protocols.
+          grep -q 'GTK 3 fractional scale: on' configure.log
           cmake --build build --parallel "$(nproc)"
 
       - name: Shell probe

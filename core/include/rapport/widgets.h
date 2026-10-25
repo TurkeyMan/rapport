@@ -274,8 +274,16 @@ public:
     // `filter`. For 1:1 device pixels, make dst = src size / device_scale().
     virtual void image(const rap::image&, rect_f src, rect_f dst, filter = filter::linear,
                        float alpha = 1) = 0;
-    // Device pixels per logical pixel (2 on a 200% display).
+    // Device pixels per logical pixel as the display shows them (2 on a 200%
+    // display, 1.5 at 150%): for sizes on screen and 1:1 images.
     virtual float device_scale() const = 0;
+    // Pixels per logical pixel of the surface being drawn into, for snapping
+    // to its grid (pixel_grid). The same as device_scale() except where a
+    // toolkit draws at a whole scale the compositor then resizes: GTK 3 on
+    // Wayland at 150% draws at 2, shown at 1.5, so its 1:1 images are the
+    // right size but slightly soft (exact at whole scales; GTK 4 and Qt are
+    // exact). See docs/gtk3-fractional-scale.md.
+    virtual float pixel_scale() const { return device_scale(); }
     // Restrict drawing to `r` until the matching pop (nestable).
     virtual void push_clip(rect_f r) = 0;
     virtual void pop_clip() = 0;
@@ -292,10 +300,10 @@ public:
 //     float y = g.stroke(lineY, 1); p.line({x0, y}, {x1, y}, c, g.stroke_width(1));
 struct pixel_grid
 {
-    float k;  // device pixels per logical pixel
+    float k;  // surface pixels per logical pixel (painter::pixel_scale)
 
     explicit pixel_grid(const painter& p)
-        : k(std::max(1.f, p.device_scale()))
+        : k(std::max(1.f, p.pixel_scale()))
     {
     }
 
