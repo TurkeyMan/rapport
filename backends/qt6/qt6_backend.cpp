@@ -3965,20 +3965,44 @@ private:
     {
         auto* box = new QDialogButtonBox;
         box->setContentsMargins(0, 6, 0, 0);
+        // The app's own buttons (no role) go in a row just before the box,
+        // as GTK and Windows place them: QDialogButtonBox would put them
+        // where its layout keeps action buttons, between OK and Cancel in
+        // its Windows layout. The box orders the standard ones.
+        QWidget* row = nullptr;
+        QHBoxLayout* extra = nullptr;
         for (auto& b : s.buttons)
         {
             const auto standard = standard_for(b.role);
-            QPushButton* pb = standard == QDialogButtonBox::NoButton
-                                  ? box->addButton(mnemonic(b.text), QDialogButtonBox::ActionRole)
-                                  : box->addButton(standard);
-            if (!b.text.empty()) pb->setText(mnemonic(b.text));
+            QPushButton* pb = nullptr;
+            if (standard == QDialogButtonBox::NoButton)
+            {
+                if (!row)
+                {
+                    row = new QWidget;
+                    extra = new QHBoxLayout(row);
+                    extra->setContentsMargins(0, 6, 0, 0);
+                    extra->addStretch();
+                }
+                pb = new QPushButton(mnemonic(b.text));
+                pb->setAutoDefault(false);
+                extra->addWidget(pb);
+            }
+            else
+            {
+                pb = box->addButton(standard);
+                if (!b.text.empty()) pb->setText(mnemonic(b.text));
+            }
             pb->setIcon(QIcon());  // stock labels only, as on GTK and Windows
             auto* w = new button_impl(pb);
             win_.parts.emplace_back(w);
             if (!b.on_click) win_.add_role_button(pb, b.role);
             sink_.created(b, *w);
         }
-        return box;
+        if (!row) return box;
+        box->setContentsMargins(0, 0, 0, 0);
+        extra->addWidget(box);
+        return row;
     }
 
     window_impl& win_;
