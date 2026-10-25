@@ -5620,6 +5620,19 @@ public:
                 x = (pr.left + pr.right - (r.right - r.left)) / 2;
                 y = (pr.top + pr.bottom - (r.bottom - r.top)) / 2;
             }
+            else if (!placed_)
+            {
+                // Centred on the monitor the pointer is on (where the user
+                // just clicked, in a file manager say), rather than where
+                // Windows cascades new windows, at the top left.
+                POINT cursor{};
+                GetCursorPos(&cursor);
+                MONITORINFO mi{sizeof mi};
+                GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY), &mi);
+                const RECT& work = mi.rcWork;
+                x = (work.left + work.right - (r.right - r.left)) / 2;
+                y = (work.top + work.bottom - (r.bottom - r.top)) / 2;
+            }
             else
                 flags |= SWP_NOMOVE;
             SetWindowPos(hwnd_, nullptr, x, y, r.right - r.left, r.bottom - r.top, flags);
@@ -5685,6 +5698,7 @@ public:
     }
     void move(point_f p) override
     {
+        placed_ = true;
         RECT now;
         GetWindowRect(hwnd_, &now);
         place_on_screen(px(p.x), px(p.y), now.right - now.left, now.bottom - now.top);
@@ -6089,6 +6103,7 @@ private:
     bool painted_once_ = false;  // painted as it was first shown (see show)
     static constexpr UINT_PTR deferred_timer = 0xDEF;
     std::optional<SIZE> requested_;  // client size from resize() before the first show
+    bool placed_ = false;            // move()d by the app: left where it put it
     struct bar_menu
     {
         menu_bar_item item;
