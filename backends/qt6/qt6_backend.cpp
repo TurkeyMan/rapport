@@ -3707,6 +3707,15 @@ private:
                                             : Qt::Alignment();
             l->addWidget(w, c.common.stretch, align);
         }
+        // A column packs its rows at the top, as GTK does, unless one of them
+        // grows: QBoxLayout would otherwise share its spare height out
+        // between them as gaps (beside a canvas, say, that sets the height).
+        // Aligned rather than given a trailing stretch, which would make the
+        // box itself expand and push the gaps up into its parent.
+        if (s.dir == orientation::vertical &&
+            std::ranges::none_of(s.items, [](const node& c) { return c.common.stretch > 0; }) &&
+            !(l->expandingDirections() & Qt::Vertical))
+            l->setAlignment(Qt::AlignTop);
         return box;
     }
 
@@ -3838,10 +3847,14 @@ private:
         return box;
     }
 
-    QWidget* make(const node&, const spec::spacer&, orientation)
+    QWidget* make(const node&, const spec::spacer&, orientation parent_dir)
     {
+        // Along its box only, as GTK's: a spacer in a row that also grew
+        // downwards made the row take a column's spare height.
         auto* w = new QWidget;
-        w->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        const bool across = parent_dir == orientation::horizontal;
+        w->setSizePolicy(across ? QSizePolicy::Expanding : QSizePolicy::Preferred,
+                         across ? QSizePolicy::Preferred : QSizePolicy::Expanding);
         return w;
     }
 
