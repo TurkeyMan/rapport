@@ -43,15 +43,18 @@ endif()
 # rap::gpu on Vulkan elsewhere: only the headers are needed, the loader is
 # opened at run time.
 if(NOT WIN32)
-    find_path(RAPPORT_VULKAN_INCLUDE vulkan/vulkan.h PATHS ENV PKG_CONFIG_SYSROOT_DIR)
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(RAPPORT_VULKAN QUIET vulkan)
     endif()
-    if(RAPPORT_VULKAN_FOUND OR RAPPORT_VULKAN_INCLUDE)
+    # The header decides, not vulkan.pc: that can come with the loader alone
+    # (Arch's vulkan-icd-loader), the headers being another package.
+    find_path(RAPPORT_VULKAN_INCLUDE vulkan/vulkan.h HINTS ${RAPPORT_VULKAN_INCLUDE_DIRS}
+              PATHS ENV PKG_CONFIG_SYSROOT_DIR)
+    if(RAPPORT_VULKAN_INCLUDE)
         target_sources(rapport PRIVATE src/gpu_vulkan.cpp)
         target_compile_definitions(rapport PRIVATE RAPPORT_GPU_VULKAN=1)
-        target_include_directories(rapport PRIVATE ${RAPPORT_VULKAN_INCLUDE_DIRS})
+        target_include_directories(rapport PRIVATE ${RAPPORT_VULKAN_INCLUDE})
         message(STATUS "rapport: GPU: Vulkan")
     else()
         message(STATUS "rapport: GPU: none (no Vulkan headers)")
