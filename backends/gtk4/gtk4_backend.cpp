@@ -1172,6 +1172,8 @@ public:
                 if (self->changed_) self->changed_(self->current());
             },
             this);
+        // The font is known once styled, in a window.
+        connect(w_, "realize", +[](GtkWidget*, gpointer p) { static_cast<drop_down_impl*>(p)->fit_widest(); }, this);
     }
 
     void set_items(std::vector<std::string> items) override
@@ -1180,6 +1182,8 @@ public:
         for (auto& i : items) gtk_string_list_append(list, i.c_str());
         gtk_drop_down_set_model(GTK_DROP_DOWN(w_), G_LIST_MODEL(list));
         g_object_unref(list);
+        items_ = std::move(items);
+        if (gtk_widget_get_realized(w_)) fit_widest();
     }
     int current() const override
     {
@@ -1194,6 +1198,31 @@ public:
 
 private:
     std::function<void(int)> changed_;
+    std::vector<std::string> items_;
+
+    // GTK sizes the button to the item showing, so choosing a longer one
+    // would widen it and push its neighbours about: as wide as the widest
+    // item, as on GTK 3 and Qt. The button's own padding and arrow are
+    // what its natural width has beyond the showing item's text.
+    int text_width(const std::string& text) const
+    {
+        PangoLayout* layout = gtk_widget_create_pango_layout(w_, text.c_str());
+        int w = 0;
+        pango_layout_get_pixel_size(layout, &w, nullptr);
+        g_object_unref(layout);
+        return w;
+    }
+    void fit_widest()
+    {
+        gtk_widget_set_size_request(w_, -1, -1);
+        int natural = 0;
+        gtk_widget_measure(w_, GTK_ORIENTATION_HORIZONTAL, -1, nullptr, &natural, nullptr, nullptr);
+        const int shown = current();
+        const int chrome = natural - (shown >= 0 && size_t(shown) < items_.size() ? text_width(items_[shown]) : 0);
+        int widest = 0;
+        for (const std::string& i : items_) widest = std::max(widest, text_width(i));
+        gtk_widget_set_size_request(w_, chrome + widest, -1);
+    }
 };
 
 G_GNUC_BEGIN_IGNORE_DEPRECATIONS
