@@ -5643,7 +5643,9 @@ public:
             modal_ = true;
             EnableWindow(parent->hwnd_, FALSE);
         }
-        const bool snapshot = std::getenv("RAPPORT_SNAPSHOT") != nullptr;
+        // Snapshots and test runs (RAPPORT_NO_ACTIVATE) show without taking
+        // the focus from whatever the user is doing.
+        const bool snapshot = std::getenv("RAPPORT_SNAPSHOT") != nullptr || std::getenv("RAPPORT_NO_ACTIVATE") != nullptr;
         // The first time, painted, controls and all, as it's shown: the
         // compositor's opening animation starts from the window complete,
         // not from a frame its contents fill in a moment later. (Cloaking it

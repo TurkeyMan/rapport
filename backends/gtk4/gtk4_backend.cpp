@@ -2864,7 +2864,12 @@ public:
     void show() override
     {
         finished_ = false;
-        gtk_window_present(GTK_WINDOW(win_));
+        // Test runs (RAPPORT_NO_ACTIVATE): shown, not presented (presenting
+        // asks for the focus).
+        if (std::getenv("RAPPORT_NO_ACTIVATE"))
+            gtk_widget_set_visible(win_, TRUE);
+        else
+            gtk_window_present(GTK_WINDOW(win_));
         snapshot_if_asked();
     }
 

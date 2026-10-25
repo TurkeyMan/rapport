@@ -3408,7 +3408,14 @@ public:
     void show() override
     {
         finished_ = false;
-        gtk_window_present(GTK_WINDOW(win_));
+        // Test runs (RAPPORT_NO_ACTIVATE): shown, not given the focus.
+        if (std::getenv("RAPPORT_NO_ACTIVATE"))
+        {
+            gtk_window_set_focus_on_map(GTK_WINDOW(win_), FALSE);
+            gtk_widget_show(win_);
+        }
+        else
+            gtk_window_present(GTK_WINDOW(win_));
         snapshot_if_asked();
     }
     void close() override { gtk_widget_hide(win_); }

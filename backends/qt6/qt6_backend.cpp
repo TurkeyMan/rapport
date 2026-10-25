@@ -3292,6 +3292,8 @@ public:
     void show() override
     {
         finished_ = false;
+        if (std::getenv("RAPPORT_NO_ACTIVATE"))  // test runs: shown, not given the focus
+            frame_->setAttribute(Qt::WA_ShowWithoutActivating);
         frame_->show();
         if (!frame_->testAttribute(Qt::WA_ShowWithoutActivating))
         {
