@@ -10,6 +10,9 @@ if(WIN32)
     target_link_libraries(rapport-frame PRIVATE d3d11 dxgi)
 endif()
 
+add_executable(rapport-gpu gpu.cpp)
+target_link_libraries(rapport-gpu PRIVATE rapport::rapport)
+
 add_executable(rapport-print print.cpp)
 target_link_libraries(rapport-print PRIVATE rapport::rapport)
 
@@ -33,7 +36,7 @@ if(RAPPORT_STATIC)
         endif()
     endforeach()
     file(GENERATE OUTPUT ${builtins_cpp} CONTENT "${builtins}")
-    foreach(example rapport-demo rapport-gallery rapport-canvas rapport-frame rapport-print)
+    foreach(example rapport-demo rapport-gallery rapport-canvas rapport-frame rapport-gpu rapport-print)
         target_sources(${example} PRIVATE ${builtins_cpp})
         target_link_libraries(${example} PRIVATE ${backend_targets})
     endforeach()

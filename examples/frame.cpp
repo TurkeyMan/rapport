@@ -19,6 +19,7 @@
 #include <vector>
 
 #ifdef _WIN32
+#define NOMINMAX
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
 #endif

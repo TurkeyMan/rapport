@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include "gpu.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -936,6 +938,15 @@ public:
     }
     // The same from CPU pixels, on every backend; kept until replaced.
     virtual void present(std::shared_ptr<const rap::image>, frame_color = {}) = 0;
+    // The GPU device this canvas presents on (gpu::device::of): null until it
+    // has one (on_frame_target says when), and on backends without one.
+    virtual std::shared_ptr<gpu::device> gpu_device() const { return nullptr; }
+    // A texture of that device, shown as present(gpu_frame) shows a frame.
+    // `ready` is the GPU work that made it, waited for on the GPU, never on
+    // the UI thread. Refused (and logged) when it's another device's, or not
+    // one the canvas can draw: rgba8 or rgba16f, one level. The canvas holds
+    // it until it's replaced and the GPU has finished drawing it.
+    virtual void present(gpu::texture_ptr, gpu::ticket ready, frame_color = {}) {}
     // Back to on_paint alone.
     virtual void clear_frame() = 0;
 };

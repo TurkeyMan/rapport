@@ -5,11 +5,13 @@
 
 #include "frame_layer.h"
 
+#include "rapport/gpu_d3d11.h"
 #include "rapport/i18n.h"
 
 #include <commdlg.h>
 #include <d3d11.h>
 #include <d3d11_4.h>
+#include <d2d1_1.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <format>
@@ -4574,13 +4576,17 @@ frame_clock* g_frames = nullptr;
 // (on the CPU), and canvases take it at their next paint after it's ready.
 // When it's lost (a driver update, a GPU reset), it's dropped, the
 // canvases go back to the CPU, and a new one is made. UI thread only.
-struct gpu_device
+struct gpu_shared
 {
     com<ID3D11Device> d3d;
     com<IDXGIFactory2> dxgi;
     com<ID2D1Device> d2d;
     uint64_t key = 0;   // its bitmaps' (see new_resource_key)
     uint64_t luid = 0;  // its adapter's, for frame_target::device
+    // rap::gpu over the same device, for apps' passes (made multithreaded:
+    // their workers and Direct2D take turns through the factory's lock).
+    com<ID2D1Multithread> lock;
+    std::shared_ptr<rap::gpu::device> api;
 };
 
 class gpu
@@ -4588,7 +4594,7 @@ class gpu
 public:
     // The device, or null while there's none (yet); with `start`, one is
     // made if there isn't.
-    static std::shared_ptr<gpu_device> device(bool start)
+    static std::shared_ptr<gpu_shared> device(bool start)
     {
         state& s = get();
         if (!s.current && s.pending.valid() && s.pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
@@ -4604,7 +4610,7 @@ public:
             s.pending = std::async(std::launch::async, make);
         return s.current;
     }
-    static void lost(const std::shared_ptr<gpu_device>& d)
+    static void lost(const std::shared_ptr<gpu_shared>& d)
     {
         state& s = get();
         if (!d || s.current != d) return;
@@ -4615,8 +4621,8 @@ public:
 private:
     struct state
     {
-        std::shared_ptr<gpu_device> current;
-        std::future<std::shared_ptr<gpu_device>> pending;
+        std::shared_ptr<gpu_shared> current;
+        std::future<std::shared_ptr<gpu_shared>> pending;
         ULONGLONG failed_at = 0;
     };
     static state& get()
@@ -4624,9 +4630,9 @@ private:
         static state s;
         return s;
     }
-    static std::shared_ptr<gpu_device> make()
+    static std::shared_ptr<gpu_shared> make()
     {
-        auto d = std::make_shared<gpu_device>();
+        auto d = std::make_shared<gpu_shared>();
         if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                                      nullptr, 0, D3D11_SDK_VERSION, d->d3d.put(), nullptr, nullptr)))
             return nullptr;
@@ -4637,10 +4643,12 @@ private:
         if (FAILED(d->d3d->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(dxgi_device.put()))) ||
             FAILED(dxgi_device->GetAdapter(adapter.put())) ||
             FAILED(adapter->GetParent(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(d->dxgi.put()))) ||
-            FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), nullptr,
+            FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory1), nullptr,
                                      reinterpret_cast<void**>(factory.put()))) ||
-            FAILED(factory->CreateDevice(dxgi_device.get(), d->d2d.put())))
+            FAILED(factory->CreateDevice(dxgi_device.get(), d->d2d.put())) ||
+            FAILED(factory->QueryInterface(__uuidof(ID2D1Multithread), reinterpret_cast<void**>(d->lock.put()))))
             return nullptr;
+        d->api = rap::gpu::d3d11::wrap(d->d3d.get(), d->lock.get());
         DXGI_ADAPTER_DESC desc{};
         if (SUCCEEDED(adapter->GetDesc(&desc)))
             d->luid = uint64_t(desc.AdapterLuid.LowPart) | uint64_t(uint32_t(desc.AdapterLuid.HighPart)) << 32;
@@ -4652,7 +4660,7 @@ private:
 class gpu_target
 {
 public:
-    static std::unique_ptr<gpu_target> make(std::shared_ptr<gpu_device> dev, HWND h, UINT w, UINT hgt)
+    static std::unique_ptr<gpu_target> make(std::shared_ptr<gpu_shared> dev, HWND h, UINT w, UINT hgt)
     {
         auto t = std::unique_ptr<gpu_target>(new gpu_target(std::move(dev)));
         DXGI_SWAP_CHAIN_DESC1 desc{};
@@ -4671,7 +4679,7 @@ public:
         t->w_ = w, t->h_ = hgt;
         return t;
     }
-    const std::shared_ptr<gpu_device>& device() const { return dev_; }
+    const std::shared_ptr<gpu_shared>& device() const { return dev_; }
     ID2D1DeviceContext* begin(UINT w, UINT h)
     {
         if (w != w_ || h != h_)
@@ -4692,7 +4700,7 @@ public:
     }
 
 private:
-    explicit gpu_target(std::shared_ptr<gpu_device> dev)
+    explicit gpu_target(std::shared_ptr<gpu_shared> dev)
         : dev_(std::move(dev))
     {
     }
@@ -4710,7 +4718,7 @@ private:
         return true;
     }
 
-    std::shared_ptr<gpu_device> dev_;
+    std::shared_ptr<gpu_shared> dev_;
     com<IDXGISwapChain1> swap_;
     com<ID2D1DeviceContext> dc_;
     UINT w_ = 0, h_ = 0;
@@ -4789,6 +4797,36 @@ public:
     {
         retire_gpu_frame();
         frame_ = {std::move(pixels), color};
+        invalidate();
+    }
+    std::shared_ptr<rap::gpu::device> gpu_device() const override
+    {
+        const std::shared_ptr<gpu_shared> d = gpu_ ? gpu_->device() : gpu::device(false);
+        return d ? d->api : nullptr;
+    }
+    void present(rap::gpu::texture_ptr texture, rap::gpu::ticket, frame_color) override
+    {
+        // Drawn on the device that made it, after it in the context's order:
+        // `ready` needs no wait.
+        const std::shared_ptr<gpu_shared> dev = gpu_ ? gpu_->device() : nullptr;
+        ID3D11Texture2D* native = dev && dev->api && texture ? rap::gpu::d3d11::native(*dev->api, *texture) : nullptr;
+        D3D11_TEXTURE2D_DESC desc{};
+        if (native) native->GetDesc(&desc);
+        if (!native || desc.MipLevels != 1 ||
+            (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT))
+        {
+            OutputDebugStringW(L"rapport: canvas::present: not a texture this canvas can show "
+                               L"(its device's, rgba8 or rgba16f, one level)\n");
+            return;
+        }
+        retire_gpu_frame();
+        frame_ = {};
+        gpu_frame_ = std::make_unique<shown_frame>();
+        gpu_frame_->device = dev;
+        native->AddRef();
+        *gpu_frame_->texture.put() = native;
+        gpu_frame_->format = desc.Format;
+        gpu_frame_->release = [texture] {};  // the hold on it, dropped once the GPU's done drawing it
         invalidate();
     }
     void present(gpu_frame frame) override
@@ -5020,7 +5058,7 @@ private:
         const UINT w = UINT(std::max<LONG>(r.right, 1)), h = UINT(std::max<LONG>(r.bottom, 1));
         // The first frame doesn't wait for the GPU: it's on the CPU, and the
         // GPU's device starts after it.
-        const std::shared_ptr<gpu_device> dev = gpu::device(painted_);
+        const std::shared_ptr<gpu_shared> dev = gpu::device(painted_);
         if (gpu_ && gpu_->device() != dev) gpu_.reset();  // lost, by another canvas
         if (gpu_frame_ && (!gpu_ || gpu_frame_->device != gpu_->device())) drop_gpu_frame();
         if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h)))
@@ -5184,7 +5222,7 @@ private:
     // A GPU frame being shown: the app's texture, opened on our device.
     struct shown_frame
     {
-        std::shared_ptr<gpu_device> device;
+        std::shared_ptr<gpu_shared> device;
         com<ID3D11Texture2D> texture;
         DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM;
         com<ID3D11Fence> fence;
