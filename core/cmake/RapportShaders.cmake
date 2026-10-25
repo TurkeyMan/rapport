@@ -14,6 +14,21 @@
 # The compiler is found on PATH (and the Windows SDK), or named with
 # RAPPORT_SHADER_COMPILER.
 
+# Sets RAPPORT_SHADER_COMPILER (cached) to the compiler found, if any: for
+# a project to leave out what needs shaders when there's none.
+function(rapport_find_shader_compiler)
+    if(RAPPORT_SHADER_COMPILER)
+        return()
+    endif()
+    if(WIN32)
+        file(GLOB kits "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin/*/x64")
+        list(SORT kits ORDER DESCENDING)
+        find_program(RAPPORT_SHADER_COMPILER fxc HINTS ${kits})
+    else()
+        find_program(RAPPORT_SHADER_COMPILER NAMES dxc glslangValidator glslang)
+    endif()
+endfunction()
+
 function(rapport_add_shader target)
     set(_rapport_shaders_dir ${CMAKE_CURRENT_FUNCTION_LIST_DIR})
     cmake_parse_arguments(S "" "NAME;SOURCE;ENTRY;STAGE" "DEFINES;DEPENDS" ${ARGN})
@@ -43,18 +58,10 @@ function(rapport_add_shader target)
     set(dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
     file(MAKE_DIRECTORY ${dir})
 
+    rapport_find_shader_compiler()
     if(NOT RAPPORT_SHADER_COMPILER)
-        if(WIN32)
-            file(GLOB kits "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin/*/x64")
-            list(SORT kits ORDER DESCENDING)
-            find_program(RAPPORT_SHADER_COMPILER fxc HINTS ${kits})
-        else()
-            find_program(RAPPORT_SHADER_COMPILER NAMES dxc glslangValidator glslang)
-        endif()
-        if(NOT RAPPORT_SHADER_COMPILER)
-            message(FATAL_ERROR "rapport_add_shader: no shader compiler (fxc on Windows; dxc or glslang elsewhere). "
-                                "Install one or set RAPPORT_SHADER_COMPILER.")
-        endif()
+        message(FATAL_ERROR "rapport_add_shader: no shader compiler (fxc on Windows; dxc or glslang elsewhere). "
+                            "Install one or set RAPPORT_SHADER_COMPILER.")
     endif()
     get_filename_component(compiler_name ${RAPPORT_SHADER_COMPILER} NAME_WE)
 
