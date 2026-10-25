@@ -4351,6 +4351,12 @@ public:
     {
         QGuiApplication::clipboard()->setText(qs(s));
     }
+    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    {
+        const QMimeData* data = QGuiApplication::clipboard()->mimeData();
+        if (!data || !data->hasText()) return done(std::nullopt);
+        done(data->text().toStdString());
+    }
 
     void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels,
                            size_t stride) override

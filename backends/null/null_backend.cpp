@@ -656,6 +656,7 @@ public:
             });
     }
     void set_clipboard(const std::string&) override {}
+    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override { done(std::nullopt); }
     void set_clipboard_image(int, int, pixel_format, const uint8_t*, size_t) override {}
     bool save_snapshot(const std::string&) override { return false; }
 

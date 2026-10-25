@@ -75,6 +75,14 @@ public:
     // The platform's print dialog, then the job's pages (see print_job).
     void print(window* parent, print_job job) { backend_->print(parent, std::move(job)); }
     void set_clipboard(const std::string& s) { backend_->set_clipboard(s); }
+    // The clipboard's text, or nullopt when it holds none. Asynchronous where
+    // the toolkit is (GTK 4, GTK 3 under Wayland): `done` runs on the UI
+    // thread, possibly before this returns. (An image counterpart, for
+    // Paste, is to come.)
+    void clipboard_text(std::function<void(std::optional<std::string>)> done)
+    {
+        backend_->read_clipboard_text(std::move(done));
+    }
     void set_clipboard_image(int width, int height, pixel_format format, const uint8_t* pixels,
                            size_t stride)
     {

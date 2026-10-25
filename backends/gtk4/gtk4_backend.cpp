@@ -3885,6 +3885,24 @@ public:
         if (GdkDisplay* d = gdk_display_get_default())
             gdk_clipboard_set_text(gdk_display_get_clipboard(d), s.c_str());
     }
+    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    {
+        GdkDisplay* d = gdk_display_get_default();
+        if (!d) return done(std::nullopt);
+        gdk_clipboard_read_text_async(
+            gdk_display_get_clipboard(d), nullptr,
+            +[](GObject* source, GAsyncResult* result, gpointer user)
+            {
+                std::unique_ptr<std::function<void(std::optional<std::string>)>> f(
+                    static_cast<std::function<void(std::optional<std::string>)>*>(user));
+                char* text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), result, nullptr);
+                if (!text) return (*f)(std::nullopt);
+                std::string s = text;
+                g_free(text);
+                (*f)(std::move(s));
+            },
+            new std::function<void(std::optional<std::string>)>(std::move(done)));
+    }
 
     // TODO(tortilla): a GdkTexture-backed Image would avoid cairo for painting.
     std::unique_ptr<rap::image> create_image(int w, int h, pixel_format format,

@@ -6644,6 +6644,25 @@ public:
         CloseClipboard();
     }
 
+    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    {
+        if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) return done(std::nullopt);
+        // Another program holding it open (a clipboard manager, say) is
+        // common and brief: a few tries, about 100 ms in all.
+        bool open = false;
+        for (int i = 0; i < 10 && !(open = OpenClipboard(messages_)); ++i) Sleep(10);
+        if (!open) return done(std::nullopt);
+        std::optional<std::string> text;
+        if (HANDLE mem = GetClipboardData(CF_UNICODETEXT))
+            if (auto* w = static_cast<const wchar_t*>(GlobalLock(mem)))
+            {
+                text = narrow(std::wstring(w));
+                GlobalUnlock(mem);
+            }
+        CloseClipboard();
+        done(std::move(text));
+    }
+
     bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
 
     // -- printing ----------------------------------------------------------------

@@ -4454,6 +4454,19 @@ public:
         gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), s.c_str(),
                                int(s.size()));
     }
+    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    {
+        gtk_clipboard_request_text(
+            gtk_clipboard_get(GDK_SELECTION_CLIPBOARD),
+            +[](GtkClipboard*, const gchar* text, gpointer user)
+            {
+                std::unique_ptr<std::function<void(std::optional<std::string>)>> f(
+                    static_cast<std::function<void(std::optional<std::string>)>*>(user));
+                if (!text) return (*f)(std::nullopt);
+                (*f)(std::string(text));
+            },
+            new std::function<void(std::optional<std::string>)>(std::move(done)));
+    }
 
     bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
 

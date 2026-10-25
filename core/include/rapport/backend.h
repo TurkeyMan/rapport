@@ -16,7 +16,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 43;
+inline constexpr int abi_version = 44;
 
 // For list::set_column_order: whether `order` names each of `n` columns once.
 inline bool is_column_order(const std::vector<size_t>& order, size_t n)
@@ -133,6 +133,9 @@ public:
     // toolkit writes PDF), prints there without a dialog, for tests.
     virtual void print(window* parent, print_job job) = 0;
     virtual void set_clipboard(const std::string&) = 0;
+    // The clipboard's text, or nullopt when it holds none; `done` runs on
+    // the UI thread, possibly before this returns.
+    virtual void read_clipboard_text(std::function<void(std::optional<std::string>)> done) = 0;
     // An image on the clipboard (copied now; the caller keeps its pixels).
     virtual void set_clipboard_image(int width, int height, pixel_format, const uint8_t* pixels,
                                    size_t stride) = 0;
