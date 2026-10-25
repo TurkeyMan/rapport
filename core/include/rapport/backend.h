@@ -16,7 +16,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 41;
+inline constexpr int abi_version = 42;
 
 // For list::set_column_order: whether `order` names each of `n` columns once.
 inline bool is_column_order(const std::vector<size_t>& order, size_t n)

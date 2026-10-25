@@ -549,6 +549,38 @@ struct date
     auto operator<=>(const date&) const = default;
 };
 
+// One item of a tree: its label, the app's id for it, and its children.
+struct tree_item
+{
+    std::string label;
+    std::string id;  // unique in the tree: what selection and the handlers name it by
+    std::vector<tree_item> children;
+    bool expanded = false;  // shown open at first
+};
+
+// A hierarchy of labelled items, one selected at a time (folders, say): the
+// toolkit's own tree view. The app hands over the whole tree, and again when
+// it changes.
+class tree : public widget
+{
+public:
+    // Replaces every item. The selection stays on the same id if it's still
+    // there, and items keep being open or closed as the user left them;
+    // new ones take tree_item::expanded.
+    virtual void set_items(std::vector<tree_item>) = 0;
+    virtual std::optional<std::string> selected() const = 0;
+    // Selects `id`, opening its ancestors and scrolling it into view; an id
+    // that isn't there clears the selection.
+    virtual void select(const std::string& id) = 0;
+    virtual void set_expanded(const std::string& id, bool) = 0;
+
+    virtual void on_selection_changed(std::function<void()>) = 0;  // the user's changes only
+    virtual void on_activate(std::function<void(const std::string& id)>) = 0;  // double-click / Enter
+    // Right-click / menu key. A right-click selects its item first, as file
+    // managers do; nullopt for blank space. Return an empty menu for none.
+    virtual void on_context_menu(std::function<menu(std::optional<std::string> id)>) = 0;
+};
+
 class date_picker : public widget
 {
 public:

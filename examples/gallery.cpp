@@ -115,6 +115,17 @@ std::vector<rap::text_view::span> diff_spans(const std::string& text)
 
 }  // namespace
 
+// Folders of refs, as a ref browser shows them.
+std::vector<rap::tree_item> refs_tree()
+{
+    using item = rap::tree_item;
+    return {item{"refs", "refs",
+                 {item{"heads", "refs/heads", {item{"feature", "refs/heads/feature", {item{"x", "refs/heads/feature/x"}}}}},
+                  item{"remotes", "refs/remotes", {item{"origin", "refs/remotes/origin"}, item{"upstream", "refs/remotes/upstream"}}},
+                  item{"tags", "refs/tags"}},
+                 true}};
+}
+
 int main(int argc, char** argv)
 {
     auto loaded = rap::ui::load(argc, argv);
@@ -129,6 +140,7 @@ int main(int argc, char** argv)
     rap::label* status = nullptr;
     rap::list* log = nullptr;
     rap::text_view* details = nullptr;
+    rap::tree* refs = nullptr;
 
     auto say = [&](const std::string& s) { status->set_text(s); };
 
@@ -256,6 +268,26 @@ int main(int argc, char** argv)
                                button{"Disabled"}.enabled(false).tooltip("Can't touch this"),
                            }},
                      text_view{"Editable text area.\nType here."}.stretch(),
+                 }},
+                {"_Tree",
+                 hbox{
+                     tree{refs_tree()}
+                         .bind(refs)
+                         .on_selection_changed([&] { say("selected " + refs->selected().value_or("(none)")); })
+                         .on_activate([&](const std::string& id) { say("activated " + id); })
+                         .on_context_menu(
+                             [&](std::optional<std::string> id) -> rap::menu
+                             {
+                                 if (!id) return {{.label = "Blank space", .enabled = false}};
+                                 return {{.label = "Copy " + *id, .action = [&ui, id] { ui.set_clipboard(*id); }},
+                                         {.label = "Collapse", .action = [&, id] { refs->set_expanded(*id, false); }}};
+                             })
+                         .stretch(),
+                     vbox{
+                         button{"Select heads/feature/x"}.on_click([&] { refs->select("refs/heads/feature/x"); }),
+                         button{"Rebuild (keeps state)"}.on_click([&] { refs->set_items(refs_tree()); }),
+                         button{"Select nothing"}.on_click([&] { refs->select(""); }),
+                     },
                  }},
             }
                 .stretch(),

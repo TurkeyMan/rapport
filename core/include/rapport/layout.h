@@ -258,6 +258,14 @@ struct list
     std::function<menu(size_t, size_t, point_f)> on_cell_context_menu;
     rap::list** bind = nullptr;
 };
+struct tree
+{
+    std::vector<tree_item> items;
+    std::function<void()> on_selection_changed;
+    std::function<void(const std::string&)> on_activate;
+    std::function<menu(std::optional<std::string>)> on_context_menu;
+    rap::tree** bind = nullptr;
+};
 struct menu_button
 {
     std::string text;
@@ -310,7 +318,7 @@ using node_spec =
                  spec::spacer, spec::separator, spec::label, spec::button, spec::check, spec::entry,
                  spec::drop_down, spec::combo, spec::text_view, spec::list, spec::canvas,
                  spec::menu_button, spec::progress_bar, spec::date_picker, spec::toolbar,
-                 spec::tool_button, spec::slider, spec::spin, spec::color_button, spec::buttons>;
+                 spec::tool_button, spec::slider, spec::spin, spec::color_button, spec::buttons, spec::tree>;
 
 struct node
 {
@@ -865,6 +873,32 @@ public:
         return *this;
     }
     list& bind(rap::list*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+};
+
+class tree : public builder<tree, spec::tree>
+{
+public:
+    explicit tree(std::vector<tree_item> items = {}) { s().items = std::move(items); }
+    tree& on_selection_changed(std::function<void()> f)
+    {
+        s().on_selection_changed = std::move(f);
+        return *this;
+    }
+    tree& on_activate(std::function<void(const std::string&)> f)
+    {
+        s().on_activate = std::move(f);
+        return *this;
+    }
+    tree& on_context_menu(std::function<menu(std::optional<std::string>)> f)
+    {
+        s().on_context_menu = std::move(f);
+        return *this;
+    }
+    tree& bind(rap::tree*& h)
     {
         s().bind = &h;
         return *this;

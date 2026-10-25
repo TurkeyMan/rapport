@@ -76,6 +76,43 @@ public:
     rap::date value;
 };
 
+// Knows its ids, so select() and selected() behave.
+class null_tree : public stub<rap::tree>
+{
+public:
+    void set_items(std::vector<tree_item> items) override
+    {
+        ids.clear();
+        add(items);
+        if (current && std::ranges::find(ids, *current) == ids.end()) current.reset();
+    }
+    std::optional<std::string> selected() const override { return current; }
+    void select(const std::string& id) override
+    {
+        if (std::ranges::find(ids, id) != ids.end())
+            current = id;
+        else
+            current.reset();
+    }
+    void set_expanded(const std::string&, bool) override {}
+    void on_selection_changed(std::function<void()>) override {}
+    void on_activate(std::function<void(const std::string&)>) override {}
+    void on_context_menu(std::function<menu(std::optional<std::string>)>) override {}
+
+    std::vector<std::string> ids;
+    std::optional<std::string> current;
+
+private:
+    void add(const std::vector<tree_item>& items)
+    {
+        for (const tree_item& i : items)
+        {
+            ids.push_back(i.id);
+            add(i.children);
+        }
+    }
+};
+
 class null_entry : public stub<rap::entry>
 {
 public:
@@ -525,6 +562,12 @@ private:
         std::printf("date_picker %04d-%02d-%02d", s.date.year, s.date.month, s.date.day);
         suffix(n);
         make<null_date_picker>(n);
+    }
+    void visit(const node& n, const spec::tree& s, int)
+    {
+        std::printf("tree (%zu)", s.items.size());
+        suffix(n);
+        make<null_tree>(n)->set_items(s.items);
     }
     void visit(const node& n, const spec::buttons& s, int)
     {

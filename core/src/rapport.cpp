@@ -210,6 +210,14 @@ private:
         bind(s.bind, w);
     }
     static void apply(const spec::progress_bar& s, widget& w) { bind(s.bind, w); }
+    static void apply(const spec::tree& s, widget& w)
+    {
+        auto& t = static_cast<tree&>(w);
+        if (s.on_selection_changed) t.on_selection_changed(s.on_selection_changed);
+        if (s.on_activate) t.on_activate(s.on_activate);
+        if (s.on_context_menu) t.on_context_menu(s.on_context_menu);
+        bind(s.bind, w);
+    }
     static void apply(const spec::date_picker& s, widget& w)
     {
         auto& d = static_cast<date_picker&>(w);

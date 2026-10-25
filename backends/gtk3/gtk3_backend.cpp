@@ -880,6 +880,245 @@ public:
 
 // GTK 3 has no date picker: a button showing the date, with a calendar in
 // a popover. on_changed fires when the popover closes on a new date.
+// -- tree ---------------------------------------------------------------------
+
+// A GtkTreeView over a GtkTreeStore: column 0 the label, column 1 the id.
+class tree_impl : public widget_base<rap::tree>
+{
+public:
+    explicit tree_impl(const spec::tree& s)
+        : widget_base(gtk_tree_view_new(), gtk_scrolled_window_new(nullptr, nullptr))
+    {
+        store_ = gtk_tree_store_new(2, G_TYPE_STRING, G_TYPE_STRING);
+        auto* view = GTK_TREE_VIEW(w_);
+        gtk_tree_view_set_model(view, GTK_TREE_MODEL(store_));
+        gtk_container_add(GTK_CONTAINER(outer_), w_);
+        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), GTK_SHADOW_IN);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(outer_), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+        gtk_tree_view_set_headers_visible(view, false);
+        gtk_tree_view_set_enable_tree_lines(view, true);
+        gtk_tree_view_append_column(
+            view, gtk_tree_view_column_new_with_attributes("", gtk_cell_renderer_text_new(), "text", 0, nullptr));
+        sel_ = gtk_tree_view_get_selection(view);
+        gtk_tree_selection_set_mode(sel_, GTK_SELECTION_SINGLE);
+        // Taking focus with no cursor, GTK puts it on the first row and
+        // selects that (grab-focus, as a window shows, or focus-in): nobody
+        // chose it, so it's refused.
+        gtk_tree_selection_set_select_function(
+            sel_,
+            +[](GtkTreeSelection*, GtkTreeModel*, GtkTreePath*, gboolean selected, gpointer p) -> gboolean
+            { return selected || !static_cast<tree_impl*>(p)->focusing_; },
+            this, nullptr);
+        connect(w_, "grab-focus", +[](GtkWidget*, gpointer p) { static_cast<tree_impl*>(p)->focusing_ = true; }, this);
+        connect_after(w_, "grab-focus", +[](GtkWidget*, gpointer p) { static_cast<tree_impl*>(p)->focusing_ = false; },
+                      this);
+        connect(
+            w_, "focus-in-event",
+            +[](GtkWidget*, GdkEvent*, gpointer p) -> gboolean
+            {
+                static_cast<tree_impl*>(p)->focusing_ = true;
+                return false;
+            },
+            this);
+        connect_after(
+            w_, "focus-in-event",
+            +[](GtkWidget*, GdkEvent*, gpointer p) -> gboolean
+            {
+                static_cast<tree_impl*>(p)->focusing_ = false;
+                return false;
+            },
+            this);
+        connect(
+            sel_, "changed",
+            +[](GtkTreeSelection*, gpointer p)
+            {
+                auto* self = static_cast<tree_impl*>(p);
+                if (!self->quiet_ && self->changed_) self->changed_();
+            },
+            this);
+        connect(
+            w_, "row-activated",
+            +[](GtkTreeView*, GtkTreePath* path, GtkTreeViewColumn*, gpointer p)
+            {
+                auto* self = static_cast<tree_impl*>(p);
+                if (self->activate_) self->activate_(self->id_at(path));
+            },
+            this);
+        connect(
+            w_, "button-press-event",
+            +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<tree_impl*>(p);
+                if (e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_SECONDARY) return false;
+                // The item under the pointer is selected first, as file managers do.
+                GtkTreePath* path = nullptr;
+                if (gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(self->w_), int(e->x), int(e->y), &path, nullptr,
+                                                  nullptr, nullptr))
+                {
+                    gtk_tree_view_set_cursor(GTK_TREE_VIEW(self->w_), path, nullptr, false);  // reported
+                    gtk_tree_path_free(path);
+                }
+                self->popup(reinterpret_cast<GdkEvent*>(e), path != nullptr);
+                return true;
+            },
+            this);
+        connect(
+            w_, "popup-menu",
+            +[](GtkWidget*, gpointer p) -> gboolean
+            {
+                static_cast<tree_impl*>(p)->popup(nullptr, true);
+                return true;
+            },
+            this);
+        set_items(s.items);
+    }
+    ~tree_impl() override { g_object_unref(store_); }
+
+    void set_items(std::vector<tree_item> items) override
+    {
+        const std::optional<std::string> keep = selected();
+        std::unordered_map<std::string, bool> open;
+        for (auto& [id, ref] : by_id_)
+            if (GtkTreePath* path = gtk_tree_row_reference_get_path(ref))
+            {
+                open[id] = gtk_tree_view_row_expanded(GTK_TREE_VIEW(w_), path);
+                gtk_tree_path_free(path);
+            }
+        quiet q(*this);
+        clear_refs();
+        gtk_tree_store_clear(store_);
+        std::vector<std::string> expand;
+        insert(items, nullptr, open, expand);
+        for (const std::string& id : expand)
+            if (GtkTreePath* path = path_of(id))
+            {
+                gtk_tree_view_expand_row(GTK_TREE_VIEW(w_), path, false);
+                gtk_tree_path_free(path);
+            }
+        if (keep) select_quietly(*keep);
+    }
+    std::optional<std::string> selected() const override
+    {
+        GtkTreeModel* model = nullptr;
+        GtkTreeIter it;
+        if (!gtk_tree_selection_get_selected(sel_, &model, &it)) return std::nullopt;
+        return id_at(&it);
+    }
+    void select(const std::string& id) override
+    {
+        quiet q(*this);
+        if (!select_quietly(id)) gtk_tree_selection_unselect_all(sel_);
+    }
+    void set_expanded(const std::string& id, bool open) override
+    {
+        if (GtkTreePath* path = path_of(id))
+        {
+            if (open)
+                gtk_tree_view_expand_row(GTK_TREE_VIEW(w_), path, false);
+            else
+                gtk_tree_view_collapse_row(GTK_TREE_VIEW(w_), path);
+            gtk_tree_path_free(path);
+        }
+    }
+    void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
+    void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
+    void on_context_menu(std::function<menu(std::optional<std::string>)> f) override { context_ = std::move(f); }
+
+protected:
+    void on_disconnect() override
+    {
+        menu_.destroy();
+        clear_refs();
+    }
+
+private:
+    struct quiet
+    {
+        explicit quiet(tree_impl& t)
+            : t(t)
+            , was(t.quiet_)
+        {
+            t.quiet_ = true;
+        }
+        ~quiet() { t.quiet_ = was; }
+        tree_impl& t;
+        bool was;
+    };
+
+    void insert(const std::vector<tree_item>& items, GtkTreeIter* parent,
+                const std::unordered_map<std::string, bool>& open, std::vector<std::string>& expand)
+    {
+        for (const tree_item& t : items)
+        {
+            GtkTreeIter it;
+            gtk_tree_store_insert_with_values(store_, &it, parent, -1, 0, t.label.c_str(), 1, t.id.c_str(), -1);
+            GtkTreePath* path = gtk_tree_model_get_path(GTK_TREE_MODEL(store_), &it);
+            by_id_[t.id] = gtk_tree_row_reference_new(GTK_TREE_MODEL(store_), path);
+            gtk_tree_path_free(path);
+            insert(t.children, &it, open, expand);
+            const auto was = open.find(t.id);
+            if (!t.children.empty() && (was != open.end() ? was->second : t.expanded)) expand.push_back(t.id);
+        }
+    }
+    void clear_refs()
+    {
+        for (auto& [id, ref] : by_id_) gtk_tree_row_reference_free(ref);
+        by_id_.clear();
+    }
+    GtkTreePath* path_of(const std::string& id) const
+    {
+        const auto it = by_id_.find(id);
+        return it == by_id_.end() ? nullptr : gtk_tree_row_reference_get_path(it->second);
+    }
+    std::string id_at(GtkTreeIter* it) const
+    {
+        gchar* id = nullptr;
+        gtk_tree_model_get(GTK_TREE_MODEL(store_), it, 1, &id, -1);
+        std::string out = id ? id : "";
+        g_free(id);
+        return out;
+    }
+    std::string id_at(GtkTreePath* path) const
+    {
+        GtkTreeIter it;
+        return gtk_tree_model_get_iter(GTK_TREE_MODEL(store_), &it, path) ? id_at(&it) : std::string();
+    }
+    bool select_quietly(const std::string& id)
+    {
+        GtkTreePath* path = path_of(id);
+        if (!path) return false;
+        // Its ancestors open, itself as it was.
+        if (GtkTreePath* parent = gtk_tree_path_copy(path))
+        {
+            if (gtk_tree_path_up(parent) && gtk_tree_path_get_depth(parent) > 0)
+                gtk_tree_view_expand_to_path(GTK_TREE_VIEW(w_), parent);
+            gtk_tree_path_free(parent);
+        }
+        gtk_tree_view_set_cursor(GTK_TREE_VIEW(w_), path, nullptr, false);
+        gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(w_), path, nullptr, false, 0, 0);
+        gtk_tree_path_free(path);
+        return true;
+    }
+    // A right-click (`event`) on an item, or the menu key on the selected one.
+    void popup(GdkEvent* event, bool on_item)
+    {
+        if (!context_) return;
+        const std::optional<std::string> id = on_item ? selected() : std::nullopt;
+        menu m = context_(id);
+        if (!m.empty()) menu_.show(std::move(m), w_, event);
+    }
+
+    GtkTreeStore* store_ = nullptr;
+    GtkTreeSelection* sel_ = nullptr;
+    std::unordered_map<std::string, GtkTreeRowReference*> by_id_;
+    std::function<void()> changed_;
+    std::function<void(const std::string&)> activate_;
+    std::function<menu(std::optional<std::string>)> context_;
+    popup_menu menu_;
+    bool quiet_ = false;
+    bool focusing_ = false;  // in focus-in: GTK's own cursor placement
+};
+
 class date_picker_impl : public widget_base<rap::date_picker>
 {
 public:
@@ -3463,6 +3702,7 @@ private:
     {
         return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
                std::holds_alternative<spec::text_view>(s) || std::holds_alternative<spec::list>(s) ||
+               std::holds_alternative<spec::tree>(s) ||
                std::holds_alternative<spec::canvas>(s) || std::holds_alternative<spec::box>(s) ||
                std::holds_alternative<spec::form>(s) || std::holds_alternative<spec::splitter>(s) ||
                std::holds_alternative<spec::group>(s) || std::holds_alternative<spec::scroll>(s) ||
@@ -3777,6 +4017,7 @@ private:
     {
         return add<date_picker_impl>(n, s).outer();
     }
+    GtkWidget* make(const node& n, const spec::tree& s, orientation) { return add<tree_impl>(n, s).outer(); }
 
     GtkWidget* make(const node& n, const spec::button& s, orientation)
     {

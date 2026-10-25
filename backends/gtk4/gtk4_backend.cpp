@@ -629,6 +629,308 @@ public:
 };
 
 // A menu button showing the date, with a calendar in its popover.
+// -- tree ---------------------------------------------------------------------
+
+// A GtkListView over a GtkTreeListModel, rows a GtkTreeExpander and label.
+// The models hold GtkStringObjects naming the app's ids; labels and children
+// come from nodes_.
+class tree_impl : public widget_base<rap::tree>
+{
+public:
+    explicit tree_impl(const spec::tree& s)
+        : widget_base(nullptr, gtk_scrolled_window_new())
+    {
+        root_ = g_list_store_new(GTK_TYPE_STRING_OBJECT);
+        model_ = gtk_tree_list_model_new(G_LIST_MODEL(g_object_ref(root_)), false, false,
+                                         +[](gpointer item, gpointer p) -> GListModel*
+                                         { return static_cast<tree_impl*>(p)->children_of(item); },
+                                         this, nullptr);
+        sel_ = gtk_single_selection_new(G_LIST_MODEL(g_object_ref(model_)));
+        gtk_single_selection_set_autoselect(sel_, false);
+        gtk_single_selection_set_can_unselect(sel_, true);
+        GtkListItemFactory* factory = gtk_signal_list_item_factory_new();
+        connect(factory, "setup",
+                +[](GtkSignalListItemFactory*, GObject* li, gpointer p)
+                { static_cast<tree_impl*>(p)->setup(GTK_LIST_ITEM(li)); },
+                this);
+        connect(factory, "bind",
+                +[](GtkSignalListItemFactory*, GObject* li, gpointer p)
+                { static_cast<tree_impl*>(p)->bind_row(GTK_LIST_ITEM(li)); },
+                this);
+        w_ = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(sel_)), factory);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
+        gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(outer_), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+        ctx_menu_ = std::make_unique<menu_actions>(w_, "ctx");
+        connect(sel_, "selection-changed",
+                +[](GtkSelectionModel*, guint, guint, gpointer p)
+                {
+                    auto* self = static_cast<tree_impl*>(p);
+                    if (!self->quiet_ && self->changed_) self->changed_();
+                },
+                this);
+        connect(w_, "activate",
+                +[](GtkListView*, guint pos, gpointer p)
+                {
+                    auto* self = static_cast<tree_impl*>(p);
+                    if (self->activate_) self->activate_(self->id_at(pos));
+                },
+                this);
+        // Right-click on blank space (rows claim their own presses).
+        GtkGesture* click = gtk_gesture_click_new();
+        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
+        connect(click, "pressed",
+                +[](GtkGestureClick*, int, double x, double y, gpointer p)
+                { static_cast<tree_impl*>(p)->popup(std::nullopt, x, y); },
+                this);
+        gtk_widget_add_controller(w_, GTK_EVENT_CONTROLLER(click));
+        // The menu key, and Shift+F10: under the selected row's start.
+        GtkEventController* keys = gtk_event_controller_key_new();
+        connect(keys, "key-pressed",
+                +[](GtkEventControllerKey*, guint key, guint, GdkModifierType state, gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<tree_impl*>(p);
+                    if (key != GDK_KEY_Menu && !(key == GDK_KEY_F10 && (state & GDK_SHIFT_MASK))) return false;
+                    self->popup(self->selected(), 16, 16);
+                    return true;
+                },
+                this);
+        gtk_widget_add_controller(w_, keys);
+        set_items(s.items);
+    }
+    ~tree_impl() override
+    {
+        g_object_unref(sel_);
+        g_object_unref(model_);
+        g_object_unref(root_);
+    }
+
+    void set_items(std::vector<tree_item> items) override
+    {
+        const std::optional<std::string> keep = selected();
+        std::unordered_map<std::string, bool> open;
+        for (guint i = 0, n = rows(); i < n; ++i)
+            if (GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, i))
+            {
+                open[id_of(row)] = gtk_tree_list_row_get_expanded(row);
+                g_object_unref(row);
+            }
+        quiet q(*this);
+        nodes_.clear();
+        parent_.clear();
+        std::vector<std::string> top;
+        for (const tree_item& t : items)
+        {
+            add(t, "");
+            top.push_back(t.id);
+        }
+        for (auto& [id, node] : nodes_)
+            if (auto was = open.find(id); was != open.end()) node.expanded = was->second;
+        g_list_store_remove_all(root_);
+        for (const std::string& id : top)
+        {
+            GtkStringObject* o = gtk_string_object_new(id.c_str());
+            g_list_store_append(root_, o);
+            g_object_unref(o);
+        }
+        // Open what should be, top down: children follow their parent's row.
+        for (guint i = 0; i < rows(); ++i)
+            if (GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, i))
+            {
+                auto it = nodes_.find(id_of(row));
+                if (it != nodes_.end() && it->second.expanded && !it->second.children.empty())
+                    gtk_tree_list_row_set_expanded(row, true);
+                g_object_unref(row);
+            }
+        gtk_single_selection_set_selected(sel_, GTK_INVALID_LIST_POSITION);
+        if (keep) select_quietly(*keep);
+    }
+    std::optional<std::string> selected() const override
+    {
+        const guint pos = gtk_single_selection_get_selected(sel_);
+        if (pos == GTK_INVALID_LIST_POSITION) return std::nullopt;
+        return id_at(pos);
+    }
+    void select(const std::string& id) override
+    {
+        quiet q(*this);
+        if (!select_quietly(id)) gtk_single_selection_set_selected(sel_, GTK_INVALID_LIST_POSITION);
+    }
+    void set_expanded(const std::string& id, bool open) override
+    {
+        if (auto pos = position_of(id))
+            if (GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, *pos))
+            {
+                gtk_tree_list_row_set_expanded(row, open);
+                g_object_unref(row);
+            }
+    }
+    void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
+    void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
+    void on_context_menu(std::function<menu(std::optional<std::string>)> f) override { context_ = std::move(f); }
+
+protected:
+    void on_disconnect() override
+    {
+        alive_ = false;
+        if (popover_) gtk_widget_unparent(popover_);
+        popover_ = nullptr;
+    }
+
+private:
+    struct node
+    {
+        std::string label;
+        std::vector<std::string> children;
+        bool expanded = false;
+    };
+    struct quiet
+    {
+        explicit quiet(tree_impl& t)
+            : t(t)
+            , was(t.quiet_)
+        {
+            t.quiet_ = true;
+        }
+        ~quiet() { t.quiet_ = was; }
+        tree_impl& t;
+        bool was;
+    };
+
+    void add(const tree_item& t, const std::string& parent)
+    {
+        node n{t.label, {}, t.expanded};
+        for (const tree_item& c : t.children)
+        {
+            n.children.push_back(c.id);
+            add(c, t.id);
+        }
+        nodes_[t.id] = std::move(n);
+        parent_[t.id] = parent;
+    }
+    GListModel* children_of(gpointer item)
+    {
+        auto it = nodes_.find(gtk_string_object_get_string(GTK_STRING_OBJECT(item)));
+        if (it == nodes_.end() || it->second.children.empty()) return nullptr;
+        GListStore* store = g_list_store_new(GTK_TYPE_STRING_OBJECT);
+        for (const std::string& id : it->second.children)
+        {
+            GtkStringObject* o = gtk_string_object_new(id.c_str());
+            g_list_store_append(store, o);
+            g_object_unref(o);
+        }
+        return G_LIST_MODEL(store);
+    }
+    void setup(GtkListItem* li)
+    {
+        GtkWidget* expander = gtk_tree_expander_new();
+        GtkWidget* label = gtk_label_new(nullptr);
+        gtk_label_set_xalign(GTK_LABEL(label), 0);
+        gtk_tree_expander_set_child(GTK_TREE_EXPANDER(expander), label);
+        gtk_list_item_set_child(li, expander);
+        // A right-click on the row: selects it, then its menu. GTK recycles
+        // and drops rows, so this isn't one of the connections the window
+        // cuts (connect): the gesture goes with its row, and rows with the
+        // view.
+        GtkGesture* click = gtk_gesture_click_new();
+        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
+        g_object_set_data(G_OBJECT(click), "rapport-item", li);
+        g_signal_connect(click, "pressed", G_CALLBACK(row_pressed), this);
+        gtk_widget_add_controller(expander, GTK_EVENT_CONTROLLER(click));
+    }
+    static void row_pressed(GtkGestureClick* g, int, double x, double y, gpointer p)
+    {
+        auto* self = static_cast<tree_impl*>(p);
+        if (!self->alive_) return;
+        gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+        auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(g), "rapport-item"));
+        const guint pos = gtk_list_item_get_position(li);
+        if (pos == GTK_INVALID_LIST_POSITION) return;
+        if (gtk_single_selection_get_selected(self->sel_) != pos)
+            gtk_single_selection_set_selected(self->sel_, pos);  // the user's: reported
+        GtkWidget* row = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+        graphene_point_t in = GRAPHENE_POINT_INIT(float(x), float(y)), out;
+        if (!gtk_widget_compute_point(row, self->w_, &in, &out)) out = in;
+        self->popup(self->id_at(pos), out.x, out.y);
+    }
+    void bind_row(GtkListItem* li)
+    {
+        auto* row = GTK_TREE_LIST_ROW(gtk_list_item_get_item(li));
+        GtkWidget* expander = gtk_list_item_get_child(li);
+        gtk_tree_expander_set_list_row(GTK_TREE_EXPANDER(expander), row);
+        auto it = nodes_.find(id_of(row));
+        gtk_label_set_text(GTK_LABEL(gtk_tree_expander_get_child(GTK_TREE_EXPANDER(expander))),
+                           it != nodes_.end() ? it->second.label.c_str() : "");
+    }
+    guint rows() const { return g_list_model_get_n_items(G_LIST_MODEL(model_)); }
+    static std::string id_of(GtkTreeListRow* row)
+    {
+        auto* o = static_cast<GtkStringObject*>(gtk_tree_list_row_get_item(row));
+        std::string id = o ? gtk_string_object_get_string(o) : "";
+        if (o) g_object_unref(o);
+        return id;
+    }
+    std::string id_at(guint pos) const
+    {
+        GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, pos);
+        if (!row) return {};
+        std::string id = id_of(row);
+        g_object_unref(row);
+        return id;
+    }
+    std::optional<guint> position_of(const std::string& id) const
+    {
+        for (guint i = 0, n = rows(); i < n; ++i)
+            if (id_at(i) == id) return i;
+        return std::nullopt;
+    }
+    bool select_quietly(const std::string& id)
+    {
+        if (!nodes_.contains(id)) return false;
+        // Its ancestors open, outermost first.
+        std::vector<std::string> chain;
+        for (std::string p = parent_[id]; !p.empty(); p = parent_[p]) chain.push_back(p);
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) set_expanded(*it, true);
+        const std::optional<guint> pos = position_of(id);
+        if (!pos) return false;
+        gtk_single_selection_set_selected(sel_, *pos);
+#if GTK_CHECK_VERSION(4, 12, 0)
+        gtk_list_view_scroll_to(GTK_LIST_VIEW(w_), *pos, GTK_LIST_SCROLL_NONE, nullptr);
+#endif
+        return true;
+    }
+    void popup(std::optional<std::string> id, double x, double y)
+    {
+        if (!alive_ || !context_) return;
+        menu m = context_(std::move(id));
+        if (m.empty()) return;
+        GMenu* model = ctx_menu_->build(std::move(m));
+        if (popover_) gtk_widget_unparent(popover_);
+        popover_ = gtk_popover_menu_new_from_model(G_MENU_MODEL(model));
+        g_object_unref(model);
+        gtk_widget_set_parent(popover_, w_);
+        GdkRectangle at{int(x), int(y), 1, 1};
+        gtk_popover_set_pointing_to(GTK_POPOVER(popover_), &at);
+        gtk_popover_set_has_arrow(GTK_POPOVER(popover_), false);
+        gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_BOTTOM);
+        gtk_widget_set_halign(popover_, GTK_ALIGN_START);
+        gtk_popover_popup(GTK_POPOVER(popover_));
+    }
+
+    GListStore* root_ = nullptr;
+    GtkTreeListModel* model_ = nullptr;
+    GtkSingleSelection* sel_ = nullptr;
+    std::unordered_map<std::string, node> nodes_;
+    std::unordered_map<std::string, std::string> parent_;  // "" at the top
+    std::unique_ptr<menu_actions> ctx_menu_;
+    GtkWidget* popover_ = nullptr;
+    std::function<void()> changed_;
+    std::function<void(const std::string&)> activate_;
+    std::function<menu(std::optional<std::string>)> context_;
+    bool quiet_ = false;
+    bool alive_ = true;
+};
+
 class date_picker_impl : public widget_base<rap::date_picker>
 {
 public:
@@ -2653,6 +2955,7 @@ private:
     {
         return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
                std::holds_alternative<spec::text_view>(s) || std::holds_alternative<spec::list>(s) ||
+               std::holds_alternative<spec::tree>(s) ||
                std::holds_alternative<spec::canvas>(s) || std::holds_alternative<spec::box>(s) ||
                std::holds_alternative<spec::form>(s) || std::holds_alternative<spec::splitter>(s) ||
                std::holds_alternative<spec::group>(s) || std::holds_alternative<spec::scroll>(s) ||
@@ -2937,6 +3240,7 @@ private:
     {
         return add<date_picker_impl>(n, s).outer();
     }
+    GtkWidget* make(const node& n, const spec::tree& s, orientation) { return add<tree_impl>(n, s).outer(); }
 
     GtkWidget* make(const node& n, const spec::check& s, orientation)
     {

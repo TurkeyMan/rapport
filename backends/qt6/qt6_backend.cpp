@@ -61,6 +61,7 @@
 #include <QTimer>
 #include <QTranslator>
 #include <QTreeView>
+#include <QTreeWidget>
 #include <QDateTime>
 #include <QCursor>
 #include <QPainter>
@@ -881,6 +882,135 @@ public:
 
 private:
     QProgressBar* bar() const { return static_cast<QProgressBar*>(w_); }
+};
+
+// -- tree ---------------------------------------------------------------------
+
+// A QTreeWidget with no header; each item carries the app's id.
+class tree_impl : public widget_base<rap::tree>
+{
+public:
+    explicit tree_impl(const spec::tree& s)
+        : widget_base(new QTreeWidget)
+    {
+        view()->setHeaderHidden(true);
+        view()->setColumnCount(1);
+        view()->setSelectionMode(QAbstractItemView::SingleSelection);
+        view()->setUniformRowHeights(true);
+        QObject::connect(view(), &QTreeWidget::itemSelectionChanged, view(),
+                         [this]
+                         {
+                             if (!quiet_ && changed_) changed_();
+                         });
+        QObject::connect(view(), &QTreeWidget::itemActivated, view(),
+                         [this](QTreeWidgetItem* i, int)
+                         {
+                             if (i && activate_) activate_(id_of(i));
+                         });
+        hook(view()->viewport(),
+             [this](QEvent* e)
+             {
+                 if (e->type() != QEvent::ContextMenu) return false;
+                 context_menu(static_cast<QContextMenuEvent*>(e));
+                 return true;
+             });
+        set_items(s.items);
+    }
+
+    void set_items(std::vector<tree_item> items) override
+    {
+        const std::optional<std::string> keep = selected();
+        std::unordered_map<std::string, bool> open;
+        for (auto& [id, i] : by_id_) open[id] = i->isExpanded();
+        quiet q(*this);
+        view()->clear();
+        by_id_.clear();
+        insert(items, nullptr, open);
+        if (keep) select_quietly(*keep);
+    }
+    std::optional<std::string> selected() const override
+    {
+        const auto items = view()->selectedItems();
+        return items.isEmpty() ? std::nullopt : std::optional<std::string>(id_of(items.first()));
+    }
+    void select(const std::string& id) override
+    {
+        quiet q(*this);
+        if (!select_quietly(id)) view()->clearSelection();
+    }
+    void set_expanded(const std::string& id, bool open) override
+    {
+        if (auto it = by_id_.find(id); it != by_id_.end()) it->second->setExpanded(open);
+    }
+    void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
+    void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
+    void on_context_menu(std::function<menu(std::optional<std::string>)> f) override { context_ = std::move(f); }
+
+private:
+    struct quiet
+    {
+        explicit quiet(tree_impl& t)
+            : t(t)
+            , was(t.quiet_)
+        {
+            t.quiet_ = true;
+        }
+        ~quiet() { t.quiet_ = was; }
+        tree_impl& t;
+        bool was;
+    };
+
+    QTreeWidget* view() const { return static_cast<QTreeWidget*>(w_); }
+    static std::string id_of(const QTreeWidgetItem* i) { return i->data(0, Qt::UserRole).toString().toStdString(); }
+
+    void insert(const std::vector<tree_item>& items, QTreeWidgetItem* parent,
+                const std::unordered_map<std::string, bool>& open)
+    {
+        for (const tree_item& t : items)
+        {
+            auto* i = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(view());
+            i->setText(0, qs(t.label));
+            i->setData(0, Qt::UserRole, qs(t.id));
+            by_id_[t.id] = i;
+            insert(t.children, i, open);
+            const auto was = open.find(t.id);
+            i->setExpanded(!t.children.empty() && (was != open.end() ? was->second : t.expanded));
+        }
+    }
+    bool select_quietly(const std::string& id)
+    {
+        const auto it = by_id_.find(id);
+        if (it == by_id_.end()) return false;
+        for (QTreeWidgetItem* p = it->second->parent(); p; p = p->parent()) p->setExpanded(true);
+        view()->setCurrentItem(it->second);
+        view()->scrollToItem(it->second);
+        return true;
+    }
+    // A right-click selects its item first; the menu key uses the current one.
+    void context_menu(QContextMenuEvent* e)
+    {
+        if (!context_) return;
+        QTreeWidgetItem* item = nullptr;
+        QPoint global = e->globalPos();
+        if (e->reason() == QContextMenuEvent::Mouse)
+        {
+            item = view()->itemAt(e->pos());
+            if (item && item != view()->currentItem()) view()->setCurrentItem(item);  // the user's: reported
+        }
+        else
+        {
+            item = view()->currentItem();
+            const QRect r = item ? view()->visualItemRect(item) : QRect();
+            global = view()->viewport()->mapToGlobal(item ? QPoint(r.x() + 16, r.bottom()) : QPoint(16, 16));
+        }
+        show_popup_menu(context_(item ? std::optional<std::string>(id_of(item)) : std::nullopt), view(), global);
+    }
+
+    std::function<void()> changed_;
+    std::function<void(const std::string&)> activate_;
+    std::function<menu(std::optional<std::string>)> context_;
+    std::unordered_map<std::string, QTreeWidgetItem*> by_id_;
+    bool quiet_ = false;
 };
 
 class date_picker_impl : public widget_base<rap::date_picker>
@@ -3486,6 +3616,7 @@ private:
     {
         return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
                std::holds_alternative<spec::text_view>(s) || std::holds_alternative<spec::list>(s) ||
+               std::holds_alternative<spec::tree>(s) ||
                std::holds_alternative<spec::canvas>(s) || std::holds_alternative<spec::box>(s) ||
                std::holds_alternative<spec::form>(s) || std::holds_alternative<spec::splitter>(s) ||
                std::holds_alternative<spec::group>(s) || std::holds_alternative<spec::scroll>(s) ||
@@ -3702,6 +3833,7 @@ private:
     {
         return add<date_picker_impl>(n, s).widget();
     }
+    QWidget* make(const node& n, const spec::tree& s, orientation) { return add<tree_impl>(n, s).widget(); }
     QWidget* make(const node& n, const spec::check& s, orientation)
     {
         return add<check_impl>(n, s).widget();

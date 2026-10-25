@@ -1976,6 +1976,183 @@ private:
     bool marquee_ = false;
 };
 
+// -- tree ---------------------------------------------------------------------
+
+// The common controls' tree view. Items are found by the app's ids; each
+// item's lParam is its index into ids_.
+class tree_impl : public leaf<rap::tree>
+{
+public:
+    tree_impl(win_context& win, HWND parent, const spec::tree& s)
+        : leaf(win)
+    {
+        adopt(create_control(win, parent, WC_TREEVIEWW, L"",
+                             TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | WS_TABSTOP,
+                             WS_EX_CLIENTEDGE));
+        // Explorer's look (chevrons, hover, no lines), as Windows' own trees have it.
+        SetWindowTheme(h_, L"Explorer", nullptr);
+        TreeView_SetExtendedStyle(h_, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
+        set_items(s.items);
+    }
+
+    void set_items(std::vector<tree_item> items) override
+    {
+        // How the user left things, by id.
+        const std::optional<std::string> keep = selected();
+        std::unordered_map<std::string, bool> open;
+        for (auto& [id, h] : by_id_)
+            open[id] = (TreeView_GetItemState(h_, h, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
+        quiet q(*this);
+        SendMessageW(h_, WM_SETREDRAW, FALSE, 0);
+        TreeView_DeleteAllItems(h_);
+        ids_.clear();
+        by_id_.clear();
+        insert(items, TVI_ROOT, open);
+        if (keep) select_quietly(*keep);
+        SendMessageW(h_, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+    std::optional<std::string> selected() const override
+    {
+        const HTREEITEM h = TreeView_GetSelection(h_);
+        return h ? std::optional<std::string>(id_of(h)) : std::nullopt;
+    }
+    void select(const std::string& id) override
+    {
+        quiet q(*this);
+        if (!select_quietly(id)) TreeView_SelectItem(h_, nullptr);
+    }
+    void set_expanded(const std::string& id, bool open) override
+    {
+        if (auto it = by_id_.find(id); it != by_id_.end()) TreeView_Expand(h_, it->second, open ? TVE_EXPAND : TVE_COLLAPSE);
+    }
+    void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
+    void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
+    void on_context_menu(std::function<menu(std::optional<std::string>)> f) override { context_ = std::move(f); }
+
+    LRESULT notify(NMHDR* n, bool& handled) override
+    {
+        switch (n->code)
+        {
+        case TVN_SELCHANGEDW:
+            if (!quiet_ && changed_) changed_();
+            return 0;
+        case NM_DBLCLK:
+            if (const HTREEITEM h = item_at_cursor(); h && activate_) activate_(id_of(h));
+            return 0;
+        case NM_RCLICK:
+        {
+            // The item under the pointer is selected first, as Explorer does.
+            const HTREEITEM h = item_at_cursor();
+            if (h && h != TreeView_GetSelection(h_)) TreeView_SelectItem(h_, h);
+            POINT pt;
+            GetCursorPos(&pt);
+            show_menu(h, pt);
+            return 1;  // no WM_CONTEXTMENU as well
+        }
+        case TVN_KEYDOWN:
+        {
+            const WORD key = reinterpret_cast<NMTVKEYDOWN*>(n)->wVKey;
+            const HTREEITEM h = TreeView_GetSelection(h_);
+            if (key == VK_RETURN && h && activate_)
+            {
+                activate_(id_of(h));
+                return 1;
+            }
+            if (key == VK_APPS || (key == VK_F10 && GetKeyState(VK_SHIFT) < 0))
+            {
+                // The menu key: under the selected item, or the control's corner.
+                RECT r{};
+                if (!h || !TreeView_GetItemRect(h_, h, &r, TRUE)) r = {0, 0, 0, 0};
+                POINT pt{r.left, r.bottom};
+                ClientToScreen(h_, &pt);
+                show_menu(h, pt);
+                return 1;
+            }
+            return 0;
+        }
+        default: handled = false; return 0;
+        }
+    }
+
+    bool fills() const override { return true; }
+    bool expands_in_form() const override { return true; }
+    SIZE measure() override { return {px(120), font_metrics(win_.dpi()).cy * 8}; }
+
+private:
+    // Selection changes the app makes don't call it back.
+    struct quiet
+    {
+        explicit quiet(tree_impl& t)
+            : t(t)
+            , was(t.quiet_)
+        {
+            t.quiet_ = true;
+        }
+        ~quiet() { t.quiet_ = was; }
+        tree_impl& t;
+        bool was;
+    };
+
+    void insert(const std::vector<tree_item>& items, HTREEITEM parent, const std::unordered_map<std::string, bool>& open)
+    {
+        for (const tree_item& i : items)
+        {
+            std::wstring text = wide(i.label);
+            TVINSERTSTRUCTW in{};
+            in.hParent = parent;
+            in.hInsertAfter = TVI_LAST;
+            in.item.mask = TVIF_TEXT | TVIF_PARAM;
+            in.item.pszText = text.data();
+            in.item.lParam = LPARAM(ids_.size());
+            const HTREEITEM h = TreeView_InsertItem(h_, &in);
+            if (!h) continue;
+            ids_.push_back(i.id);
+            by_id_[i.id] = h;
+            insert(i.children, h, open);
+            const auto was = open.find(i.id);
+            if (!i.children.empty() && (was != open.end() ? was->second : i.expanded)) TreeView_Expand(h_, h, TVE_EXPAND);
+        }
+    }
+    bool select_quietly(const std::string& id)
+    {
+        const auto it = by_id_.find(id);
+        if (it == by_id_.end()) return false;
+        TreeView_SelectItem(h_, it->second);  // opens its ancestors
+        TreeView_EnsureVisible(h_, it->second);
+        return true;
+    }
+    std::string id_of(HTREEITEM h) const
+    {
+        TVITEMW item{};
+        item.mask = TVIF_PARAM;
+        item.hItem = h;
+        TreeView_GetItem(h_, &item);
+        return size_t(item.lParam) < ids_.size() ? ids_[size_t(item.lParam)] : std::string();
+    }
+    HTREEITEM item_at_cursor() const
+    {
+        TVHITTESTINFO hit{};
+        GetCursorPos(&hit.pt);
+        ScreenToClient(h_, &hit.pt);
+        const HTREEITEM h = TreeView_HitTest(h_, &hit);
+        return h && (hit.flags & TVHT_ONITEM) ? h : nullptr;
+    }
+    void show_menu(HTREEITEM h, POINT screen)
+    {
+        if (!context_) return;
+        const menu m = context_(h ? std::optional<std::string>(id_of(h)) : std::nullopt);
+        if (!m.empty()) show_popup_menu(GetAncestor(h_, GA_ROOT), m, screen);
+    }
+
+    std::function<void()> changed_;
+    std::function<void(const std::string&)> activate_;
+    std::function<menu(std::optional<std::string>)> context_;
+    std::vector<std::string> ids_;
+    std::unordered_map<std::string, HTREEITEM> by_id_;
+    bool quiet_ = false;
+};
+
 class date_picker_impl : public leaf<rap::date_picker>
 {
 public:
@@ -6166,6 +6343,7 @@ private:
     {
         return widget<date_picker_impl>(n, win_, parent, s);
     }
+    item* make(const node& n, const spec::tree& s, HWND parent, orientation) { return widget<tree_impl>(n, win_, parent, s); }
     item* make(const node& n, const spec::canvas& s, HWND parent, orientation) { return widget<canvas_impl>(n, win_, parent, s); }
     item* make(const node&, const spec::buttons& s, HWND parent, orientation)
     {
