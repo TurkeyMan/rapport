@@ -925,9 +925,10 @@ public:
     // replacing the one before (the newest wins; the display paces it). It's
     // placed at the top left, one frame pixel to one of target()'s, never
     // scaled: render at target().width x height. Where it doesn't reach (a
-    // resize catching up) rapport fills the canvas's background, and while a
-    // frame is shown on_paint draws only the overlay, leaving it showing. UI
-    // thread only: post from a worker.
+    // resize catching up) rapport fills the canvas's background; past the
+    // canvas (a shrink catching up) it's clipped. While a frame is shown
+    // on_paint draws only the overlay, leaving it showing. UI thread only:
+    // post from a worker.
     virtual void present(gpu_frame frame)
     {
         // Until a backend takes GPU frames (its target() says so).
