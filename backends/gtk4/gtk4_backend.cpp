@@ -2563,6 +2563,13 @@ public:
     // back (gpu_readback.h) until this backend takes them as they are.
     std::shared_ptr<rap::gpu::device> gpu_device() const override
     {
+        // Not before the window has GTK's own renderer: making it (Vulkan,
+        // by default) loads the GPU driver on this thread, and NVIDIA's
+        // crashes when rapport's thread loads it at the same time. GTK keeps
+        // that instance for the display, so later windows don't load it
+        // again. Until then null; drawing asks again.
+        GtkNative* native = gtk_widget_get_native(w_);
+        if (!native || !gtk_native_get_renderer(native)) return nullptr;
         // Redrawn when it arrives: an app drawing on it takes it then.
         return readback_.device(
             [](std::function<void()> f)
