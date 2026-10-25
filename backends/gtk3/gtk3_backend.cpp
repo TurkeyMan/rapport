@@ -1919,6 +1919,7 @@ public:
 
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
+        sorted_ = {column, order};
         for (size_t i = 0; i < cols_.size(); ++i)
         {
             bool on = column && *column == i;
@@ -2083,7 +2084,12 @@ private:
         gtk_tree_view_set_model(GTK_TREE_VIEW(w_), nullptr);
         rows_->stamp = g_random_int();
     }
-    void attach() { gtk_tree_view_set_model(GTK_TREE_VIEW(w_), GTK_TREE_MODEL(rows_)); }
+    // Setting the model clears the columns' sort indicators: put it back.
+    void attach()
+    {
+        gtk_tree_view_set_model(GTK_TREE_VIEW(w_), GTK_TREE_MODEL(rows_));
+        set_sort_indicator(sorted_.first, sorted_.second);
+    }
 
     void add_column(const column& c, size_t index)
     {
@@ -2722,6 +2728,7 @@ private:
     std::function<void()> sel_changed_;
     std::function<void(size_t)> activate_;
     std::function<void(size_t, sort_order)> sort_;
+    std::pair<std::optional<size_t>, sort_order> sorted_{std::nullopt, sort_order::ascending};  // set_sort_indicator
     std::function<menu(std::optional<size_t>)> context_menu_;
     std::function<menu(size_t)> header_menu_;
     std::function<menu(size_t, size_t, point_f)> cell_menu_;
