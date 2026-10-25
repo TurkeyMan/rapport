@@ -8,6 +8,7 @@
 #include "builtin_icons.h"
 #include "gtk_common.h"
 #include "frame_layer.h"
+#include "gpu_readback.h"
 
 #include <memory>
 
@@ -2495,13 +2496,38 @@ public:
     void on_frame_target(std::function<void(const rap::frame_target&)> f) override { frame_target_ = std::move(f); }
     void present(std::shared_ptr<const rap::image> pixels, frame_color color) override
     {
+        readback_.cancel();
         frame_ = {std::move(pixels), color};
         gtk_widget_queue_draw(w_);
     }
     void clear_frame() override
     {
+        readback_.cancel();
         frame_ = {};
         gtk_widget_queue_draw(w_);
+    }
+    // The process's shared device; its textures are shown by reading them
+    // back (gpu_readback.h) until this backend takes them as they are.
+    std::shared_ptr<rap::gpu::device> gpu_device() const override { return frames::shared_gpu_device(); }
+    void present(rap::gpu::texture_ptr texture, rap::gpu::ticket, frame_color color) override
+    {
+        readback_.present(
+            texture, color,
+            [](std::function<void()> f)
+              {
+                  g_idle_add_full(
+                      G_PRIORITY_DEFAULT,
+                      +[](gpointer p) -> gboolean
+                      {
+                          (*static_cast<std::function<void()>*>(p))();
+                          return G_SOURCE_REMOVE;
+                      },
+                      new std::function<void()>(std::move(f)),
+                      +[](gpointer p) { delete static_cast<std::function<void()>*>(p); });
+              },
+            [](int w, int h, pixel_format format, const uint8_t* px, size_t stride) -> std::shared_ptr<const rap::image>
+            { return std::make_shared<cairo_image>(w, h, format, px, stride); },
+            [this](std::shared_ptr<const rap::image> image, frame_color c) { present(std::move(image), c); });
     }
     subscription on_frame(std::function<void(double)> f) override
     {
@@ -2676,6 +2702,7 @@ private:
     std::function<void(rap::painter&, rap::size_f)> paint_;
     std::function<void(size_f)> resize_;
     frames::frame_layer frame_;
+    frames::gpu_readback readback_;  // GPU textures shown as pixels
     std::function<void(const rap::frame_target&)> frame_target_;
     void target_changed()
     {

@@ -223,9 +223,11 @@ std::shared_ptr<device> device::headless(uint64_t adapter)
 {
 #ifdef _WIN32
     return make_d3d11_headless(adapter);
+#elif defined(RAPPORT_GPU_VULKAN)
+    return make_vulkan_headless(adapter);
 #else
     (void)adapter;
-    return nullptr;  // Vulkan: to come
+    return nullptr;
 #endif
 }
 

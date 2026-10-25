@@ -25,7 +25,8 @@ namespace rap::gpu
 // -- formats ------------------------------------------------------------------
 
 // unorm samples as v / (2^n - 1) and snorm as max(v / (2^(n-1) - 1), -1),
-// exactly for every value on both APIs (so a GL reference stays identical).
+// to within float rounding (Direct3D's is exact; some Vulkan drivers
+// multiply by the reciprocal, a last-bit difference).
 enum class format
 {
     r8, rg8, rgba8,  // unorm
@@ -137,10 +138,14 @@ enum class sampler
     linear_mip_clamp,  // trilinear across the texture's levels (zoomed out)
 };
 
-// A fullscreen triangle over `target` (compute later): `pixel` reads
-// `inputs` by slot (t0.. / binding 0..) with `samplers` alongside, and one
-// uniform block (b0 / binding N) packed as std140 and cbuffer agree: 16-byte
-// rows, no vec3 straddling them.
+// A fullscreen triangle over `target` (compute later): the pixel shader
+// reads up to max_inputs `inputs` by slot with `samplers` alongside, and one
+// uniform block packed as std140 and cbuffer agree (16-byte rows, no vector
+// straddling them). In HLSL: textures t0..t7, samplers s0..s7, the block b0.
+// In SPIR-V, set 0: textures at bindings 0..7, samplers 8..15, the block 16
+// (DXC: -fvk-t-shift 0 0 -fvk-s-shift 8 0 -fvk-b-shift 16 0; rapport's CMake
+// helper passes these).
+inline constexpr int max_inputs = 8;
 class program;  // a compiled pixel shader, from device::program
 using program_ptr = std::shared_ptr<const program>;
 

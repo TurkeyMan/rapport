@@ -40,6 +40,8 @@ void convert(std::span<const std::byte> pixels, const source_layout& layout, int
 
 #ifdef _WIN32
 std::shared_ptr<device> make_d3d11_headless(uint64_t adapter);
+#elif defined(RAPPORT_GPU_VULKAN)
+std::shared_ptr<device> make_vulkan_headless(uint64_t adapter);
 #endif
 
 }  // namespace rap::gpu
