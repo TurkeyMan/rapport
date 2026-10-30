@@ -109,6 +109,15 @@ static void rapport_cell_class_init(RapportCellClass* c)
 }
 static void rapport_cell_init(RapportCell*) {}
 
+// Redraws a list cell: its box, and a painted cell's drawing area in it,
+// which keeps its own render node.
+static void redraw_cell(GtkWidget* cell)
+{
+    gtk_widget_queue_draw(cell);
+    if (auto* area = static_cast<GtkWidget*>(g_object_get_data(G_OBJECT(cell), "rapport-area")))
+        gtk_widget_queue_draw(area);
+}
+
 // Items at `from` and after move by `by` rows.
 static void rapport_rows_renumber(RapportRows* self, guint from, gint by)
 {
@@ -1882,7 +1891,7 @@ public:
                 auto* self = static_cast<list_impl*>(p);
                 // Painted cells draw with the selection's colours.
                 for (auto [li, ctx] : self->bound_)
-                    if (ctx->painted) gtk_widget_queue_draw(gtk_list_item_get_child(li));
+                    if (ctx->painted) redraw_cell(gtk_list_item_get_child(li));
                 if (self->sel_changed_) self->sel_changed_();
             },
             this);
@@ -2889,19 +2898,24 @@ private:
         GtkWidget* child;
         if (ctx.painted)
         {
-            child = gtk_drawing_area_new();
-            gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(child),
+            // In a cell box, which fills the row's background as text cells'
+            // do; the model paints over it.
+            GtkWidget* area = gtk_drawing_area_new();
+            gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area),
                                                 int(g_metrics.line_height + 0.5f));
-            gtk_widget_set_hexpand(child, true);
-            gtk_widget_set_vexpand(child, true);
+            gtk_widget_set_hexpand(area, true);
+            gtk_widget_set_vexpand(area, true);
             gtk_drawing_area_set_draw_func(
-                GTK_DRAWING_AREA(child),
+                GTK_DRAWING_AREA(area),
                 +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
                 {
                     static_cast<column_ctx*>(p)->list->draw_cell(area, cr, w, h,
                                                                *static_cast<column_ctx*>(p));
                 },
                 &ctx, nullptr);
+            child = GTK_WIDGET(g_object_new(rapport_cell_get_type(), nullptr));
+            gtk_box_append(GTK_BOX(child), area);
+            g_object_set_data(G_OBJECT(child), "rapport-area", area);
         }
         else
         {
@@ -2968,9 +2982,24 @@ private:
         GtkWidget* child = gtk_list_item_get_child(li);
         // Stored +1 so 0 means "not bound".
         g_object_set_data(G_OBJECT(child), "rapport-row", GSIZE_TO_POINTER(row + 1));
+        // The background is the cell's, painted by its box; the rest styles
+        // the text, or is the model's to paint.
+        text_style style = model_->style(row, ctx.column);
+        if (style.bg)
+        {
+            const color c = resolve(child, *style.bg);
+            auto* bg = g_new(GdkRGBA, 1);
+            *bg = {c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
+            g_object_set_data_full(G_OBJECT(child), "rapport-bg", bg, g_free);
+        }
+        else
+            g_object_set_data(G_OBJECT(child), "rapport-bg", nullptr);
+        style.bg.reset();
         if (ctx.painted)
         {
-            gtk_widget_queue_draw(child);
+            auto* area = g_object_get_data(G_OBJECT(child), "rapport-area");
+            g_object_set_data(G_OBJECT(area), "rapport-row", GSIZE_TO_POINTER(row + 1));
+            redraw_cell(child);
             return;
         }
         auto* label = GTK_LABEL(g_object_get_data(G_OBJECT(child), "rapport-label"));
@@ -2989,19 +3018,6 @@ private:
         gtk_image_set_from_gicon(image, gicon);
         gtk_widget_set_visible(GTK_WIDGET(image), gicon != nullptr);
         gtk_label_set_text(label, model_->text(row, ctx.column).c_str());
-        // The background is the cell's, painted by its box; the rest styles
-        // the text.
-        text_style style = model_->style(row, ctx.column);
-        if (style.bg)
-        {
-            const color c = resolve(GTK_WIDGET(label), *style.bg);
-            auto* bg = g_new(GdkRGBA, 1);
-            *bg = {c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
-            g_object_set_data_full(G_OBJECT(child), "rapport-bg", bg, g_free);
-        }
-        else
-            g_object_set_data(G_OBJECT(child), "rapport-bg", nullptr);
-        style.bg.reset();
         gtk_widget_queue_draw(child);
         PangoAttrList* attrs = pango_attrs(GTK_WIDGET(label), style);
         gtk_label_set_attributes(label, attrs);
@@ -3020,7 +3036,7 @@ private:
                 auto* self = static_cast<list_impl*>(p);
                 self->resnap_ = 0;
                 for (auto [li, ctx] : self->bound_)
-                    if (ctx->painted) gtk_widget_queue_draw(gtk_list_item_get_child(li));
+                    if (ctx->painted) redraw_cell(gtk_list_item_get_child(li));
                 return G_SOURCE_REMOVE;
             },
             this);
