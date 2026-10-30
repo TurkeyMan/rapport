@@ -187,6 +187,8 @@ public:
     void on_context_menu(std::function<menu(std::optional<size_t>)>) override {}
     void on_header_menu(std::function<menu(size_t)>) override {}
     void on_reorder(reorder_fn) override {}
+    void on_drag_out(drag_out) override {}
+    void on_drop_in(drop_in) override {}
     void set_reorderable(bool) override {}
     list_model* model = nullptr;
 };

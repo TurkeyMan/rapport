@@ -1870,6 +1870,7 @@ public:
 
     ~list_impl() override
     {
+        end_drop_hover();
         auto_lists().erase(this);
         if (model_) model_->remove_observer(this);
         g_object_unref(rows_);
@@ -1992,6 +1993,19 @@ public:
     void on_header_menu(std::function<menu(size_t)> f) override { header_menu_ = std::move(f); }
     void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)> f) override { cell_menu_ = std::move(f); }
     void on_reorder(reorder_fn f) override { reorder_ = std::move(f); }
+    void on_drag_out(drag_out d) override
+    {
+        const bool first = !drag_out_.begin;
+        drag_out_ = std::move(d);
+        if (first && drag_out_.begin) connect_drag_source();
+        // A drag that comes back here reorders, so this is a target too.
+        set_drop_target();
+    }
+    void on_drop_in(drop_in d) override
+    {
+        drop_in_ = std::move(d);
+        set_drop_target();
+    }
     void set_reorderable(bool v) override { reorderable_ = v; }
     void on_cell_drag(cell_drag d) override
     {
@@ -2052,6 +2066,7 @@ protected:
     {
         alive_ = false;
         if (active == this) active = nullptr;
+        end_drop_hover();
         menu_.destroy();
     }
 
@@ -2320,6 +2335,7 @@ private:
         bool defer_select = false;  // pressed inside a multi-selection
         double x0 = 0, y0 = 0;
         size_t row = 0;
+        bool out_asked = false;  // drag_out.begin had its say (once a press)
     };
     // A cell_drag in progress: from a press `begin` accepted.
     struct cell_drag_state
@@ -2344,6 +2360,16 @@ private:
     // rather than counting as "past the end".
     size_t drop_target(double bx, double by)
     {
+        size_t dest = insertion_at(bx, by);
+        // Dropping a contiguous block onto its own place changes nothing, so
+        // that shows no drop line and a "not allowed" cursor.
+        bool noop = is_noop_drop(dest);
+        set_drag_cursor(noop ? "not-allowed" : "grabbing");
+        show_drop_line(noop ? std::nullopt : std::optional(dest));
+        return dest;
+    }
+    size_t insertion_at(double bx, double by) const
+    {
         auto* view = GTK_TREE_VIEW(w_);
         size_t count = rows_->count, dest = count;
         int height = gdk_window_get_height(gtk_tree_view_get_bin_window(view));
@@ -2359,22 +2385,277 @@ private:
             gtk_tree_path_free(path);
         }
         // else: empty space below the last row, so the end.
-
-        // Dropping a contiguous block onto its own place changes nothing, so
-        // that shows no drop line and a "not allowed" cursor.
-        bool noop = is_noop_drop(dest);
-        set_drag_cursor(noop ? "not-allowed" : "grabbing");
-        if (count && !noop)
+        return dest;
+    }
+    // The native drop line in front of row `dest` (after the last row for
+    // the end), or none.
+    void show_drop_line(std::optional<size_t> dest)
+    {
+        auto* view = GTK_TREE_VIEW(w_);
+        size_t count = rows_->count;
+        if (count && dest)
         {
-            bool at_end = dest >= count;
-            GtkTreePath* line = gtk_tree_path_new_from_indices(int(at_end ? count - 1 : dest), -1);
+            bool at_end = *dest >= count;
+            GtkTreePath* line = gtk_tree_path_new_from_indices(int(at_end ? count - 1 : *dest), -1);
             gtk_tree_view_set_drag_dest_row(
                 view, line, at_end ? GTK_TREE_VIEW_DROP_AFTER : GTK_TREE_VIEW_DROP_BEFORE);
             gtk_tree_path_free(line);
         }
         else
             gtk_tree_view_set_drag_dest_row(view, nullptr, GTK_TREE_VIEW_DROP_BEFORE);
-        return dest;
+    }
+
+    bool reorders() const { return reorder_ && reorderable_; }
+
+    // drag_out: the system drag, begun from drag_motion once the rows leave
+    // the list (or, with no reordering, past the threshold). The tree view's
+    // own DnD handlers expect a GtkTreeDragSource model, so they're stopped.
+    void connect_drag_source()
+    {
+        connect(
+            w_, "drag-begin",
+            +[](GtkWidget* w, GdkDragContext*, gpointer)
+            { g_signal_stop_emission_by_name(w, "drag-begin"); },
+            this);
+        connect(
+            w_, "drag-data-get",
+            +[](GtkWidget* w, GdkDragContext*, GtkSelectionData* sel, guint info, guint, gpointer p)
+            {
+                g_signal_stop_emission_by_name(w, "drag-data-get");
+                auto* self = static_cast<list_impl*>(p);
+                if (!self->out_ || info >= self->out_->formats.size()) return;
+                const std::string& bytes = self->out_->formats[info].second;
+                gtk_selection_data_set(sel, gtk_selection_data_get_target(sel), 8,
+                                       reinterpret_cast<const guchar*>(bytes.data()),
+                                       int(bytes.size()));
+            },
+            this);
+        connect(
+            w_, "drag-end",
+            +[](GtkWidget*, GdkDragContext*, gpointer p)
+            { static_cast<list_impl*>(p)->out_.reset(); },
+            this);
+    }
+
+    // Asks drag_out.begin for what the selected rows carry and, given an
+    // offer, hands the drag to the system. Returns whether it did.
+    bool begin_drag_out(GdkEventMotion* e)
+    {
+        drag_.out_asked = true;
+        std::optional<data_offer> offer = drag_out_.begin(selection());
+        if (!offer || offer->formats.empty()) return false;
+        // The in-list reorder (if any) ends here; a drop back on the list
+        // reorders through drop_hover instead.
+        drag_ = {};
+        if (active == this) active = nullptr;
+        show_drop_line(std::nullopt);
+        set_drag_cursor(nullptr);
+        out_ = std::move(*offer);
+        GtkTargetList* targets = gtk_target_list_new(nullptr, 0);
+        for (size_t i = 0; i < out_->formats.size(); ++i)
+        {
+            const std::string& type = out_->formats[i].first;
+            gtk_target_list_add(targets, gdk_atom_intern(type.c_str(), false), 0, guint(i));
+            // UTF-8 text under the names X11 and GTK programs ask for too.
+            if (type == "text/plain")
+                for (const char* alias : text_aliases)
+                    if (!gtk_target_list_find(targets, gdk_atom_intern(alias, false), nullptr))
+                        gtk_target_list_add(targets, gdk_atom_intern(alias, false), 0, guint(i));
+        }
+        gtk_drag_begin_with_coordinates(w_, targets, GDK_ACTION_COPY, GDK_BUTTON_PRIMARY,
+                                        reinterpret_cast<GdkEvent*>(e), -1, -1);
+        gtk_target_list_unref(targets);
+        return true;
+    }
+    static constexpr const char* text_aliases[] = {"text/plain;charset=utf-8", "UTF8_STRING"};
+
+    // drop_in, and a drag_out coming back to reorder: the list is a drop
+    // target, handled here rather than through GTK's defaults so that a drag
+    // it doesn't take (files) carries on up to the window's.
+    void set_drop_target()
+    {
+        std::vector<GtkTargetEntry> entries;
+        for (const std::string& type : drop_in_.types)
+            entries.push_back({const_cast<gchar*>(type.c_str()), 0, 0});
+        if (dest_set_)
+        {
+            GtkTargetList* targets = gtk_target_list_new(entries.data(), guint(entries.size()));
+            gtk_drag_dest_set_target_list(w_, targets);
+            gtk_target_list_unref(targets);
+            return;
+        }
+        if (!drop_in_.drop && !drag_out_.begin) return;
+        dest_set_ = true;
+        gtk_drag_dest_set(w_, GtkDestDefaults(0), entries.data(), int(entries.size()),
+                          GDK_ACTION_COPY);
+        connect(
+            w_, "drag-motion",
+            +[](GtkWidget* w, GdkDragContext* ctx, gint x, gint y, guint time,
+                gpointer p) -> gboolean
+            {
+                auto* self = static_cast<list_impl*>(p);
+                if (!self->takes(ctx))
+                {
+                    g_signal_stop_emission_by_name(w, "drag-motion");
+                    return false;  // on to the window
+                }
+                if (self->in_.ctx != ctx)
+                {
+                    self->end_drop_hover();
+                    self->in_.ctx = GDK_DRAG_CONTEXT(g_object_ref(ctx));
+                }
+                self->in_.x = x;
+                self->in_.y = y;
+                self->in_.time = time;
+                gdk_drag_status(ctx, self->drop_hover(), time);
+                if (self->edge_direction() && !self->in_.scroll)
+                    self->in_.scroll = g_timeout_add(
+                        50, +[](gpointer p) -> gboolean
+                        { return static_cast<list_impl*>(p)->drop_scroll(); }, self);
+                return true;
+            },
+            this);
+        connect(
+            w_, "drag-leave",
+            +[](GtkWidget*, GdkDragContext*, guint, gpointer p)
+            { static_cast<list_impl*>(p)->end_drop_hover(); },
+            this);
+        connect(
+            w_, "drag-drop",
+            +[](GtkWidget* w, GdkDragContext* ctx, gint x, gint y, guint time,
+                gpointer p) -> gboolean
+            {
+                g_signal_stop_emission_by_name(w, "drag-drop");
+                return static_cast<list_impl*>(p)->dropped(ctx, x, y, time);
+            },
+            this);
+        connect(
+            w_, "drag-data-received",
+            +[](GtkWidget* w, GdkDragContext* ctx, gint, gint, GtkSelectionData* sel, guint,
+                guint time, gpointer p)
+            {
+                g_signal_stop_emission_by_name(w, "drag-data-received");
+                auto* self = static_cast<list_impl*>(p);
+                if (!self->pending_) return;
+                auto [at, type] = std::move(*self->pending_);
+                self->pending_.reset();
+                const int n = gtk_selection_data_get_length(sel);
+                const auto* data = reinterpret_cast<const char*>(gtk_selection_data_get_data(sel));
+                bool ok = n >= 0 && self->drop_in_.drop &&
+                          self->drop_in_.drop(std::min(at, size_t(self->rows_->count)), type,
+                                              std::string(data ? data : "", data ? size_t(n) : 0));
+                gtk_drag_finish(ctx, ok, false, time);
+            },
+            this);
+    }
+
+    // A drag of this list's own rows, dropped back on it, reorders them.
+    bool reorders_own(GdkDragContext* ctx) const
+    {
+        return reorders() && gtk_drag_get_source_widget(ctx) == w_;
+    }
+    // The first type the drag offers that drop_in takes: the target to ask
+    // for, and the type the app knows it by (UTF-8 text aliases count as
+    // "text/plain").
+    std::optional<std::pair<GdkAtom, std::string>> offered_type(GdkDragContext* ctx) const
+    {
+        if (!drop_in_.drop) return std::nullopt;
+        auto takes_type = [&](const std::string& t)
+        { return std::ranges::find(drop_in_.types, t) != drop_in_.types.end(); };
+        for (GList* l = gdk_drag_context_list_targets(ctx); l; l = l->next)
+        {
+            GdkAtom atom = GDK_POINTER_TO_ATOM(l->data);
+            gchar* name = gdk_atom_name(atom);
+            std::string type = name;
+            g_free(name);
+            if (takes_type(type)) return std::pair{atom, type};
+            if (std::ranges::find(text_aliases, type) != std::end(text_aliases) &&
+                takes_type("text/plain"))
+                return std::pair{atom, std::string("text/plain")};
+        }
+        return std::nullopt;
+    }
+    bool takes(GdkDragContext* ctx) const { return reorders_own(ctx) || offered_type(ctx); }
+
+    // Where a drag hovering at in_.x, in_.y (widget coordinates) would go:
+    // shows the drop line there and returns what it would do.
+    GdkDragAction drop_hover()
+    {
+        if (!in_.ctx) return GdkDragAction(0);
+        size_t at = 0;
+        bool ok = drop_at(in_.ctx, in_.x, in_.y, at);
+        show_drop_line(ok ? std::optional(at) : std::nullopt);
+        return ok ? GDK_ACTION_COPY : GdkDragAction(0);
+    }
+    // The insertion position for a drop at (x, y), widget coordinates, and
+    // whether one is allowed there.
+    bool drop_at(GdkDragContext* ctx, int x, int y, size_t& at) const
+    {
+        int bx, by;
+        gtk_tree_view_convert_widget_to_bin_window_coords(GTK_TREE_VIEW(w_), x, y, &bx, &by);
+        at = insertion_at(bx, by);
+        if (reorders_own(ctx)) return !is_noop_drop(at);
+        auto type = offered_type(ctx);
+        return type && (!drop_in_.can_drop || drop_in_.can_drop(at, type->second));
+    }
+    // -1 or 1 while the hovering drag is near the top or bottom edge, else 0.
+    int edge_direction() const
+    {
+        int top = 0, bottom = gtk_widget_get_allocated_height(w_), edge = 24;
+        // The header doesn't scroll: the edge is the rows' top.
+        gtk_tree_view_convert_bin_window_to_widget_coords(GTK_TREE_VIEW(w_), 0, 0, nullptr, &top);
+        return in_.y < std::max(0, top) + edge ? -1 : in_.y > bottom - edge ? 1 : 0;
+    }
+    // While a drag hovers near the top or bottom, the list scrolls a line
+    // at a time, and the drop line follows the rows that move under it.
+    gboolean drop_scroll()
+    {
+        const int dir = in_.ctx ? edge_direction() : 0;
+        if (!dir)
+        {
+            in_.scroll = 0;
+            return G_SOURCE_REMOVE;
+        }
+        if (GtkAdjustment* adj = gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(w_)))
+        {
+            double v = gtk_adjustment_get_value(adj) + dir * g_metrics.line_height;
+            gtk_adjustment_set_value(
+                adj, std::clamp(v, gtk_adjustment_get_lower(adj),
+                                gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj)));
+        }
+        gdk_drag_status(in_.ctx, drop_hover(), in_.time);
+        return G_SOURCE_CONTINUE;
+    }
+    void end_drop_hover()
+    {
+        if (in_.scroll) g_source_remove(in_.scroll);
+        if (in_.ctx)
+        {
+            g_object_unref(in_.ctx);
+            if (alive_) show_drop_line(std::nullopt);
+        }
+        in_ = {};
+    }
+
+    gboolean dropped(GdkDragContext* ctx, int x, int y, guint time)
+    {
+        end_drop_hover();
+        if (!takes(ctx)) return false;  // on to the window
+        size_t at = 0;
+        if (!drop_at(ctx, x, y, at))
+        {
+            gtk_drag_finish(ctx, false, false, time);
+            return true;
+        }
+        if (reorders_own(ctx))
+        {
+            gtk_drag_finish(ctx, reorder_(selection(), at), false, time);
+            return true;
+        }
+        auto type = offered_type(ctx);
+        pending_ = std::pair{at, type->second};
+        gtk_drag_get_data(w_, ctx, type->first, time);
+        return true;
     }
 
 public:
@@ -2422,7 +2703,7 @@ private:
     gboolean drag_pressed(GdkEventButton* e)
     {
         drag_ = {};
-        if (!reorder_ || !reorderable_ || e->type != GDK_BUTTON_PRESS ||
+        if (!(reorders() || drag_out_.begin) || e->type != GDK_BUTTON_PRESS ||
             e->button != GDK_BUTTON_PRIMARY || !on_bin_window(reinterpret_cast<GdkEvent*>(e)) ||
             (e->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK)))
             return false;
@@ -2501,16 +2782,28 @@ private:
                          nullptr);
             if (std::abs(e->x - drag_.x0) < threshold && std::abs(e->y - drag_.y0) < threshold)
                 return true;
+            // Nothing to reorder: rows can only be dragged out.
+            if (!reorders())
+            {
+                if (!begin_drag_out(e)) drag_ = {};
+                return true;
+            }
             drag_.dragging = true;
             active = this;
         }
-        drop_target(e->x, e->y);
-
-        // Scroll when the pointer nears the top or bottom edge.
         int wx, wy;
         gtk_tree_view_convert_bin_window_to_widget_coords(GTK_TREE_VIEW(w_), int(e->x), int(e->y),
                                                           &wx, &wy);
-        int height = gtk_widget_get_allocated_height(w_), edge = 24;
+        int width = gtk_widget_get_allocated_width(w_),
+            height = gtk_widget_get_allocated_height(w_);
+        // Out of the list's bounds the rows go to the system's drag and drop.
+        if (drag_out_.begin && !drag_.out_asked &&
+            (wx < 0 || wy < 0 || wx >= width || wy >= height) && begin_drag_out(e))
+            return true;
+        drop_target(e->x, e->y);
+
+        // Scroll when the pointer nears the top or bottom edge.
+        int edge = 24;
         if (wy < edge || wy > height - edge)
             if (GtkAdjustment* adj = gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(w_)))
                 gtk_adjustment_set_value(adj, gtk_adjustment_get_value(adj) +
@@ -2745,6 +3038,20 @@ private:
     drag drag_;
     cell_drag cell_drag_;
     cell_drag_state cell_;
+    drag_out drag_out_;
+    drop_in drop_in_;
+    std::optional<data_offer> out_;  // what a system drag from here carries, until it ends
+    bool dest_set_ = false;
+    struct drop_hover_state  // a system drag over the list that it takes
+    {
+        GdkDragContext* ctx = nullptr;  // a reference, till it leaves
+        int x = 0, y = 0;               // widget coordinates
+        guint time = 0;
+        guint scroll = 0;  // the edge-scroll timer
+    };
+    drop_hover_state in_;
+    // A drop waiting for its data: at, type.
+    std::optional<std::pair<size_t, std::string>> pending_;
     struct auto_scroll_state
     {
         bool on = false;

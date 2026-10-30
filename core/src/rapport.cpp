@@ -200,6 +200,8 @@ private:
         if (s.on_header_menu) l.on_header_menu(s.on_header_menu);
         if (s.on_reorder) l.on_reorder(s.on_reorder);
         if (s.on_cell_drag.begin) l.on_cell_drag(s.on_cell_drag);
+        if (s.on_drag_out.begin) l.on_drag_out(s.on_drag_out);
+        if (s.on_drop_in.drop) l.on_drop_in(s.on_drop_in);
         if (s.on_cell_context_menu) l.on_cell_context_menu(s.on_cell_context_menu);
         bind(s.bind, w);
     }

@@ -76,6 +76,7 @@
 #include <QDoubleSpinBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QDrag>
 #include <QColorDialog>
 
 #include <algorithm>
@@ -2203,6 +2204,10 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
     void contextMenuEvent(QContextMenuEvent* e) override;
+    void dragEnterEvent(QDragEnterEvent* e) override;
+    void dragMoveEvent(QDragMoveEvent* e) override;
+    void dragLeaveEvent(QDragLeaveEvent* e) override;
+    void dropEvent(QDropEvent* e) override;
     bool viewportEvent(QEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
     void changeEvent(QEvent* e) override;
@@ -2418,7 +2423,21 @@ public:
     {
         cell_menu_ = std::move(f);
     }
-    void on_reorder(reorder_fn f) override { reorder_ = std::move(f); }
+    void on_reorder(reorder_fn f) override
+    {
+        reorder_ = std::move(f);
+        accept_drops();
+    }
+    void on_drag_out(drag_out d) override
+    {
+        drag_out_ = std::move(d);
+        accept_drops();
+    }
+    void on_drop_in(drop_in d) override
+    {
+        drop_in_ = std::move(d);
+        accept_drops();
+    }
     void set_reorderable(bool v) override { reorderable_ = v; }
     void on_cell_drag(cell_drag d) override { cell_drag_ = std::move(d); }
 
@@ -2752,6 +2771,80 @@ public:
 
     void leave() { set_hot(std::nullopt); }
 
+    // A system drag over the list: drop_in data, or this list's own rows
+    // brought back after leaving it (a reorder). Anything else is ignored
+    // and goes on to the window (files).
+    void drag_over(QDragMoveEvent* e, bool entering)
+    {
+        const bool self = e->source() == view_ && reorders();
+        std::string type = self ? std::string() : drop_type(e->mimeData());
+        if (!self && type.empty())
+        {
+            end_dnd();
+            e->ignore();
+            return;
+        }
+        if (!dnd_ || entering) dnd_ = dnd_state{std::move(type), self};
+        if (!dnd_timer_)
+        {
+            // Edge scrolling has to go on while the pointer rests there,
+            // and a drag sends no events then.
+            dnd_timer_ = new QTimer(view_);
+            dnd_timer_->setInterval(50);
+            QObject::connect(dnd_timer_, &QTimer::timeout, view_,
+                             [this]
+                             {
+                                 if (dnd_ && edge_scroll(dnd_->y)) dnd_hover(dnd_->y);
+                             });
+        }
+        dnd_timer_->start();
+        // Entering is accepted even where can_drop refuses, or the moves
+        // that follow would go to the window instead.
+        if (dnd_hover(e->position().toPoint().y()) || entering)
+        {
+            e->setDropAction(Qt::CopyAction);
+            e->accept();
+        }
+        else
+            e->ignore();
+    }
+
+    void drag_leave() { end_dnd(); }
+
+    void drop(QDropEvent* e)
+    {
+        if (!dnd_)
+        {
+            e->ignore();
+            return;
+        }
+        const dnd_state d = *dnd_;
+        end_dnd();
+        const size_t at = row_gap_at(e->position().toPoint().y());
+        if (d.self)
+        {
+            if (!is_noop_drop(at)) reorder_(selection(), at);
+            e->setDropAction(Qt::CopyAction);
+            e->accept();
+            return;
+        }
+        if (drop_in_.can_drop && !drop_in_.can_drop(at, d.type))
+        {
+            e->ignore();
+            return;
+        }
+        const QMimeData* m = e->mimeData();
+        // text() decodes whichever charset the text came in.
+        const QByteArray bytes = d.type == "text/plain" ? m->text().toUtf8() : m->data(qs(d.type));
+        if (drop_in_.drop(at, d.type, std::string(bytes.constData(), size_t(bytes.size()))))
+        {
+            e->setDropAction(Qt::CopyAction);
+            e->accept();
+        }
+        else
+            e->ignore();
+    }
+
 private:
     static constexpr size_t bulk = 256;
 
@@ -2900,6 +2993,7 @@ private:
 
     // Drag-reordering (on_reorder): press on a row, move past the drag
     // distance, and a line between rows follows the pointer until release.
+    // With drag_out too, leaving the list hands it to a system drag.
     struct drag
     {
         bool pressed = false;
@@ -2907,6 +3001,7 @@ private:
         bool defer_select = false;  // pressed inside a multi-selection
         QPoint start;
         size_t row = 0;
+        bool asked_out = false;  // drag_out's begin had its say
     };
     // A cell_drag in progress: from a press `begin` accepted.
     struct cell_drag_state
@@ -2921,7 +3016,7 @@ private:
     bool drag_pressed(QMouseEvent* e)
     {
         drag_ = {};
-        if (!reorder_ || !reorderable_ || e->button() != Qt::LeftButton ||
+        if ((!reorders() && !drag_out_.begin) || e->button() != Qt::LeftButton ||
             (e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier)))
             return false;
         const QPoint pos = e->position().toPoint();
@@ -2949,34 +3044,51 @@ private:
         return contiguous && dest >= sel.front() && dest <= sel.back() + 1;
     }
 
-    // The row the dragged rows would go in front of; sets the drop line.
-    size_t drop_target(int y)
+    bool reorders() const { return reorder_ && reorderable_; }
+
+    // The row in front of which something dropped at `y` goes.
+    size_t row_gap_at(int y) const
     {
         const size_t count = size_t(rows_->count);
-        size_t dest = count;
         const int vh = view_->viewport()->height();
         if (auto row = row_at(std::clamp(y, 0, std::max(0, vh - 1))))
         {
             const QRect r = row_rect(*row);
-            dest = y < r.center().y() ? *row : *row + 1;
+            return y < r.center().y() ? *row : *row + 1;
         }
+        return count;  // below the last row
+    }
+
+    void set_drop_line(std::optional<size_t> dest)
+    {
+        const size_t count = size_t(rows_->count);
+        if (!dest)
+            drop_y_.reset();
+        else if (!count)
+            drop_y_ = 1;  // an empty list: at its top
+        else
+            drop_y_ = *dest >= count ? row_rect(count - 1).bottom() + 1 : row_rect(*dest).top();
+    }
+
+    // The row the dragged rows would go in front of; sets the drop line.
+    size_t drop_target(int y)
+    {
+        const size_t dest = row_gap_at(y);
         const bool noop = is_noop_drop(dest);
         view_->viewport()->setCursor(noop ? Qt::ForbiddenCursor : Qt::ClosedHandCursor);
-        if (count && !noop)
-            drop_y_ = dest >= count ? row_rect(count - 1).bottom() + 1 : row_rect(dest).top();
-        else
-            drop_y_.reset();
+        set_drop_line(rows_->count && !noop ? std::optional(dest) : std::nullopt);
         return dest;
     }
 
-    void edge_scroll(int y)
+    // Returns whether it scrolled.
+    bool edge_scroll(int y)
     {
         const int edge = 24, vh = view_->viewport()->height();
-        if (y < edge || y > vh - edge)
-        {
-            QScrollBar* bar = view_->verticalScrollBar();
-            bar->setValue(bar->value() + (y < edge ? -1 : 1) * row_height_);
-        }
+        if (y >= edge && y <= vh - edge) return false;
+        QScrollBar* bar = view_->verticalScrollBar();
+        const int before = bar->value();
+        bar->setValue(before + (y < edge ? -1 : 1) * row_height_);
+        return bar->value() != before;
     }
 
     void drag_motion(QPoint pos)
@@ -2984,13 +3096,103 @@ private:
         if (!drag_.dragging)
         {
             if ((pos - drag_.start).manhattanLength() < QApplication::startDragDistance()) return;
+            // Without on_reorder there's nothing to do inside the list:
+            // the system drag starts at the threshold.
+            if (!reorders())
+            {
+                if (!drag_.asked_out)
+                {
+                    drag_.asked_out = true;
+                    start_drag_out();
+                }
+                return;
+            }
             drag_.dragging = true;
             active = this;
             set_hot(std::nullopt);
         }
+        // Asked once a drag: a reorder that declines stays a reorder.
+        if (drag_out_.begin && !drag_.asked_out && !view_->viewport()->rect().contains(pos))
+        {
+            drag_.asked_out = true;
+            if (start_drag_out()) return;
+        }
         drop_target(pos.y());
         edge_scroll(pos.y());
         view_->viewport()->update();
+    }
+
+    // The selected rows as drag_out offers them, through a system drag (a
+    // nested loop until the drop). Returns whether one ran.
+    bool start_drag_out()
+    {
+        std::optional<data_offer> offer = drag_out_.begin(selection());
+        if (!offer || offer->formats.empty()) return false;
+        auto* mime = new QMimeData;
+        for (const auto& [type, bytes] : offer->formats)
+        {
+            mime->setData(qs(type), QByteArray(bytes.data(), qsizetype(bytes.size())));
+            // Also as text, which other programs know in its other names.
+            if (type == "text/plain")
+                mime->setText(QString::fromUtf8(bytes.data(), qsizetype(bytes.size())));
+        }
+        // The system drag has the pointer now; no release comes back here.
+        drag_ = {};
+        if (active == this) active = nullptr;
+        drop_y_.reset();
+        view_->viewport()->unsetCursor();
+        view_->viewport()->update();
+        const QPointer<list_view> view(view_);
+        const QPointer<QDrag> drag(new QDrag(view_));
+        drag->setMimeData(mime);
+        drag->exec(Qt::CopyAction);
+        if (drag) drag->deleteLater();
+        // A drop handler may have closed the window.
+        if (view && view->owner == this) end_dnd();
+        return true;
+    }
+
+    // The first of the drag's formats drop_in takes, or "".
+    std::string drop_type(const QMimeData* m) const
+    {
+        if (!m || !drop_in_.drop) return {};
+        for (const QString& f : m->formats())
+            if (std::string t = f.toStdString(); std::ranges::contains(drop_in_.types, t)) return t;
+        // Other programs' text can come only as "text/plain;charset=utf-8".
+        // (Not hasText(): that's true of files, which are the window's.)
+        if (std::ranges::contains(drop_in_.types, std::string("text/plain")) &&
+            std::ranges::any_of(m->formats(), [](const QString& f)
+                                { return f.startsWith(QLatin1String("text/plain;")); }))
+            return "text/plain";
+        return {};
+    }
+
+    // Where a system drag would drop, with its line; false if it can't.
+    bool dnd_hover(int y)
+    {
+        dnd_->y = y;
+        const size_t at = row_gap_at(y);
+        const bool ok = dnd_->self ? !is_noop_drop(at)
+                                   : !drop_in_.can_drop || drop_in_.can_drop(at, dnd_->type);
+        set_drop_line(ok ? std::optional(at) : std::nullopt);
+        view_->viewport()->update();
+        return ok;
+    }
+
+    void end_dnd()
+    {
+        if (dnd_timer_) dnd_timer_->stop();
+        if (!dnd_) return;
+        dnd_.reset();
+        drop_y_.reset();
+        view_->viewport()->update();
+    }
+
+    // Drops are taken by the viewport only when there's something to do
+    // with them; otherwise they reach the window (files).
+    void accept_drops()
+    {
+        view_->viewport()->setAcceptDrops(bool(drop_in_.drop) || (drag_out_.begin && reorder_));
     }
 
     // A press on something the app lets you drag out of a cell. Selection
@@ -3109,7 +3311,19 @@ private:
     cell_drag cell_drag_;
     drag drag_;
     cell_drag_state cell_;
+    drag_out drag_out_;
+    drop_in drop_in_;
     std::optional<int> drop_y_;
+
+    // A system drag over the list (drop_in, or our own rows coming back).
+    struct dnd_state
+    {
+        std::string type;   // the drop_in type it'd be taken as
+        bool self = false;  // a reorder
+        int y = 0;
+    };
+    std::optional<dnd_state> dnd_;
+    QTimer* dnd_timer_ = nullptr;
     std::optional<size_t> hot_;  // the row under the pointer
 
     struct auto_scroll_state
@@ -3166,6 +3380,28 @@ void list_view::keyPressEvent(QKeyEvent* e)
 void list_view::contextMenuEvent(QContextMenuEvent* e)
 {
     if (owner) owner->context_menu(e);
+}
+
+// Not QAbstractItemView's: its drops go through the Qt model, ours through
+// drop_in.
+void list_view::dragEnterEvent(QDragEnterEvent* e)
+{
+    owner ? owner->drag_over(e, true) : e->ignore();
+}
+
+void list_view::dragMoveEvent(QDragMoveEvent* e)
+{
+    owner ? owner->drag_over(e, false) : e->ignore();
+}
+
+void list_view::dragLeaveEvent(QDragLeaveEvent*)
+{
+    if (owner) owner->drag_leave();
+}
+
+void list_view::dropEvent(QDropEvent* e)
+{
+    owner ? owner->drop(e) : e->ignore();
 }
 
 bool list_view::viewportEvent(QEvent* e)
