@@ -18,11 +18,20 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE(RapportRows, rapport_rows, RAPPORT, ROWS, GObject)
 G_END_DECLS
 
+// Each row's item carries its index. GTK keeps the items (and their cells)
+// it already has across an insert or removal and moves them, so the ones
+// still alive are kept here to renumber.
 struct _RapportRows
 {
     GObject parent_instance;
     guint count;
+    GHashTable* live;  // the items handed out and not yet freed
 };
+
+static void rapport_rows_item_freed(gpointer self, GObject* item)
+{
+    g_hash_table_remove(RAPPORT_ROWS(self)->live, item);
+}
 
 static GType rapport_rows_get_item_type(GListModel*)
 {
@@ -38,6 +47,8 @@ static gpointer rapport_rows_get_item(GListModel* m, guint pos)
     if (pos >= RAPPORT_ROWS(m)->count) return nullptr;
     auto* item = G_OBJECT(g_object_new(G_TYPE_OBJECT, nullptr));
     g_object_set_data(item, "rapport-row", GUINT_TO_POINTER(pos));
+    g_hash_table_add(RAPPORT_ROWS(m)->live, item);
+    g_object_weak_ref(item, rapport_rows_item_freed, m);
     return item;
 }
 
@@ -51,10 +62,40 @@ static void rapport_rows_iface_init(GListModelInterface* iface)
 G_DEFINE_TYPE_WITH_CODE(RapportRows, rapport_rows, G_TYPE_OBJECT,
                         G_IMPLEMENT_INTERFACE(G_TYPE_LIST_MODEL, rapport_rows_iface_init))
 
-static void rapport_rows_class_init(RapportRowsClass*) {}
+static void rapport_rows_finalize(GObject* o)
+{
+    auto* self = RAPPORT_ROWS(o);
+    GHashTableIter it;
+    gpointer item;
+    g_hash_table_iter_init(&it, self->live);
+    while (g_hash_table_iter_next(&it, &item, nullptr))
+        g_object_weak_unref(G_OBJECT(item), rapport_rows_item_freed, self);
+    g_hash_table_unref(self->live);
+    G_OBJECT_CLASS(rapport_rows_parent_class)->finalize(o);
+}
+static void rapport_rows_class_init(RapportRowsClass* c)
+{
+    G_OBJECT_CLASS(c)->finalize = rapport_rows_finalize;
+}
 static void rapport_rows_init(RapportRows* self)
 {
     self->count = 0;
+    self->live = g_hash_table_new(g_direct_hash, g_direct_equal);
+}
+
+// Items at `from` and after move by `by` rows.
+static void rapport_rows_renumber(RapportRows* self, guint from, gint by)
+{
+    GHashTableIter it;
+    gpointer item;
+    g_hash_table_iter_init(&it, self->live);
+    while (g_hash_table_iter_next(&it, &item, nullptr))
+    {
+        const guint row = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(item), "rapport-row"));
+        if (row >= from)
+            g_object_set_data(G_OBJECT(item), "rapport-row",
+                              GUINT_TO_POINTER(guint(gint(row) + by)));
+    }
 }
 
 namespace rap::gtk4
@@ -2059,15 +2100,21 @@ public:
             if (row >= first && row < first + n) bind_cell(li, *ctx);
         }
     }
+    // The rows after the change keep their items and cells, renumbered;
+    // the cells are bound again, as what they show can depend on the row.
     void rows_inserted(size_t first, size_t n) override
     {
+        rapport_rows_renumber(rows_, guint(first), gint(n));
         rows_->count += guint(n);
         g_list_model_items_changed(G_LIST_MODEL(rows_), guint(first), 0, guint(n));
+        rows_changed(first + n, rows_->count - first - n);
     }
     void rows_removed(size_t first, size_t n) override
     {
+        rapport_rows_renumber(rows_, guint(first + n), -gint(n));
         rows_->count -= guint(n);
         g_list_model_items_changed(G_LIST_MODEL(rows_), guint(first), guint(n), 0);
+        rows_changed(first, rows_->count - first);
     }
 
 protected:
