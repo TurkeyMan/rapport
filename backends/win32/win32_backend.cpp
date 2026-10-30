@@ -5072,8 +5072,9 @@ public:
     void present(rap::gpu::texture_ptr texture, rap::gpu::ticket, frame_color) override
     {
         // Drawn on the device that made it, after it in the context's order:
-        // `ready` needs no wait.
-        const std::shared_ptr<gpu_shared> dev = gpu_ ? gpu_->device() : nullptr;
+        // `ready` needs no wait. That's the one gpu_device hands out, which
+        // the canvas may not have taken yet (it does at its next paint).
+        const std::shared_ptr<gpu_shared> dev = gpu_ ? gpu_->device() : gpu::device(false);
         ID3D11Texture2D* native = dev && dev->api && texture ? rap::gpu::d3d11::native(*dev->api, *texture) : nullptr;
         D3D11_TEXTURE2D_DESC desc{};
         if (native) native->GetDesc(&desc);
@@ -5341,7 +5342,7 @@ private:
         // GPU's device starts after it.
         const std::shared_ptr<gpu_shared> dev = gpu::device(painted_);
         if (gpu_ && gpu_->device() != dev) gpu_.reset();  // lost, by another canvas
-        if (gpu_frame_ && (!gpu_ || gpu_frame_->device != gpu_->device())) drop_gpu_frame();
+        if (gpu_frame_ && gpu_frame_->device != dev) drop_gpu_frame();
         if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h)))
             drop_cpu();
         if (gpu_)
