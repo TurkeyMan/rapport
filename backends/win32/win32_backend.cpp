@@ -7257,13 +7257,16 @@ public:
         }
     };
 
-    // Page `page` onto a printer's DC (w x h pixels at `dpi`): drawn at up to
-    // 300 dpi, then stretched to the page. Direct2D's DC target won't bind a
-    // printer's DC, and every driver takes a bitmap.
+    // Page `page` onto a printer's DC (w x h pixels at `dpi`): drawn at the
+    // printer's resolution, or as near as 48 megapixels allow (192 MB; A4 at
+    // 600 dpi is 35, A3 at 600 dpi 70), then stretched to the page.
+    // Direct2D's DC target won't bind a printer's DC, and every driver takes a
+    // bitmap.
     static bool draw_print_page(HDC dc, int w, int h, float dpi, print_job& job, int page,
                                 size_f printable)
     {
-        const float rdpi = std::min(dpi, 300.f);
+        const double most = 48e6;
+        const float rdpi = double(w) * h <= most ? dpi : float(dpi * std::sqrt(most / (double(w) * h)));
         const int rw = std::max(1, int(std::lround(w * rdpi / dpi))),
                   rh = std::max(1, int(std::lround(h * rdpi / dpi)));
         page_bitmap b(rw, rh);
