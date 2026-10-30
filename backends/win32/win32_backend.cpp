@@ -16,9 +16,11 @@
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <format>
+#include <ole2.h>
 #include <oleacc.h>
 #include <richedit.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
 #include <vssym32.h>
@@ -2907,10 +2909,186 @@ void strip_button::set_checked(bool c)
     strip_.set_checked(id_, c);
 }
 
+// -- drag and drop ------------------------------------------------------------
+
+// A COM object of our own with one interface, made with one reference (for
+// com<>::put) and gone with its last.
+template <class I>
+class com_object : public I
+{
+public:
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) override
+    {
+        if (id != IID_IUnknown && id != __uuidof(I))
+        {
+            *out = nullptr;
+            return E_NOINTERFACE;
+        }
+        *out = static_cast<I*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const ULONG n = --refs_;
+        if (!n) delete this;
+        return n;
+    }
+
+protected:
+    virtual ~com_object() = default;
+
+private:
+    ULONG refs_ = 1;
+};
+
+// The clipboard format a MIME type travels as between programs: text as
+// Windows' Unicode text, any other type registered under its own name.
+UINT clipboard_format(const std::string& mime)
+{
+    return mime == "text/plain" ? CF_UNICODETEXT : RegisterClipboardFormatW(wide(mime).c_str());
+}
+HGLOBAL global_of(const std::string& bytes)
+{
+    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+    if (void* p = g ? GlobalLock(g) : nullptr)
+    {
+        std::memcpy(p, bytes.data(), bytes.size());
+        GlobalUnlock(g);
+    }
+    return g;
+}
+// A drag's data in `format` (Unicode text as UTF-8), or nullopt.
+std::optional<std::string> data_of(IDataObject* data, UINT format)
+{
+    FORMATETC f{CLIPFORMAT(format), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    STGMEDIUM m{};
+    if (FAILED(data->GetData(&f, &m))) return std::nullopt;
+    std::optional<std::string> out;
+    if (m.tymed == TYMED_HGLOBAL)
+    {
+        const size_t n = GlobalSize(m.hGlobal);
+        if (!n)
+            out.emplace();
+        else if (const void* p = GlobalLock(m.hGlobal))
+        {
+            if (format == CF_UNICODETEXT)
+            {
+                const auto* w = static_cast<const wchar_t*>(p);
+                out = narrow(w, int(wcsnlen(w, n / sizeof(wchar_t))));
+            }
+            else
+                out.emplace(static_cast<const char*>(p), n);
+            GlobalUnlock(m.hGlobal);
+        }
+    }
+    ReleaseStgMedium(&m);
+    return out;
+}
+
+// What a drag carries: a data_offer's formats, best first, each handed
+// over in memory of its own when asked.
+class offer_data final : public com_object<IDataObject>
+{
+public:
+    explicit offer_data(const data_offer& offer)
+    {
+        for (const auto& [type, bytes] : offer.formats)
+        {
+            const UINT format = clipboard_format(type);
+            if (!format || find(format)) continue;  // the first of a format wins
+            if (format != CF_UNICODETEXT)
+            {
+                formats_.emplace_back(format, bytes);
+                continue;
+            }
+            const std::wstring w = wide(bytes);
+            formats_.emplace_back(format, std::string(reinterpret_cast<const char*>(w.c_str()),
+                                                      (w.size() + 1) * sizeof(wchar_t)));
+        }
+    }
+
+    HRESULT STDMETHODCALLTYPE GetData(FORMATETC* f, STGMEDIUM* m) override
+    {
+        const std::string* bytes = find(*f);
+        if (!bytes) return DV_E_FORMATETC;
+        *m = {};
+        m->tymed = TYMED_HGLOBAL;
+        m->hGlobal = global_of(*bytes);
+        return m->hGlobal ? S_OK : E_OUTOFMEMORY;
+    }
+    HRESULT STDMETHODCALLTYPE GetDataHere(FORMATETC*, STGMEDIUM*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE QueryGetData(FORMATETC* f) override { return find(*f) ? S_OK : DV_E_FORMATETC; }
+    HRESULT STDMETHODCALLTYPE GetCanonicalFormatEtc(FORMATETC*, FORMATETC* out) override
+    {
+        out->ptd = nullptr;
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE SetData(FORMATETC*, STGMEDIUM*, BOOL) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE EnumFormatEtc(DWORD direction, IEnumFORMATETC** out) override
+    {
+        if (direction != DATADIR_GET) return E_NOTIMPL;
+        std::vector<FORMATETC> all;
+        for (const auto& f : formats_) all.push_back({CLIPFORMAT(f.first), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL});
+        return SHCreateStdEnumFmtEtc(UINT(all.size()), all.data(), out);
+    }
+    HRESULT STDMETHODCALLTYPE DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override
+    {
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
+    HRESULT STDMETHODCALLTYPE DUnadvise(DWORD) override { return OLE_E_ADVISENOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE EnumDAdvise(IEnumSTATDATA**) override { return OLE_E_ADVISENOTSUPPORTED; }
+
+private:
+    const std::string* find(UINT format) const
+    {
+        for (const auto& f : formats_)
+            if (f.first == format) return &f.second;
+        return nullptr;
+    }
+    const std::string* find(const FORMATETC& f) const
+    {
+        return f.dwAspect == DVASPECT_CONTENT && (f.tymed & TYMED_HGLOBAL) ? find(f.cfFormat) : nullptr;
+    }
+
+    std::vector<std::pair<UINT, std::string>> formats_;
+};
+
+// A drag's end: a drop when the button comes up, none on Esc.
+class drop_source final : public com_object<IDropSource>
+{
+public:
+    HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL escape, DWORD keys) override
+    {
+        if (escape) return DRAGDROP_S_CANCEL;
+        return keys & MK_LBUTTON ? S_OK : DRAGDROP_S_DROP;
+    }
+    HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+};
+
 // -- list ---------------------------------------------------------------------
 
 class list_impl;
 list_impl* g_dragging = nullptr;  // the list with a row drag in progress, for Esc
+list_impl* g_drag_out = nullptr;  // the list whose rows a system drag carries
+
+// A list's end of system drags over it: list_impl does the work, while it's
+// there (`list` goes with it; the system may hold this a little longer).
+class list_drop_target final : public com_object<IDropTarget>
+{
+public:
+    explicit list_drop_target(list_impl* l)
+        : list(l)
+    {
+    }
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data, DWORD, POINTL pt, DWORD* effect) override;
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL pt, DWORD* effect) override;
+    HRESULT STDMETHODCALLTYPE DragLeave() override;
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* data, DWORD, POINTL pt, DWORD* effect) override;
+
+    list_impl* list;
+};
 
 // A virtual report-style list_view: the model is asked for visible cells only.
 class list_impl : public leaf<rap::list>, public list_observer
@@ -2955,6 +3133,12 @@ public:
     {
         if (anchor_) DestroyWindow(anchor_);
         if (g_dragging == this) g_dragging = nullptr;
+        if (g_drag_out == this) g_drag_out = nullptr;
+        if (drop_target_)
+        {
+            RevokeDragDrop(h_);
+            drop_target_->list = nullptr;
+        }
         if (model_) model_->remove_observer(this);
     }
 
@@ -3049,11 +3233,19 @@ public:
     {
         reorder_ = std::move(f);
         reorderable_ = bool(reorder_);
+        accept_drops();
     }
     void set_reorderable(bool on) override { reorderable_ = on && reorder_; }
-    // TODO(ifritview): OLE drag and drop (IDropSource, IDataObject, IDropTarget).
-    void on_drag_out(drag_out) override {}
-    void on_drop_in(drop_in) override {}
+    void on_drag_out(drag_out d) override
+    {
+        drag_out_ = std::move(d);
+        accept_drops();
+    }
+    void on_drop_in(drop_in d) override
+    {
+        drop_in_ = std::move(d);
+        accept_drops();
+    }
     void on_cell_drag(cell_drag d) override
     {
         if (!cell_drag_.begin) SetWindowSubclass(h_, cell_press_proc, 5, reinterpret_cast<DWORD_PTR>(this));
@@ -3176,7 +3368,8 @@ public:
             return custom_draw(reinterpret_cast<NMLVCUSTOMDRAW*>(n));
         case LVN_BEGINDRAG:
             // Past the drag threshold: a press `begin` accepted drags its
-            // label, any other the rows (if they reorder).
+            // label, any other the rows: reordered within the list, or out
+            // of it (at once without on_reorder).
             if (cell_.pressed)
             {
                 cell_.dragging = true;
@@ -3185,12 +3378,18 @@ public:
                 SetWindowSubclass(h_, cell_drag_proc, 6, reinterpret_cast<DWORD_PTR>(this));
                 return 0;
             }
-            if (reorderable_ && reorder_)
+            asked_out_ = false;
+            if (reorderable_)
             {
                 dragging_ = true;
                 g_dragging = this;
                 SetCapture(h_);
                 SetWindowSubclass(h_, drag_proc, 2, reinterpret_cast<DWORD_PTR>(this));
+            }
+            else if (drag_out_.begin)
+            {
+                asked_out_ = true;
+                start_drag_out();  // the list may be gone after
             }
             return 0;
         }
@@ -3653,7 +3852,7 @@ private:
             // The drop line while rows are dragged (the list_view would draw
             // it, but its item painting is skipped).
             RECT mark{};
-            if (dragging_ && SendMessageW(h_, LVM_GETINSERTMARKRECT, 0, reinterpret_cast<LPARAM>(&mark)) &&
+            if ((dragging_ || dnd_) && SendMessageW(h_, LVM_GETINSERTMARKRECT, 0, reinterpret_cast<LPARAM>(&mark)) &&
                 !IsRectEmpty(&mark))
                 fill(mark, theme_color_of(theme_color::text));
             // A cell drag: the drop row framed, the label at the pointer.
@@ -3761,24 +3960,33 @@ private:
         const bool contiguous = rows.back() - rows.front() + 1 == rows.size();
         return contiguous && target >= rows.front() && target <= rows.back() + 1;
     }
-    void show_mark(size_t target)
+    // The drop line in front of `target`, or none.
+    void set_mark(std::optional<size_t> target)
     {
-        if (noop(target))
-        {
-            LVINSERTMARK none{sizeof none, 0, -1, 0};
-            SendMessageW(h_, LVM_SETINSERTMARK, 0, reinterpret_cast<LPARAM>(&none));
-            SetCursor(LoadCursorW(nullptr, IDC_NO));
-            return;
-        }
-        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
         const size_t count = model_ ? model_->row_count() : 0;
         LVINSERTMARK mark{sizeof mark, 0, -1, 0};
-        if (count)
+        if (target && count)
         {
-            mark.iItem = int(std::min(target, count - 1));
-            mark.dwFlags = target >= count ? LVIM_AFTER : 0;
+            mark.iItem = int(std::min(*target, count - 1));
+            mark.dwFlags = *target >= count ? LVIM_AFTER : 0;
         }
         SendMessageW(h_, LVM_SETINSERTMARK, 0, reinterpret_cast<LPARAM>(&mark));
+    }
+    void show_mark(size_t target)
+    {
+        const bool none = noop(target);
+        SetCursor(LoadCursorW(nullptr, none ? IDC_NO : IDC_ARROW));
+        set_mark(none ? std::nullopt : std::optional<size_t>(target));
+    }
+    // A step of scrolling with the pointer (client coordinates) near the
+    // top or bottom edge, as anything dragged there does.
+    void edge_scroll(POINT pt)
+    {
+        RECT c;
+        GetClientRect(h_, &c);
+        const int edge = px(20);
+        if (pt.y < edge) ListView_Scroll(h_, 0, -px(8));
+        else if (pt.y > c.bottom - edge) ListView_Scroll(h_, 0, px(8));
     }
 public:
     void cancel_drag()
@@ -3794,8 +4002,7 @@ private:
         if (!dragging_) return;
         dragging_ = false;
         if (g_dragging == this) g_dragging = nullptr;
-        LVINSERTMARK none{sizeof none, 0, -1, 0};
-        SendMessageW(h_, LVM_SETINSERTMARK, 0, reinterpret_cast<LPARAM>(&none));
+        set_mark(std::nullopt);
         RemoveWindowSubclass(h_, drag_proc, 2);
         if (GetCapture() == h_) ReleaseCapture();
         if (drop && reorder_)
@@ -3854,11 +4061,7 @@ private:
                 self->cell_drag_.can_drop(c.from, size_t(row), c.start.data))
                 c.target = size_t(row);
             SetCursor(LoadCursorW(nullptr, c.target ? IDC_HAND : IDC_NO));
-            RECT client;
-            GetClientRect(h, &client);
-            const int edge = self->px(20);
-            if (c.pt.y < edge) ListView_Scroll(h, 0, -self->px(8));
-            else if (c.pt.y > client.bottom - edge) ListView_Scroll(h, 0, self->px(8));
+            self->edge_scroll(c.pt);
             InvalidateRect(h, nullptr, FALSE);  // one paint pass: a few ms
             return 0;
         }
@@ -4044,12 +4247,17 @@ private:
         {
         case WM_MOUSEMOVE:
         {
-            self->show_mark(self->drop_target(pt));
+            // Out of the list, the rows go on as a system drag (drag_out),
+            // asked once a drag: a reorder `begin` declines stays one.
             RECT c;
             GetClientRect(h, &c);
-            const int edge = self->px(20);
-            if (pt.y < edge) ListView_Scroll(h, 0, -self->px(8));
-            else if (pt.y > c.bottom - edge) ListView_Scroll(h, 0, self->px(8));
+            if (self->drag_out_.begin && !self->asked_out_ && !PtInRect(&c, pt))
+            {
+                self->asked_out_ = true;
+                if (self->start_drag_out()) return 0;  // the list may be gone
+            }
+            self->show_mark(self->drop_target(pt));
+            self->edge_scroll(pt);
             return 0;
         }
         case WM_LBUTTONUP: self->end_drag(true, pt); return 0;
@@ -4066,8 +4274,155 @@ private:
         return DefSubclassProc(h, msg, wp, lp);
     }
 
+    // The selected rows as drag_out offers them, through the system's drag
+    // and drop, which runs until the drop. Returns whether one ran: the
+    // list may be gone by then (a drop handler closing its window).
+    bool start_drag_out()
+    {
+        std::optional<data_offer> offer = drag_out_.begin(selection());
+        if (!offer || offer->formats.empty()) return false;
+        end_drag(false, POINT{});  // a reorder hands over to it
+        set_hot(-1);
+        com<IDataObject> data;
+        *data.put() = new offer_data(*offer);
+        com<IDropSource> source;
+        *source.put() = new drop_source;
+        g_drag_out = this;
+        DWORD effect = 0;
+        DoDragDrop(data.get(), source.get(), DROPEFFECT_COPY, &effect);
+        if (g_drag_out == this) g_drag_out = nullptr;  // cleared already if the list went
+        return true;
+    }
+
+    // System drags land through OLE (list_drop_target): drop_in's data, and
+    // this list's own rows brought back after leaving it (a reorder).
+    void accept_drops()
+    {
+        if (drop_target_ || !(drop_in_.drop || (reorder_ && drag_out_.begin))) return;
+        *drop_target_.put() = new list_drop_target(this);
+        RegisterDragDrop(h_, drop_target_.get());
+    }
+    // What a system drag over the list would drop: data of one of drop_in's
+    // types, this list's own rows, or files, which are the window's (the
+    // list's drop target stands in front of the window's own).
+    struct dnd_state
+    {
+        enum class what
+        {
+            data,
+            own_rows,
+            files
+        } kind;
+        std::string type;
+        UINT format = 0;
+    };
+    std::optional<dnd_state> dnd_offered(IDataObject* data) const
+    {
+        if (g_drag_out == this && reorderable_) return dnd_state{dnd_state::what::own_rows};
+        if (drop_in_.drop)
+        {
+            // The first of the drag's formats drop_in takes.
+            auto taken = [&](UINT format) -> std::optional<dnd_state>
+            {
+                for (const std::string& type : drop_in_.types)
+                    if (clipboard_format(type) == format) return dnd_state{dnd_state::what::data, type, format};
+                return std::nullopt;
+            };
+            com<IEnumFORMATETC> formats;
+            if (SUCCEEDED(data->EnumFormatEtc(DATADIR_GET, formats.put())) && formats)
+            {
+                FORMATETC f;
+                while (formats->Next(1, &f, nullptr) == S_OK)
+                {
+                    if (f.ptd) CoTaskMemFree(f.ptd);
+                    if (f.tymed & TYMED_HGLOBAL)
+                        if (auto d = taken(f.cfFormat)) return d;
+                }
+            }
+            else
+                for (const std::string& type : drop_in_.types)
+                {
+                    FORMATETC f{CLIPFORMAT(clipboard_format(type)), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+                    if (data->QueryGetData(&f) == S_OK) return dnd_state{dnd_state::what::data, type, f.cfFormat};
+                }
+        }
+        FORMATETC files{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        if ((GetWindowLongW(GetAncestor(h_, GA_ROOT), GWL_EXSTYLE) & WS_EX_ACCEPTFILES) &&
+            data->QueryGetData(&files) == S_OK)
+            return dnd_state{dnd_state::what::files};
+        return std::nullopt;
+    }
+    bool dnd_can_drop(size_t at) const
+    {
+        switch (dnd_->kind)
+        {
+        case dnd_state::what::own_rows: return !noop(at);
+        case dnd_state::what::data: return !drop_in_.can_drop || drop_in_.can_drop(at, dnd_->type);
+        default: return true;
+        }
+    }
+
+public:
+    // list_drop_target's calls (screen coordinates), returning the effect.
+    DWORD dnd_enter(IDataObject* data, POINT pt)
+    {
+        dnd_ = dnd_offered(data);
+        return dnd_over(pt);
+    }
+    DWORD dnd_over(POINT pt)
+    {
+        if (!dnd_) return DROPEFFECT_NONE;
+        if (dnd_->kind == dnd_state::what::files) return DROPEFFECT_COPY;
+        ScreenToClient(h_, &pt);
+        edge_scroll(pt);  // called again and again while the pointer rests
+        const size_t at = drop_target(pt);
+        const bool ok = dnd_can_drop(at);
+        set_mark(ok ? std::optional<size_t>(at) : std::nullopt);
+        return ok ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+    }
+    void dnd_leave()
+    {
+        if (dnd_) set_mark(std::nullopt);
+        dnd_.reset();
+    }
+    DWORD dnd_drop(IDataObject* data, POINT pt)
+    {
+        if (!dnd_) return DROPEFFECT_NONE;
+        ScreenToClient(h_, &pt);
+        const size_t at = drop_target(pt);
+        const bool ok = dnd_can_drop(at);
+        const dnd_state d = *dnd_;
+        dnd_leave();
+        if (!ok) return DROPEFFECT_NONE;
+        switch (d.kind)
+        {
+        case dnd_state::what::own_rows:
+            reorder_(selection(), at);
+            return DROPEFFECT_COPY;
+        case dnd_state::what::files:
+            // To the window, as a drop there would have gone.
+            if (std::optional<std::string> bytes = data_of(data, CF_HDROP))
+                if (HGLOBAL copy = global_of(*bytes))
+                    if (!PostMessageW(GetAncestor(h_, GA_ROOT), WM_DROPFILES, reinterpret_cast<WPARAM>(copy), 0))
+                        GlobalFree(copy);
+            return DROPEFFECT_COPY;
+        case dnd_state::what::data:
+        {
+            const std::optional<std::string> bytes = data_of(data, d.format);
+            return bytes && drop_in_.drop(at, d.type, *bytes) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        }
+        }
+        return DROPEFFECT_NONE;
+    }
+
+private:
     reorder_fn reorder_;
     bool reorderable_ = false, dragging_ = false;
+    drag_out drag_out_;
+    drop_in drop_in_;
+    bool asked_out_ = false;  // drag_out's begin has had its say this drag
+    com<list_drop_target> drop_target_;
+    std::optional<dnd_state> dnd_;  // a system drag over the list
     cell_drag cell_drag_;
     cell_drag_state cell_;
     auto_scroll_state auto_;
@@ -4096,6 +4451,35 @@ private:
     std::function<menu(size_t)> header_menu_;
     std::function<menu(size_t, size_t, point_f)> cell_menu_;
 };
+
+// The list answers a copy or nothing; `*effect` comes in as what the
+// drag's source allows.
+HRESULT list_drop_target::DragEnter(IDataObject* data, DWORD, POINTL pt, DWORD* effect)
+{
+    *effect = list ? list->dnd_enter(data, {pt.x, pt.y}) & *effect : DROPEFFECT_NONE;
+    return S_OK;
+}
+HRESULT list_drop_target::DragOver(DWORD, POINTL pt, DWORD* effect)
+{
+    *effect = list ? list->dnd_over({pt.x, pt.y}) & *effect : DROPEFFECT_NONE;
+    return S_OK;
+}
+HRESULT list_drop_target::DragLeave()
+{
+    if (list) list->dnd_leave();
+    return S_OK;
+}
+HRESULT list_drop_target::Drop(IDataObject* data, DWORD, POINTL pt, DWORD* effect)
+{
+    if (!list || !(*effect & DROPEFFECT_COPY))
+    {
+        if (list) list->dnd_leave();
+        *effect = DROPEFFECT_NONE;
+        return S_OK;
+    }
+    *effect = list->dnd_drop(data, {pt.x, pt.y});
+    return S_OK;
+}
 
 // -- tabs ---------------------------------------------------------------------
 
@@ -6565,7 +6949,7 @@ public:
         if (auto fn = reinterpret_cast<fn_t>(reinterpret_cast<void*>(
                 GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"))))
             fn(reinterpret_cast<HANDLE>(-4) /* PER_MONITOR_AWARE_V2 */);
-        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        OleInitialize(nullptr);  // COM, and the system's drag and drop
         enable_visual_styles();
         g_comctl.resolve();
         INITCOMMONCONTROLSEX icc{sizeof icc,
