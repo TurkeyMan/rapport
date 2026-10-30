@@ -520,8 +520,9 @@ SIZE text_extent(HWND h, const std::wstring& s, bool multiline = false, int max_
 struct move_batch
 {
     std::map<HWND, std::vector<std::pair<HWND, RECT>>> moves;  // parent -> its children's moves
+    std::vector<std::pair<HWND, bool>> shown;                  // controls shown or hidden, once moved
     // For a size the window doesn't have yet (see window::resize): nothing
-    // moves, and canvases draw for where they'll be.
+    // moves or shows, and canvases draw for where they'll be.
     bool ahead = false;
 };
 move_batch* g_moves = nullptr;
@@ -562,7 +563,10 @@ void move_control(HWND h, int x, int y, int w, int hgt)
         SetWindowPos(h, nullptr, x, y, w, hgt, move_flags_for(h, w, hgt));
 }
 
-// Batches the moves of a layout pass (nested passes join the outer one).
+void show_now(HWND h, bool shown);
+
+// Batches the moves of a layout pass (nested passes join the outer one),
+// and the shows and hides, made once the moves are.
 class moves_in_one_pass
 {
 public:
@@ -584,6 +588,7 @@ public:
                                          move_flags_for(h, r.right - r.left, r.bottom - r.top));
             if (dwp) EndDeferWindowPos(dwp);
         }
+        for (auto [h, shown] : batch_.shown) show_now(h, shown);
     }
 
 private:
@@ -594,7 +599,7 @@ private:
 // Shows or hides a control. While its window is still hidden (being built)
 // that's just the style bit: ShowWindow raises an accessibility event per
 // control, milliseconds apiece whenever an automation client listens.
-void show_control(HWND h, bool shown)
+void show_now(HWND h, bool shown)
 {
     const LONG_PTR style = GetWindowLongPtrW(h, GWL_STYLE);
     if (bool(style & WS_VISIBLE) == shown) return;
@@ -602,6 +607,17 @@ void show_control(HWND h, bool shown)
         ShowWindow(h, shown ? SW_SHOWNA : SW_HIDE);
     else
         SetWindowLongPtrW(h, GWL_STYLE, shown ? style | WS_VISIBLE : style & ~WS_VISIBLE);
+}
+
+// In a layout pass, once its moves are made: a control shown where it was
+// last put, and painted there, shows somewhere it isn't (a pane coming in
+// over the image, before the window has grown to hold it).
+void show_control(HWND h, bool shown)
+{
+    if (!g_moves)
+        show_now(h, shown);
+    else if (!g_moves->ahead)
+        g_moves->shown.push_back({h, shown});
 }
 
 HWND create_control(win_context& win, HWND parent, const wchar_t* cls, const std::wstring& text, DWORD style,
