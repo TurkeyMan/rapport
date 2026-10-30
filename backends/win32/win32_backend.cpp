@@ -591,6 +591,16 @@ public:
             if (dwp) EndDeferWindowPos(dwp);
         }
         for (auto [h, shown] : batch_.shown) show_now(h, shown);
+        // Then painted, all of them, before anything else runs: left to their
+        // WM_PAINTs, which come only once the queue is idle, they landed a
+        // band at a time over several frames (a pane's controls, top to
+        // bottom, while the app was busy).
+        std::set<HWND> roots;
+        for (auto& [parent, list] : batch_.moves) roots.insert(GetAncestor(parent, GA_ROOT));
+        for (auto [h, shown] : batch_.shown)
+            if (shown) roots.insert(GetAncestor(h, GA_ROOT));
+        for (HWND root : roots)
+            if (IsWindowVisible(root)) RedrawWindow(root, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
 
 private:
