@@ -3029,6 +3029,9 @@ public:
         reorderable_ = bool(reorder_);
     }
     void set_reorderable(bool on) override { reorderable_ = on && reorder_; }
+    // TODO(ifritview): OLE drag and drop (IDropSource, IDataObject, IDropTarget).
+    void on_drag_out(drag_out) override {}
+    void on_drop_in(drop_in) override {}
     void on_cell_drag(cell_drag d) override
     {
         if (!cell_drag_.begin) SetWindowSubclass(h_, cell_press_proc, 5, reinterpret_cast<DWORD_PTR>(this));

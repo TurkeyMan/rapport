@@ -646,6 +646,15 @@ public:
     virtual void select(size_t begin, size_t end) = 0;
 };
 
+// Data offered by a drag (and, later, the clipboard) in one or more
+// formats, best first: MIME type and bytes (binary-safe). An app's own
+// type ("application/x-tortilla-commits") travels between its windows and
+// processes; "text/plain" (UTF-8) reaches other programs.
+struct data_offer
+{
+    std::vector<std::pair<std::string, std::string>> formats;
+};
+
 class list : public widget
 {
 public:
@@ -709,6 +718,34 @@ public:
         std::function<void(size_t from, size_t to, const std::string& data)> drop;
     };
     virtual void on_cell_drag(cell_drag) = 0;
+
+    // Dragging rows out to another window or program, and dropping data in
+    // from one, through the system's drag and drop, so across processes.
+    //
+    // drag_out: dragging the selected rows past the threshold asks `begin`
+    // for what they carry; nullopt starts no drag. In a list with
+    // on_reorder, a drag that stays inside the list reorders as before; the
+    // system drag starts only once the pointer leaves the list's bounds.
+    // The drop is a copy: nothing is removed from the source.
+    //
+    // drop_in: data of one of `types` (the first the drag offers wins) can
+    // be dropped between rows. While it hovers, the insertion line shows
+    // where it goes and the list scrolls near its top and bottom edges.
+    // `at` is the row it goes in front of (row_count() = the end).
+    // can_drop sees only the type: on some systems (Wayland) the data
+    // arrives only at the drop. drop returns false to refuse it.
+    struct drag_out
+    {
+        std::function<std::optional<data_offer>(const std::vector<size_t>& rows)> begin;
+    };
+    struct drop_in
+    {
+        std::vector<std::string> types;
+        std::function<bool(size_t at, const std::string& type)> can_drop;  // unset: always
+        std::function<bool(size_t at, const std::string& type, const std::string& data)> drop;
+    };
+    virtual void on_drag_out(drag_out) = 0;
+    virtual void on_drop_in(drop_in) = 0;
 };
 
 // Draggable divider between panes.

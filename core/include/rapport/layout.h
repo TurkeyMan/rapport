@@ -260,6 +260,8 @@ struct list
     std::function<menu(size_t)> on_header_menu;
     rap::list::reorder_fn on_reorder;
     rap::list::cell_drag on_cell_drag;
+    rap::list::drag_out on_drag_out;
+    rap::list::drop_in on_drop_in;
     std::function<menu(size_t, size_t, point_f)> on_cell_context_menu;
     rap::list** bind = nullptr;
 };
@@ -865,6 +867,16 @@ public:
     list& on_reorder(rap::list::reorder_fn f)
     {
         s().on_reorder = std::move(f);
+        return *this;
+    }
+    list& on_drag_out(rap::list::drag_out d)
+    {
+        s().on_drag_out = std::move(d);
+        return *this;
+    }
+    list& on_drop_in(rap::list::drop_in d)
+    {
+        s().on_drop_in = std::move(d);
         return *this;
     }
     list& on_cell_drag(rap::list::cell_drag d)

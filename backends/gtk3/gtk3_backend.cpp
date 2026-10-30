@@ -1992,6 +1992,8 @@ public:
     void on_header_menu(std::function<menu(size_t)> f) override { header_menu_ = std::move(f); }
     void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)> f) override { cell_menu_ = std::move(f); }
     void on_reorder(reorder_fn f) override { reorder_ = std::move(f); }
+    void on_drag_out(drag_out) override {}
+    void on_drop_in(drop_in) override {}
     void set_reorderable(bool v) override { reorderable_ = v; }
     void on_cell_drag(cell_drag d) override
     {

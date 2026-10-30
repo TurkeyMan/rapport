@@ -1920,6 +1920,8 @@ public:
     void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)> f) override { cell_menu_ = std::move(f); }
     // TODO(tortilla): drag-reordering (GtkDragSource on the rows).
     void on_reorder(reorder_fn) override {}
+    void on_drag_out(drag_out) override {}
+    void on_drop_in(drop_in) override {}
     void set_reorderable(bool) override {}
     // Autoscroll (spec.auto_scroll): with the middle button held, a tick
     // callback scrolls by the pointer's offset from the anchor. (The anchor

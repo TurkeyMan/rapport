@@ -2419,6 +2419,8 @@ public:
         cell_menu_ = std::move(f);
     }
     void on_reorder(reorder_fn f) override { reorder_ = std::move(f); }
+    void on_drag_out(drag_out) override {}
+    void on_drop_in(drop_in) override {}
     void set_reorderable(bool v) override { reorderable_ = v; }
     void on_cell_drag(cell_drag d) override { cell_drag_ = std::move(d); }
 
