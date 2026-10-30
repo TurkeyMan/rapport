@@ -1595,6 +1595,8 @@ public:
         , min_(map_.track(s.min))
         , max_(map_.track(s.max))
         , step_(s.step > 0 ? s.step : (max_ - min_) / 1000)
+        , snap_(s.snap)
+        , marks_(s.marks)
         , digits_(s.digits)
     {
         auto* row = new QHBoxLayout(w_);
@@ -1610,17 +1612,12 @@ public:
         slider_->setFocusPolicy(Qt::StrongFocus);
         slider_->setSingleStep(1);
         slider_->setPageStep(std::max(1, int(std::lround(s.page / step_))));
-        if (s.marks.size() >= 2)
-        {
-            slider_->setTickPosition(QSlider::TicksBelow);
-            slider_->setTickInterval(
-                std::max(1, int(std::lround((map_.track(s.marks[1].first) - map_.track(s.marks[0].first)) / step_))));
-        }
         apply_range();
         set_value(s.value);
         QObject::connect(slider_, &QSlider::valueChanged, slider_,
                          [this](int)
                          {
+                             if (snap_ && slider_->isSliderDown() && snap_to_mark()) return;  // its setValue reported it
                              show_value();
                              if (!quiet_ && changed_) changed_(value());
                          });
@@ -1650,14 +1647,41 @@ public:
         apply_range();
         set_value(v);
     }
+    void set_marks(std::vector<std::pair<double, std::string>> marks) override
+    {
+        marks_ = std::move(marks);
+        apply_range();
+    }
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
 
 private:
+    int position_of(double v) const { return int(std::lround((std::clamp(map_.track(v), min_, max_) - min_) / step_)); }
+    // QSlider's ticks are evenly spaced: the first two marks' spacing.
     void apply_range()
     {
         quiet_ = true;
         slider_->setRange(0, std::max(0, int(std::lround((max_ - min_) / step_))));
+        slider_->setTickPosition(marks_.size() >= 2 ? QSlider::TicksBelow : QSlider::NoTicks);
+        if (marks_.size() >= 2)
+            slider_->setTickInterval(std::max(1, std::abs(position_of(marks_[1].first) - position_of(marks_[0].first))));
         quiet_ = false;
+    }
+    // The handle dragged within a few pixels of a mark lands on it: the
+    // mark's value exactly. Returns whether it moved it.
+    bool snap_to_mark()
+    {
+        const int positions = slider_->maximum();
+        if (positions <= 0 || slider_->width() <= 0) return false;
+        const double reach = 5.0 * positions / slider_->width();
+        const int pos = slider_->value();
+        const std::pair<double, std::string>* nearest = nullptr;
+        for (const auto& m : marks_)
+            if (!nearest || std::abs(position_of(m.first) - pos) < std::abs(position_of(nearest->first) - pos)) nearest = &m;
+        if (!nearest || std::abs(position_of(nearest->first) - pos) > reach) return false;
+        set_ = {nearest->first, position_of(nearest->first)};
+        if (set_.second == pos) return false;  // there already: it reads as the mark
+        slider_->setValue(set_.second);
+        return true;
     }
     void show_value()
     {
@@ -1669,6 +1693,8 @@ private:
     slider_map map_;
     double min_, max_, step_;  // along the track
     std::pair<double, int> set_{0, -1};  // the value last set, and its position
+    bool snap_;
+    std::vector<std::pair<double, std::string>> marks_;
     int digits_;
     bool quiet_ = false;
     std::function<void(double)> changed_;

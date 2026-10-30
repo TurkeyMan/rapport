@@ -58,6 +58,31 @@ inline GtkOrientation gtk_orientation(orientation o)
     return o == orientation::vertical ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL;
 }
 
+// A slider's marks (values) on its scale, which runs along the track.
+inline void set_scale_marks(GtkScale* scale, const slider_map& map, const std::vector<std::pair<double, std::string>>& marks)
+{
+    gtk_scale_clear_marks(scale);
+    for (const auto& [at, label] : marks)
+        gtk_scale_add_mark(scale, map.track(at), GTK_POS_BOTTOM, label.empty() ? nullptr : label.c_str());
+}
+// spec::slider::snap: the scale dragged (to `t`, along the track) within a
+// few pixels of a mark lands on it. `width`: the scale's, in pixels.
+// Returns whether it did (change-value is then handled).
+inline bool snap_scale(GtkRange* r, int width, const slider_map& map,
+                       const std::vector<std::pair<double, std::string>>& marks, GtkScrollType how, double t)
+{
+    GtkAdjustment* a = gtk_range_get_adjustment(r);
+    const double span = gtk_adjustment_get_upper(a) - gtk_adjustment_get_lower(a);
+    if (how != GTK_SCROLL_JUMP || width <= 0 || span <= 0) return false;
+    const double reach = 5.0 * span / width;
+    const std::pair<double, std::string>* nearest = nullptr;
+    for (const auto& m : marks)
+        if (!nearest || std::abs(map.track(m.first) - t) < std::abs(map.track(nearest->first) - t)) nearest = &m;
+    if (!nearest || std::abs(map.track(nearest->first) - t) > reach) return false;
+    gtk_range_set_value(r, map.track(nearest->first));
+    return true;
+}
+
 inline uint8_t u8(double v)
 {
     return uint8_t(std::clamp(v, 0.0, 1.0) * 255 + 0.5);

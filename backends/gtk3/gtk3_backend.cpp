@@ -619,15 +619,23 @@ public:
         : widget_base(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, s.map.track(s.min), s.map.track(s.max),
                                      s.step > 0 ? s.step : 0.01))
         , map_(s.map)
+        , marks_(s.marks)
         , digits_(s.digits)
     {
         gtk_range_set_increments(GTK_RANGE(w_), s.step, s.page);
         gtk_scale_set_digits(GTK_SCALE(w_), s.digits);
         gtk_scale_set_draw_value(GTK_SCALE(w_), s.show_value);
         gtk_range_set_value(GTK_RANGE(w_), map_.track(s.value));
-        for (auto& [at, label] : s.marks)
-            gtk_scale_add_mark(GTK_SCALE(w_), map_.track(at), GTK_POS_BOTTOM,
-                               label.empty() ? nullptr : label.c_str());
+        set_scale_marks(GTK_SCALE(w_), map_, marks_);
+        if (s.snap)
+            connect(
+                w_, "change-value",
+                +[](GtkRange* r, GtkScrollType how, double t, gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<slider_impl*>(p);
+                    return snap_scale(r, gtk_widget_get_allocated_width(GTK_WIDGET(r)), self->map_, self->marks_, how, t);
+                },
+                this);
         // The track is rounded to nothing (digits are the value's); the
         // label shows the value.
         if (map_.to_value)
@@ -665,10 +673,16 @@ public:
         gtk_range_set_range(GTK_RANGE(w_), map_.track(min), map_.track(max));
         quiet_ = false;
     }
+    void set_marks(std::vector<std::pair<double, std::string>> marks) override
+    {
+        marks_ = std::move(marks);
+        set_scale_marks(GTK_SCALE(w_), map_, marks_);
+    }
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
 
 private:
     slider_map map_;
+    std::vector<std::pair<double, std::string>> marks_;
     int digits_;
     bool quiet_ = false;
     std::function<void(double)> changed_;

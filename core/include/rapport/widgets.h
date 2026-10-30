@@ -501,6 +501,9 @@ public:
     virtual double value() const = 0;
     virtual void set_value(double) = 0;  // doesn't fire on_changed
     virtual void set_range(double min, double max) = 0;
+    // The ticks (spec::slider::marks), for a slider whose notable values
+    // change: the value as it was, say.
+    virtual void set_marks(std::vector<std::pair<double, std::string>> marks) = 0;
     virtual void on_changed(std::function<void(double)>) = 0;
 };
 

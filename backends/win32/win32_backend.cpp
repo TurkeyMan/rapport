@@ -2346,6 +2346,7 @@ public:
         , max_(map_.track(s.max))
         , step_(s.step > 0 ? s.step : (max_ - min_) / 1000)
         , show_value_(s.show_value)
+        , snap_(s.snap)
         , digits_(s.digits)
     {
         adopt(create_control(win, parent, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP));
@@ -2373,7 +2374,7 @@ public:
     {
         const double t = std::clamp(map_.track(v), min_, max_);
         set_ = {t == map_.track(v) ? v : map_.value(t), std::lround((t - min_) / step_)};
-        SendMessageW(h_, TBM_SETPOS, TRUE, LPARAM(set_.second));
+        SendMessageW(h_, TBM_SETPOS, TRUE, set_.second);
         update_label();
     }
     void set_range(double mn, double mx) override
@@ -2384,9 +2385,19 @@ public:
         apply_range();
         set_value(v);
     }
-    void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
-    void scroll(WORD) override
+    void set_marks(std::vector<std::pair<double, std::string>> marks) override
     {
+        const bool ticks = !marks_.empty();
+        const double v = value();
+        marks_ = std::move(marks);
+        apply_range();
+        set_value(v);
+        if (ticks != !marks_.empty()) win_.relayout();  // ticks take height
+    }
+    void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
+    void scroll(WORD code) override
+    {
+        if (snap_ && (code == TB_THUMBTRACK || code == TB_THUMBPOSITION)) snap_to_mark();
         update_label();
         if (changed_) changed_(value());
     }
@@ -2412,12 +2423,27 @@ private:
         SendMessageW(h_, TBM_SETRANGEMIN, FALSE, 0);
         SendMessageW(h_, TBM_SETRANGEMAX, TRUE, n);
         SendMessageW(h_, TBM_CLEARTICS, FALSE, 0);
-        if (!marks_.empty())
-        {
-            SetWindowLongPtrW(h_, GWL_STYLE, (GetWindowLongPtrW(h_, GWL_STYLE) & ~TBS_NOTICKS) | TBS_BOTTOM);
-            for (auto& [at, label] : marks_)
-                SendMessageW(h_, TBM_SETTIC, 0, LPARAM(std::lround((map_.track(at) - min_) / step_)));
-        }
+        const LONG_PTR style = GetWindowLongPtrW(h_, GWL_STYLE) & ~(TBS_NOTICKS | TBS_BOTTOM);
+        SetWindowLongPtrW(h_, GWL_STYLE, style | (marks_.empty() ? TBS_NOTICKS : TBS_BOTTOM));
+        for (auto& [at, label] : marks_) SendMessageW(h_, TBM_SETTIC, 0, position_of(at));
+    }
+    LPARAM position_of(double v) const { return LPARAM(std::lround((std::clamp(map_.track(v), min_, max_) - min_) / step_)); }
+    // The thumb dragged within a few pixels of a mark lands on it: the
+    // mark's value exactly.
+    void snap_to_mark()
+    {
+        RECT channel{};
+        SendMessageW(h_, TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
+        const LRESULT positions = SendMessageW(h_, TBM_GETRANGEMAX, 0, 0);
+        if (positions <= 0 || channel.right <= channel.left) return;
+        const double reach = px(5) * double(positions) / (channel.right - channel.left);
+        const LRESULT pos = SendMessageW(h_, TBM_GETPOS, 0, 0);
+        const std::pair<double, std::string>* nearest = nullptr;
+        for (const auto& m : marks_)
+            if (!nearest || std::abs(position_of(m.first) - pos) < std::abs(position_of(nearest->first) - pos)) nearest = &m;
+        if (!nearest || std::abs(position_of(nearest->first) - pos) > reach) return;
+        set_ = {nearest->first, position_of(nearest->first)};
+        SendMessageW(h_, TBM_SETPOS, TRUE, set_.second);
     }
     void update_label()
     {
@@ -2430,7 +2456,7 @@ private:
     slider_map map_;
     double min_, max_, step_;  // along the track
     std::pair<double, LRESULT> set_{0, -1};  // the value last set, and its position
-    bool show_value_;
+    bool show_value_, snap_;
     int digits_;
     std::vector<std::pair<double, std::string>> marks_;
     HWND value_label_ = nullptr;

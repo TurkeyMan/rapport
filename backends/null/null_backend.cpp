@@ -253,6 +253,12 @@ private:
     double value_ = 0;
 };
 
+class null_slider : public null_value<rap::slider>
+{
+public:
+    void set_marks(std::vector<std::pair<double, std::string>>) override {}
+};
+
 class null_color_button : public stub<rap::color_button>
 {
 public:
@@ -527,7 +533,7 @@ private:
     {
         std::printf("slider %g..%g = %g", s.min, s.max, s.value);
         suffix(n);
-        make<null_value<rap::slider>>(n);
+        make<null_slider>(n);
     }
     void visit(const node& n, const spec::spin& s, int)
     {

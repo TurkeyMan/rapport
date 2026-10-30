@@ -511,9 +511,40 @@ private:
         return GTK_IS_SPIN_BUTTON(w) ? gtk_spin_button_get_value(GTK_SPIN_BUTTON(w))
                                      : gtk_range_get_value(GTK_RANGE(w));
     }
-    slider_map map_;
     bool quiet_ = false;
     std::function<void(double)> changed_;
+
+protected:
+    slider_map map_;
+};
+
+// A slider: value_impl with its marks, which it can snap to.
+class slider_impl : public value_impl<rap::slider>
+{
+public:
+    slider_impl(GtkWidget* scale, const spec::slider& s)
+        : value_impl(scale, s.map)
+        , marks_(s.marks)
+    {
+        set_scale_marks(GTK_SCALE(w_), map_, marks_);
+        if (s.snap)
+            connect(
+                w_, "change-value",
+                +[](GtkRange* r, GtkScrollType how, double t, gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<slider_impl*>(p);
+                    return snap_scale(r, gtk_widget_get_width(GTK_WIDGET(r)), self->map_, self->marks_, how, t);
+                },
+                this);
+    }
+    void set_marks(std::vector<std::pair<double, std::string>> marks) override
+    {
+        marks_ = std::move(marks);
+        set_scale_marks(GTK_SCALE(w_), map_, marks_);
+    }
+
+private:
+    std::vector<std::pair<double, std::string>> marks_;
 };
 
 // TODO(tortilla): GtkColorButton is deprecated since GTK 4.10 (GtkColorDialogButton).
@@ -4110,9 +4141,6 @@ private:
         gtk_scale_set_digits(GTK_SCALE(scale), s.digits);
         gtk_scale_set_draw_value(GTK_SCALE(scale), s.show_value);
         gtk_range_set_value(GTK_RANGE(scale), s.map.track(s.value));
-        for (auto& [at, label] : s.marks)
-            gtk_scale_add_mark(GTK_SCALE(scale), s.map.track(at), GTK_POS_BOTTOM,
-                               label.empty() ? nullptr : label.c_str());
         // The track is rounded to nothing (digits are the value's); the
         // label shows the value.
         if (s.map.to_value)
@@ -4128,7 +4156,7 @@ private:
                 new std::pair<slider_map, int>(s.map, s.digits),
                 +[](gpointer p) { delete static_cast<std::pair<slider_map, int>*>(p); });
         }
-        return add<value_impl<rap::slider>>(n, scale, s.map).outer();
+        return add<slider_impl>(n, scale, s).outer();
     }
 
     GtkWidget* make(const node& n, const spec::spin& s, orientation)
