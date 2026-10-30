@@ -614,43 +614,57 @@ private:
 class slider_impl : public widget_base<rap::slider>
 {
 public:
+    // The scale runs along the track (s.map); what it shows is the value.
     explicit slider_impl(const spec::slider& s)
-        : widget_base(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, s.min, s.max,
+        : widget_base(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, s.map.track(s.min), s.map.track(s.max),
                                      s.step > 0 ? s.step : 0.01))
+        , map_(s.map)
+        , digits_(s.digits)
     {
         gtk_range_set_increments(GTK_RANGE(w_), s.step, s.page);
         gtk_scale_set_digits(GTK_SCALE(w_), s.digits);
         gtk_scale_set_draw_value(GTK_SCALE(w_), s.show_value);
-        gtk_range_set_value(GTK_RANGE(w_), s.value);
+        gtk_range_set_value(GTK_RANGE(w_), map_.track(s.value));
         for (auto& [at, label] : s.marks)
-            gtk_scale_add_mark(GTK_SCALE(w_), at, GTK_POS_BOTTOM,
+            gtk_scale_add_mark(GTK_SCALE(w_), map_.track(at), GTK_POS_BOTTOM,
                                label.empty() ? nullptr : label.c_str());
+        if (map_.to_value)
+            connect(
+                w_, "format-value",
+                +[](GtkScale*, double t, gpointer p) -> gchar*
+                {
+                    auto* self = static_cast<slider_impl*>(p);
+                    return g_strdup_printf("%.*f", self->digits_, self->map_.value(t));
+                },
+                this);
         connect(
             w_, "value-changed",
-            +[](GtkRange* r, gpointer p)
+            +[](GtkRange*, gpointer p)
             {
                 auto* self = static_cast<slider_impl*>(p);
-                if (!self->quiet_ && self->changed_) self->changed_(gtk_range_get_value(r));
+                if (!self->quiet_ && self->changed_) self->changed_(self->value());
             },
             this);
     }
 
-    double value() const override { return gtk_range_get_value(GTK_RANGE(w_)); }
+    double value() const override { return map_.value(gtk_range_get_value(GTK_RANGE(w_))); }
     void set_value(double v) override
     {
         quiet_ = true;
-        gtk_range_set_value(GTK_RANGE(w_), v);
+        gtk_range_set_value(GTK_RANGE(w_), map_.track(v));
         quiet_ = false;
     }
     void set_range(double min, double max) override
     {
         quiet_ = true;
-        gtk_range_set_range(GTK_RANGE(w_), min, max);
+        gtk_range_set_range(GTK_RANGE(w_), map_.track(min), map_.track(max));
         quiet_ = false;
     }
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
 
 private:
+    slider_map map_;
+    int digits_;
     bool quiet_ = false;
     std::function<void(double)> changed_;
 };

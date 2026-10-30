@@ -2341,9 +2341,10 @@ class slider_impl : public leaf<rap::slider>
 public:
     slider_impl(win_context& win, HWND parent, const spec::slider& s)
         : leaf(win)
-        , min_(s.min)
-        , max_(s.max)
-        , step_(s.step > 0 ? s.step : (s.max - s.min) / 1000)
+        , map_(s.map)
+        , min_(map_.track(s.min))
+        , max_(map_.track(s.max))
+        , step_(s.step > 0 ? s.step : (max_ - min_) / 1000)
         , show_value_(s.show_value)
         , digits_(s.digits)
     {
@@ -2360,17 +2361,18 @@ public:
     {
         if (value_label_) DestroyWindow(value_label_);
     }
-    double value() const override { return min_ + double(SendMessageW(h_, TBM_GETPOS, 0, 0)) * step_; }
+    // The trackbar's positions are steps along the track from min_.
+    double value() const override { return map_.value(min_ + double(SendMessageW(h_, TBM_GETPOS, 0, 0)) * step_); }
     void set_value(double v) override
     {
-        SendMessageW(h_, TBM_SETPOS, TRUE, LPARAM(std::lround((std::clamp(v, min_, max_) - min_) / step_)));
+        SendMessageW(h_, TBM_SETPOS, TRUE, LPARAM(std::lround((std::clamp(map_.track(v), min_, max_) - min_) / step_)));
         update_label();
     }
     void set_range(double mn, double mx) override
     {
         const double v = value();
-        min_ = mn;
-        max_ = mx;
+        min_ = map_.track(mn);
+        max_ = map_.track(mx);
         apply_range();
         set_value(v);
     }
@@ -2406,7 +2408,7 @@ private:
         {
             SetWindowLongPtrW(h_, GWL_STYLE, (GetWindowLongPtrW(h_, GWL_STYLE) & ~TBS_NOTICKS) | TBS_BOTTOM);
             for (auto& [at, label] : marks_)
-                SendMessageW(h_, TBM_SETTIC, 0, LPARAM(std::lround((at - min_) / step_)));
+                SendMessageW(h_, TBM_SETTIC, 0, LPARAM(std::lround((map_.track(at) - min_) / step_)));
         }
     }
     void update_label()
@@ -2417,7 +2419,8 @@ private:
         SetWindowTextW(value_label_, buf);
     }
 
-    double min_, max_, step_;
+    slider_map map_;
+    double min_, max_, step_;  // along the track
     bool show_value_;
     int digits_;
     std::vector<std::pair<double, std::string>> marks_;

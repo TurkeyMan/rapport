@@ -171,6 +171,9 @@ struct slider
     int digits = 2;                  // shown value's decimals (if shown)
     bool show_value = false;
     std::vector<std::pair<double, std::string>> marks;  // ticks, optional labels
+    // A track uneven in the value: min, max, value, marks and the shown
+    // value are values, step and page in the track's units.
+    rap::slider_map map;
     std::function<void(double)> on_changed;
     rap::slider** bind = nullptr;
 };
@@ -1083,6 +1086,11 @@ public:
     slider& mark(double at, std::string label = {})
     {
         s().marks.emplace_back(at, std::move(label));
+        return *this;
+    }
+    slider& map(std::function<double(double)> to_track, std::function<double(double)> to_value)
+    {
+        s().map = {std::move(to_track), std::move(to_value)};
         return *this;
     }
     slider& on_changed(std::function<void(double)> f)

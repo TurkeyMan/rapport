@@ -1591,9 +1591,10 @@ public:
     explicit slider_impl(const spec::slider& s)
         : widget_base(new QWidget)
         , slider_(new QSlider(Qt::Horizontal))
-        , min_(s.min)
-        , max_(s.max)
-        , step_(s.step > 0 ? s.step : (s.max - s.min) / 1000)
+        , map_(s.map)
+        , min_(map_.track(s.min))
+        , max_(map_.track(s.max))
+        , step_(s.step > 0 ? s.step : (max_ - min_) / 1000)
         , digits_(s.digits)
     {
         auto* row = new QHBoxLayout(w_);
@@ -1612,7 +1613,8 @@ public:
         if (s.marks.size() >= 2)
         {
             slider_->setTickPosition(QSlider::TicksBelow);
-            slider_->setTickInterval(std::max(1, int(std::lround((s.marks[1].first - s.marks[0].first) / step_))));
+            slider_->setTickInterval(
+                std::max(1, int(std::lround((map_.track(s.marks[1].first) - map_.track(s.marks[0].first)) / step_))));
         }
         apply_range();
         set_value(s.value);
@@ -1623,19 +1625,20 @@ public:
                              if (!quiet_ && changed_) changed_(value());
                          });
     }
-    double value() const override { return min_ + slider_->value() * step_; }
+    // The QSlider's positions are steps along the track from min_.
+    double value() const override { return map_.value(min_ + slider_->value() * step_); }
     void set_value(double v) override
     {
         quiet_ = true;
-        slider_->setValue(int(std::lround((std::clamp(v, min_, max_) - min_) / step_)));
+        slider_->setValue(int(std::lround((std::clamp(map_.track(v), min_, max_) - min_) / step_)));
         quiet_ = false;
         show_value();
     }
     void set_range(double mn, double mx) override
     {
         const double v = value();
-        min_ = mn;
-        max_ = mx;
+        min_ = map_.track(mn);
+        max_ = map_.track(mx);
         apply_range();
         set_value(v);
     }
@@ -1655,7 +1658,8 @@ private:
 
     QSlider* slider_;
     QLabel* label_ = nullptr;
-    double min_, max_, step_;
+    slider_map map_;
+    double min_, max_, step_;  // along the track
     int digits_;
     bool quiet_ = false;
     std::function<void(double)> changed_;

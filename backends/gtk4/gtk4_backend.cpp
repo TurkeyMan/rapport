@@ -470,8 +470,10 @@ template <class Base>
 class value_impl : public widget_base<Base>
 {
 public:
-    explicit value_impl(GtkWidget* w)
+    // A slider's scale runs along its track (map); spins have none.
+    explicit value_impl(GtkWidget* w, slider_map map = {})
         : widget_base<Base>(w)
+        , map_(std::move(map))
     {
         this->connect(
             w, "value-changed",
@@ -482,14 +484,14 @@ public:
             },
             this);
     }
-    double value() const override { return gtk_range_or_spin_value(this->w_); }
+    double value() const override { return map_.value(gtk_range_or_spin_value(this->w_)); }
     void set_value(double v) override
     {
         quiet_ = true;
         if (GTK_IS_SPIN_BUTTON(this->w_))
             gtk_spin_button_set_value(GTK_SPIN_BUTTON(this->w_), v);
         else
-            gtk_range_set_value(GTK_RANGE(this->w_), v);
+            gtk_range_set_value(GTK_RANGE(this->w_), map_.track(v));
         quiet_ = false;
     }
     void set_range(double min, double max) override
@@ -498,7 +500,7 @@ public:
         if (GTK_IS_SPIN_BUTTON(this->w_))
             gtk_spin_button_set_range(GTK_SPIN_BUTTON(this->w_), min, max);
         else
-            gtk_range_set_range(GTK_RANGE(this->w_), min, max);
+            gtk_range_set_range(GTK_RANGE(this->w_), map_.track(min), map_.track(max));
         quiet_ = false;
     }
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
@@ -509,6 +511,7 @@ private:
         return GTK_IS_SPIN_BUTTON(w) ? gtk_spin_button_get_value(GTK_SPIN_BUTTON(w))
                                      : gtk_range_get_value(GTK_RANGE(w));
     }
+    slider_map map_;
     bool quiet_ = false;
     std::function<void(double)> changed_;
 };
@@ -4100,15 +4103,27 @@ private:
 
     GtkWidget* make(const node& n, const spec::slider& s, orientation)
     {
-        GtkWidget* scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, s.min, s.max,
-                                                    s.step > 0 ? s.step : 0.01);
+        // The scale runs along the track (s.map); what it shows is the value.
+        GtkWidget* scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, s.map.track(s.min),
+                                                    s.map.track(s.max), s.step > 0 ? s.step : 0.01);
+        gtk_range_set_increments(GTK_RANGE(scale), s.step, s.page);
         gtk_scale_set_digits(GTK_SCALE(scale), s.digits);
         gtk_scale_set_draw_value(GTK_SCALE(scale), s.show_value);
-        gtk_range_set_value(GTK_RANGE(scale), s.value);
+        gtk_range_set_value(GTK_RANGE(scale), s.map.track(s.value));
         for (auto& [at, label] : s.marks)
-            gtk_scale_add_mark(GTK_SCALE(scale), at, GTK_POS_BOTTOM,
+            gtk_scale_add_mark(GTK_SCALE(scale), s.map.track(at), GTK_POS_BOTTOM,
                                label.empty() ? nullptr : label.c_str());
-        return add<value_impl<rap::slider>>(n, scale).outer();
+        if (s.map.to_value)
+            gtk_scale_set_format_value_func(
+                GTK_SCALE(scale),
+                +[](GtkScale*, double t, gpointer p) -> char*
+                {
+                    const auto* f = static_cast<std::pair<slider_map, int>*>(p);
+                    return g_strdup_printf("%.*f", f->second, f->first.value(t));
+                },
+                new std::pair<slider_map, int>(s.map, s.digits),
+                +[](gpointer p) { delete static_cast<std::pair<slider_map, int>*>(p); });
+        return add<value_impl<rap::slider>>(n, scale, s.map).outer();
     }
 
     GtkWidget* make(const node& n, const spec::spin& s, orientation)

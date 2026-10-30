@@ -485,6 +485,16 @@ public:
 };
 
 // A value on a continuous range: horizontal track with a knob.
+// Where a value sits along a slider's track, and back, for a track that
+// isn't even in the value: a logarithmic one, say. Unset, the track is the
+// value.
+struct slider_map
+{
+    std::function<double(double)> to_track, to_value;
+    double track(double v) const { return to_track ? to_track(v) : v; }
+    double value(double t) const { return to_value ? to_value(t) : t; }
+};
+
 class slider : public widget
 {
 public:
