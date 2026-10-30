@@ -1625,12 +1625,20 @@ public:
                              if (!quiet_ && changed_) changed_(value());
                          });
     }
-    // The QSlider's positions are steps along the track from min_.
-    double value() const override { return map_.value(min_ + slider_->value() * step_); }
+    // The QSlider's positions are steps along the track from min_; a value
+    // set reads back as it was until the slider moves (between two steps,
+    // it would drift to the nearer).
+    double value() const override
+    {
+        const int pos = slider_->value();
+        return pos == set_.second ? set_.first : map_.value(min_ + pos * step_);
+    }
     void set_value(double v) override
     {
         quiet_ = true;
-        slider_->setValue(int(std::lround((std::clamp(map_.track(v), min_, max_) - min_) / step_)));
+        const double t = std::clamp(map_.track(v), min_, max_);
+        set_ = {t == map_.track(v) ? v : map_.value(t), int(std::lround((t - min_) / step_))};
+        slider_->setValue(set_.second);
         quiet_ = false;
         show_value();
     }
@@ -1660,6 +1668,7 @@ private:
     QLabel* label_ = nullptr;
     slider_map map_;
     double min_, max_, step_;  // along the track
+    std::pair<double, int> set_{0, -1};  // the value last set, and its position
     int digits_;
     bool quiet_ = false;
     std::function<void(double)> changed_;

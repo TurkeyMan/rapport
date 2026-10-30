@@ -628,7 +628,11 @@ public:
         for (auto& [at, label] : s.marks)
             gtk_scale_add_mark(GTK_SCALE(w_), map_.track(at), GTK_POS_BOTTOM,
                                label.empty() ? nullptr : label.c_str());
+        // The track is rounded to nothing (digits are the value's); the
+        // label shows the value.
         if (map_.to_value)
+        {
+            gtk_range_set_round_digits(GTK_RANGE(w_), -1);
             connect(
                 w_, "format-value",
                 +[](GtkScale*, double t, gpointer p) -> gchar*
@@ -637,6 +641,7 @@ public:
                     return g_strdup_printf("%.*f", self->digits_, self->map_.value(t));
                 },
                 this);
+        }
         connect(
             w_, "value-changed",
             +[](GtkRange*, gpointer p)

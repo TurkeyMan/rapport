@@ -2361,11 +2361,19 @@ public:
     {
         if (value_label_) DestroyWindow(value_label_);
     }
-    // The trackbar's positions are steps along the track from min_.
-    double value() const override { return map_.value(min_ + double(SendMessageW(h_, TBM_GETPOS, 0, 0)) * step_); }
+    // The trackbar's positions are steps along the track from min_; a value
+    // set reads back as it was until the slider moves (between two steps,
+    // it would drift to the nearer).
+    double value() const override
+    {
+        const LRESULT pos = SendMessageW(h_, TBM_GETPOS, 0, 0);
+        return pos == set_.second ? set_.first : map_.value(min_ + double(pos) * step_);
+    }
     void set_value(double v) override
     {
-        SendMessageW(h_, TBM_SETPOS, TRUE, LPARAM(std::lround((std::clamp(map_.track(v), min_, max_) - min_) / step_)));
+        const double t = std::clamp(map_.track(v), min_, max_);
+        set_ = {t == map_.track(v) ? v : map_.value(t), std::lround((t - min_) / step_)};
+        SendMessageW(h_, TBM_SETPOS, TRUE, LPARAM(set_.second));
         update_label();
     }
     void set_range(double mn, double mx) override
@@ -2421,6 +2429,7 @@ private:
 
     slider_map map_;
     double min_, max_, step_;  // along the track
+    std::pair<double, LRESULT> set_{0, -1};  // the value last set, and its position
     bool show_value_;
     int digits_;
     std::vector<std::pair<double, std::string>> marks_;

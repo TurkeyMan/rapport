@@ -4113,7 +4113,11 @@ private:
         for (auto& [at, label] : s.marks)
             gtk_scale_add_mark(GTK_SCALE(scale), s.map.track(at), GTK_POS_BOTTOM,
                                label.empty() ? nullptr : label.c_str());
+        // The track is rounded to nothing (digits are the value's); the
+        // label shows the value.
         if (s.map.to_value)
+        {
+            gtk_range_set_round_digits(GTK_RANGE(scale), -1);
             gtk_scale_set_format_value_func(
                 GTK_SCALE(scale),
                 +[](GtkScale*, double t, gpointer p) -> char*
@@ -4123,6 +4127,7 @@ private:
                 },
                 new std::pair<slider_map, int>(s.map, s.digits),
                 +[](gpointer p) { delete static_cast<std::pair<slider_map, int>*>(p); });
+        }
         return add<value_impl<rap::slider>>(n, scale, s.map).outer();
     }
 
