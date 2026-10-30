@@ -7031,6 +7031,20 @@ public:
     {
         quit_ = true;
         code_ = code;
+        // A system dialog open (print, files, a message) runs a loop of its
+        // own, which the quit doesn't end: it's cancelled, as its close box
+        // would, and the quit comes once it has returned (WM_QUIT waits for
+        // the messages posted before it).
+        EnumThreadWindows(
+            GetCurrentThreadId(),
+            [](HWND h, LPARAM) -> BOOL
+            {
+                wchar_t cls[8] = {};
+                if (IsWindowVisible(h) && GetClassNameW(h, cls, 8) && std::wcscmp(cls, L"#32770") == 0)
+                    PostMessageW(h, WM_CLOSE, 0, 0);
+                return TRUE;
+            },
+            0);
         PostQuitMessage(code);
     }
     void post(std::function<void()> f) override
