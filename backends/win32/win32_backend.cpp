@@ -12,6 +12,7 @@
 #include <d3d11.h>
 #include <d3d11_4.h>
 #include <d2d1_1.h>
+#include <dcomp.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <format>
@@ -519,6 +520,9 @@ SIZE text_extent(HWND h, const std::wstring& s, bool multiline = false, int max_
 struct move_batch
 {
     std::map<HWND, std::vector<std::pair<HWND, RECT>>> moves;  // parent -> its children's moves
+    // For a size the window doesn't have yet (see window::resize): nothing
+    // moves, and canvases draw for where they'll be.
+    bool ahead = false;
 };
 move_batch* g_moves = nullptr;
 
@@ -545,6 +549,7 @@ bool placed_at(HWND h, int x, int y, int w, int hgt)
 // Now, for containers that size their contents from their own client area.
 void move_now(HWND h, int x, int y, int w, int hgt)
 {
+    if (g_moves && g_moves->ahead) return;
     if (!placed_at(h, x, y, w, hgt)) SetWindowPos(h, nullptr, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
@@ -561,14 +566,15 @@ void move_control(HWND h, int x, int y, int w, int hgt)
 class moves_in_one_pass
 {
 public:
-    moves_in_one_pass()
+    explicit moves_in_one_pass(bool ahead = false)
     {
-        if (!g_moves) g_moves = &batch_, owner_ = true;
+        if (!g_moves) g_moves = &batch_, owner_ = true, batch_.ahead = ahead;
     }
     ~moves_in_one_pass()
     {
         if (!owner_) return;
         g_moves = nullptr;
+        if (batch_.ahead) return;
         for (auto& [parent, list] : batch_.moves)
         {
             HDWP dwp = BeginDeferWindowPos(int(list.size()));
@@ -4682,8 +4688,8 @@ private:
 
 // -- frames -------------------------------------------------------------------
 
-// One display-paced clock for every frame subscriber: a thread waits on the
-// compositor (DwmFlush) and posts a tick to the UI thread.
+// One display-paced clock for every frame subscriber: a thread waits for the
+// compositor's next frame and posts a tick to the UI thread.
 class frame_clock
 {
 public:
@@ -4727,12 +4733,40 @@ private:
         thread_ = std::thread(
             [this]
             {
+                const com<IDXGIOutput> display = compositor_clock() ? com<IDXGIOutput>() : main_display();
                 while (running_)
                 {
-                    if (FAILED(DwmFlush())) Sleep(16);
+                    wait_for_frame(display.get());
                     if (!pending_.exchange(true)) PostMessageW(target_, wm_rapport_frame, 0, 0);
                 }
             });
+    }
+    // DwmFlush doesn't pace it: with canvases on composition swap chains
+    // (gpu_target) it returns at once. The compositor's clock (Windows 11),
+    // or the main display's refresh.
+    using compositor_clock_fn = DWORD(WINAPI*)(UINT, const HANDLE*, DWORD);
+    static compositor_clock_fn compositor_clock()
+    {
+        static const auto fn = reinterpret_cast<compositor_clock_fn>(reinterpret_cast<void*>(
+            GetProcAddress(GetModuleHandleW(L"dcomp.dll"), "DCompositionWaitForCompositorClock")));
+        return fn;
+    }
+    static com<IDXGIOutput> main_display()
+    {
+        com<IDXGIFactory1> factory;
+        com<IDXGIAdapter1> adapter;
+        com<IDXGIOutput> output;
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(factory.put()))) &&
+            SUCCEEDED(factory->EnumAdapters1(0, adapter.put())))
+            adapter->EnumOutputs(0, output.put());
+        return output;
+    }
+    static void wait_for_frame(IDXGIOutput* display)
+    {
+        if (compositor_clock())
+            compositor_clock()(0, nullptr, 100);  // 100 ms at most, whatever the compositor does
+        else if (!display || FAILED(display->WaitForVBlank()))
+            Sleep(16);
     }
     void stop_thread()
     {
@@ -4768,6 +4802,7 @@ struct gpu_shared
     com<ID3D11Device> d3d;
     com<IDXGIFactory2> dxgi;
     com<ID2D1Device> d2d;
+    com<IDCompositionDevice> dcomp;  // canvases' swap chains in their windows (see gpu_target)
     uint64_t key = 0;   // its bitmaps' (see new_resource_key)
     uint64_t luid = 0;  // its adapter's, for frame_target::device
     // rap::gpu over the same device, for apps' passes, made when an app
@@ -4835,7 +4870,9 @@ private:
             FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory1), nullptr,
                                      reinterpret_cast<void**>(factory.put()))) ||
             FAILED(factory->CreateDevice(dxgi_device.get(), d->d2d.put())) ||
-            FAILED(factory->QueryInterface(__uuidof(ID2D1Multithread), reinterpret_cast<void**>(d->lock.put()))))
+            FAILED(factory->QueryInterface(__uuidof(ID2D1Multithread), reinterpret_cast<void**>(d->lock.put()))) ||
+            FAILED(DCompositionCreateDevice(dxgi_device.get(), __uuidof(IDCompositionDevice),
+                                            reinterpret_cast<void**>(d->dcomp.put()))))
             return nullptr;
         DXGI_ADAPTER_DESC desc{};
         if (SUCCEEDED(adapter->GetDesc(&desc)))
@@ -4844,10 +4881,24 @@ private:
     }
 };
 
-// A canvas's drawing on the GPU's device: a swap chain for its window.
+// A canvas's drawing on the GPU's device: a swap chain in its window,
+// through DirectComposition. The window's own kind (CreateSwapChainForHwnd)
+// is scaled to the window by the compositor, and nothing ties a resize to
+// the frame for it: the last frame shows stretched until the next lands.
+// This one is never scaled: as big as the canvas has been, cleared where the
+// canvas doesn't reach, and cut to the window. A frame drawn at a size before
+// the window takes it (window::resize) then shows whole as the window does.
 class gpu_target
 {
 public:
+    ~gpu_target()
+    {
+        // Out of the window at once: what's drawn there next (on the CPU,
+        // after a lost device) shows only once the visual's gone.
+        if (!target_) return;
+        target_->SetRoot(nullptr);
+        dev_->dcomp->Commit();
+    }
     static std::unique_ptr<gpu_target> make(std::shared_ptr<gpu_shared> dev, HWND h, UINT w, UINT hgt)
     {
         auto t = std::unique_ptr<gpu_target>(new gpu_target(std::move(dev)));
@@ -4860,7 +4911,11 @@ public:
         desc.BufferCount = 2;
         desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-        if (FAILED(t->dev_->dxgi->CreateSwapChainForHwnd(t->dev_->d3d.get(), h, &desc, nullptr, nullptr, t->swap_.put())) ||
+        if (FAILED(t->dev_->dxgi->CreateSwapChainForComposition(t->dev_->d3d.get(), &desc, nullptr, t->swap_.put())) ||
+            FAILED(t->dev_->dcomp->CreateTargetForHwnd(h, TRUE, t->target_.put())) ||
+            FAILED(t->dev_->dcomp->CreateVisual(t->visual_.put())) ||
+            FAILED(t->visual_->SetContent(t->swap_.get())) ||
+            FAILED(t->target_->SetRoot(t->visual_.get())) ||
             FAILED(t->dev_->d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, t->dc_.put())) ||
             !t->bind())
             return nullptr;
@@ -4868,10 +4923,13 @@ public:
         return t;
     }
     const std::shared_ptr<gpu_shared>& device() const { return dev_; }
+    // Drawing for a canvas of w x h: the buffers grow to hold it, and never
+    // shrink (what's past the canvas is cleared, and cut off by the window).
     ID2D1DeviceContext* begin(UINT w, UINT h)
     {
-        if (w != w_ || h != h_)
+        if (w > w_ || h > h_)
         {
+            w = std::max(w, w_), h = std::max(h, h_);
             dc_->SetTarget(nullptr);
             if (FAILED(swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)) || !bind()) return nullptr;
             w_ = w, h_ = h;
@@ -4884,6 +4942,8 @@ public:
     {
         if (dc_->EndDraw() == D2DERR_RECREATE_TARGET) return false;
         const HRESULT hr = swap_->Present(0, 0);
+        // Into the window with its first frame, not blank before it.
+        if (!committed_) committed_ = SUCCEEDED(dev_->dcomp->Commit());
         return hr != DXGI_ERROR_DEVICE_REMOVED && hr != DXGI_ERROR_DEVICE_RESET;
     }
 
@@ -4908,8 +4968,11 @@ private:
 
     std::shared_ptr<gpu_shared> dev_;
     com<IDXGISwapChain1> swap_;
+    com<IDCompositionTarget> target_;
+    com<IDCompositionVisual> visual_;
     com<ID2D1DeviceContext> dc_;
     UINT w_ = 0, h_ = 0;
+    bool committed_ = false;
 };
 
 class canvas_impl : public leaf<rap::canvas>
@@ -4946,10 +5009,23 @@ public:
     size_f size() const override
     {
         win_.flush_layout();
-        RECT r;
-        GetClientRect(h_, &r);
+        const SIZE px = pixels();
         const float s = win_.scale();
-        return {r.right / s, r.bottom / s};
+        return {px.cx / s, px.cy / s};
+    }
+    // Laid out ahead of the window's resize (see move_batch), it draws for
+    // the new size where it is; moved there, it has drawn for it already.
+    void place(RECT r) override
+    {
+        if (g_moves && g_moves->ahead)
+        {
+            ahead_ = SIZE{r.right - r.left, r.bottom - r.top};
+            sized();
+            return;
+        }
+        ahead_.reset();
+        leaf::place(r);
+        if (placed_at(h_, r.left, r.top, r.right - r.left, r.bottom - r.top)) sized();  // not moved after all
     }
     float device_scale() const override { return win_.scale(); }
     void set_cursor(cursor c) override
@@ -5172,8 +5248,7 @@ private:
             return 0;
         case WM_SIZE:
             if (cpu_) cpu_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));  // the GPU's resizes as it draws
-            if (resize_) resize_(size());
-            if (frame_target_) frame_target_(target());
+            sized();
             return 0;
         case WM_LBUTTONDOWN:
         case WM_LBUTTONDBLCLK: press(lp, 1); return 0;
@@ -5239,12 +5314,29 @@ private:
         return 0;
     }
 
+    // Its size in pixels: the one it's drawing for.
+    SIZE pixels() const
+    {
+        if (ahead_) return *ahead_;
+        RECT r;
+        GetClientRect(h_, &r);
+        return {r.right, r.bottom};
+    }
+    // The app hears of a size once, whether ahead of the window or as it comes.
+    void sized()
+    {
+        const SIZE px = pixels();
+        if (px.cx == told_.cx && px.cy == told_.cy) return;
+        told_ = px;
+        if (resize_) resize_(size());
+        if (frame_target_) frame_target_(target());
+    }
+
     // On the GPU's device when there is one (see gpu), on the CPU until then.
     void render()
     {
-        RECT r;
-        GetClientRect(h_, &r);
-        const UINT w = UINT(std::max<LONG>(r.right, 1)), h = UINT(std::max<LONG>(r.bottom, 1));
+        const SIZE px = pixels();
+        const UINT w = UINT(std::max<LONG>(px.cx, 1)), h = UINT(std::max<LONG>(px.cy, 1));
         // The first frame doesn't wait for the GPU: it's on the CPU, and the
         // GPU's device starts after it.
         const std::shared_ptr<gpu_shared> dev = gpu::device(painted_);
@@ -5394,6 +5486,8 @@ private:
     com<ID2D1HwndRenderTarget> cpu_;
     uint64_t cpu_key_ = 0;
     bool painted_ = false;
+    std::optional<SIZE> ahead_;  // the size laid out for, before the window has it (see place)
+    SIZE told_{};                // the size the app last heard of
     cursor cursor_ = cursor::default_;
     bool inside_ = false;
     int clicks_ = 0, last_button_ = 0;
@@ -5556,11 +5650,10 @@ public:
     {
         relayout_pending_ = false;
         if (!root) return;
-        RECT r;
-        GetClientRect(hwnd_, &r);
+        RECT r = client();
         const int m = margin();
         InflateRect(&r, -m, -m);
-        moves_in_one_pass batch;
+        moves_in_one_pass batch(ahead_.has_value());
         root->show_all(true);
         root->place(r);
     }
@@ -5675,26 +5768,43 @@ public:
     }
     size_f size() const override
     {
-        RECT r;
-        GetClientRect(hwnd_, &r);
+        const RECT r = client();
         const float s = scale();
         return {r.right / s, r.bottom / s};
+    }
+    // The client area, or the one it's about to have (see resize).
+    RECT client() const
+    {
+        if (ahead_) return *ahead_;
+        RECT r;
+        GetClientRect(hwnd_, &r);
+        return r;
     }
     void resize(size_f sz) override
     {
         if (fullscreen_ || IsZoomed(hwnd_)) return;
         RECT r{0, 0, px(sz.w), px(sz.h)};
         if (!shown_once_) requested_ = SIZE{r.right, r.bottom};
+        // Canvases draw for the new size before the window takes it (cut to
+        // the window meanwhile, not scaled: see gpu_target), so its first
+        // frame at that size has their new content. Nothing ties a window's
+        // resize to its content's frame: drawn after, the last frame showed
+        // stretched for several refreshes.
+        const bool ahead = root && IsWindowVisible(hwnd_);
+        if (ahead)
+        {
+            ahead_ = r;
+            layout_now();
+            RedrawWindow(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+            ahead_.reset();
+        }
         adjust(r);
         RECT now;
         GetWindowRect(hwnd_, &now);
-        // What's waiting to be painted (a new image, say, at the old size)
-        // is painted first: while the resize goes through, the compositor
-        // shows the last frame for a refresh or two, and it should be the
-        // new content, not what came before it. (Painting during the resize
-        // doesn't help: that frame shows, then the old one, then it again.)
-        RedrawWindow(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
         place_on_screen(now.left, now.top, r.right - r.left, r.bottom - r.top);
+        // Laid out for the size it got: done in WM_SIZE if that changed
+        // (normally to what was drawn for: nothing moves), but not if not.
+        if (ahead) layout_now();
     }
     void set_min_size(size_f s) override { min_size_ = s; }
     std::optional<point_f> position() const override
@@ -6109,6 +6219,7 @@ private:
     bool dialog_, margins_, modal_spec_;
     bool modal_ = false, finished_ = false, shown_once_ = false, fullscreen_ = false, relayout_pending_ = false;
     bool painted_once_ = false;  // painted as it was first shown (see show)
+    std::optional<RECT> ahead_;  // the client area being laid out for, before the window has it (see resize)
     static constexpr UINT_PTR deferred_timer = 0xDEF;
     std::optional<SIZE> requested_;  // client size from resize() before the first show
     bool placed_ = false;            // move()d by the app: left where it put it
