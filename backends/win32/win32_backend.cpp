@@ -3584,7 +3584,10 @@ private:
                 if (rr.bottom <= clip.top) continue;
                 const bool selected = ListView_GetItemState(h_, row, LVIS_SELECTED) & LVIS_SELECTED;
                 const row_colors colors = colors_for_row(selected, row == hot_);
-                fill(RECT{clip.left, rr.top, clip.right, rr.bottom}, colors.background);
+                // Across the columns only, as the list_view repaints a row
+                // whose state changes: filled past them (a window wider than
+                // its columns), a strip stayed behind when it was deselected.
+                fill(rr, colors.background);
 
                 for (const span& sp : spans)
                 {
