@@ -83,6 +83,32 @@ static void rapport_rows_init(RapportRows* self)
     self->live = g_hash_table_new(g_direct_hash, g_direct_equal);
 }
 
+// A list cell's box, which paints the model's background across the
+// whole cell (its padding too: the cell clips to itself), as GTK 3 and Qt
+// fill theirs, rather than behind the text alone. Not on selected rows.
+G_DECLARE_FINAL_TYPE(RapportCell, rapport_cell, RAPPORT, CELL, GtkBox)
+struct _RapportCell
+{
+    GtkBox parent_instance;
+};
+G_DEFINE_TYPE(RapportCell, rapport_cell, GTK_TYPE_BOX)
+
+static void rapport_cell_snapshot(GtkWidget* w, GtkSnapshot* s)
+{
+    auto* bg = static_cast<GdkRGBA*>(g_object_get_data(G_OBJECT(w), "rapport-bg"));
+    GtkWidget* cell = gtk_widget_get_parent(w);
+    graphene_rect_t r;
+    if (bg && cell && !(gtk_widget_get_state_flags(w) & GTK_STATE_FLAG_SELECTED) &&
+        gtk_widget_compute_bounds(cell, w, &r))
+        gtk_snapshot_append_color(s, bg, &r);
+    GTK_WIDGET_CLASS(rapport_cell_parent_class)->snapshot(w, s);
+}
+static void rapport_cell_class_init(RapportCellClass* c)
+{
+    GTK_WIDGET_CLASS(c)->snapshot = rapport_cell_snapshot;
+}
+static void rapport_cell_init(RapportCell*) {}
+
 // Items at `from` and after move by `by` rows.
 static void rapport_rows_renumber(RapportRows* self, guint from, gint by)
 {
@@ -2853,7 +2879,8 @@ private:
             gtk_widget_set_hexpand(label, true);
             GtkWidget* image = gtk_image_new();
             gtk_widget_set_visible(image, false);
-            child = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+            child = GTK_WIDGET(g_object_new(rapport_cell_get_type(), "orientation",
+                                            GTK_ORIENTATION_HORIZONTAL, "spacing", 4, nullptr));
             gtk_widget_set_margin_top(child, 2);
             gtk_widget_set_margin_bottom(child, 2);
             if (checks_ && ctx.column == 0)
@@ -2928,7 +2955,21 @@ private:
         gtk_image_set_from_gicon(image, gicon);
         gtk_widget_set_visible(GTK_WIDGET(image), gicon != nullptr);
         gtk_label_set_text(label, model_->text(row, ctx.column).c_str());
-        PangoAttrList* attrs = pango_attrs(GTK_WIDGET(label), model_->style(row, ctx.column));
+        // The background is the cell's, painted by its box; the rest styles
+        // the text.
+        text_style style = model_->style(row, ctx.column);
+        if (style.bg)
+        {
+            const color c = resolve(GTK_WIDGET(label), *style.bg);
+            auto* bg = g_new(GdkRGBA, 1);
+            *bg = {c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
+            g_object_set_data_full(G_OBJECT(child), "rapport-bg", bg, g_free);
+        }
+        else
+            g_object_set_data(G_OBJECT(child), "rapport-bg", nullptr);
+        style.bg.reset();
+        gtk_widget_queue_draw(child);
+        PangoAttrList* attrs = pango_attrs(GTK_WIDGET(label), style);
         gtk_label_set_attributes(label, attrs);
         if (attrs) pango_attr_list_unref(attrs);
     }
