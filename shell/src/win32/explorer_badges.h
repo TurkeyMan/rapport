@@ -7,9 +7,14 @@
 
 #include <atomic>
 #include <string>
+#include <string_view>
 
 namespace rap::shell::detail
 {
+
+std::wstring wide(std::string_view);
+// A REG_SZ value of `key` under `root`, the key made if need be.
+bool set_value(HKEY root, const std::wstring& key, const wchar_t* name, const std::wstring& value);
 
 // Live COM objects and server locks, for DllCanUnloadNow.
 std::atomic<long>& objects();

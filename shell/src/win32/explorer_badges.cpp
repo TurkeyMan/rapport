@@ -31,14 +31,6 @@ namespace
 const wchar_t k_overlays[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellIconOverlayIdentifiers\\";
 
-std::wstring wide(std::string_view s)
-{
-    if (s.empty()) return {};
-    std::wstring w(MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), int(w.size()));
-    return w;
-}
-
 // The provider the overlays share, made on first use: badge() is asked from
 // Explorer's icon threads at once, which the provider is told to allow.
 provider& shared_provider()
@@ -87,6 +79,24 @@ std::wstring registry_name(size_t i)
     return L"    " + wide(this_extension.name) + std::to_wstring(i + 1) + id;
 }
 
+// The provider's badge for `path`. Explorer asks each overlay class in turn
+// about an icon, on one thread, so the last answer on this thread is kept a
+// moment for the others rather than asked again.
+std::string badge_of(LPCWSTR path)
+{
+    struct last
+    {
+        std::wstring path;
+        std::string id;
+        ULONGLONG at = 0;
+    };
+    thread_local last kept;
+    const ULONGLONG now = GetTickCount64();
+    if (kept.path == path && now - kept.at < 250) return kept.id;
+    kept = {path, shared_provider().badge(std::filesystem::path(path)), now};
+    return kept.id;
+}
+
 class overlay final : public IShellIconOverlayIdentifier
 {
 public:
@@ -121,8 +131,7 @@ public:
     try
     {
         if (!path) return S_FALSE;
-        return shared_provider().badge(std::filesystem::path(path)) == kinds()[kind_].id ? S_OK
-                                                                                         : S_FALSE;
+        return badge_of(path) == kinds()[kind_].id ? S_OK : S_FALSE;
     }
     catch (...)
     {
@@ -208,18 +217,6 @@ private:
     std::atomic<ULONG> refs_{1};
     size_t kind_;
 };
-
-bool set_value(HKEY root, const std::wstring& key, const wchar_t* name, const std::wstring& value)
-{
-    HKEY k = nullptr;
-    if (RegCreateKeyExW(root, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, nullptr,
-                        &k, nullptr) != ERROR_SUCCESS)
-        return false;
-    const LONG r = RegSetValueExW(k, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
-                                  DWORD((value.size() + 1) * sizeof(wchar_t)));
-    RegCloseKey(k);
-    return r == ERROR_SUCCESS;
-}
 
 }  // namespace
 

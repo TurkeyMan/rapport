@@ -23,17 +23,11 @@ namespace
 {
 
 using rap::shell::menu_item;
+using rap::shell::detail::set_value;
+using rap::shell::detail::wide;
 
 std::atomic<long>& g_objects = rap::shell::detail::objects();
 std::atomic<long>& g_locks = rap::shell::detail::locks();
-
-std::wstring wide(std::string_view s)
-{
-    if (s.empty()) return {};
-    std::wstring w(MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), int(w.size()));
-    return w;
-}
 
 std::string narrow(std::wstring_view w)
 {
@@ -384,18 +378,6 @@ const wchar_t* const k_handler_parents[] = {
 const wchar_t k_approved[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Shell Extensions\\Approved";
 
-bool set_value(HKEY root, const std::wstring& key, const wchar_t* name, const std::wstring& value)
-{
-    HKEY k = nullptr;
-    if (RegCreateKeyExW(root, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, nullptr,
-                        &k, nullptr) != ERROR_SUCCESS)
-        return false;
-    const LONG r = RegSetValueExW(k, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
-                                  DWORD((value.size() + 1) * sizeof(wchar_t)));
-    RegCloseKey(k);
-    return r == ERROR_SUCCESS;
-}
-
 std::wstring module_path()
 {
     HMODULE self = nullptr;
@@ -427,6 +409,26 @@ std::atomic<long>& locks()
 {
     static std::atomic<long> n{0};
     return n;
+}
+
+std::wstring wide(std::string_view s)
+{
+    if (s.empty()) return {};
+    std::wstring w(MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), int(w.size()));
+    return w;
+}
+
+bool set_value(HKEY root, const std::wstring& key, const wchar_t* name, const std::wstring& value)
+{
+    HKEY k = nullptr;
+    if (RegCreateKeyExW(root, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, nullptr,
+                        &k, nullptr) != ERROR_SUCCESS)
+        return false;
+    const LONG r = RegSetValueExW(k, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                                  DWORD((value.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(k);
+    return r == ERROR_SUCCESS;
 }
 
 }  // namespace rap::shell::detail
