@@ -327,6 +327,7 @@ public:
     void set_fullscreen(bool on) override { fullscreen_ = on; }
     void on_fullscreen_changed(std::function<void(bool)>) override {}
     void set_icon(const icon&) override {}
+    void set_app_id(const std::string&) override {}
     void set_menu_bar_visible(bool) override {}
     void on_key(std::function<bool(const key_event&)>) override {}
 

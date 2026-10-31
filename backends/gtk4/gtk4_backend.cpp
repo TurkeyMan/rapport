@@ -3733,6 +3733,7 @@ public:
         if (!icon.name.empty()) gtk_window_set_icon_name(GTK_WINDOW(win_), icon.name.c_str());
     }
     void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
+    void set_app_id(const std::string&) override {}  // the process's (.desktop), not a window's
     void set_menu_bar_visible(bool on) override
     {
         menu_bar_wanted = on;

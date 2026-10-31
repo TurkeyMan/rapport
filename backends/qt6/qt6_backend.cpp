@@ -3648,6 +3648,7 @@ public:
         if (icon.draw) frame_->setWindowIcon(drawn_icon(icon.draw, 256, frame_));
     }
 
+    void set_app_id(const std::string&) override {}  // the process's (.desktop), not a window's
     void set_menu_bar_visible(bool on) override
     {
         menu_bar_wanted_ = on;
