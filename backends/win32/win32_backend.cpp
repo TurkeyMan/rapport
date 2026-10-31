@@ -18,6 +18,7 @@
 #include <format>
 #include <ole2.h>
 #include <oleacc.h>
+#include <propsys.h>
 #include <richedit.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -6368,6 +6369,27 @@ public:
         }
         SetMenu(hwnd_, menu_bar_);
     }
+    void set_app_id(const std::string& id) override
+    {
+        // PKEY_AppUserModel_ID, spelled out: propkey.h's needs propsys.lib.
+        static const PROPERTYKEY app_user_model_id{
+            {0x9F4C2855, 0x9F79, 0x4B39, {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}}, 5};
+        com<IPropertyStore> store;
+        if (FAILED(SHGetPropertyStoreForWindow(hwnd_, __uuidof(IPropertyStore), reinterpret_cast<void**>(store.put()))))
+            return;
+        PROPVARIANT v{};  // VT_EMPTY: the app's group again
+        const std::wstring w = wide(id);
+        if (!w.empty())
+            if (auto* copy = static_cast<wchar_t*>(CoTaskMemAlloc((w.size() + 1) * sizeof(wchar_t))))
+            {
+                std::memcpy(copy, w.c_str(), (w.size() + 1) * sizeof(wchar_t));
+                v.vt = VT_LPWSTR;
+                v.pwszVal = copy;
+            }
+        store->SetValue(app_user_model_id, v);
+        PropVariantClear(&v);
+        app_id_ = !w.empty();
+    }
     void set_menu_bar_visible(bool on) override
     {
         menu_bar_wanted_ = on;
@@ -6646,6 +6668,8 @@ private:
                 break;
             case WM_DESTROY:
                 if (last_shown() == self) last_shown() = nullptr;
+                // Windows asks for a window's own taskbar id back before it goes.
+                if (self->app_id_) self->set_app_id({});
                 break;
             }
         }
@@ -6696,6 +6720,7 @@ private:
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
+    bool app_id_ = false;  // a taskbar group of its own (set_app_id), cleared before it goes
 };
 
 // -- builder ------------------------------------------------------------------

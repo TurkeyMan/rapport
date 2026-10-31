@@ -1075,6 +1075,12 @@ public:
     virtual void set_fullscreen(bool) = 0;
     virtual void on_fullscreen_changed(std::function<void(bool)>) = 0;
     virtual void set_icon(const icon&) = 0;
+    // A taskbar group of the window's own, apart from the app's other
+    // windows, its button showing the window's icon (Windows: its
+    // AppUserModelID; best set before it shows, as the taskbar regroups a
+    // window whose id changes). Empty: the app's. Elsewhere nothing: a
+    // Wayland app_id is the process's, and finds its .desktop file.
+    virtual void set_app_id(const std::string&) = 0;
     // Shows or hides the menu bar (fullscreen views hide their chrome).
     virtual void set_menu_bar_visible(bool) = 0;
 

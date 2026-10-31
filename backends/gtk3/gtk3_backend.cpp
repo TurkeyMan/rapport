@@ -3921,6 +3921,7 @@ public:
         gtk_widget_show_all(top);
     }
 
+    void set_app_id(const std::string&) override {}  // the process's (.desktop), not a window's
     void set_menu_bar_visible(bool on) override
     {
         menu_bar_wanted_ = on;
