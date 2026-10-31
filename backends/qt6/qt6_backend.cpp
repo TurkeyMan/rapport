@@ -4629,23 +4629,47 @@ public:
     {
         QGuiApplication::clipboard()->setText(qs(s));
     }
-    // Under Wayland only the focused client gets the clipboard: wait
-    // (polling, 50 ms) for one of our windows to have the focus, a tick
-    // more, then read; after 1.5 s, read anyway. Elsewhere it's at once.
     void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
     {
-        auto read = [](const std::function<void(std::optional<std::string>)>& done)
-        {
-            const QMimeData* data = QGuiApplication::clipboard()->mimeData();
-            if (!data || !data->hasText()) return done(std::nullopt);
-            done(data->text().toStdString());
-        };
-        if (!QGuiApplication::platformName().startsWith("wayland")) return read(done);
+        when_clipboard_ours(
+            [done = std::move(done)]
+            {
+                const QMimeData* data = QGuiApplication::clipboard()->mimeData();
+                if (!data || !data->hasText()) return done(std::nullopt);
+                done(data->text().toStdString());
+            });
+    }
+    // Straight RGBA, which Qt converts to from whatever the image holds.
+    void read_clipboard_image(std::function<void(std::optional<sys::decoded_image>)> done) override
+    {
+        when_clipboard_ours(
+            [done = std::move(done)]
+            {
+                const QMimeData* data = QGuiApplication::clipboard()->mimeData();
+                if (!data || !data->hasImage()) return done(std::nullopt);
+                const QImage image =
+                    QGuiApplication::clipboard()->image().convertToFormat(QImage::Format_RGBA8888);
+                if (image.isNull()) return done(std::nullopt);
+                const int w = image.width(), h = image.height();
+                sys::decoded_image out{w, h, pixel_format::rgba8, {}};
+                out.pixels.resize(size_t(w) * h * 4);
+                for (int y = 0; y < h; ++y)
+                    std::memcpy(out.pixels.data() + size_t(y) * w * 4, image.constScanLine(y),
+                                size_t(w) * 4);
+                done(std::move(out));
+            });
+    }
+    // Under Wayland only the focused client gets the clipboard: wait
+    // (polling, 50 ms) for one of our windows to have the focus, a tick
+    // more, then `read`; after 1.5 s, read anyway. Elsewhere it's at once.
+    static void when_clipboard_ours(std::function<void()> read)
+    {
+        if (!QGuiApplication::platformName().startsWith("wayland")) return read();
         auto* timer = new QTimer(qApp);
         auto ticks = std::make_shared<int>(0);
         auto active = std::make_shared<bool>(false);
         QObject::connect(timer, &QTimer::timeout, timer,
-                         [timer, ticks, active, read, done = std::move(done)]
+                         [timer, ticks, active, read = std::move(read)]
                          {
                              const bool focused = QGuiApplication::focusWindow() != nullptr;
                              if (!*active && focused && ++*ticks < 30)
@@ -4656,7 +4680,7 @@ public:
                              if (!*active && ++*ticks < 30) return;
                              timer->stop();
                              timer->deleteLater();
-                             read(done);
+                             read();
                          });
         timer->start(50);
     }
