@@ -1,5 +1,6 @@
 // rapport shell: an app's entries in the file manager's context menu, and
-// (later) badges on its icons, through each platform's own extension point.
+// badges on its icons, through each platform's own extension point
+// (badges: Explorer so far).
 //
 // An app writes a provider, built with rapport_add_shell_extension() into an
 // extension the file manager loads: a COM DLL for Explorer, a plugin each for
@@ -45,7 +46,10 @@ struct menu_item
 struct badge_kind
 {
     std::string id;
-    std::string icon;  // as menu_item::icon
+    // As menu_item::icon. On Windows an .ico the size of a file icon, the
+    // badge drawn in its corner and the rest transparent: Explorer lays it
+    // over the file's icon at whatever size it draws.
+    std::string icon;
     int priority = 0;  // the higher wins where a platform shows only one
 };
 
@@ -60,9 +64,13 @@ public:
     virtual std::vector<menu_item> menu(const selection&) = 0;
     virtual void invoke(std::string_view id, const selection&) = 0;
 
+    // The same every time: Windows registers them when the extension is
+    // installed (at most 15, an Explorer limit shared with other apps).
     virtual std::vector<badge_kind> badge_kinds() const { return {}; }
-    // A badge_kind id, or empty. Asked for every icon drawn, so answer from a
-    // cache, never by doing the work.
+    // A badge_kind id, or empty. Asked for every icon drawn, by each badge
+    // kind in turn and from several threads at once, on one provider kept
+    // for the purpose: answer from a cache, thread-safely, never by doing
+    // the work.
     virtual std::string badge(const std::filesystem::path&) { return {}; }
 };
 
@@ -101,7 +109,8 @@ extern const extension_info this_extension;
 // For the app (or its installer): registers the extension module at `module`
 // with the file manager. On Windows, `user` is this user only (HKCU, no
 // elevation), and `machine` is every user (HKLM, elevated, as an installer
-// does). On Linux the plugins load only from system directories, so there
+// does); badges need `machine`, Explorer reading its overlays from HKLM
+// only, and show from the next sign-in. On Linux the plugins load only from system directories, so there
 // it's the package's job, and these return false.
 enum class scope
 {

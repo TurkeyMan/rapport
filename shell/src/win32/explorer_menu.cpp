@@ -4,6 +4,8 @@
 //
 // This runs inside explorer.exe: every entry point catches everything, and
 // the module links its C++ runtime statically (see rapport_add_shell_extension).
+#include "explorer_badges.h"
+
 #include <rapport/shell.h>
 
 #include <olectl.h>
@@ -22,8 +24,8 @@ namespace
 
 using rap::shell::menu_item;
 
-std::atomic<long> g_objects{0};
-std::atomic<long> g_locks{0};
+std::atomic<long>& g_objects = rap::shell::detail::objects();
+std::atomic<long>& g_locks = rap::shell::detail::locks();
 
 std::wstring wide(std::string_view s)
 {
@@ -412,6 +414,23 @@ std::wstring module_path()
 
 }  // namespace
 
+namespace rap::shell::detail
+{
+
+std::atomic<long>& objects()
+{
+    static std::atomic<long> n{0};
+    return n;
+}
+
+std::atomic<long>& locks()
+{
+    static std::atomic<long> n{0};
+    return n;
+}
+
+}  // namespace rap::shell::detail
+
 // -- exports (named in explorer.def) ----------------------------------------------
 
 STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void** out)
@@ -419,7 +438,7 @@ try
 {
     if (!out) return E_POINTER;
     *out = nullptr;
-    if (clsid != our_clsid()) return CLASS_E_CLASSNOTAVAILABLE;
+    if (clsid != our_clsid()) return rap::shell::detail::badge_class_object(clsid, riid, out);
     return g_factory.QueryInterface(riid, out);
 }
 catch (...)
@@ -447,6 +466,7 @@ HRESULT register_in(HKEY root)
     for (const wchar_t* parent : k_handler_parents)
         ok = ok && set_value(root, parent + name, nullptr, clsid);
     ok = ok && set_value(root, k_approved, clsid.c_str(), name);
+    ok = ok && rap::shell::detail::register_badges(root, path);
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return ok ? S_OK : SELFREG_E_CLASS;
 }
@@ -470,6 +490,7 @@ HRESULT unregister_in(HKEY root)
         RegDeleteValueW(k, clsid.c_str());
         RegCloseKey(k);
     }
+    rap::shell::detail::unregister_badges(root);
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return S_OK;
 }
