@@ -193,7 +193,7 @@ struct menu_item
     bool radio = false;           // a checkable item drawn as one of a group
     // Beside the label, at the toolkit's menu icon size, where the desktop
     // shows menu icons: Windows and Qt; GTK's menus have none (GNOME's way).
-    icon icon;
+    rap::icon icon;
 
     static menu_item separator() { return {}; }
     bool is_separator() const { return label.empty() && children.empty(); }
