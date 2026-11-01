@@ -411,7 +411,12 @@ private:
     {
         std::printf("form");
         suffix(n);
-        for (size_t i = 0; i < s.fields.size(); ++i) build(s.fields[i], d + 1, s.labels[i]);
+        for (size_t i = 0; i < s.fields.size(); ++i)
+        {
+            if (i < s.label_widgets.size() && s.label_widgets[i])
+                build(*s.label_widgets[i], d + 1, "label");
+            build(s.fields[i], d + 1, s.labels[i]);
+        }
     }
     void visit(const node& n, const spec::splitter& s, int d)
     {

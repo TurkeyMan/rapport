@@ -3975,6 +3975,14 @@ private:
                 gtk_widget_set_hexpand(field, true);
             else if (!gtk_widget_get_hexpand(field))
                 gtk_widget_set_halign(field, GTK_ALIGN_START);
+            if (i < s.label_widgets.size() && s.label_widgets[i])
+            {
+                GtkWidget* label = build(*s.label_widgets[i], orientation::horizontal);
+                gtk_widget_set_halign(label, GTK_ALIGN_START);
+                gtk_grid_attach(GTK_GRID(grid), label, 0, int(i), 1, 1);
+                gtk_grid_attach(GTK_GRID(grid), field, 1, int(i), 1, 1);
+                continue;
+            }
             if (s.labels[i].empty())
             {
                 gtk_grid_attach(GTK_GRID(grid), field, 0, int(i), 2, 1);

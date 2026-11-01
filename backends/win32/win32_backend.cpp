@@ -893,7 +893,8 @@ private:
 };
 
 // Labels right-aligned in the first column, fields in the second; an empty
-// label lets its field span both.
+// label lets its field span both. A widget for a label (a check) sits at the
+// column's start.
 class form_item : public item
 {
 public:
@@ -906,6 +907,7 @@ public:
     {
         item* label = nullptr;  // null: field spans both columns
         item* field = nullptr;
+        bool label_at_start = false;
     };
     std::vector<row> rows;
 
@@ -960,7 +962,9 @@ public:
             if (row.label)
             {
                 const SIZE l = row.label->natural();
-                row.label->place({r.left + label_w - l.cx, y + (row_h - l.cy) / 2, r.left + label_w, y + (row_h - l.cy) / 2 + l.cy});
+                const long lx = row.label_at_start ? r.left : r.left + label_w - l.cx;
+                row.label->place(
+                    {lx, y + (row_h - l.cy) / 2, lx + l.cx, y + (row_h - l.cy) / 2 + l.cy});
             }
             y += row_h + row_gap_;
         }
@@ -6826,7 +6830,12 @@ private:
         for (size_t i = 0; i < s.fields.size(); ++i)
         {
             form_item::row row;
-            if (i < s.labels.size() && !s.labels[i].empty())
+            if (i < s.label_widgets.size() && s.label_widgets[i])
+            {
+                row.label = build(*s.label_widgets[i], parent, orientation::horizontal);
+                row.label_at_start = true;
+            }
+            else if (i < s.labels.size() && !s.labels[i].empty())
             {
                 auto* l = own<label_impl>(win_, parent, spec::label{s.labels[i]});
                 row.label = l;

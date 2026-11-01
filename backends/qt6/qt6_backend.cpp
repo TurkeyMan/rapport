@@ -4018,7 +4018,17 @@ private:
             else if (policy.horizontalPolicy() & QSizePolicy::ExpandFlag)
                 policy.setHorizontalPolicy(QSizePolicy::Preferred);
             field->setSizePolicy(policy);
-            if (s.labels[i].empty())
+            if (i < s.label_widgets.size() && s.label_widgets[i])
+            {
+                // At the column's start, whatever side the style puts labels.
+                auto* holder = new QWidget;
+                auto* h = new QHBoxLayout(holder);
+                h->setContentsMargins(0, 0, 0, 0);
+                h->addWidget(build(*s.label_widgets[i], orientation::horizontal));
+                h->addStretch();
+                l->addRow(holder, field);
+            }
+            else if (s.labels[i].empty())
                 l->addRow(field);
             else
             {

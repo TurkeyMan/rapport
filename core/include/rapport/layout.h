@@ -35,7 +35,9 @@
 
 #include "widgets.h"
 
+#include <algorithm>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <utility>
 #include <variant>
@@ -80,6 +82,10 @@ struct form
 {
     std::vector<std::string> labels;
     nodes fields;
+    // Per row, a widget in the label column in place of the text, at the
+    // column's start (a check that turns its field on); null for the text.
+    // Empty when no row has one, else as long as `fields`.
+    std::vector<std::shared_ptr<const node>> label_widgets;
 };
 struct splitter
 {
@@ -464,7 +470,19 @@ public:
 
 struct form_row
 {
+    form_row(std::string label, node field)
+        : label(std::move(label))
+        , field(std::move(field))
+    {
+    }
+    // A widget for the label: {check{"Set author"}.bind(set), entry{}...}.
+    form_row(node label_widget, node field)
+        : label_widget(std::make_shared<const node>(std::move(label_widget)))
+        , field(std::move(field))
+    {
+    }
     std::string label;
+    std::shared_ptr<const node> label_widget;
     node field;
 };
 
@@ -477,7 +495,10 @@ public:
         {
             s().labels.push_back(r.label);
             s().fields.push_back(r.field);
+            s().label_widgets.push_back(r.label_widget);
         }
+        if (std::ranges::none_of(s().label_widgets, [](auto& w) { return bool(w); }))
+            s().label_widgets.clear();
     }
 };
 
