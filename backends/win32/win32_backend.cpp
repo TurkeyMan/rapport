@@ -3918,25 +3918,34 @@ private:
                             rt->DrawBitmap(bmp, D2D1::RectF(x, y, x + sz.width, y + sz.height));
                             icon_space = dip(check_lead()) - 4;
                         }
-                    if (const icon icon = model_->icon(size_t(row), sp.col); !icon.file.empty())
-                        if (ID2D1Bitmap* bmp = file_icon(rt, icon.file))
+                    // The shell's icon for the file's type, or the model's
+                    // drawing, before the text; its overlay over it.
+                    if (const icon icon = model_->icon(size_t(row), sp.col))
+                    {
+                        ID2D1Bitmap* bmp = !icon.file.empty() ? file_icon(rt, icon.file) : nullptr;
+                        if (bmp || icon.draw)
                         {
-                            // The shell's icon for the file's type, before the text.
-                            const D2D1_SIZE_F sz = bmp->GetSize();  // DIPs at the target's DPI
+                            const D2D1_SIZE_F sz = bmp ? bmp->GetSize()  // DIPs at the target's DPI
+                                                       : D2D1::SizeF(16, 16);
                             const float x = dip(cell.left) + 4 + icon_space,
                                         y = dip(cell.top) +
                                             (dip(cell.bottom - cell.top) - sz.height) / 2;
-                            rt->SetTransform(origin);
-                            rt->DrawBitmap(bmp, D2D1::RectF(x, y, x + sz.width, y + sz.height));
-                            if (icon.overlay)
+                            const auto draw = [&](const std::function<void(rap::painter&, rap::size_f)>& f)
                             {
-                                d2d_painter badge(rt, s);
-                                badge.set_gdi_classic();
+                                d2d_painter p(rt, s);
+                                p.set_gdi_classic();
                                 rt->SetTransform(D2D1::Matrix3x2F::Translation(x, y) * origin);
-                                icon.overlay(badge, {sz.width, sz.height});
-                            }
+                                f(p, {sz.width, sz.height});
+                            };
+                            rt->SetTransform(origin);
+                            if (bmp)
+                                rt->DrawBitmap(bmp, D2D1::RectF(x, y, x + sz.width, y + sz.height));
+                            else
+                                draw(icon.draw);
+                            if (icon.overlay) draw(icon.overlay);
                             icon_space += sz.width + 2;
                         }
+                    }
                     const std::wstring text = wide(model_->text(size_t(row), sp.col));
                     if (text.empty()) continue;
                     IDWriteTextFormat* format = text_format(st, columns_[sp.col].align);

@@ -2966,7 +2966,9 @@ private:
                                }),
                     &ctx);
             }
-            // The icon's overlay (a badge) drawn over it.
+            // Over the icon, the model's drawing in its place (an icon
+            // without a file or name) and its overlay (a badge). The drawing
+            // area is measured, so a drawing alone has its square.
             GtkWidget* holder = gtk_overlay_new();
             gtk_widget_set_visible(image, true);
             gtk_widget_set_visible(holder, false);
@@ -2978,15 +2980,16 @@ private:
                 +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer)
                 {
                     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
-                    if (auto* draw = static_cast<draw_fn*>(
-                            g_object_get_data(G_OBJECT(a), "rapport-overlay")))
-                    {
-                        cairo_painter painter(cr, GTK_WIDGET(a));
-                        (*draw)(painter, {float(w), float(h)});
-                    }
+                    for (const char* key : {"rapport-draw", "rapport-overlay"})
+                        if (auto* draw = static_cast<draw_fn*>(g_object_get_data(G_OBJECT(a), key)))
+                        {
+                            cairo_painter painter(cr, GTK_WIDGET(a));
+                            (*draw)(painter, {float(w), float(h)});
+                        }
                 },
                 nullptr, nullptr);
             gtk_overlay_add_overlay(GTK_OVERLAY(holder), badge);
+            gtk_overlay_set_measure_overlay(GTK_OVERLAY(holder), badge, true);
             gtk_box_append(GTK_BOX(child), holder);
             gtk_box_append(GTK_BOX(child), label);
             g_object_set_data(G_OBJECT(child), "rapport-label", label);
@@ -3052,13 +3055,19 @@ private:
         const icon icon = model_->icon(row, ctx.column);
         GIcon* gicon = !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
         gtk_image_set_from_gicon(image, gicon);
-        gtk_widget_set_visible(gtk_widget_get_parent(GTK_WIDGET(image)), gicon != nullptr);
+        const bool drawn = !gicon && icon.draw;
+        gtk_widget_set_visible(gtk_widget_get_parent(GTK_WIDGET(image)), gicon || drawn);
         auto* badge = GTK_WIDGET(g_object_get_data(G_OBJECT(child), "rapport-badge"));
         using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
         g_object_set_data_full(
+            G_OBJECT(badge), "rapport-draw", drawn ? new draw_fn(icon.draw) : nullptr,
+            +[](gpointer p) { delete static_cast<draw_fn*>(p); });
+        g_object_set_data_full(
             G_OBJECT(badge), "rapport-overlay", icon.overlay ? new draw_fn(icon.overlay) : nullptr,
             +[](gpointer p) { delete static_cast<draw_fn*>(p); });
-        gtk_widget_set_visible(badge, bool(icon.overlay));
+        // A drawing alone sizes the square as the image would (16 px).
+        gtk_widget_set_size_request(badge, drawn ? 16 : -1, drawn ? 16 : -1);
+        gtk_widget_set_visible(badge, drawn || icon.overlay);
         gtk_widget_queue_draw(badge);
         gtk_label_set_text(label, model_->text(row, ctx.column).c_str());
         gtk_widget_queue_draw(child);
