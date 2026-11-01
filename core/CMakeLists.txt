@@ -29,16 +29,16 @@ target_compile_features(rapport_headers INTERFACE cxx_std_23)
 target_compile_options(rapport_headers INTERFACE $<$<CXX_COMPILER_ID:MSVC>:/utf-8 /Zc:__cplusplus>)
 
 if(RAPPORT_STATIC)
-    add_library(rapport STATIC src/rapport.cpp src/sys.cpp src/http.cpp src/watch.cpp src/image.cpp src/i18n.cpp src/gpu.cpp)
+    add_library(rapport STATIC src/rapport.cpp src/sys.cpp src/http.cpp src/secrets.cpp src/watch.cpp src/image.cpp src/i18n.cpp src/gpu.cpp)
 else()
-    add_library(rapport SHARED src/rapport.cpp src/sys.cpp src/http.cpp src/watch.cpp src/image.cpp src/i18n.cpp src/gpu.cpp)
+    add_library(rapport SHARED src/rapport.cpp src/sys.cpp src/http.cpp src/secrets.cpp src/watch.cpp src/image.cpp src/i18n.cpp src/gpu.cpp)
 endif()
 add_library(rapport::rapport ALIAS rapport)
 target_link_libraries(rapport PUBLIC rapport_headers PRIVATE ${CMAKE_DL_LIBS})
 if(WIN32)
     # rap::gpu on Direct3D 11 (d3dcompiler is loaded at run time, for HLSL source).
     target_sources(rapport PRIVATE src/gpu_d3d11.cpp)
-    target_link_libraries(rapport PRIVATE shell32 ole32 uuid winhttp windowscodecs d3d11 dxgi)
+    target_link_libraries(rapport PRIVATE shell32 ole32 uuid winhttp advapi32 windowscodecs d3d11 dxgi)
 endif()
 # rap::gpu on Vulkan elsewhere: only the headers are needed, the loader is
 # opened at run time.

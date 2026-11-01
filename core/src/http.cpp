@@ -1,4 +1,4 @@
-// rap::sys::http_get: WinHTTP on Windows; elsewhere libcurl, loaded on first
+// rap::sys::http_request: WinHTTP on Windows; elsewhere libcurl, loaded on first
 // use with the few functions it needs declared here (their interface has been
 // stable for decades), so the core neither builds nor installs against it.
 #include "rapport/sys.h"
@@ -95,7 +95,8 @@ struct handle
 
 }  // namespace
 
-http_response http_get(const std::string& url, const http_options& o)
+http_response http_request(std::string_view method, const std::string& url, std::string_view body,
+                           const http_options& o)
 {
     http_response r;
     const std::wstring wurl = wide(url);
@@ -124,10 +125,12 @@ http_response http_get(const std::string& url, const http_options& o)
     DWORD decompress = WINHTTP_DECOMPRESSION_FLAG_ALL;  // Windows 8.1 on; ignored before
     WinHttpSetOption(session.h, WINHTTP_OPTION_DECOMPRESSION, &decompress, sizeof decompress);
     handle connection(WinHttpConnect(session.h, host.c_str(), parts.nPort, 0));
-    handle request(connection ? WinHttpOpenRequest(connection.h, L"GET", target.c_str(), nullptr, WINHTTP_NO_REFERER,
-                                                   WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                                   parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
-                              : nullptr);
+    handle request(
+        connection
+            ? WinHttpOpenRequest(connection.h, wide(std::string(method)).c_str(), target.c_str(),
+                                 nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
+            : nullptr);
     if (!request)
     {
         r.error = failure("could not connect");
@@ -135,8 +138,11 @@ http_response http_get(const std::string& url, const http_options& o)
     }
     std::wstring extra;
     for (const auto& [name, value] : o.headers) extra += wide(name) + L": " + wide(value) + L"\r\n";
-    if (!WinHttpSendRequest(request.h, extra.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : extra.c_str(), DWORD(-1L),
-                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+    // A 307 or 308 sends the body again; 301, 302 and 303 go on as a GET.
+    void* data = body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data());
+    if (!WinHttpSendRequest(request.h,
+                            extra.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : extra.c_str(),
+                            DWORD(-1L), data, DWORD(body.size()), DWORD(body.size()), 0) ||
         !WinHttpReceiveResponse(request.h, nullptr))
     {
         r.error = failure("request failed");
@@ -206,11 +212,12 @@ namespace
 using CURL = void;
 struct curl_slist;
 using curl_off_t = long long;
-constexpr int opt_writedata = 10001, opt_url = 10002, opt_useragent = 10018, opt_httpheader = 10023,
-              opt_headerdata = 10029, opt_noprogress = 43, opt_followlocation = 52, opt_maxredirs = 68,
-              opt_nosignal = 99, opt_timeout_ms = 155, opt_connecttimeout_ms = 156,
-              opt_accept_encoding = 10102, opt_xferinfodata = 10057, opt_writefunction = 20011,
-              opt_headerfunction = 20079, opt_xferinfofunction = 20219;
+constexpr int opt_writedata = 10001, opt_url = 10002, opt_postfields = 10015, opt_useragent = 10018,
+              opt_httpheader = 10023, opt_headerdata = 10029, opt_customrequest = 10036,
+              opt_noprogress = 43, opt_nobody = 44, opt_post = 47, opt_postfieldsize_large = 30120,
+              opt_followlocation = 52, opt_maxredirs = 68, opt_nosignal = 99, opt_timeout_ms = 155,
+              opt_connecttimeout_ms = 156, opt_accept_encoding = 10102, opt_xferinfodata = 10057,
+              opt_writefunction = 20011, opt_headerfunction = 20079, opt_xferinfofunction = 20219;
 constexpr int info_effective_url = 0x100001, info_response_code = 0x200002;
 constexpr long global_default = 3;
 
@@ -301,7 +308,8 @@ int on_progress(void* p, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
 
 }  // namespace
 
-http_response http_get(const std::string& url, const http_options& o)
+http_response http_request(std::string_view method, const std::string& url, std::string_view body,
+                           const http_options& o)
 {
     http_response r;
     if (!url.starts_with("https://") && !url.starts_with("http://"))
@@ -328,6 +336,20 @@ http_response http_get(const std::string& url, const http_options& o)
     c.easy_setopt(h, opt_url, url.c_str());
     c.easy_setopt(h, opt_useragent, "rapport");
     c.easy_setopt(h, opt_httpheader, list);
+    // POST as curl's own: a 307 or 308 sends the body again, 301, 302 and 303
+    // go on as a GET. Another method is kept through redirects.
+    const std::string verb(method);
+    if (verb == "POST")
+        c.easy_setopt(h, opt_post, 1L);
+    else if (verb == "HEAD")
+        c.easy_setopt(h, opt_nobody, 1L);
+    else if (verb != "GET")
+        c.easy_setopt(h, opt_customrequest, verb.c_str());
+    if (!body.empty() || verb == "POST")
+    {
+        c.easy_setopt(h, opt_postfields, body.data());  // not copied: outlives the transfer
+        c.easy_setopt(h, opt_postfieldsize_large, curl_off_t(body.size()));
+    }
     c.easy_setopt(h, opt_followlocation, 1L);
     c.easy_setopt(h, opt_maxredirs, 10L);
     c.easy_setopt(h, opt_accept_encoding, "");  // whatever it can decompress
@@ -365,5 +387,10 @@ http_response http_get(const std::string& url, const http_options& o)
 }
 
 #endif
+
+http_response http_get(const std::string& url, const http_options& o)
+{
+    return http_request("GET", url, {}, o);
+}
 
 }  // namespace rap::sys

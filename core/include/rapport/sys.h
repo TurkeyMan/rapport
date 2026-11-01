@@ -331,10 +331,37 @@ struct http_options
     const std::atomic<bool>* cancelled = nullptr;  // checked as data arrives
 };
 
-// An HTTP(S) GET, blocking: for a worker thread. TLS, certificates, proxies
-// and redirects are the platform's: WinHTTP on Windows; elsewhere libcurl,
-// loaded when first used (without it, the response says so).
+// An HTTP(S) request, blocking: for a worker thread. TLS, certificates,
+// proxies and redirects are the platform's: WinHTTP on Windows; elsewhere
+// libcurl, loaded when first used (without it, the response says so). The
+// body is sent as it is, its Content-Type among the options' headers. A
+// response is a response whatever its status: a 400 comes with its body.
+// Redirects: a 307 or 308 sends the body again, a 301, 302 or 303 goes on as
+// a GET.
+http_response http_request(std::string_view method, const std::string& url,
+                           std::string_view body = {}, const http_options& = {});
 http_response http_get(const std::string& url, const http_options& = {});
+
+// -- secrets ------------------------------------------------------------------
+
+// The user's keychain, for tokens and passwords: Windows' Credential Manager
+// (a generic credential, kept on this machine for this user); elsewhere the
+// Secret Service (GNOME Keyring, KWallet, KeePassXC) through libsecret,
+// loaded when first used. Blocking, and the keychain may ask to be unlocked:
+// for a worker thread. Names are the caller's: start them with the app's
+// name ("tortilla:github.com:someone"), as keychain programs list them.
+
+// Stores (or replaces) it. label: what keychain programs show, the name
+// when empty. False when it couldn't be: secret_error() says why.
+bool store_secret(std::string_view name, std::string_view secret, std::string_view label = {});
+// nullopt both when there's none and when the keychain couldn't be read
+// (locked, the unlock prompt dismissed, no keychain): secret_error() is empty
+// only for the first.
+std::optional<std::string> load_secret(std::string_view name);
+// True when it's gone, including when there was none.
+bool erase_secret(std::string_view name);
+// Why this thread's last store, load or erase failed; empty when it didn't.
+const std::string& secret_error();
 
 // -- images -------------------------------------------------------------------
 
