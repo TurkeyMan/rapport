@@ -1743,6 +1743,36 @@ private:
     std::function<GtkWidget*(const node&)> build_;
 };
 
+// `in` read to its end without blocking (and let go of); `done` gets what it
+// held, or nullopt if reading it failed. For what a drop or the clipboard
+// hands over as a stream.
+void read_to_end(GInputStream* in, std::function<void(std::optional<std::string>)> done)
+{
+    g_output_stream_splice_async(
+        g_memory_output_stream_new_resizable(), in,
+        GOutputStreamSpliceFlags(G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE |
+                                 G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET),
+        G_PRIORITY_DEFAULT, nullptr,
+        +[](GObject* out, GAsyncResult* res, gpointer p)
+        {
+            std::unique_ptr<std::function<void(std::optional<std::string>)>> f(
+                static_cast<std::function<void(std::optional<std::string>)>*>(p));
+            std::optional<std::string> s;
+            if (g_output_stream_splice_finish(G_OUTPUT_STREAM(out), res, nullptr) >= 0)
+            {
+                GBytes* bytes = g_memory_output_stream_steal_as_bytes(G_MEMORY_OUTPUT_STREAM(out));
+                gsize n = 0;
+                const auto* data = static_cast<const char*>(g_bytes_get_data(bytes, &n));
+                s.emplace(data ? data : "", n);
+                g_bytes_unref(bytes);
+            }
+            g_object_unref(out);
+            (*f)(std::move(s));
+        },
+        new std::function<void(std::optional<std::string>)>(std::move(done)));
+    g_object_unref(in);
+}
+
 // -- list ---------------------------------------------------------------------
 
 class list_impl : public widget_base<rap::list>, public list_observer
@@ -2727,12 +2757,10 @@ private:
             GdkDrop* drop;
             size_t at;
             std::string type;
-            GOutputStream* out = nullptr;
             void finish(bool ok)
             {
                 gdk_drop_finish(drop, ok ? GDK_ACTION_COPY : GdkDragAction(0));
                 g_object_unref(drop);
-                if (out) g_object_unref(out);
                 delete this;
             }
         };
@@ -2745,29 +2773,15 @@ private:
                 auto* r = static_cast<read*>(p);
                 GInputStream* in = gdk_drop_read_finish(GDK_DROP(src), res, nullptr, nullptr);
                 if (!in) return r->finish(false);
-                r->out = g_memory_output_stream_new_resizable();
-                g_output_stream_splice_async(
-                    r->out, in,
-                    GOutputStreamSpliceFlags(G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE |
-                                             G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET),
-                    G_PRIORITY_DEFAULT, nullptr,
-                    +[](GObject* out, GAsyncResult* res, gpointer p)
-                    {
-                        auto* r = static_cast<read*>(p);
-                        if (g_output_stream_splice_finish(G_OUTPUT_STREAM(out), res, nullptr) < 0)
-                            return r->finish(false);
-                        auto life = r->life.lock();
-                        if (!life || !*life || !r->self->drop_in_.drop) return r->finish(false);
-                        GBytes* bytes =
-                            g_memory_output_stream_steal_as_bytes(G_MEMORY_OUTPUT_STREAM(out));
-                        gsize n = 0;
-                        const auto* data = static_cast<const char*>(g_bytes_get_data(bytes, &n));
-                        std::string s(data ? data : "", n);
-                        g_bytes_unref(bytes);
-                        r->finish(r->self->drop_in_.drop(r->at, r->type, s));
-                    },
-                    r);
-                g_object_unref(in);
+                read_to_end(in,
+                            [r](std::optional<std::string> s)
+                            {
+                                if (!s) return r->finish(false);
+                                auto life = r->life.lock();
+                                if (!life || !*life || !r->self->drop_in_.drop)
+                                    return r->finish(false);
+                                r->finish(r->self->drop_in_.drop(r->at, r->type, *s));
+                            });
             },
             r);
         return true;
@@ -4617,15 +4631,25 @@ public:
         if (GdkDisplay* d = gdk_display_get_default())
             gdk_clipboard_set_text(gdk_display_get_clipboard(d), s.c_str());
     }
+    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    {
+        when_clipboard_ours([done = std::move(done)]() mutable
+                            { read_clipboard_now(std::move(done)); });
+    }
+    void read_clipboard_image(std::function<void(std::optional<sys::decoded_image>)> done) override
+    {
+        when_clipboard_ours([done = std::move(done)]() mutable
+                            { read_clipboard_image_now(std::move(done)); });
+    }
     // Wayland hands the clipboard only to the client with keyboard focus, so
     // a window just created can't read it yet: wait (polling, 50 ms) until
     // one of ours is active, then a tick more for the selection to arrive;
-    // after 1.5 s without (no window manager, say), read anyway.
-    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    // after 1.5 s without (no window manager, say), `read` anyway.
+    static void when_clipboard_ours(std::function<void()> read)
     {
         struct waiting
         {
-            std::function<void(std::optional<std::string>)> done;
+            std::function<void()> read;
             int ticks = 0;
             bool active = false;
         };
@@ -4648,10 +4672,11 @@ public:
                     return G_SOURCE_CONTINUE;
                 }
                 if (!w->active && ++w->ticks < 30) return G_SOURCE_CONTINUE;
-                read_clipboard_now(std::move(w->done));
+                w->read();
                 return G_SOURCE_REMOVE;
             },
-            new waiting{.done = std::move(done)}, +[](gpointer p) { delete static_cast<waiting*>(p); });
+            new waiting{.read = std::move(read)},
+            +[](gpointer p) { delete static_cast<waiting*>(p); });
     }
     static void read_clipboard_now(std::function<void(std::optional<std::string>)> done)
     {
@@ -4670,6 +4695,70 @@ public:
                 (*f)(std::move(s));
             },
             new std::function<void(std::optional<std::string>)>(std::move(done)));
+    }
+    // Straight RGBA, which GDK converts to from whatever the texture holds.
+    // GDK reads PNG, JPEG and TIFF; an image offered as anything else (a
+    // BMP, as WSLg hands Windows' over) is read as it is.
+    static void
+    read_clipboard_image_now(std::function<void(std::optional<sys::decoded_image>)> done)
+    {
+        GdkDisplay* d = gdk_display_get_default();
+        if (!d) return done(std::nullopt);
+        gdk_clipboard_read_texture_async(
+            gdk_display_get_clipboard(d), nullptr,
+            +[](GObject* source, GAsyncResult* result, gpointer user)
+            {
+                std::unique_ptr<std::function<void(std::optional<sys::decoded_image>)>> f(
+                    static_cast<std::function<void(std::optional<sys::decoded_image>)>*>(user));
+                GdkTexture* texture =
+                    gdk_clipboard_read_texture_finish(GDK_CLIPBOARD(source), result, nullptr);
+                if (!texture)
+                    return read_clipboard_image_bytes(GDK_CLIPBOARD(source), std::move(*f));
+                const int w = gdk_texture_get_width(texture), h = gdk_texture_get_height(texture);
+                sys::decoded_image out{w, h, pixel_format::rgba8, {}};
+                out.pixels.resize(size_t(w) * h * 4);
+                GdkTextureDownloader* down = gdk_texture_downloader_new(texture);
+                gdk_texture_downloader_set_format(down, GDK_MEMORY_R8G8B8A8);
+                gdk_texture_downloader_download_into(down, out.pixels.data(), size_t(w) * 4);
+                gdk_texture_downloader_free(down);
+                g_object_unref(texture);
+                (*f)(std::move(out));
+            },
+            new std::function<void(std::optional<sys::decoded_image>)>(std::move(done)));
+    }
+    // The clipboard's image in a type of its own, decoded by the platform's
+    // decoders (gdk-pixbuf, through sys::decode_image).
+    static void
+    read_clipboard_image_bytes(GdkClipboard* clipboard,
+                               std::function<void(std::optional<sys::decoded_image>)> done)
+    {
+        gsize n = 0;
+        const char* const* offered =
+            gdk_content_formats_get_mime_types(gdk_clipboard_get_formats(clipboard), &n);
+        std::vector<const char*> images;
+        for (gsize i = 0; i < n; ++i)
+            if (g_str_has_prefix(offered[i], "image/")) images.push_back(offered[i]);
+        if (images.empty()) return done(std::nullopt);
+        images.push_back(nullptr);
+        gdk_clipboard_read_async(
+            clipboard, images.data(), G_PRIORITY_DEFAULT, nullptr,
+            +[](GObject* source, GAsyncResult* result, gpointer user)
+            {
+                std::unique_ptr<std::function<void(std::optional<sys::decoded_image>)>> f(
+                    static_cast<std::function<void(std::optional<sys::decoded_image>)>*>(user));
+                GInputStream* in =
+                    gdk_clipboard_read_finish(GDK_CLIPBOARD(source), result, nullptr, nullptr);
+                if (!in) return (*f)(std::nullopt);
+                read_to_end(
+                    in,
+                    [done = std::move(*f)](std::optional<std::string> bytes)
+                    {
+                        if (!bytes) return done(std::nullopt);
+                        done(sys::decode_image(
+                            {reinterpret_cast<const uint8_t*>(bytes->data()), bytes->size()}));
+                    });
+            },
+            new std::function<void(std::optional<sys::decoded_image>)>(std::move(done)));
     }
 
     // TODO(tortilla): a GdkTexture-backed Image would avoid cairo for painting.

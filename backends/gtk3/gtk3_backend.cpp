@@ -4802,14 +4802,24 @@ public:
         gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), s.c_str(),
                                int(s.size()));
     }
+    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    {
+        when_clipboard_ours([done = std::move(done)]() mutable
+                            { read_clipboard_now(std::move(done)); });
+    }
+    void read_clipboard_image(std::function<void(std::optional<sys::decoded_image>)> done) override
+    {
+        when_clipboard_ours([done = std::move(done)]() mutable
+                            { read_clipboard_image_now(std::move(done)); });
+    }
     // As in GTK 4: under Wayland only the focused client gets the
     // clipboard, so wait (polling, 50 ms) for one of our windows to be
-    // active, a tick more, then read; after 1.5 s, read anyway.
-    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    // active, a tick more, then `read`; after 1.5 s, read anyway.
+    static void when_clipboard_ours(std::function<void()> read)
     {
         struct waiting
         {
-            std::function<void(std::optional<std::string>)> done;
+            std::function<void()> read;
             int ticks = 0;
             bool active = false;
         };
@@ -4828,10 +4838,11 @@ public:
                     return G_SOURCE_CONTINUE;
                 }
                 if (!w->active && ++w->ticks < 30) return G_SOURCE_CONTINUE;
-                read_clipboard_now(std::move(w->done));
+                w->read();
                 return G_SOURCE_REMOVE;
             },
-            new waiting{.done = std::move(done)}, +[](gpointer p) { delete static_cast<waiting*>(p); });
+            new waiting{.read = std::move(read)},
+            +[](gpointer p) { delete static_cast<waiting*>(p); });
     }
     static void read_clipboard_now(std::function<void(std::optional<std::string>)> done)
     {
@@ -4845,6 +4856,33 @@ public:
                 (*f)(std::string(text));
             },
             new std::function<void(std::optional<std::string>)>(std::move(done)));
+    }
+    // Straight RGBA, as GDK has it: one without alpha given an opaque one.
+    static void
+    read_clipboard_image_now(std::function<void(std::optional<sys::decoded_image>)> done)
+    {
+        gtk_clipboard_request_image(
+            gtk_clipboard_get(GDK_SELECTION_CLIPBOARD),
+            +[](GtkClipboard*, GdkPixbuf* image, gpointer user)
+            {
+                std::unique_ptr<std::function<void(std::optional<sys::decoded_image>)>> f(
+                    static_cast<std::function<void(std::optional<sys::decoded_image>)>*>(user));
+                GdkPixbuf* pb = image && gdk_pixbuf_get_bits_per_sample(image) == 8
+                                    ? gdk_pixbuf_add_alpha(image, false, 0, 0, 0)
+                                    : nullptr;
+                if (!pb) return (*f)(std::nullopt);
+                const int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
+                sys::decoded_image out{w, h, pixel_format::rgba8, {}};
+                out.pixels.resize(size_t(w) * h * 4);
+                for (int y = 0; y < h; ++y)
+                    std::memcpy(out.pixels.data() + size_t(y) * w * 4,
+                                gdk_pixbuf_read_pixels(pb) +
+                                    size_t(y) * gdk_pixbuf_get_rowstride(pb),
+                                size_t(w) * 4);
+                g_object_unref(pb);
+                (*f)(std::move(out));
+            },
+            new std::function<void(std::optional<sys::decoded_image>)>(std::move(done)));
     }
 
     bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }

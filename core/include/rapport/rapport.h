@@ -79,11 +79,17 @@ public:
     // UI thread, possibly before this returns, or later: GTK reads
     // asynchronously, and under Wayland, which gives the clipboard only to
     // the focused client, the read waits for one of the app's windows to
-    // have focus (up to 1.5 s). (An image counterpart, for Paste, is to
-    // come.)
+    // have focus (up to 1.5 s).
     void clipboard_text(std::function<void(std::optional<std::string>)> done)
     {
         backend_->read_clipboard_text(std::move(done));
+    }
+    // The clipboard's image, or nullopt when it holds none, read as
+    // clipboard_text is. Its pixels as the platform has them: straight RGBA
+    // or premultiplied BGRA (ui::create_image takes either).
+    void clipboard_image(std::function<void(std::optional<sys::decoded_image>)> done)
+    {
+        backend_->read_clipboard_image(std::move(done));
     }
     void set_clipboard_image(int width, int height, pixel_format format, const uint8_t* pixels,
                            size_t stride)

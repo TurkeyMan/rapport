@@ -36,6 +36,7 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -7251,14 +7252,19 @@ public:
         CloseClipboard();
     }
 
-    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    // Another program holding the clipboard open (a clipboard manager, say)
+    // is common and brief: a few tries, about 100 ms in all.
+    bool open_clipboard()
     {
-        if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) return done(std::nullopt);
-        // Another program holding it open (a clipboard manager, say) is
-        // common and brief: a few tries, about 100 ms in all.
         bool open = false;
         for (int i = 0; i < 10 && !(open = OpenClipboard(messages_)); ++i) Sleep(10);
-        if (!open) return done(std::nullopt);
+        return open;
+    }
+
+    void read_clipboard_text(std::function<void(std::optional<std::string>)> done) override
+    {
+        if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !open_clipboard())
+            return done(std::nullopt);
         std::optional<std::string> text;
         if (HANDLE mem = GetClipboardData(CF_UNICODETEXT))
             if (auto* w = static_cast<const wchar_t*>(GlobalLock(mem)))
@@ -7606,6 +7612,106 @@ public:
         EmptyClipboard();
         SetClipboardData(CF_DIBV5, mem);
         CloseClipboard();
+    }
+
+    // A DIB (CF_DIBV5, then CF_DIB, which Windows also makes of a bitmap
+    // put there), else the PNG browsers and many programs add, decoded
+    // once the clipboard is let go.
+    void read_clipboard_image(std::function<void(std::optional<sys::decoded_image>)> done) override
+    {
+        static const UINT png = RegisterClipboardFormatW(L"PNG");
+        const UINT format = IsClipboardFormatAvailable(CF_DIBV5) ? CF_DIBV5
+                            : IsClipboardFormatAvailable(CF_DIB) ? CF_DIB
+                            : IsClipboardFormatAvailable(png)    ? png
+                                                                 : 0;
+        if (!format || !open_clipboard()) return done(std::nullopt);
+        std::vector<uint8_t> bytes;
+        if (HANDLE mem = GetClipboardData(format))
+            if (const auto* p = static_cast<const uint8_t*>(GlobalLock(mem)))
+            {
+                bytes.assign(p, p + GlobalSize(mem));
+                GlobalUnlock(mem);
+            }
+        CloseClipboard();
+        done(format == png ? sys::decode_image(bytes) : dib_image(bytes));
+    }
+
+    // A DIB's pixels as straight RGBA: 16, 24 or 32 bits a pixel, either
+    // way up, the channels where BI_BITFIELDS's masks put them. Alpha only
+    // where a V3 header or later gives it a mask, and straight, as
+    // set_clipboard_image writes it; all 0, it's an opaque image whose
+    // writer left the byte unset. nullopt for any other kind.
+    static std::optional<sys::decoded_image> dib_image(std::span<const uint8_t> dib)
+    {
+        DWORD size = 0;
+        if (dib.size() >= sizeof size) std::memcpy(&size, dib.data(), sizeof size);
+        if (size < sizeof(BITMAPINFOHEADER) || size > dib.size()) return std::nullopt;
+        BITMAPV5HEADER h{};
+        std::memcpy(&h, dib.data(), std::min<size_t>(size, sizeof h));
+        const int bits = h.bV5BitCount, w = h.bV5Width;
+        const bool fields = h.bV5Compression == BI_BITFIELDS;
+        if (w <= 0 || h.bV5Height == 0 || h.bV5Height == INT_MIN ||
+            (bits != 16 && bits != 24 && bits != 32) || (!fields && h.bV5Compression != BI_RGB) ||
+            (fields && bits == 24))
+            return std::nullopt;
+        const int rows = std::abs(h.bV5Height);
+        // The masks: in the header past BITMAPINFOHEADER's fields (alpha's
+        // from V3 on), else after it for BI_BITFIELDS, else BI_RGB's 5-5-5
+        // or 8-8-8.
+        DWORD masks[4] = {h.bV5RedMask, h.bV5GreenMask, h.bV5BlueMask,
+                          size >= offsetof(BITMAPV5HEADER, bV5CSType) ? h.bV5AlphaMask : 0};
+        size_t at = size;
+        if (fields && size == sizeof(BITMAPINFOHEADER))
+        {
+            if (dib.size() < at + 12) return std::nullopt;
+            std::memcpy(masks, dib.data() + at, 12);
+            at += 12;
+        }
+        else if (!fields)
+        {
+            masks[0] = bits == 16 ? 0x7c00 : 0xff0000;
+            masks[1] = bits == 16 ? 0x03e0 : 0x00ff00;
+            masks[2] = bits == 16 ? 0x001f : 0x0000ff;
+            if (bits != 32) masks[3] = 0;
+        }
+        at += size_t(std::min<DWORD>(h.bV5ClrUsed, 256)) * 4;  // an optional palette
+        const size_t stride = (size_t(w) * bits + 31) / 32 * 4;
+        // The CF_DIBV5 Windows makes of a bitmap has the masks again after
+        // its header, as BITMAPINFOHEADER would (set_clipboard_image's
+        // doesn't): skipped where they're there and the pixels still fit.
+        if (fields && size > sizeof(BITMAPINFOHEADER) && dib.size() >= at + 12 &&
+            std::memcmp(dib.data() + at, masks, 12) == 0 &&
+            (dib.size() - at - 12) / stride >= size_t(rows))
+            at += 12;
+        if (dib.size() < at || (dib.size() - at) / stride < size_t(rows)) return std::nullopt;
+
+        // Each channel to 8 bits: its top 8, or a narrower one scaled up.
+        auto channel = [](uint32_t px, DWORD mask) -> uint8_t
+        {
+            if (!mask) return 255;
+            const int width = std::popcount(mask);
+            const uint32_t v = (px & mask) >> std::countr_zero(mask);
+            return uint8_t(width >= 8 ? v >> (width - 8) : v * 255 / ((1u << width) - 1));
+        };
+        sys::decoded_image out{w, rows, pixel_format::rgba8, {}};
+        out.pixels.resize(size_t(w) * rows * 4);
+        bool alpha = false;
+        for (int y = 0; y < rows; ++y)
+        {
+            const uint8_t* src =
+                dib.data() + at + size_t(h.bV5Height > 0 ? rows - 1 - y : y) * stride;
+            uint8_t* dst = out.pixels.data() + size_t(y) * w * 4;
+            for (int x = 0; x < w; ++x, src += bits / 8, dst += 4)
+            {
+                uint32_t px = 0;
+                std::memcpy(&px, src, size_t(bits / 8));  // little-endian
+                for (int c = 0; c < 4; ++c) dst[c] = channel(px, masks[c]);
+                alpha |= dst[3] != 0;
+            }
+        }
+        if (!alpha)
+            for (size_t i = 3; i < out.pixels.size(); i += 4) out.pixels[i] = 255;
+        return out;
     }
 
     std::unique_ptr<rap::image> create_image(int w, int h, pixel_format format, const uint8_t* pixels, size_t stride) override
