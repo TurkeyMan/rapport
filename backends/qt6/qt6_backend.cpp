@@ -3674,6 +3674,7 @@ public:
     QWidget* frame() const { return frame_; }
 
     std::vector<std::unique_ptr<part>> parts;
+    std::map<std::string, std::vector<QPointer<QWidget>>> form_groups;  // forms aligned by key
 
     // -- from Frame and key_filter --------------------------------------------
 
@@ -4018,6 +4019,7 @@ private:
         // like keep their natural width (as in Windows dialogs) unless the
         // node asks to stretch.
         l->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+        std::vector<QWidget*> labels;  // for align_group
         for (size_t i = 0; i < s.fields.size(); ++i)
         {
             QWidget* field = build(s.fields[i], orientation::horizontal);
@@ -4028,20 +4030,39 @@ private:
                 policy.setHorizontalPolicy(QSizePolicy::Preferred);
             field->setSizePolicy(policy);
             if (i < s.label_widgets.size() && s.label_widgets[i])
-                l->addRow(build(*s.label_widgets[i], orientation::horizontal), field);
+            {
+                QWidget* label = build(*s.label_widgets[i], orientation::horizontal);
+                labels.push_back(label);
+                l->addRow(label, field);
+            }
             else if (s.labels[i].empty())
                 l->addRow(field);
             else
             {
                 auto* label = new QLabel(qs(s.labels[i]));
                 label->setTextFormat(Qt::PlainText);
+                label->setAlignment(l->labelAlignment());  // within a column widened by align_group
                 // set_visible on the field shows and hides its label too.
                 field->setProperty("rapport-form-label", QVariant::fromValue<QObject*>(label));
                 if (!s.fields[i].common.visible) label->setVisible(false);
+                labels.push_back(label);
                 l->addRow(label, field);
             }
         }
+        if (!s.align_group.empty()) align(s.align_group, labels);
         return form;
+    }
+
+    // Forms aligned by `key` in this window: every label at least as wide
+    // as the widest of them (QFormLayout sizes its column to its own).
+    void align(const std::string& key, const std::vector<QWidget*>& labels)
+    {
+        auto& group = win_.form_groups[key];
+        for (QWidget* w : labels) group.emplace_back(w);
+        std::erase_if(group, [](const QPointer<QWidget>& w) { return !w; });
+        int widest = 0;
+        for (const auto& w : group) widest = std::max(widest, w->sizeHint().width());
+        for (const auto& w : group) w->setMinimumWidth(widest);
     }
 
     QWidget* make(const node& n, const spec::splitter& s, orientation)

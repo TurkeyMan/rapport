@@ -86,6 +86,9 @@ struct form
     // column's start (a check that turns its field on); null for the text.
     // Empty when no row has one, else as long as `fields`.
     std::vector<std::shared_ptr<const node>> label_widgets;
+    // Forms in one window with the same key share their label column's
+    // width, the widest of theirs, so groups of forms line up; empty: alone.
+    std::string align_group;
 };
 struct splitter
 {
@@ -499,6 +502,13 @@ public:
         }
         if (std::ranges::none_of(s().label_widgets, [](auto& w) { return bool(w); }))
             s().label_widgets.clear();
+    }
+    // Lines its label column up with every other form of the window given
+    // the same key (sections of a settings page, say).
+    form& align_group(std::string key)
+    {
+        s().align_group = std::move(key);
+        return *this;
     }
 };
 

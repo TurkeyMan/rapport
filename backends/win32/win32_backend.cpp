@@ -951,9 +951,28 @@ public:
         bool label_at_start = false;
     };
     std::vector<row> rows;
+    // The window's forms aligned with this one (itself among them), or null.
+    const std::vector<form_item*>* group = nullptr;
 
     bool fills() const override { return true; }
     bool expands_in_form() const override { return true; }
+
+    // Its own label column: the widest label of a visible row.
+    long own_label_width() const
+    {
+        long w = 0;
+        for (const row& r : rows)
+            if (r.label && r.field->visible) w = std::max(w, r.label->natural().cx);
+        return w;
+    }
+    // The column as laid out: the widest of its group's.
+    long label_width() const
+    {
+        if (!group) return own_label_width();
+        long w = 0;
+        for (const form_item* f : *group) w = std::max(w, f->own_label_width());
+        return w;
+    }
 
     SIZE measure() override
     {
@@ -977,15 +996,14 @@ public:
             ++n;
         }
         if (n > 1) h += row_gap_ * (n - 1);
+        if (label_w) label_w = label_width();
         const long both = label_w ? label_w + gap_ + field_w : field_w;
         return {std::max(both, span_w), h};
     }
 
     void place(RECT r) override
     {
-        long label_w = 0;
-        for (row& row : rows)
-            if (row.label && row.field->visible) label_w = std::max(label_w, row.label->natural().cx);
+        const long label_w = label_width();
         long y = r.top;
         for (row& row : rows)
         {
@@ -6186,6 +6204,7 @@ public:
     std::vector<std::unique_ptr<widget>> widgets;  // plain handles for containers
     std::vector<button_impl*> role_buttons;
     std::vector<std::shared_ptr<deferred_build>> deferred;  // built when first idle (see show)
+    std::map<std::string, std::vector<form_item*>> form_groups;  // forms aligned by key
 
     void set_title(const std::string& t) override { SetWindowTextW(hwnd_, wide(t).c_str()); }
     void flush_layout() override
@@ -6892,6 +6911,12 @@ private:
     item* make(const node& n, const spec::form& s, HWND parent, orientation)
     {
         auto* form = own<form_item>(metrics_.form_column_gap, metrics_.row_gap);
+        if (!s.align_group.empty())
+        {
+            auto& group = win_.form_groups[s.align_group];
+            group.push_back(form);
+            form->group = &group;
+        }
         for (size_t i = 0; i < s.fields.size(); ++i)
         {
             form_item::row row;

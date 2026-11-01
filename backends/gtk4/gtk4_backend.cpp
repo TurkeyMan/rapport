@@ -4009,9 +4009,24 @@ private:
         return box;
     }
 
+    // The window's size group for forms aligned by `key`.
+    GtkSizeGroup* align_group(const std::string& key)
+    {
+        GObject* w = G_OBJECT(win_.gtk_window());
+        const std::string name = "rapport-align:" + key;
+        auto* g = static_cast<GtkSizeGroup*>(g_object_get_data(w, name.c_str()));
+        if (!g)
+        {
+            g = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL);
+            g_object_set_data_full(w, name.c_str(), g, g_object_unref);
+        }
+        return g;
+    }
+
     GtkWidget* make(const node&, const spec::form& s, orientation)
     {
         GtkWidget* grid = gtk_grid_new();
+        GtkSizeGroup* labels = s.align_group.empty() ? nullptr : align_group(s.align_group);
         gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
         gtk_grid_set_row_spacing(GTK_GRID(grid), 6);
         for (size_t i = 0; i < s.fields.size(); ++i)
@@ -4028,6 +4043,7 @@ private:
             {
                 GtkWidget* label = build(*s.label_widgets[i], orientation::horizontal);
                 gtk_widget_set_halign(label, GTK_ALIGN_START);
+                if (labels) gtk_size_group_add_widget(labels, label);
                 gtk_grid_attach(GTK_GRID(grid), label, 0, int(i), 1, 1);
                 gtk_grid_attach(GTK_GRID(grid), field, 1, int(i), 1, 1);
                 continue;
@@ -4039,6 +4055,7 @@ private:
             }
             GtkWidget* label = gtk_label_new(s.labels[i].c_str());
             gtk_label_set_xalign(GTK_LABEL(label), 1);
+            if (labels) gtk_size_group_add_widget(labels, label);
             gtk_widget_add_css_class(label, "dim-label");
             // set_visible on the field shows and hides its label too.
             g_object_set_data(G_OBJECT(field), "rapport-form-label", label);
