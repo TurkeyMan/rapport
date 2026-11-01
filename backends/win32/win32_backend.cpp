@@ -3946,7 +3946,10 @@ private:
                     const float pad = 6;  // the list_view's own cell padding, in DIPs
                     rt->DrawText(text.c_str(), UINT32(text.size()), format,
                                  D2D1::RectF(dip(cell.left) + pad + icon_space, dip(cell.top), dip(cell.right) - pad, dip(cell.bottom)),
-                                 brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                                 brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                                 // GDI-classic glyphs need GDI-classic advances: natural
+                                 // ones put each snapped glyph off by a fraction ('throu gh').
+                                 DWRITE_MEASURING_MODE_GDI_CLASSIC);
                 }
             }
 
