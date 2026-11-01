@@ -7,8 +7,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <wincred.h>
+// clang-format off
 #include <windows.h>
+#include <wincred.h>  // after windows.h, whose types it uses
+// clang-format on
 #endif
 
 namespace rap::sys
