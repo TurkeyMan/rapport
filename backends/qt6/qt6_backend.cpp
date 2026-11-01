@@ -4004,7 +4004,10 @@ private:
         l->setContentsMargins(0, 0, 0, 0);
         l->setHorizontalSpacing(12);
         l->setVerticalSpacing(6);
-        l->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        // Checks for labels stand at the column's start; QFormLayout has one
+        // alignment for the column, so its text labels go there too.
+        l->setLabelAlignment((s.label_widgets.empty() ? Qt::AlignRight : Qt::AlignLeft) |
+                             Qt::AlignVCenter);
         // Text fields and containers fill the row; selects, spins and the
         // like keep their natural width (as in Windows dialogs) unless the
         // node asks to stretch.
@@ -4019,15 +4022,7 @@ private:
                 policy.setHorizontalPolicy(QSizePolicy::Preferred);
             field->setSizePolicy(policy);
             if (i < s.label_widgets.size() && s.label_widgets[i])
-            {
-                // At the column's start, whatever side the style puts labels.
-                auto* holder = new QWidget;
-                auto* h = new QHBoxLayout(holder);
-                h->setContentsMargins(0, 0, 0, 0);
-                h->addWidget(build(*s.label_widgets[i], orientation::horizontal));
-                h->addStretch();
-                l->addRow(holder, field);
-            }
+                l->addRow(build(*s.label_widgets[i], orientation::horizontal), field);
             else if (s.labels[i].empty())
                 l->addRow(field);
             else
