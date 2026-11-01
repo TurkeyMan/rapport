@@ -152,6 +152,33 @@ constexpr extent operator""_px(unsigned long long v)
 
 // -- menus --------------------------------------------------------------------
 
+class painter;
+
+// An icon for a button or toolbar item: a named theme icon, an app-drawn
+// one, or both (the drawing is the fallback where the name isn't found,
+// and is always used where there is no icon theme, e.g. Win32).
+struct icon
+{
+    // freedesktop icon name, e.g. "go-up", "document-save".
+    std::string name;
+    // The desktop's icon for this kind of file, as its file manager shows
+    // it (for_file). Only the name matters (its extension or MIME type); the
+    // file needn't exist. A name ending in '/' is a folder.
+    std::string file;
+    // Draws the icon into `size` (logical px) on a Painter with the right
+    // device_scale. Draw with theme colours (theme_color::window_text) so it
+    // follows dark mode; backends redraw it when the theme or scale changes.
+    std::function<void(rap::painter&, rap::size_f)> draw;
+
+    static icon named(std::string n) { return {std::move(n), {}, {}}; }
+    static icon for_file(std::string file_name) { return {{}, std::move(file_name), {}}; }
+    static icon drawn(std::function<void(rap::painter&, rap::size_f)> f)
+    {
+        return {{}, {}, std::move(f)};
+    }
+    explicit operator bool() const { return !name.empty() || !file.empty() || bool(draw); }
+};
+
 struct menu_item
 {
     // "_" marks the access key ("_Copy"); write "__" for a literal underscore
@@ -164,6 +191,9 @@ struct menu_item
     bool enabled = true;
     std::optional<bool> checked;  // set = checkable item
     bool radio = false;           // a checkable item drawn as one of a group
+    // Beside the label, at the toolkit's menu icon size, where the desktop
+    // shows menu icons: Windows and Qt; GTK's menus have none (GNOME's way).
+    icon icon;
 
     static menu_item separator() { return {}; }
     bool is_separator() const { return label.empty() && children.empty(); }
@@ -332,27 +362,6 @@ struct cell_info
 
 // -- icons --------------------------------------------------------------------
 
-// An icon for a button or toolbar item: a named theme icon, an app-drawn
-// one, or both (the drawing is the fallback where the name isn't found,
-// and is always used where there is no icon theme, e.g. Win32).
-struct icon
-{
-    // freedesktop icon name, e.g. "go-up", "document-save".
-    std::string name;
-    // The desktop's icon for this kind of file, as its file manager shows
-    // it (for_file). Only the name matters (its extension or MIME type); the
-    // file needn't exist. A name ending in '/' is a folder.
-    std::string file;
-    // Draws the icon into `size` (logical px) on a Painter with the right
-    // device_scale. Draw with theme colours (theme_color::window_text) so it
-    // follows dark mode; backends redraw it when the theme or scale changes.
-    std::function<void(rap::painter&, rap::size_f)> draw;
-
-    static icon named(std::string n) { return {std::move(n), {}, {}}; }
-    static icon for_file(std::string file_name) { return {{}, std::move(file_name), {}}; }
-    static icon drawn(std::function<void(rap::painter&, rap::size_f)> f) { return {{}, {}, std::move(f)}; }
-    explicit operator bool() const { return !name.empty() || !file.empty() || bool(draw); }
-};
 
 // -- list model ---------------------------------------------------------------
 

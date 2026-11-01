@@ -532,11 +532,14 @@ void fill_menu(QMenu* menu, const rap::menu& items)
         {
             QMenu* sub = menu->addMenu(mnemonic(item.label));
             sub->setEnabled(item.enabled);
+            if (item.icon) sub->setIcon(to_q_icon(item.icon, 16, menu));
             fill_menu(sub, item.children);
             continue;
         }
         QAction* a = menu->addAction(mnemonic(item.label));
         a->setEnabled(item.enabled && item.action);
+        // Shown where the platform shows menu icons (not macOS).
+        if (item.icon) a->setIcon(to_q_icon(item.icon, 16, menu));
         if (item.checked)
         {
             a->setCheckable(true);

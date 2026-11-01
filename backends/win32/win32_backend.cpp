@@ -436,8 +436,45 @@ void set_tooltip_text(HWND control, const std::string& text)
 
 // -- menus --------------------------------------------------------------------
 
-// Appends `items` to `m`; command id `base + n` runs actions[n - 1].
-void fill_menu(HMENU m, const menu& items, std::vector<std::function<void()>>& actions, UINT base = 0)
+// Items' icons, as bitmaps the menu shows; they go when the menu does.
+struct menu_bitmaps
+{
+    struct free_bitmap
+    {
+        void operator()(HBITMAP b) const { DeleteObject(b); }
+    };
+    std::vector<std::unique_ptr<std::remove_pointer_t<HBITMAP>, free_bitmap>> held;
+    UINT dpi = 96;
+};
+
+// `icon` for a menu at `dpi`: menus blend their bitmaps premultiplied.
+HBITMAP menu_bitmap(const icon& icon, UINT dpi)
+{
+    HBITMAP bmp = render_icon(icon, MulDiv(16, int(dpi), 96), float(dpi) / 96);
+    DIBSECTION ds{};
+    if (!bmp || GetObjectW(bmp, sizeof ds, &ds) != sizeof ds || !ds.dsBm.bmBits) return bmp;
+    auto* p = static_cast<uint8_t*>(ds.dsBm.bmBits);
+    for (long i = 0; i < long(ds.dsBm.bmWidth) * std::abs(ds.dsBm.bmHeight); ++i, p += 4)
+        for (int c = 0; c < 3; ++c) p[c] = uint8_t((p[c] * p[3] + 127) / 255);
+    return bmp;
+}
+
+void set_menu_icon(HMENU m, UINT item, BOOL by_position, const icon& icon, menu_bitmaps* bitmaps)
+{
+    if (!icon || !bitmaps) return;
+    HBITMAP bmp = menu_bitmap(icon, bitmaps->dpi);
+    if (!bmp) return;
+    bitmaps->held.emplace_back(bmp);
+    MENUITEMINFOW mi{sizeof mi};
+    mi.fMask = MIIM_BITMAP;
+    mi.hbmpItem = bmp;
+    SetMenuItemInfoW(m, item, by_position, &mi);
+}
+
+// Appends `items` to `m`; command id `base + n` runs actions[n - 1]. Icons
+// only with `bitmaps`, which keeps them.
+void fill_menu(HMENU m, const menu& items, std::vector<std::function<void()>>& actions,
+               UINT base = 0, menu_bitmaps* bitmaps = nullptr)
 {
     for (const menu_item& it : items)
     {
@@ -452,9 +489,10 @@ void fill_menu(HMENU m, const menu& items, std::vector<std::function<void()>>& a
         if (!it.children.empty())
         {
             HMENU sub = CreatePopupMenu();
-            fill_menu(sub, it.children, actions, base);
+            fill_menu(sub, it.children, actions, base, bitmaps);
             AppendMenuW(m, flags | (it.enabled ? 0 : MF_GRAYED) | MF_POPUP, reinterpret_cast<UINT_PTR>(sub),
                         label.c_str());
+            set_menu_icon(m, UINT(GetMenuItemCount(m) - 1), TRUE, it.icon, bitmaps);
             continue;
         }
         actions.push_back(it.action);
@@ -467,13 +505,15 @@ void fill_menu(HMENU m, const menu& items, std::vector<std::function<void()>>& a
             mi.fType = MFT_STRING | MFT_RADIOCHECK;
             SetMenuItemInfoW(m, id, FALSE, &mi);
         }
+        set_menu_icon(m, id, FALSE, it.icon, bitmaps);
     }
 }
 
-HMENU build_menu(const menu& items, std::vector<std::function<void()>>& actions)
+HMENU build_menu(const menu& items, std::vector<std::function<void()>>& actions,
+                 menu_bitmaps* bitmaps = nullptr)
 {
     HMENU m = CreatePopupMenu();
-    fill_menu(m, items, actions);
+    fill_menu(m, items, actions, 0, bitmaps);
     return m;
 }
 
@@ -481,7 +521,8 @@ void show_popup_menu(HWND owner, const menu& items, POINT screen)
 {
     if (items.empty()) return;
     std::vector<std::function<void()>> actions;
-    HMENU m = build_menu(items, actions);
+    menu_bitmaps bitmaps{.dpi = dpi_of(owner)};
+    HMENU m = build_menu(items, actions, &bitmaps);
     const UINT id = UINT(TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, owner, nullptr));
     DestroyMenu(m);
     if (id > 0 && id <= actions.size() && actions[id - 1]) actions[id - 1]();
@@ -6408,7 +6449,10 @@ public:
             if (bar.popup != popup) continue;
             while (GetMenuItemCount(popup) > 0) DeleteMenu(popup, 0, MF_BYPOSITION);  // destroys submenus too
             bar.actions.clear();
-            fill_menu(popup, bar.item.menu ? bar.item.menu() : menu{}, bar.actions, menu_bar_ids + UINT(i) * menu_bar_block);
+            bar.bitmaps.held.clear();
+            bar.bitmaps.dpi = dpi();
+            fill_menu(popup, bar.item.menu ? bar.item.menu() : menu{}, bar.actions,
+                      menu_bar_ids + UINT(i) * menu_bar_block, &bar.bitmaps);
             return true;
         }
         return false;
@@ -6712,6 +6756,7 @@ private:
         menu_bar_item item;
         HMENU popup;
         std::vector<std::function<void()>> actions;
+        menu_bitmaps bitmaps;  // the popup's icons, until it's rebuilt
     };
     HMENU menu_bar_ = nullptr;  // destroyed with the window while attached
     std::vector<bar_menu> bars_;
