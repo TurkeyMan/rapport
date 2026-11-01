@@ -2953,8 +2953,11 @@ private:
         if (const icon icon = model_->icon(row, c))
         {
             const QIcon qi = to_q_icon(icon, icon_size_, view_);
-            qi.paint(p, QRect(area.x(), area.y() + (area.height() - icon_size_) / 2, icon_size_,
-                              icon_size_));
+            const QRect square(area.x(), area.y() + (area.height() - icon_size_) / 2, icon_size_,
+                               icon_size_);
+            qi.paint(p, square);
+            if (icon.overlay)
+                to_q_icon(icon::drawn(icon.overlay), icon_size_, view_).paint(p, square);
             area.setLeft(area.left() + icon_size_ + 4);
         }
         const auto& [font, fm] = font_for(style);

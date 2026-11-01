@@ -2262,18 +2262,56 @@ private:
                 ctx.get());
     }
 
+    // A menu-sized `gicon` with `overlay` drawn over it, as `w` shows it.
+    static cairo_surface_t*
+    with_overlay(GtkWidget* w, GIcon* gicon,
+                 const std::function<void(rap::painter&, rap::size_f)>& overlay)
+    {
+        const int size = 16, scale = gtk_widget_get_scale_factor(w);
+        GtkIconInfo* info = gtk_icon_theme_lookup_by_gicon_for_scale(
+            gtk_icon_theme_get_default(), gicon, size, scale, GTK_ICON_LOOKUP_FORCE_SIZE);
+        GdkPixbuf* pb = info ? gtk_icon_info_load_icon(info, nullptr) : nullptr;
+        if (info) g_object_unref(info);
+        if (!pb) return nullptr;
+        cairo_surface_t* s =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, size * scale, size * scale);
+        cairo_surface_set_device_scale(s, scale, scale);
+        cairo_t* cr = cairo_create(s);
+        cairo_save(cr);
+        cairo_scale(cr, 1.0 / scale, 1.0 / scale);
+        gdk_cairo_set_source_pixbuf(cr, pb, 0, 0);
+        cairo_paint(cr);
+        cairo_restore(cr);
+        g_object_unref(pb);
+        {
+            cairo_painter painter(cr, w);
+            overlay(painter, {float(size), float(size)});
+        }
+        cairo_destroy(cr);
+        return s;
+    }
+
     static void icon_cell(GtkTreeViewColumn*, GtkCellRenderer* r, GtkTreeModel*, GtkTreeIter* iter,
                          gpointer p)
     {
         auto* ctx = static_cast<column_ctx*>(p);
         list_model* model = ctx->list->model_;
         GIcon* gicon = nullptr;
+        icon icon;
         if (model && ctx->list->alive_ && row_of(iter) < model->row_count())
         {
-            const icon icon = model->icon(row_of(iter), ctx->column);
+            icon = model->icon(row_of(iter), ctx->column);
             if (!icon.file.empty()) gicon = file_type_icon(icon.file);
             else if (!icon.name.empty()) gicon = named_g_icon(icon.name);
         }
+        // An overlay: the icon and its badge drawn together, at the screen's scale.
+        if (gicon && icon.overlay)
+            if (cairo_surface_t* both = with_overlay(ctx->list->w_, gicon, icon.overlay))
+            {
+                g_object_set(r, "surface", both, "visible", true, nullptr);
+                cairo_surface_destroy(both);
+                return;
+            }
         g_object_set(r, "gicon", gicon, "visible", gicon != nullptr, nullptr);
     }
 

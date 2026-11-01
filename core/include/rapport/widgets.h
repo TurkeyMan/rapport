@@ -169,9 +169,12 @@ struct icon
     // device_scale. Draw with theme colours (theme_color::window_text) so it
     // follows dark mode; backends redraw it when the theme or scale changes.
     std::function<void(rap::painter&, rap::size_f)> draw;
+    // Drawn over the icon in its square, as a file manager's overlays: a
+    // badge on a row's icon in a list (the only place it's drawn).
+    std::function<void(rap::painter&, rap::size_f)> overlay;
 
-    static icon named(std::string n) { return {std::move(n), {}, {}}; }
-    static icon for_file(std::string file_name) { return {{}, std::move(file_name), {}}; }
+    static icon named(std::string n) { return {std::move(n), {}, {}, {}}; }
+    static icon for_file(std::string file_name) { return {{}, std::move(file_name), {}, {}}; }
     static icon drawn(std::function<void(rap::painter&, rap::size_f)> f)
     {
         return {{}, {}, std::move(f)};
@@ -359,9 +362,6 @@ struct cell_info
     bool selected = false;
     bool focused = false;
 };
-
-// -- icons --------------------------------------------------------------------
-
 
 // -- list model ---------------------------------------------------------------
 

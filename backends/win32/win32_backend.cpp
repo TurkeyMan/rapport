@@ -3927,6 +3927,12 @@ private:
                                             (dip(cell.bottom - cell.top) - sz.height) / 2;
                             rt->SetTransform(origin);
                             rt->DrawBitmap(bmp, D2D1::RectF(x, y, x + sz.width, y + sz.height));
+                            if (icon.overlay)
+                            {
+                                d2d_painter badge(rt, s);
+                                rt->SetTransform(D2D1::Matrix3x2F::Translation(x, y) * origin);
+                                icon.overlay(badge, {sz.width, sz.height});
+                            }
                             icon_space += sz.width + 2;
                         }
                     const std::wstring text = wide(model_->text(size_t(row), sp.col));
