@@ -526,7 +526,10 @@ com<IDWriteTextLayout> d2d_painter::layout(const std::string& s, const text_styl
                                           DWRITE_FONT_STRETCH_NORMAL, size, L"", format.put());
     com<IDWriteTextLayout> layout;
     const std::wstring w = wide(s);
-    if (format)
+    if (format && gdi_classic_)
+        dwrite_factory()->CreateGdiCompatibleTextLayout(w.c_str(), UINT32(w.size()), format.get(), max_width,
+                                                       100000, scale_, nullptr, FALSE, layout.put());
+    else if (format)
         dwrite_factory()->CreateTextLayout(w.c_str(), UINT32(w.size()), format.get(), max_width, 100000,
                                           layout.put());
     return layout;

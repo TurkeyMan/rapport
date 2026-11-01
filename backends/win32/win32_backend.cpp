@@ -3892,6 +3892,7 @@ private:
                     if (columns_[sp.col].painted)
                     {
                         d2d_painter cell_painter(rt, s);
+                        cell_painter.set_gdi_classic();  // as the rows' own text
                         if (soft_)
                         {
                             cell_painter.override_color(theme_color::highlight, colors.background);
@@ -3930,6 +3931,7 @@ private:
                             if (icon.overlay)
                             {
                                 d2d_painter badge(rt, s);
+                                badge.set_gdi_classic();
                                 rt->SetTransform(D2D1::Matrix3x2F::Translation(x, y) * origin);
                                 icon.overlay(badge, {sz.width, sz.height});
                             }

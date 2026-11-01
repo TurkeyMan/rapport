@@ -180,6 +180,10 @@ public:
     void override_color(theme_color role, color c) { overrides_[int(role)] = c; }
     // On paper: theme roles are print_color()'s, whatever the screen's theme.
     void set_printing() { printing_ = true; }
+    // On a target rendering text GDI-classic (a list's rows): text laid out
+    // with GDI-classic advances to match its snapped glyphs, which natural
+    // ones put a fraction off each ('throu gh').
+    void set_gdi_classic() { gdi_classic_ = true; }
 
 private:
     ID2D1SolidColorBrush* brush(const paint& p);
@@ -196,6 +200,7 @@ private:
     int clips_ = 0;
     std::map<int, color> overrides_;
     bool printing_ = false;
+    bool gdi_classic_ = false;
 };
 
 // Renders an icon (named icons have no theme on Windows: drawn ones only)
