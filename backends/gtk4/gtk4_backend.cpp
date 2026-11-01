@@ -3682,9 +3682,20 @@ public:
             delay ? guint(std::atoi(delay)) : 500u,
             +[](gpointer) -> gboolean
             {
-                save_last_shown(std::getenv("RAPPORT_SNAPSHOT"));
-                if (main_loop()) g_main_loop_quit(main_loop());
-                return G_SOURCE_REMOVE;
+                // Not drawn yet (a slow first frame, e.g. on Broadway): again
+                // every 250 ms, for up to 5 s more.
+                static const GSourceFunc attempt = +[](gpointer again) -> gboolean
+                {
+                    static int tries = 0;
+                    if (!save_last_shown(std::getenv("RAPPORT_SNAPSHOT")) && ++tries <= 20)
+                    {
+                        if (!again) g_timeout_add(250, attempt, GINT_TO_POINTER(1));
+                        return again ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+                    }
+                    if (main_loop()) g_main_loop_quit(main_loop());
+                    return G_SOURCE_REMOVE;
+                };
+                return attempt(nullptr);
             },
             nullptr);
     }
