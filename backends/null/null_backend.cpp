@@ -634,6 +634,7 @@ public:
         return code_;
     }
 
+    void set_color_scheme(color_scheme) override {}
     void quit(int code) override
     {
         std::lock_guard lock(mutex_);

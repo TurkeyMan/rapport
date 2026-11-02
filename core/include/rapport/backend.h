@@ -19,7 +19,17 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 56;
+inline constexpr int abi_version = 57;
+
+// Light or dark: as the desktop has it (system), or the app's own choice
+// (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for
+// snapshots and tests.
+enum class color_scheme
+{
+    system,
+    light,
+    dark,
+};
 
 // For list::set_column_order: whether `order` names each of `n` columns once.
 inline bool is_column_order(const std::vector<size_t>& order, size_t n)
@@ -125,6 +135,9 @@ public:
 
     virtual int run() = 0;  // main loop; returns the quit() code
     virtual void quit(int code) = 0;
+    // Light, dark, or the desktop's again, live in every window; before the
+    // first window is shown, so it never shows in the other one.
+    virtual void set_color_scheme(color_scheme) = 0;
     virtual void post(std::function<void()>) = 0;  // thread-safe
 
     // Native dialogs (xdg-desktop-portal where available). Async.
@@ -174,6 +187,8 @@ struct look_options
         off,
     };
     adwaita_mode adwaita = adwaita_mode::auto_;
+    // The scheme from the start, as ui::set_color_scheme sets it later.
+    rap::color_scheme color_scheme = color_scheme::system;
 };
 
 // Backend entry point. Returns nullptr if the ABI doesn't match or the

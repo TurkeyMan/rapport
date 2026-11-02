@@ -1406,6 +1406,8 @@ public:
         }
         set_read_only(s.read_only);
         buffer_ = gtk_text_view_get_buffer(tv);
+        // Spans in theme roles take the new colours.
+        on_theme_changed(this, [this] { tags_.recolour(w_); });
         set_text(s.text);
         connect(
             buffer_, "changed",
@@ -1481,6 +1483,8 @@ public:
         gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(w_), gtk_text_buffer_get_insert(buffer_), 0.1,
                                      false, 0, 0);
     }
+
+    ~text_view_impl() override { forget_theme_listener(this); }
 
 private:
     GtkTextBuffer* buffer_;
@@ -4635,8 +4639,9 @@ private:
 class gtk3_backend : public backend
 {
 public:
-    static backend* create(int* argc, char** argv, const look_options&)
+    static backend* create(int* argc, char** argv, const look_options& look)
     {
+        palette::app_scheme() = palette::scheme_number(look.color_scheme);
         // Under WSLg, GTK keeps its own choice, Wayland: WSLg's X server
         // doesn't keep the pointer's shape up to date, leaving whatever was
         // set last (often nothing) over the window. Wayland can't place
@@ -4673,6 +4678,11 @@ public:
         return code_;
     }
 
+    void set_color_scheme(color_scheme s) override
+    {
+        palette::app_scheme() = palette::scheme_number(s);
+        apply_scheme();
+    }
     void quit(int code) override
     {
         quit_ = true;

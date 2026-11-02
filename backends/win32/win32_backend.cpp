@@ -325,10 +325,15 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
             }
         }
         // (Themed check boxes ignore the text colour: theirs is drawn by
-        // check_impl in dark mode.)
+        // check_impl in dark mode. A link takes it in dark mode, where
+        // theme_control asks it to: the link colour.)
+        wchar_t cls[16] = {};
+        GetClassNameW(c, cls, 16);
+        const bool link = dark_mode() && !_wcsicmp(cls, WC_LINK);
         SetTextColor(reinterpret_cast<HDC>(wp),
-                     color_ref(theme_color_of(IsWindowEnabled(c) ? theme_color::window_text
-                                                                 : theme_color::disabled_text)));
+                     color_ref(theme_color_of(!IsWindowEnabled(c) ? theme_color::disabled_text
+                                              : link              ? theme_color::link
+                                                                  : theme_color::window_text)));
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
         result = reinterpret_cast<LRESULT>(theme_brush(theme_color::window));
         return true;
@@ -7449,8 +7454,9 @@ private:
 class win32_backend : public backend
 {
 public:
-    static backend* create(int*, char**, const look_options&)
+    static backend* create(int*, char**, const look_options& look)
     {
+        palette::app_scheme() = palette::scheme_number(look.color_scheme);
         // Per-monitor DPI awareness (v2) where the system has it.
         using fn_t = BOOL(WINAPI*)(HANDLE);
         if (auto fn = reinterpret_cast<fn_t>(reinterpret_cast<void*>(
@@ -7531,6 +7537,15 @@ public:
             DispatchMessageW(&m);
         }
         return code_;
+    }
+    // As RAPPORT_THEME does: the palette, menus, title bars and controls,
+    // in every window now (before one is shown, it starts so).
+    void set_color_scheme(color_scheme s) override
+    {
+        palette::app_scheme() = palette::scheme_number(s);
+        forget_theme_colors();
+        apply_app_mode();
+        for (window_impl* w : window_impl::windows()) w->retheme();
     }
     void quit(int code) override
     {

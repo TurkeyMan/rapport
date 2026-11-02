@@ -224,11 +224,20 @@ QFont styled_font(QFont f, const text_style& s)
     return f;
 }
 
+// Text formats remember the theme roles they were given (role + 1), so a
+// palette change can recolour them (recolour_roles).
+constexpr int fg_role_property = QTextFormat::UserProperty + 1;
+constexpr int bg_role_property = QTextFormat::UserProperty + 2;
+
 QTextCharFormat char_format(const QWidget* w, const text_style& s)
 {
     QTextCharFormat f;
     if (s.fg) f.setForeground(qcolor(resolve(w, *s.fg)));
     if (s.bg) f.setBackground(qcolor(resolve(w, *s.bg)));
+    if (s.fg && std::holds_alternative<theme_color>(*s.fg))
+        f.setProperty(fg_role_property, int(std::get<theme_color>(*s.fg)) + 1);
+    if (s.bg && std::holds_alternative<theme_color>(*s.bg))
+        f.setProperty(bg_role_property, int(std::get<theme_color>(*s.bg)) + 1);
     if (s.bold) f.setFontWeight(QFont::Bold);
     if (s.italic) f.setFontItalic(true);
     if (s.monospace)
@@ -239,6 +248,43 @@ QTextCharFormat char_format(const QWidget* w, const text_style& s)
     }
     if (s.size > 0) f.setFontPointSize(s.size);
     return f;
+}
+
+// The palette changed: text in theme roles takes the roles' new colours.
+void recolour_roles(QTextDocument* doc, const QWidget* w)
+{
+    struct run
+    {
+        int from, to;
+        QTextCharFormat change;
+    };
+    std::vector<run> runs;
+    for (QTextBlock b = doc->begin(); b.isValid(); b = b.next())
+        for (auto it = b.begin(); !it.atEnd(); ++it)
+        {
+            const QTextFragment f = it.fragment();
+            const QTextCharFormat cf = f.charFormat();
+            QTextCharFormat change;
+            if (cf.hasProperty(fg_role_property))
+                change.setForeground(
+                    qcolor(theme_color_of(w, theme_color(cf.intProperty(fg_role_property) - 1))));
+            if (cf.hasProperty(bg_role_property))
+                change.setBackground(
+                    qcolor(theme_color_of(w, theme_color(cf.intProperty(bg_role_property) - 1))));
+            if (!change.isEmpty())
+                runs.push_back({f.position(), f.position() + f.length(), change});
+        }
+    if (runs.empty()) return;
+    const bool undo = doc->isUndoRedoEnabled();
+    doc->setUndoRedoEnabled(false);
+    QTextCursor c(doc);
+    for (const run& r : runs)
+    {
+        c.setPosition(r.from);
+        c.setPosition(r.to, QTextCursor::KeepAnchor);
+        c.mergeCharFormat(r.change);
+    }
+    doc->setUndoRedoEnabled(undo);
 }
 
 // Byte offsets into a UTF-8 string and UTF-16 positions in its QString.
@@ -678,6 +724,22 @@ public:
                              {
                                  if (f) f();
                              });
+            // The link's colour is fixed when the text is laid out: laid
+            // out again in a new palette.
+            hook(label(),
+                 [this](QEvent* e)
+                 {
+                     if (e->type() == QEvent::PaletteChange ||
+                         e->type() == QEvent::ApplicationPaletteChange)
+                         QTimer::singleShot(
+                             0, label(),
+                             [this]
+                             {
+                                 label()->clear();  // (the same text isn't laid out again)
+                                 set_text(text_);
+                             });
+                     return false;
+                 });
         }
         else if (s.selectable)
         {
@@ -689,6 +751,7 @@ public:
     }
     void set_text(const std::string& t) override
     {
+        text_ = t;
         if (link_)
             // Through the full text the label re-applies on resize.
             label()->set_full_text("<a href=\"rapport:\">" + qs(t).toHtmlEscaped() + "</a>");
@@ -697,6 +760,7 @@ public:
     }
 
 private:
+    std::string text_;
     // With an icon, the label sits after it in a row of its own; on a link
     // the icon takes the link's click and pointer.
     static QWidget* with_icon(elided_label* text, const spec::label& s)
@@ -1196,6 +1260,17 @@ public:
         e->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
         set_read_only(s.read_only);
         set_text(s.text);
+        hook(e,
+             [this](QEvent* ev)
+             {
+                 if (ev->type() == QEvent::PaletteChange)
+                 {
+                     const bool quiet = edit()->blockSignals(true);  // not the user's change
+                     recolour_roles(edit()->document(), w_);
+                     edit()->blockSignals(quiet);
+                 }
+                 return false;
+             });
         QObject::connect(e, &QPlainTextEdit::textChanged, e,
                          [this]
                          {
@@ -4363,15 +4438,30 @@ private:
 // snapshots of both. Qt 6.8 asks the platform theme for it; where that
 // can't (the offscreen platform, X11 without a desktop theme), a palette
 // of the scheme's own: Fusion's standard light one, or a dark one.
+// The application's palette before any scheme of ours, to go back to.
+std::optional<QPalette>& own_palette()
+{
+    static std::optional<QPalette> p;
+    return p;
+}
 void force_scheme(bool dark)
 {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
     const Qt::ColorScheme wanted = dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light;
     QGuiApplication::styleHints()->setColorScheme(wanted);
-    if (QGuiApplication::styleHints()->colorScheme() == wanted) return;
+    if (QGuiApplication::styleHints()->colorScheme() == wanted)
+    {
+        if (own_palette()) QApplication::setPalette(*std::exchange(own_palette(), std::nullopt));
+        return;
+    }
 #endif
-    const bool now_dark = QApplication::palette().color(QPalette::Window).lightnessF() < 0.5;
-    if (now_dark == dark) return;
+    if (!own_palette()) own_palette() = QApplication::palette();
+    const bool system_dark = own_palette()->color(QPalette::Window).lightnessF() < 0.5;
+    if (system_dark == dark)
+    {
+        QApplication::setPalette(*own_palette());
+        return;
+    }
     if (!dark)
     {
         QApplication::setPalette(QApplication::style()->standardPalette());
@@ -4410,13 +4500,28 @@ void force_scheme(bool dark)
     QApplication::setPalette(p);
 }
 
+// The app's or RAPPORT_THEME's scheme, or the desktop's again.
+void apply_scheme()
+{
+    if (const int forced = palette::forced_scheme())
+    {
+        force_scheme(forced == 1);
+        return;
+    }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    QGuiApplication::styleHints()->unsetColorScheme();
+#endif
+    if (own_palette()) QApplication::setPalette(*std::exchange(own_palette(), std::nullopt));
+}
+
 // -- backend ------------------------------------------------------------------
 
 class qt6_backend : public backend
 {
 public:
-    static backend* create(int* argc, char** argv, const look_options&)
+    static backend* create(int* argc, char** argv, const look_options& look)
     {
+        palette::app_scheme() = palette::scheme_number(look.color_scheme);
         QApplication* app = nullptr;  // one made here, deleted with the backend
         if (!qApp)
         {
@@ -4453,6 +4558,7 @@ public:
                     QIcon::setThemeName(theme);
                     break;
                 }
+        if (palette::forced_scheme()) apply_scheme();
         init_metrics();
         return new qt6_backend(app);
     }
@@ -4486,6 +4592,11 @@ public:
         return code_;
     }
 
+    void set_color_scheme(color_scheme s) override
+    {
+        palette::app_scheme() = palette::scheme_number(s);
+        apply_scheme();
+    }
     void quit(int code) override
     {
         quit_ = true;

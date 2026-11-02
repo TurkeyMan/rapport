@@ -884,37 +884,34 @@ class tag_cache
 public:
     GtkTextTag* get(GtkTextBuffer* buffer, GtkWidget* w, const text_style& s)
     {
-        auto rgba = [&](const std::optional<paint>& p) -> std::optional<GdkRGBA>
+        // Keyed by the style's paints, roles by name: a theme change
+        // recolours a role's tags (recolour) rather than leaving them.
+        auto part = [](const std::optional<paint>& p)
         {
-            if (!p) return std::nullopt;
-            color c = resolve(w, *p);
-            return GdkRGBA{c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
+            if (!p) return std::string();
+            if (auto* r = std::get_if<theme_color>(&*p)) return "r" + std::to_string(int(*r));
+            const color c = std::get<color>(*p);
+            return std::to_string(c.r) + "," + std::to_string(c.g) + "," + std::to_string(c.b) +
+                   "," + std::to_string(c.a);
         };
-        auto fg = rgba(s.fg), bg = rgba(s.bg);
-
-        std::string key =
-            std::to_string(s.bold) + std::to_string(s.italic) + std::to_string(s.monospace);
-        for (auto& c : {fg, bg})
-        {
-            key += '|';
-            if (c)
-            {
-                char* str = gdk_rgba_to_string(&*c);
-                key += str;
-                g_free(str);
-            }
-        }
-        for (auto& [k, t] : tags_)
-            if (k == key) return t;
+        std::string key = std::to_string(s.bold) + std::to_string(s.italic) +
+                          std::to_string(s.monospace) + '|' + part(s.fg) + '|' + part(s.bg);
+        for (auto& e : tags_)
+            if (e.key == key) return e.tag;
 
         GtkTextTag* t = gtk_text_buffer_create_tag(buffer, nullptr, nullptr);
         if (s.bold) g_object_set(t, "weight", PANGO_WEIGHT_BOLD, nullptr);
         if (s.italic) g_object_set(t, "style", PANGO_STYLE_ITALIC, nullptr);
         if (s.monospace) g_object_set(t, "family", "monospace", nullptr);
-        if (fg) g_object_set(t, "foreground-rgba", &*fg, nullptr);
-        if (bg) g_object_set(t, "background-rgba", &*bg, nullptr);
-        tags_.emplace_back(std::move(key), t);
+        tags_.push_back({std::move(key), t, s.fg, s.bg});
+        colour(w, tags_.back());
         return t;
+    }
+
+    // The theme changed: tags of theme roles take the roles' new colours.
+    void recolour(GtkWidget* w)
+    {
+        for (entry& e : tags_) colour(w, e);
     }
 
     // Applies byte-offset spans to text just loaded into the buffer.
@@ -942,7 +939,31 @@ public:
     }
 
 private:
-    std::vector<std::pair<std::string, GtkTextTag*>> tags_;
+    struct entry
+    {
+        std::string key;
+        GtkTextTag* tag;
+        std::optional<paint> fg, bg;
+    };
+    static void colour(GtkWidget* w, const entry& e)
+    {
+        auto rgba = [&](const paint& p)
+        {
+            const color c = resolve(w, p);
+            return GdkRGBA{c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
+        };
+        if (e.fg)
+        {
+            const GdkRGBA c = rgba(*e.fg);
+            g_object_set(e.tag, "foreground-rgba", &c, nullptr);
+        }
+        if (e.bg)
+        {
+            const GdkRGBA c = rgba(*e.bg);
+            g_object_set(e.tag, "background-rgba", &c, nullptr);
+        }
+    }
+    std::vector<entry> tags_;
 };
 
 // Running under WSL, where WSLg shows the windows on the Windows desktop:
@@ -1312,12 +1333,36 @@ inline void watch_gtk_theme()
 // accent-color. `apply` gets 0 (no preference), 1 (dark) or 2 (light)
 // now, before anything is shown, and again on every change; with
 // RAPPORT_THEME=dark|light, that once and never the desktop's.
+// The desktop's scheme as last read, and how the backend applies one.
+struct scheme_state
+{
+    void (*apply)(int scheme) = nullptr;
+    int desktop = 0;
+};
+inline scheme_state& schemes()
+{
+    static scheme_state s;
+    return s;
+}
+// The app's or RAPPORT_THEME's scheme, else the desktop's.
+inline void apply_scheme()
+{
+    const scheme_state& s = schemes();
+    if (!s.apply) return;
+    const int forced = palette::forced_scheme();
+    s.apply(forced ? forced : s.desktop);
+}
+inline void desktop_scheme_changed(int desktop)
+{
+    schemes().desktop = desktop;
+    apply_scheme();
+}
+
 inline void follow_color_scheme(void (*apply)(int scheme))
 {
-    static void (*on_change)(int) = apply;
+    schemes().apply = apply;
     watch_gtk_theme();
-    const int forced = palette::forced_scheme();
-    if (forced) apply(forced);
+    apply_scheme();
     GError* error = nullptr;
     GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
     g_clear_error(&error);
@@ -1326,7 +1371,7 @@ inline void follow_color_scheme(void (*apply)(int scheme))
         GVariant* scheme = portal_setting(bus, "color-scheme");
         GVariant* accent = portal_setting(bus, "accent-color");
         const bool known = scheme && g_variant_is_of_type(scheme, G_VARIANT_TYPE_UINT32);
-        if (known && !forced) apply(int(g_variant_get_uint32(scheme)));
+        if (known) desktop_scheme_changed(int(g_variant_get_uint32(scheme)));
         theme_states().portal_accent = portal_accent_of(accent);
         if (scheme) g_variant_unref(scheme);
         if (accent) g_variant_unref(accent);
@@ -1343,9 +1388,9 @@ inline void follow_color_scheme(void (*apply)(int scheme))
                     const gchar* key = nullptr;
                     GVariant* v = nullptr;
                     g_variant_get(params, "(&s&sv)", &ns, &key, &v);
-                    if (g_strcmp0(key, "color-scheme") == 0 && !palette::forced_scheme() &&
+                    if (g_strcmp0(key, "color-scheme") == 0 &&
                         g_variant_is_of_type(v, G_VARIANT_TYPE_UINT32))
-                        on_change(int(g_variant_get_uint32(v)));
+                        desktop_scheme_changed(int(g_variant_get_uint32(v)));
                     if (g_strcmp0(key, "accent-color") == 0)
                     {
                         theme_states().portal_accent = portal_accent_of(v);
@@ -1359,7 +1404,6 @@ inline void follow_color_scheme(void (*apply)(int scheme))
         else
             g_object_unref(bus);
     }
-    if (forced) return;
     GSettingsSchemaSource* source = g_settings_schema_source_get_default();
     GSettingsSchema* schema =
         source ? g_settings_schema_source_lookup(source, "org.gnome.desktop.interface", true)
@@ -1377,11 +1421,12 @@ inline void follow_color_scheme(void (*apply)(int scheme))
         g_free(v);
         return scheme;
     };
-    apply(read(gnome));
-    g_signal_connect(gnome, "changed::color-scheme",
-                     G_CALLBACK(+[](GSettings* s, gchar*, gpointer f)
-                                { on_change(reinterpret_cast<int (*)(GSettings*)>(f)(s)); }),
-                     reinterpret_cast<gpointer>(read));
+    desktop_scheme_changed(read(gnome));
+    g_signal_connect(
+        gnome, "changed::color-scheme",
+        G_CALLBACK(+[](GSettings* s, gchar*, gpointer f)
+                   { desktop_scheme_changed(reinterpret_cast<int (*)(GSettings*)>(f)(s)); }),
+        reinterpret_cast<gpointer>(read));
 }
 
 }  // namespace rap::gtkcommon

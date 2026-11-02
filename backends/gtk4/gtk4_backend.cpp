@@ -1375,6 +1375,8 @@ public:
         gtk_text_view_set_right_margin(tv, 4);
         set_read_only(s.read_only);
         buffer_ = gtk_text_view_get_buffer(tv);
+        // Spans in theme roles take the new colours.
+        on_theme_changed(this, [this] { tags_.recolour(w_); });
         set_text(s.text);
         connect(
             buffer_, "changed",
@@ -1450,6 +1452,8 @@ public:
         gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(w_), gtk_text_buffer_get_insert(buffer_), 0.1,
                                      false, 0, 0);
     }
+
+    ~text_view_impl() override { forget_theme_listener(this); }
 
 private:
     GtkTextBuffer* buffer_;
@@ -1870,6 +1874,8 @@ public:
 
         ctx_menu_ = std::make_unique<menu_actions>(w_, "ctx");
         if (s.auto_scroll) enable_auto_scroll();
+        // Cells styled in theme roles are bound again in the new colours.
+        on_theme_changed(this, [this] { rows_changed(0, SIZE_MAX); });
 
         // The model's tooltips, asked again as the pointer moves.
         gtk_widget_set_has_tooltip(w_, true);
@@ -1913,6 +1919,7 @@ public:
 
     ~list_impl() override
     {
+        forget_theme_listener(this);
         if (resnap_) g_source_remove(resnap_);
         if (model_) model_->remove_observer(this);
         g_object_unref(sel_);
@@ -4339,6 +4346,7 @@ class gtk4_backend : public backend
 public:
     static backend* create(int*, char**, const look_options& look)
     {
+        palette::app_scheme() = palette::scheme_number(look.color_scheme);
         // Under WSLg, Wayland, as for GTK 3: on its X server the pointer can
         // vanish over the window. (Its X11 does draw faster: 23 against 20 fps
         // for a panning canvas; gtk3 39 against 29.)
@@ -4394,6 +4402,14 @@ public:
         return code_;
     }
 
+    void set_color_scheme(color_scheme s) override
+    {
+        palette::app_scheme() = palette::scheme_number(s);
+        if (adw::adopted())
+            adw::apply_scheme();
+        else
+            apply_scheme();
+    }
     void quit(int code) override
     {
         quit_ = true;

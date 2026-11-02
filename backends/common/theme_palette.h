@@ -5,6 +5,7 @@
 // with no toolkit, so tests/theme_palette_test.cpp can check them.
 #pragma once
 
+#include "rapport/backend.h"
 #include "rapport/widgets.h"
 
 #include <algorithm>
@@ -233,10 +234,23 @@ inline int scheme_from_name(std::string_view v)
 {
     return v == "dark" ? 1 : v == "light" ? 2 : 0;
 }
+// The app's choice (ui::set_color_scheme), in the same numbering.
+inline int& app_scheme()
+{
+    static int scheme = 0;
+    return scheme;
+}
+inline int scheme_number(color_scheme s)
+{
+    return s == color_scheme::dark ? 1 : s == color_scheme::light ? 2 : 0;
+}
+// The scheme to use whatever the desktop's: RAPPORT_THEME, else the
+// app's; 0 to follow the desktop.
 inline int forced_scheme()
 {
     const char* v = std::getenv("RAPPORT_THEME");
-    return v ? scheme_from_name(v) : 0;
+    if (const int env = v ? scheme_from_name(v) : 0) return env;
+    return app_scheme();
 }
 
 // Windows' app mode: dark when Settings > Personalisation > Colours says

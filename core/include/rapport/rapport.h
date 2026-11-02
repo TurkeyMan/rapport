@@ -62,6 +62,9 @@ public:
     std::unique_ptr<window> create(const window_spec&, window* parent = nullptr);
 
     int run() { return backend_->run(); }
+    // Light, dark or the desktop's (system), live; before the first window
+    // to start in it (or load_options::look.color_scheme).
+    void set_color_scheme(rap::color_scheme s) { backend_->set_color_scheme(s); }
     void quit(int code = 0) { backend_->quit(code); }
     void post(std::function<void()> f) { backend_->post(std::move(f)); }
 

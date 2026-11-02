@@ -49,6 +49,19 @@ inline bool desktop_wants_adwaita()
     return gtkcommon::default_gtk_theme();
 }
 
+// The app's or RAPPORT_THEME's scheme through the style manager, else the
+// desktop's (libadwaita follows it itself).
+inline void apply_scheme()
+{
+    const api* a = adopted();
+    if (!a) return;
+    const int forced = palette::forced_scheme();
+    a->style_manager_set_color_scheme(a->style_manager_get_default(),
+                                      forced == 1   ? color_scheme_force_dark
+                                      : forced == 2 ? color_scheme_force_light
+                                                    : color_scheme_default);
+}
+
 // Calls adw_init when `look` and the desktop want libadwaita and it's
 // installed, after gtk_init. RAPPORT_THEME=dark|light goes through the
 // style manager (libadwaita owns the colour scheme, and warns about GTK's
@@ -78,9 +91,8 @@ inline bool adopt(const look_options& look)
     if (!a.init || !a.style_manager_get_default || !a.style_manager_set_color_scheme) return false;
     a.init();
     GObject* manager = a.style_manager_get_default();
-    if (const int forced = palette::forced_scheme())
-        a.style_manager_set_color_scheme(manager, forced == 1 ? color_scheme_force_dark
-                                                              : color_scheme_force_light);
+    adopted() = &a;
+    apply_scheme();
     // Dark, high contrast and the accent (1.6) are the style manager's,
     // which writes them into the stylesheet's named colours (accent_bg_color
     // and accent_fg_color, the desktop's accent and its text): each change

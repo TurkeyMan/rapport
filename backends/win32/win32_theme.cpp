@@ -216,6 +216,19 @@ void theme_control(HWND h)
         RedrawWindow(h, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE);
         SendMessageW(h, EM_SETBKGNDCOLOR, 0, LPARAM(color_ref(theme_color_of(theme_color::base))));
     }
+    else if (class_is(h, WC_LINK))
+    {
+        // The system's link blue is unreadable on dark: in dark mode the
+        // link takes its text colour from WM_CTLCOLORSTATIC (the link
+        // role), as LIS_DEFAULTCOLORS asks.
+        LITEM item{};
+        item.mask = LIF_ITEMINDEX | LIF_STATE;
+        item.iLink = 0;
+        item.state = dark ? LIS_DEFAULTCOLORS : 0;
+        item.stateMask = LIS_DEFAULTCOLORS;
+        SendMessageW(h, LM_SETITEM, 0, reinterpret_cast<LPARAM>(&item));
+        InvalidateRect(h, nullptr, TRUE);
+    }
     else if (class_is(h, TOOLTIPS_CLASSW) || class_is(h, L"rapportHost") ||
              class_is(h, L"ScrollBar") || class_is(h, UPDOWN_CLASSW))
         SetWindowTheme(h, explorer, nullptr);

@@ -3,10 +3,15 @@
 // backend's reading of the desktop's colours can be snapshotted:
 //   RAPPORT_SNAPSHOT=roles.png ./rapport-theme-roles
 //   RAPPORT_THEME=dark RAPPORT_SNAPSHOT=roles-dark.png ./rapport-theme-roles
+// The Appearance drop-down switches with ui::set_color_scheme. To check a
+// live switch unattended, schemes to set one after another, 200 ms apart,
+// the first before the window shows:
+//   RAPPORT_SNAPSHOT=switched.png ./rapport-theme-roles dark light
 #include <rapport/rapport.h>
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -109,9 +114,21 @@ int main(int argc, char** argv)
     }
     rap::ui& ui = **loaded;
 
+    // Schemes named on the command line: the first now, the rest later.
+    std::vector<rap::color_scheme> schemes;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a = argv[i];
+        schemes.push_back(a == "dark"    ? rap::color_scheme::dark
+                          : a == "light" ? rap::color_scheme::light
+                                         : rap::color_scheme::system);
+    }
+    if (!schemes.empty()) ui.set_color_scheme(schemes.front());
+
     rows_model model;
     rap::list* soft = nullptr;
     rap::list* solid = nullptr;
+    rap::text_view* diff = nullptr;
     using namespace rap::layout;
     auto win = ui.create(window{
         "rapport theme roles — " + std::string(ui.backend_name()),
@@ -123,15 +140,37 @@ int main(int argc, char** argv)
                 entry{}.placeholder("Placeholder text"),
                 drop_down{{"Drop-down", "Other"}, 0},
                 label{"A link"}.link([] {}),
+                spacer{},
+                label{"Appearance"},
+                drop_down{{"System", "Light", "Dark"}, schemes.empty() ? 0 : int(schemes.back())}
+                    .on_changed([&](int i) { ui.set_color_scheme(rap::color_scheme(i)); }),
             },
             hbox{
                 list{{{"Soft selection", {}, true}}, &model}.soft_selection().bind(soft).stretch(),
                 list{{{"Solid selection", {}, true}}, &model}.bind(solid).stretch(),
+                text_view{}.read_only().monospace().bind(diff).stretch(),
             }
                 .height(7_lines),
         }}}.size(880_px, 640_px));
     soft->select({1});
     solid->select({1});
+    // Text in theme roles, as a diff shows it: recoloured when they change.
+    {
+        const std::string text = "@@ -1,2 +1,2 @@\n-removed\n+added\n context\n";
+        rap::text_style hunk, removed, added;
+        hunk.fg = theme_color::accent;
+        removed.fg = theme_color::negative;
+        added.fg = theme_color::positive;
+        diff->set_text(text, {{0, 15, hunk}, {16, 24, removed}, {25, 31, added}});
+    }
     win->show();
+    size_t next = 1;
+    rap::subscription switching;
+    if (schemes.size() > 1)
+        switching = ui.timer(200, true,
+                             [&]
+                             {
+                                 if (next < schemes.size()) ui.set_color_scheme(schemes[next++]);
+                             });
     return ui.run();
 }
