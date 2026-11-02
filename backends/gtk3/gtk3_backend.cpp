@@ -228,33 +228,6 @@ using namespace gtkcommon;
 }
 }  // namespace rap::gtk3
 
-rap::color rap::gtkcommon::theme_color_of(GtkWidget* w, theme_color role)
-{
-    GtkStyleContext* ctx = gtk_widget_get_style_context(w);
-    GdkRGBA fg;
-    gtk_style_context_get_color(ctx, gtk_style_context_get_state(ctx), &fg);
-
-    // Named colours every GTK 3 theme is expected to define.
-    const char* name = nullptr;
-    switch (role)
-    {
-    case theme_color::window: name = "theme_bg_color"; break;
-    case theme_color::window_text: name = "theme_fg_color"; break;
-    case theme_color::base: name = "theme_base_color"; break;
-    case theme_color::text: name = "theme_text_color"; break;
-    case theme_color::highlight:
-    case theme_color::accent: name = "theme_selected_bg_color"; break;
-    case theme_color::highlight_text: name = "theme_selected_fg_color"; break;
-    case theme_color::positive: name = "success_color"; break;
-    case theme_color::negative: name = "error_color"; break;
-    case theme_color::link: name = "link_color"; break;
-    default: break;
-    }
-    GdkRGBA c;
-    if (name && gtk_style_context_lookup_color(ctx, name, &c)) return to_color(c);
-    return fallback_color(role, to_color(fg), is_dark_text(fg));
-}
-
 namespace rap::gtk3
 {
 namespace
@@ -1781,21 +1754,15 @@ public:
         }
         if (s.soft_selection)
         {
-            soft_ = soft_selection_colors(w_);
-            auto rgb = [](color c)
-            {
-                return "rgb(" + std::to_string(c.r) + "," + std::to_string(c.g) + "," +
-                       std::to_string(c.b) + ")";
-            };
-            std::string rule = "treeview.view:selected, treeview.view:selected:focus, "
-                               "treeview.view:selected:backdrop { background-color: " +
-                               rgb(soft_->first) + "; color: " + rgb(soft_->second) + "; }";
-            GtkCssProvider* css = gtk_css_provider_new();
-            gtk_css_provider_load_from_data(css, rule.c_str(), -1, nullptr);
-            gtk_style_context_add_provider(gtk_widget_get_style_context(w_),
-                                           GTK_STYLE_PROVIDER(css),
-                                           GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-            g_object_unref(css);
+            soft_ = true;
+            themed_widget_css(w_, this,
+                              [w = w_]
+                              {
+                                  const auto [selected, text] = soft_selection_colors(w);
+                                  return "treeview.view:selected, treeview.view:selected:focus, "
+                                         "treeview.view:selected:backdrop { background-color: " +
+                                         css_rgb(selected) + "; color: " + css_rgb(text) + "; }";
+                              });
         }
         if (compact_)
         {
@@ -1911,6 +1878,7 @@ public:
     {
         end_drop_hover();
         auto_lists().erase(this);
+        forget_theme_listener(this);
         if (model_) model_->remove_observer(this);
         g_object_unref(rows_);
     }
@@ -2379,14 +2347,15 @@ private:
             cairo_set_source_rgba(cr, c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0);
             cairo_paint(cr);
         }
-        auto& soft = ctx->list->soft_;
+        const bool soft = ctx->list->soft_;
         cairo_painter painter(cr, widget,
                              selected && !soft ? std::optional<paint>{theme_color::highlight_text}
                                                : std::nullopt);
         if (soft)
         {
-            painter.override_color(theme_color::highlight, soft->first);
-            painter.override_color(theme_color::highlight_text, soft->second);
+            const auto [background, text] = soft_selection_colors(widget);
+            painter.override_color(theme_color::highlight, background);
+            painter.override_color(theme_color::highlight_text, text);
         }
         cell_info info{{float(area->width), float(area->height)},
                       selected,
@@ -2819,9 +2788,7 @@ private:
     std::optional<color> hover_color() const
     {
         if (!soft_) return std::nullopt;
-        color base = theme_color_of(w_, theme_color::base), accent = theme_color_of(w_, theme_color::accent);
-        bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
-        return mix_colors(base, accent, dark ? 0.16f : 0.09f);
+        return soft_hover_color(w_);
     }
     void set_hot(std::optional<size_t> row)
     {
@@ -3132,7 +3099,7 @@ private:
     bool fitted_ = false;  // stretch columns have had their share of the width
     bool compact_ = false;
     bool checks_ = false;                          // a toggle cell at the start of column 0
-    std::optional<std::pair<color, color>> soft_;  // selection background, text
+    bool soft_ = false;  // soft selection: a tint of the accent, normal text
     float compact_scale_ = 1;
 
     std::function<void()> sel_changed_;

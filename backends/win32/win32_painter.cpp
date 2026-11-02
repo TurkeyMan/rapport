@@ -2,9 +2,12 @@
 
 #include "builtin_icons.h"
 
+#include <dwmapi.h>
+
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <set>
 #include <thread>
 #include <tuple>
@@ -255,8 +258,68 @@ color sys_color(int index)
     return color{GetRValue(c), GetGValue(c), GetBValue(c), 255};
 }
 
+namespace
+{
+
+// What Windows says about colour beyond GetSysColor, read once and again
+// after forget_theme_colors() (the top-level windows call it on
+// WM_SETTINGCHANGE, WM_SYSCOLORCHANGE and WM_DWMCOLORIZATIONCOLORCHANGED).
+struct desktop_colors
+{
+    bool high_contrast = false;
+    std::optional<palette::accent_shades> shades;  // the accent's light and dark steps
+    color accent;
+};
+std::optional<desktop_colors> g_desktop;
+
+// The user's accent colour: Settings > Personalisation > Colours, which
+// UISettings' UIColorType::Accent reports. Its shades from the Explorer
+// key (UISettings reads the same), else the DWM's AccentColor, else the
+// colorization colour; the selection colour where none is set.
+desktop_colors read_desktop_colors()
+{
+    desktop_colors d;
+    HIGHCONTRASTW hc{sizeof hc};
+    d.high_contrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof hc, &hc, 0) &&
+                      (hc.dwFlags & HCF_HIGHCONTRASTON);
+    d.accent = sys_color(COLOR_HIGHLIGHT);
+    if (d.high_contrast) return d;  // the system colours unchanged
+    uint8_t bytes[32];
+    DWORD size = sizeof bytes;
+    if (RegGetValueW(HKEY_CURRENT_USER,
+                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
+                     L"AccentPalette", RRF_RT_REG_BINARY, nullptr, bytes, &size) == ERROR_SUCCESS)
+        d.shades = palette::parse_accent_palette(bytes, size);
+    DWORD word = 0;
+    size = sizeof word;
+    BOOL opaque = FALSE;
+    if (d.shades)
+        d.accent = d.shades->accent();
+    else if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", L"AccentColor",
+                          RRF_RT_REG_DWORD, nullptr, &word, &size) == ERROR_SUCCESS)
+        d.accent = palette::from_abgr(word);
+    else if (SUCCEEDED(DwmGetColorizationColor(&word, &opaque)))
+        d.accent = palette::from_argb(word);
+    return d;
+}
+
+const desktop_colors& desktop()
+{
+    if (!g_desktop) g_desktop = read_desktop_colors();
+    return *g_desktop;
+}
+
+}  // namespace
+
+void forget_theme_colors()
+{
+    g_desktop.reset();
+}
+
 color theme_color_of(theme_color role)
 {
+    const desktop_colors& d = desktop();
+    const bool dark = false;
     switch (role)
     {
     case theme_color::window: return sys_color(COLOR_BTNFACE);
@@ -265,19 +328,27 @@ color theme_color_of(theme_color role)
     case theme_color::alternate_base:
     {
         color b = sys_color(COLOR_WINDOW);
-        auto d = [](uint8_t v) { return uint8_t(v > 128 ? v - 8 : v + 8); };
-        return color{d(b.r), d(b.g), d(b.b), 255};
+        auto f = [](uint8_t v) { return uint8_t(v > 128 ? v - 8 : v + 8); };
+        return color{f(b.r), f(b.g), f(b.b), 255};
     }
     case theme_color::text: return sys_color(COLOR_WINDOWTEXT);
     case theme_color::placeholder_text: return sys_color(COLOR_GRAYTEXT);
-    case theme_color::highlight: return sys_color(COLOR_HIGHLIGHT);
-    case theme_color::highlight_text: return sys_color(COLOR_HIGHLIGHTTEXT);
     case theme_color::mid: return sys_color(COLOR_BTNSHADOW);
-    case theme_color::accent: return sys_color(COLOR_HOTLIGHT);
-    case theme_color::link: return sys_color(COLOR_HOTLIGHT);
-    case theme_color::positive: return color{0x26, 0x8a, 0x3c, 255};
-    case theme_color::negative: return color{0xc0, 0x1c, 0x28, 255};
     case theme_color::neutral: return sys_color(COLOR_GRAYTEXT);
+    // Selection follows the accent, as Explorer's does, with white or
+    // black text, whichever reads on it; high contrast keeps its own.
+    case theme_color::accent: return d.accent;
+    case theme_color::highlight: return d.high_contrast ? sys_color(COLOR_HIGHLIGHT) : d.accent;
+    case theme_color::highlight_text:
+        return d.high_contrast ? sys_color(COLOR_HIGHLIGHTTEXT) : palette::text_on(d.accent);
+    case theme_color::link:
+        // Fluent's accent text: a darker step of the accent on light, a
+        // lighter one on dark.
+        if (d.shades) return dark ? d.shades->light(3) : d.shades->dark(2);
+        return sys_color(COLOR_HOTLIGHT);
+    case theme_color::positive:
+    case theme_color::negative:
+    case theme_color::warning: return palette::fluent_status(role, dark);
     }
     return color{0, 0, 0, 255};
 }

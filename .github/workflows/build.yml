@@ -42,6 +42,9 @@ jobs:
       - name: Translations
         run: build/bin/rapport-i18n-test tests/i18n
 
+      - name: Theme palette
+        run: build/bin/rapport-theme-palette-test
+
   # MSVC with the static runtime, as the apps ship: as plugins and statically
   # linked. The examples must run, and the shell extension must load into
   # Explorer's way of calling it and need nothing but Windows.
@@ -75,6 +78,11 @@ jobs:
         run: |
           build/bin/Release/rapport-i18n-test.exe tests/i18n
           if ($LASTEXITCODE) { throw 'rapport-i18n-test failed' }
+
+      - name: Theme palette
+        run: |
+          build/bin/Release/rapport-theme-palette-test.exe
+          if ($LASTEXITCODE) { throw 'rapport-theme-palette-test failed' }
 
       - name: Shell extension
         working-directory: build/bin/Release

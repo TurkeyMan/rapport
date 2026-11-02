@@ -27,6 +27,9 @@ endif()
 add_executable(rapport-print print.cpp)
 target_link_libraries(rapport-print PRIVATE rapport::rapport)
 
+add_executable(rapport-theme-roles theme_roles.cpp)
+target_link_libraries(rapport-theme-roles PRIVATE rapport::rapport)
+
 add_executable(rapport-list-dnd list_dnd.cpp)
 target_link_libraries(rapport-list-dnd PRIVATE rapport::rapport)
 

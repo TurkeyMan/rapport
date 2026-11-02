@@ -58,6 +58,8 @@ struct color
 };
 
 // Colours taken from the desktop theme (portal accent, dark mode, ...).
+// Each backend reads what its desktop publishes for a role and derives the
+// rest from the window, text and accent colours.
 enum class theme_color
 {
     window,
@@ -71,11 +73,15 @@ enum class theme_color
     mid,
     accent,
     link,
-    // diff add / remove / context, status pills
+    // Status: diff add / remove / context, status pills, check marks.
+    // positive is success, negative error (and destructive), warning the
+    // desktop's warning (amber); neutral is quiet context, not a status.
     positive,
     negative,
     neutral,
+    warning,
 };
+inline constexpr int theme_color_count = int(theme_color::warning) + 1;
 
 // Either a fixed colour or a theme role resolved at paint time.
 using paint = std::variant<theme_color, color>;
@@ -101,6 +107,7 @@ inline color print_color(theme_color c)
     case theme_color::positive: return {26, 127, 55};
     case theme_color::negative: return {207, 34, 46};
     case theme_color::neutral: return {101, 109, 118};
+    case theme_color::warning: return {154, 103, 0};
     }
     return {0, 0, 0};
 }

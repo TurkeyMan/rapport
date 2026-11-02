@@ -39,6 +39,14 @@
 #include <QPrintDialog>
 #include <QPrinter>
 #endif
+#include <QColorDialog>
+#include <QCursor>
+#include <QDateTime>
+#include <QDoubleSpinBox>
+#include <QDrag>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QHelpEvent>
 #include <QLibraryInfo>
 #include <QLineEdit>
 #include <QListWidget>
@@ -47,39 +55,32 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMimeDatabase>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QPointingDevice>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSlider>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStyleHints>
 #include <QStyledItemDelegate>
 #include <QTabWidget>
 #include <QTextBlock>
 #include <QTimer>
+#include <QToolBar>
+#include <QToolButton>
+#include <QToolTip>
 #include <QTranslator>
 #include <QTreeView>
 #include <QTreeWidget>
-#include <QDateTime>
-#include <QCursor>
-#include <QPainter>
-#include <QPixmap>
 #include <QWheelEvent>
-#include <QToolButton>
-#include <QToolBar>
-#include <QSlider>
-#include <QPointingDevice>
-#include <QMouseEvent>
-#include <QDoubleSpinBox>
-#include <QDragEnterEvent>
-#include <QDropEvent>
-#include <QDrag>
-#include <QColorDialog>
-#include <QHelpEvent>
-#include <QToolTip>
 
 #include <algorithm>
 #include <cmath>
@@ -313,9 +314,8 @@ private:
     bool fixed_ = false;
 };
 
-// Selected rows in a light tint of the accent, with normal text: on light
-// themes the accent's hue at Explorer's lightness, as on win32 (#0078D7
-// becomes #CCE8FF); on dark ones a mix into the base colour, as on GTK.
+// Selected rows in a light tint of the accent, with normal text, as on
+// win32 (palette::soft_selection).
 struct soft_colors
 {
     QColor selected, hover, hover_selected;
@@ -323,22 +323,9 @@ struct soft_colors
 
 soft_colors soft_colors_for(const QWidget* w)
 {
-    const QPalette pal = w->palette();
-    const QColor base = pal.color(QPalette::Active, QPalette::Base);
-    const QColor accent = pal.color(QPalette::Active, QPalette::Highlight);
-    if (base.lightnessF() >= 0.5)
-    {
-        auto lit = [&](float l)
-        { return QColor::fromHslF(std::max(0.f, accent.hslHueF()), accent.hslSaturationF(), l); };
-        return {lit(0.90f), lit(0.95f), lit(0.88f)};
-    }
-    auto mix = [&](float t)
-    {
-        return QColor::fromRgbF(base.redF() + (accent.redF() - base.redF()) * t,
-                                base.greenF() + (accent.greenF() - base.greenF()) * t,
-                                base.blueF() + (accent.blueF() - base.blueF()) * t);
-    };
-    return {mix(0.38f), mix(0.16f), mix(0.45f)};
+    const palette::soft_colors c = palette::soft_selection(theme_color_of(w, theme_color::base),
+                                                           theme_color_of(w, theme_color::accent));
+    return {qcolor(c.selected), qcolor(c.hover), qcolor(c.hover_selected)};
 }
 
 // List autoscroll: px/s for the pointer `offset` px above (negative) or
@@ -2539,7 +2526,7 @@ public:
         // Selection doesn't grey out when the window loses focus.
         if (selected)
             p->fillRect(band, soft_ ? (hot ? soft_->hover_selected : soft_->selected)
-                                    : pal.color(QPalette::Active, QPalette::Highlight));
+                                    : qcolor(theme_color_of(view_, theme_color::highlight)));
         else if (hot)
             p->fillRect(band, soft_->hover);
         const bool focused = view_->hasFocus() && view_->currentIndex().row() == row;
@@ -2562,12 +2549,12 @@ public:
         if (drop_y_)
         {
             qp.fillRect(QRect(0, *drop_y_ - 1, view_->viewport()->width(), 2),
-                        view_->palette().color(QPalette::Active, QPalette::Highlight));
+                        qcolor(theme_color_of(view_, theme_color::highlight)));
         }
         if (cell_.dragging && cell_.target)
         {
             const QRect r = row_rect(*cell_.target).adjusted(1, 1, -2, -2);
-            qp.setPen(QPen(view_->palette().color(QPalette::Active, QPalette::Highlight), 2));
+            qp.setPen(QPen(qcolor(theme_color_of(view_, theme_color::highlight)), 2));
             qp.setBrush(Qt::NoBrush);
             qp.drawRect(r);
         }
@@ -2991,7 +2978,7 @@ private:
         const auto& [font, fm] = font_for(style);
         p->setFont(font);
         p->setPen(style.fg             ? qcolor(resolve(view_, *style.fg))
-                  : selected && !soft_ ? pal.color(QPalette::Active, QPalette::HighlightedText)
+                  : selected && !soft_ ? qcolor(theme_color_of(view_, theme_color::highlight_text))
                                        : pal.color(QPalette::Active, QPalette::Text));
         const QString text = qs(model_->text(row, c));
         p->drawText(area, qt_align(cols_[c].align) | Qt::AlignVCenter | Qt::TextSingleLine,
@@ -4372,6 +4359,57 @@ private:
     build_sink& sink_;
 };
 
+// RAPPORT_THEME=dark|light: that scheme whatever the desktop's, for
+// snapshots of both. Qt 6.8 asks the platform theme for it; where that
+// can't (the offscreen platform, X11 without a desktop theme), a palette
+// of the scheme's own: Fusion's standard light one, or a dark one.
+void force_scheme(bool dark)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    const Qt::ColorScheme wanted = dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light;
+    QGuiApplication::styleHints()->setColorScheme(wanted);
+    if (QGuiApplication::styleHints()->colorScheme() == wanted) return;
+#endif
+    const bool now_dark = QApplication::palette().color(QPalette::Window).lightnessF() < 0.5;
+    if (now_dark == dark) return;
+    if (!dark)
+    {
+        QApplication::setPalette(QApplication::style()->standardPalette());
+        return;
+    }
+    QPalette p;
+    auto set = [&](QPalette::ColorRole role, const char* active, const char* disabled = nullptr)
+    {
+        p.setColor(QPalette::Active, role, QColor(active));
+        p.setColor(QPalette::Inactive, role, QColor(active));
+        p.setColor(QPalette::Disabled, role, QColor(disabled ? disabled : active));
+    };
+    set(QPalette::Window, "#2b2b2b");
+    set(QPalette::WindowText, "#eeeeee", "#6f6f6f");
+    set(QPalette::Base, "#1e1e1e", "#2b2b2b");
+    set(QPalette::AlternateBase, "#262626");
+    set(QPalette::Text, "#eeeeee", "#6f6f6f");
+    set(QPalette::PlaceholderText, "#8c8c8c");
+    set(QPalette::Button, "#353535");
+    set(QPalette::ButtonText, "#eeeeee", "#6f6f6f");
+    set(QPalette::BrightText, "#ffffff");
+    set(QPalette::Light, "#454545");
+    set(QPalette::Midlight, "#3c3c3c");
+    set(QPalette::Mid, "#2f2f2f");
+    set(QPalette::Dark, "#1a1a1a");
+    set(QPalette::Shadow, "#0a0a0a");
+    set(QPalette::Highlight, "#2a6fc4", "#3a3a3a");
+    set(QPalette::HighlightedText, "#ffffff", "#8c8c8c");
+    set(QPalette::Link, "#78aeed");
+    set(QPalette::LinkVisited, "#c0a2f0");
+    set(QPalette::ToolTipBase, "#3c3c3c");
+    set(QPalette::ToolTipText, "#eeeeee");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    set(QPalette::Accent, "#2a6fc4", "#3a3a3a");
+#endif
+    QApplication::setPalette(p);
+}
+
 // -- backend ------------------------------------------------------------------
 
 class qt6_backend : public backend
@@ -4393,6 +4431,7 @@ public:
 #endif
             // Keeps argc: the caller's, alive for the program.
             app = new QApplication(*argc, argv);
+            if (const int forced = palette::forced_scheme()) force_scheme(forced == 1);
             // Qt's own text (standard buttons, its dialogs) in the chosen
             // language, from the translations Qt installs.
             if (!rap::i18n::languages().empty())

@@ -16,6 +16,7 @@
 #include <wincodec.h>
 
 #include "rapport/backend.h"
+#include "theme_palette.h"
 
 #include <algorithm>
 #include <functional>
@@ -105,6 +106,8 @@ int extent_px(HWND h, extent e, bool vertical);
 
 color sys_color(int index);
 color theme_color_of(theme_color role);
+// The desktop's colours changed: read them again on next use.
+void forget_theme_colors();
 inline COLORREF color_ref(color c)
 {
     return RGB(c.r, c.g, c.b);

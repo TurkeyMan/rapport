@@ -144,44 +144,6 @@ using namespace gtkcommon;
 }  // namespace
 }  // namespace rap::gtk4
 
-// The theme's named colours, as GTK 3's: libadwaita's names first, then the
-// classic ones GTK's own theme still defines. The lookup is deprecated in
-// GTK 4 with nothing to replace it for named colours, so it's kept until
-// one exists. A name that resolves transparent isn't a colour.
-rap::color rap::gtkcommon::theme_color_of(GtkWidget* w, theme_color role)
-{
-    GdkRGBA fg;
-    gtk_widget_get_color(w, &fg);
-    std::array<const char*, 2> names{};  // most preferred first; unused are null
-    switch (role)
-    {
-    case theme_color::window: names = {"window_bg_color", "theme_bg_color"}; break;
-    case theme_color::window_text: names = {"window_fg_color", "theme_fg_color"}; break;
-    case theme_color::base: names = {"view_bg_color", "theme_base_color"}; break;
-    case theme_color::text: names = {"view_fg_color", "theme_text_color"}; break;
-    case theme_color::highlight:
-    case theme_color::accent: names = {"accent_bg_color", "theme_selected_bg_color"}; break;
-    case theme_color::highlight_text: names = {"accent_fg_color", "theme_selected_fg_color"}; break;
-    case theme_color::positive: names = {"success_color"}; break;
-    case theme_color::negative: names = {"error_color"}; break;
-    case theme_color::link: names = {"link_color"}; break;
-    default: break;
-    }
-    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-    GtkStyleContext* ctx = gtk_widget_get_style_context(w);
-    for (const char* name : names)
-    {
-        GdkRGBA c;
-        if (name && gtk_style_context_lookup_color(ctx, name, &c) && c.alpha > 0)
-        {
-            G_GNUC_END_IGNORE_DEPRECATIONS
-            return to_color(c);
-        }
-    }
-    G_GNUC_END_IGNORE_DEPRECATIONS
-    return fallback_color(role, to_color(fg), is_dark_text(fg));
-}
-
 namespace rap::gtk4
 {
 namespace
@@ -1876,32 +1838,26 @@ public:
             // The colours computed as gtk3 does, written into the rule:
             // @accent_bg_color isn't defined by every GTK 4 theme, and an
             // unresolved colour left selected rows with no background.
-            soft_ = soft_selection_colors(w_);
             static bool installed = false;
             if (!installed)
             {
-                auto rgb = [](color c)
-                {
-                    return "rgb(" + std::to_string(c.r) + "," + std::to_string(c.g) + "," +
-                           std::to_string(c.b) + ")";
-                };
                 // The row under the pointer gets a light tint, as on gtk3 and
                 // win32; GTK 4 already gives rows :hover.
-                color base = theme_color_of(w_, theme_color::base), accent = theme_color_of(w_, theme_color::accent);
-                const bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
-                const color hover = mix_colors(base, accent, dark ? 0.16f : 0.09f);
-                std::string rule = "columnview.rapport-soft row:hover { background-color: " + rgb(hover) +
-                                   "; } columnview.rapport-soft row:selected, columnview.rapport-soft row:selected:focus, "
-                                   "columnview.rapport-soft row:selected:hover { background-color: " +
-                                   rgb(soft_->first) + "; color: " + rgb(soft_->second) +
-                                   "; } columnview row.rapport-drop { box-shadow: inset 0 0 0 2px " +
-                                   rgb(theme_color_of(w_, theme_color::highlight)) + "; }";
-                GtkCssProvider* css = gtk_css_provider_new();
-                gtk_css_provider_load_from_string(css, rule.c_str());
-                gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
-                                                           GTK_STYLE_PROVIDER(css),
-                                                           GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-                g_object_unref(css);
+                themed_display_css(
+                    w_,
+                    +[]
+                    {
+                        GtkWidget* probe = theme_probe();
+                        const auto [selected, text] = soft_selection_colors(probe);
+                        return "columnview.rapport-soft row:hover { background-color: " +
+                               css_rgb(soft_hover_color(probe)) +
+                               "; } columnview.rapport-soft row:selected, columnview.rapport-soft "
+                               "row:selected:focus, columnview.rapport-soft row:selected:hover { "
+                               "background-color: " +
+                               css_rgb(selected) + "; color: " + css_rgb(text) +
+                               "; } columnview row.rapport-drop { box-shadow: inset 0 0 0 2px " +
+                               css_rgb(theme_color_of(probe, theme_color::highlight)) + "; }";
+                    });
                 installed = true;
             }
             gtk_widget_add_css_class(w_, "rapport-soft");
@@ -2420,22 +2376,19 @@ private:
         static bool installed = false;
         if (installed) return;
         installed = true;
-        const color c = theme_color_of(w_, theme_color::highlight);
-        const std::string rgb = "rgb(" + std::to_string(c.r) + "," + std::to_string(c.g) + "," +
-                                std::to_string(c.b) + ")";
-        const std::string rule =
-            "columnview.rapport-list > listview > row.rapport-insert-before { box-shadow: inset 0 "
-            "2px " +
-            rgb +
-            "; } columnview.rapport-list > listview > row.rapport-insert-after { box-shadow: "
-            "inset 0 -2px " +
-            rgb + "; }";
-        GtkCssProvider* css = gtk_css_provider_new();
-        gtk_css_provider_load_from_string(css, rule.c_str());
-        gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
-                                                   GTK_STYLE_PROVIDER(css),
-                                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(css);
+        themed_display_css(
+            w_,
+            +[]
+            {
+                const std::string rgb =
+                    css_rgb(theme_color_of(theme_probe(), theme_color::highlight));
+                return "columnview.rapport-list > listview > row.rapport-insert-before { "
+                       "box-shadow: inset 0 2px " +
+                       rgb +
+                       "; } columnview.rapport-list > listview > row.rapport-insert-after { "
+                       "box-shadow: inset 0 -2px " +
+                       rgb + "; }";
+            });
     }
     void set_line(GtkWidget* row, const char* cls)
     {
@@ -3174,7 +3127,6 @@ private:
     RapportRows* rows_ = nullptr;  // owned by sel_
     GtkSelectionModel* sel_ = nullptr;
     std::unordered_map<GtkListItem*, column_ctx*> bound_;  // cells showing a row now
-    std::optional<std::pair<color, color>> soft_;  // selection background, text
     std::unique_ptr<menu_actions> ctx_menu_;
     GtkWidget* popover_ = nullptr;
     list_model* model_ = nullptr;

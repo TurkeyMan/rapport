@@ -4,6 +4,7 @@
 #pragma once
 
 #include "rapport/backend.h"
+#include "theme_palette.h"
 
 #include <QApplication>
 #include <QColor>
@@ -18,6 +19,9 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numbers>
 #include <utility>
@@ -36,38 +40,95 @@ inline color from_q_color(const QColor& c)
     return {uint8_t(c.red()), uint8_t(c.green()), uint8_t(c.blue()), uint8_t(c.alpha())};
 }
 
-// A theme role from `w`'s palette (the application's without one). Roles a
-// palette lacks are derived as the GTK backends derive them, from the text
-// colour and whether the theme is dark.
+// kdeglobals' colours under Plasma, which the Qt palette has no role for;
+// none elsewhere (a kdeglobals left by a KDE app isn't the desktop's).
+// Read again when the application's palette changes, as Plasma changes
+// both together.
+inline const palette::kde_colors& kde_colors()
+{
+    static palette::kde_colors k;
+    static qint64 read_for = 0;
+    const qint64 key = QApplication::palette().cacheKey();
+    if (key == read_for) return k;
+    read_for = key;
+    k = {};
+    const char* desktop = std::getenv("XDG_CURRENT_DESKTOP");
+    if (!desktop || !std::strstr(desktop, "KDE")) return k;
+    const char* config = std::getenv("XDG_CONFIG_HOME");
+    const char* home = std::getenv("HOME");
+    const std::string path = config && *config ? std::string(config) + "/kdeglobals"
+                             : home            ? std::string(home) + "/.config/kdeglobals"
+                                               : std::string();
+    if (FILE* f = path.empty() ? nullptr : std::fopen(path.c_str(), "rb"))
+    {
+        std::string text;
+        char buf[4096];
+        for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+        std::fclose(f);
+        k = palette::parse_kdeglobals(text);
+    }
+    return k;
+}
+
+// The desktop's accent: QPalette::Accent from Qt 6.6, which follows the
+// desktop's (Windows' accent, Plasma's); the selection colour before.
+inline QColor accent_of(const QPalette& pal)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    return pal.color(QPalette::Active, QPalette::Accent);
+#else
+    return pal.color(QPalette::Active, QPalette::Highlight);
+#endif
+}
+
+// A theme role from `w`'s palette (the application's without one), then
+// kdeglobals under Plasma; the rest derived from the palette's window,
+// text and accent colours.
 inline color theme_color_of(const QWidget* w, theme_color role)
 {
     const QPalette pal = w ? w->palette() : QApplication::palette();
-    const QColor text = pal.color(QPalette::Text);
-    const bool dark = text.lightnessF() > 0.5;
-    auto faded = [&](double a)
+    auto get = [&](QPalette::ColorRole r) { return from_q_color(pal.color(QPalette::Active, r)); };
+    const color text = get(QPalette::Text), base = get(QPalette::Base);
+    const color accent = from_q_color(accent_of(pal));
+    const palette::kde_colors& kde = kde_colors();
+    auto basics = [&]
     {
-        QColor c = text;
-        c.setAlphaF(float(a));
-        return from_q_color(c);
+        return palette::basics{get(QPalette::Window), get(QPalette::WindowText), base, text,
+                               accent};
     };
+    auto faded = [&](double a)
+    { return color{text.r, text.g, text.b, uint8_t(std::lround(a * 255))}; };
     switch (role)
     {
-        case theme_color::window: return from_q_color(pal.color(QPalette::Window));
-        case theme_color::window_text: return from_q_color(pal.color(QPalette::WindowText));
-        case theme_color::base: return from_q_color(pal.color(QPalette::Base));
-        case theme_color::alternate_base: return from_q_color(pal.color(QPalette::AlternateBase));
-        case theme_color::text: return from_q_color(text);
-        case theme_color::placeholder_text: return from_q_color(pal.color(QPalette::PlaceholderText));
-        case theme_color::highlight: return from_q_color(pal.color(QPalette::Highlight));
-        case theme_color::highlight_text: return from_q_color(pal.color(QPalette::HighlightedText));
-        case theme_color::mid: return faded(0.35);
-        case theme_color::accent: return from_q_color(pal.color(QPalette::Accent));
-        case theme_color::link: return from_q_color(pal.color(QPalette::Link));
-        case theme_color::positive: return dark ? color{0x8f, 0xf0, 0xa4} : color{0x26, 0xa2, 0x69};
-        case theme_color::negative: return dark ? color{0xf6, 0x61, 0x51} : color{0xc0, 0x1c, 0x28};
-        case theme_color::neutral: return faded(0.6);
+    case theme_color::window: return get(QPalette::Window);
+    case theme_color::window_text: return get(QPalette::WindowText);
+    case theme_color::base: return base;
+    case theme_color::alternate_base: return get(QPalette::AlternateBase);
+    case theme_color::text: return text;
+    case theme_color::placeholder_text: return get(QPalette::PlaceholderText);
+    case theme_color::accent:
+    case theme_color::highlight: return accent;
+    case theme_color::highlight_text:
+    {
+        // The palette's, unless it's for a selection colour other than
+        // the accent and doesn't read on it.
+        const color t = get(QPalette::HighlightedText);
+        return palette::contrast(t, accent) >= 3 ? t : palette::text_on(accent);
     }
-    return from_q_color(text);
+        case theme_color::mid: return faded(0.35);
+        case theme_color::link: return kde.link ? *kde.link : get(QPalette::Link);
+        case theme_color::neutral: return faded(0.6);
+        case theme_color::positive:
+            if (kde.positive) return *kde.positive;
+            break;
+        case theme_color::negative:
+            if (kde.negative) return *kde.negative;
+            break;
+        case theme_color::warning:
+            if (kde.neutral) return *kde.neutral;
+            break;
+        }
+        return palette::derived(role, basics());
 }
 
 inline color resolve(const QWidget* w, const paint& p)
@@ -154,7 +215,7 @@ public:
     {
         print_scale_ = scale;
         font_scale_ = font_scale;
-        for (int r = 0; r <= int(theme_color::neutral); ++r)
+        for (int r = 0; r < theme_color_count; ++r)
             override_color(theme_color(r), print_color(theme_color(r)));
     }
 

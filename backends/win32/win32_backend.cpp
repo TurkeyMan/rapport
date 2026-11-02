@@ -3599,49 +3599,20 @@ private:
         color background;
         std::optional<color> text;  // replaces theme_color::text (solid selection)
     };
-    // `c` with its HSL lightness set to `l` (hue and saturation kept).
-    static color with_lightness(color c, float l)
-    {
-        const float r = c.r / 255.f, g = c.g / 255.f, b = c.b / 255.f;
-        const float hi = std::max({r, g, b}), lo = std::min({r, g, b}), d = hi - lo;
-        const float l0 = (hi + lo) / 2;
-        const float sat = d == 0 ? 0 : d / (1 - std::abs(2 * l0 - 1));
-        float h = 0;  // in sixths of a turn
-        if (d > 0)
-            h = hi == r ? std::fmod((g - b) / d + 6, 6.f) : hi == g ? (b - r) / d + 2 : (r - g) / d + 4;
-        const float chroma = (1 - std::abs(2 * l - 1)) * sat;
-        const float x = chroma * (1 - std::abs(std::fmod(h, 2.f) - 1)), m = l - chroma / 2;
-        float rgb[3]{};
-        const int sector = int(h) % 6;
-        const int order[6][3] = {{0, 1, 2}, {1, 0, 2}, {2, 0, 1}, {2, 1, 0}, {1, 2, 0}, {0, 2, 1}};
-        const float parts[3] = {chroma, x, 0};  // largest, middle, smallest
-        for (int i = 0; i < 3; ++i) rgb[i] = parts[order[sector][i]] + m;
-        auto byte = [](float v) { return uint8_t(std::lround(std::clamp(v, 0.f, 1.f) * 255)); };
-        return color{byte(rgb[0]), byte(rgb[1]), byte(rgb[2]), 255};
-    }
+    // Soft selection is a tint of the accent with normal text
+    // (palette::soft_selection: Windows' default #0078D7 becomes
+    // Explorer's selected #CCE8FF and hovered #E5F3FF); solid selection
+    // the accent with white or black text.
     row_colors colors_for_row(bool selected, bool hot) const
     {
-        const color base = theme_color_of(theme_color::base), accent = theme_color_of(theme_color::accent);
-        const bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
-        auto mixed = [&](float t)
-        {
-            auto m = [t](uint8_t a, uint8_t b) { return uint8_t(std::lround(a + (b - a) * t)); };
-            return color{m(base.r, accent.r), m(base.g, accent.g), m(base.b, accent.b), 255};
-        };
-        // Soft selection is the theme's highlight with its hue and
-        // saturation kept and its lightness raised: Windows' default
-        // #0078D7 at 90% is Explorer's selected #CCE8FF, at 95% its hover
-        // #E5F3FF. (Mixing toward white also drains the saturation and
-        // reads grey.) Dark themes keep a mix of the base colour.
-        const color highlight = theme_color_of(theme_color::highlight);
-        if (!selected)
-        {
-            if (!hot || !soft_) return {base, std::nullopt};
-            return {dark ? mixed(0.16f) : with_lightness(highlight, 0.95f), std::nullopt};
-        }
-        if (soft_)
-            return {dark ? mixed(hot ? 0.46f : 0.38f) : with_lightness(highlight, hot ? 0.88f : 0.90f), std::nullopt};
-        return {theme_color_of(theme_color::highlight), theme_color_of(theme_color::highlight_text)};
+        const color base = theme_color_of(theme_color::base);
+        if (!selected && (!hot || !soft_)) return {base, std::nullopt};
+        if (!soft_)
+            return {theme_color_of(theme_color::highlight),
+                    theme_color_of(theme_color::highlight_text)};
+        const palette::soft_colors soft =
+            palette::soft_selection(base, theme_color_of(theme_color::accent));
+        return {!selected ? soft.hover : hot ? soft.hover_selected : soft.selected, std::nullopt};
     }
 
     IDWriteTextFormat* text_format(const text_style& st, align align)
@@ -6741,6 +6712,15 @@ private:
                 return 0;
             }
             case WM_CLOSE: self->close_requested(); return 0;
+            // The desktop's colours (accent, high contrast, the system
+            // colours) may have changed: read them again and repaint all.
+            case WM_SETTINGCHANGE:
+            case WM_SYSCOLORCHANGE:
+            case WM_DWMCOLORIZATIONCOLORCHANGED:
+                forget_theme_colors();
+                RedrawWindow(h, nullptr, nullptr,
+                             RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
+                break;
             case WM_DROPFILES:
             {
                 auto* drop = reinterpret_cast<HDROP>(wp);

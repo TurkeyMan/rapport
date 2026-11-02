@@ -1,20 +1,24 @@
 // Code shared by the GTK 3 and GTK 4 backends: font metrics, Pango styling,
 // the cairo cell painter, dialog button conventions and signal bookkeeping.
-// Each backend includes this after its own <gtk/gtk.h> and defines
-// theme_color_of().
+// Each backend includes this after its own <gtk/gtk.h>.
 #pragma once
 
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
+#include "theme_palette.h"
 
 #include <gtk/gtk.h>
 
 #include <algorithm>
-#include <cstdio>
+#include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -92,115 +96,13 @@ inline guint16 u16(uint8_t v)
     return guint16(v * 257);
 }
 
-// The desktop's colour scheme, which plain GTK doesn't follow (libadwaita
-// does): the Settings portal's org.freedesktop.appearance color-scheme,
-// else GNOME's own key where there's no portal. `apply` gets 0 (no
-// preference), 1 (dark) or 2 (light) now, before anything is shown, and
-// again on every change.
-inline void follow_color_scheme(void (*apply)(int scheme))
-{
-    static void (*on_change)(int) = apply;
-    GError* error = nullptr;
-    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
-    g_clear_error(&error);
-    if (bus)
-    {
-        // ReadOne (portal version 2), else Read, whose value is wrapped once more.
-        for (const char* method : {"ReadOne", "Read"})
-        {
-            GVariant* reply = g_dbus_connection_call_sync(
-                bus, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-                "org.freedesktop.portal.Settings", method,
-                g_variant_new("(ss)", "org.freedesktop.appearance", "color-scheme"),
-                G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 500, nullptr, &error);
-            g_clear_error(&error);
-            if (!reply) continue;
-            GVariant* value = nullptr;
-            g_variant_get(reply, "(v)", &value);
-            g_variant_unref(reply);
-            while (value && g_variant_is_of_type(value, G_VARIANT_TYPE_VARIANT))
-            {
-                GVariant* inner = g_variant_get_variant(value);
-                g_variant_unref(value);
-                value = inner;
-            }
-            const bool known = value && g_variant_is_of_type(value, G_VARIANT_TYPE_UINT32);
-            if (known) apply(int(g_variant_get_uint32(value)));
-            if (value) g_variant_unref(value);
-            if (!known) continue;
-            g_dbus_connection_signal_subscribe(
-                bus, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Settings",
-                "SettingChanged", "/org/freedesktop/portal/desktop", "org.freedesktop.appearance",
-                G_DBUS_SIGNAL_FLAGS_NONE,
-                +[](GDBusConnection*, const gchar*, const gchar*, const gchar*, const gchar*,
-                    GVariant* params, gpointer)
-                {
-                    const gchar* ns = nullptr;
-                    const gchar* key = nullptr;
-                    GVariant* v = nullptr;
-                    g_variant_get(params, "(&s&sv)", &ns, &key, &v);
-                    if (g_strcmp0(key, "color-scheme") == 0 && g_variant_is_of_type(v, G_VARIANT_TYPE_UINT32))
-                        on_change(int(g_variant_get_uint32(v)));
-                    if (v) g_variant_unref(v);
-                },
-                nullptr, nullptr);
-            return;  // the bus stays referenced for the subscription
-        }
-        g_object_unref(bus);
-    }
-    GSettingsSchemaSource* source = g_settings_schema_source_get_default();
-    GSettingsSchema* schema =
-        source ? g_settings_schema_source_lookup(source, "org.gnome.desktop.interface", true) : nullptr;
-    const bool has_key = schema && g_settings_schema_has_key(schema, "color-scheme");
-    if (schema) g_settings_schema_unref(schema);
-    if (!has_key) return;
-    GSettings* gnome = g_settings_new("org.gnome.desktop.interface");  // kept for the process
-    auto read = +[](GSettings* s)
-    {
-        gchar* v = g_settings_get_string(s, "color-scheme");
-        const int scheme = g_strcmp0(v, "prefer-dark") == 0 ? 1 : g_strcmp0(v, "prefer-light") == 0 ? 2 : 0;
-        g_free(v);
-        return scheme;
-    };
-    apply(read(gnome));
-    g_signal_connect(gnome, "changed::color-scheme",
-                     G_CALLBACK(+[](GSettings* s, gchar*, gpointer f)
-                                { on_change(reinterpret_cast<int (*)(GSettings*)>(f)(s)); }),
-                     reinterpret_cast<gpointer>(read));
-}
-
-// Defined by each backend: theme lookup differs between GTK 3 and 4.
-color theme_color_of(GtkWidget*, theme_color);
+// A theme role for `w`: what the desktop says, else derived (below).
+inline color theme_color_of(GtkWidget*, theme_color);
 
 inline color resolve(GtkWidget* w, const paint& p)
 {
     if (auto* c = std::get_if<color>(&p)) return *c;
     return theme_color_of(w, std::get<theme_color>(p));
-}
-
-// Fallbacks when the theme doesn't name a colour; `dark` is guessed from
-// the text colour.
-inline color fallback_color(theme_color role, color text, bool dark)
-{
-    auto alpha = [&](double a) { return color{text.r, text.g, text.b, u8(a)}; };
-    switch (role)
-    {
-    case theme_color::text:
-    case theme_color::window_text: return text;
-    case theme_color::placeholder_text: return alpha(0.5);
-    case theme_color::mid: return alpha(0.35);
-    case theme_color::neutral: return alpha(0.6);
-    case theme_color::window: return dark ? color{0x24, 0x24, 0x24} : color{0xfa, 0xfa, 0xfa};
-    case theme_color::base: return dark ? color{0x1e, 0x1e, 0x1e} : color{0xff, 0xff, 0xff};
-    case theme_color::alternate_base: return dark ? color{0x2a, 0x2a, 0x2a} : color{0xf4, 0xf4, 0xf4};
-    case theme_color::highlight:
-    case theme_color::accent: return color{0x35, 0x84, 0xe4};
-    case theme_color::highlight_text: return color{0xff, 0xff, 0xff};
-    case theme_color::link: return dark ? color{0x78, 0xae, 0xed} : color{0x1c, 0x71, 0xd8};
-    case theme_color::positive: return dark ? color{0x8f, 0xf0, 0xa4} : color{0x26, 0xa2, 0x69};
-    case theme_color::negative: return dark ? color{0xf6, 0x61, 0x51} : color{0xc0, 0x1c, 0x28};
-    }
-    return text;
 }
 
 // List autoscroll: px/s for the pointer `offset` px above (negative) or
@@ -283,8 +185,15 @@ inline std::pair<color, color> soft_selection_colors(GtkWidget* w)
 {
     color base = theme_color_of(w, theme_color::base), accent = theme_color_of(w, theme_color::accent);
     color text = theme_color_of(w, theme_color::text);
-    bool dark = base.r * 30 + base.g * 59 + base.b * 11 < 12800;
-    return {mix_colors(base, accent, dark ? 0.38f : 0.24f), text};
+    return {mix_colors(base, accent, palette::is_dark(base) ? 0.38f : 0.24f), text};
+}
+
+// The row under the pointer in a soft-selection list.
+inline color soft_hover_color(GtkWidget* w)
+{
+    color base = theme_color_of(w, theme_color::base),
+          accent = theme_color_of(w, theme_color::accent);
+    return mix_colors(base, accent, palette::is_dark(base) ? 0.16f : 0.09f);
 }
 
 // Device pixels per logical pixel. GTK 4's widget scale factor rounds a
@@ -497,7 +406,7 @@ public:
     {
         print_font_ = font;
         print_scale_ = scale;
-        for (int r = 0; r <= int(theme_color::neutral); ++r)
+        for (int r = 0; r < theme_color_count; ++r)
             override_color(theme_color(r), print_color(theme_color(r)));
     }
 
@@ -1102,6 +1011,346 @@ inline key key_for(guint keyval)
     if (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12)
         return key(int(key::f1) + int(keyval - GDK_KEY_F1));
     return gdk_keyval_to_unicode(keyval) ? key::character : key::other;
+}
+
+// -- theme roles --------------------------------------------------------------
+
+// The roles resolved so far (named colours are the theme's, the same for
+// every widget), the settings portal's accent, and who wants to hear when
+// the theme changes. Cleared and told by theme_changed().
+struct theme_state
+{
+    std::array<std::optional<color>, theme_color_count> cache;
+    std::optional<color> portal_accent;
+    std::unordered_map<const void*, std::function<void()>> listeners;
+};
+inline theme_state& theme_states()
+{
+    static theme_state t;
+    return t;
+}
+
+// `f` runs after every theme change, until forget_theme_listener(owner).
+inline void on_theme_changed(const void* owner, std::function<void()> f)
+{
+    theme_states().listeners[owner] = std::move(f);
+}
+inline void forget_theme_listener(const void* owner)
+{
+    theme_states().listeners.erase(owner);
+}
+
+inline void queue_draw_tree(GtkWidget* w)
+{
+    gtk_widget_queue_draw(w);
+#if GTK_CHECK_VERSION(4, 0, 0)
+    // GTK 4 keeps each widget's drawing; a canvas painting theme roles
+    // must be asked again itself.
+    for (GtkWidget* c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c))
+        queue_draw_tree(c);
+#endif
+}
+
+// The theme, its dark variant or the desktop's accent changed: resolve the
+// roles again, tell the listeners (CSS written with colours in it) and
+// repaint everything.
+inline void theme_changed()
+{
+    auto& t = theme_states();
+    t.cache = {};
+    std::vector<std::function<void()>> tell;
+    for (auto& [owner, f] : t.listeners) tell.push_back(f);
+    for (auto& f : tell) f();
+    GList* tops = gtk_window_list_toplevels();
+    for (GList* l = tops; l; l = l->next) queue_draw_tree(GTK_WIDGET(l->data));
+    g_list_free(tops);
+}
+
+// GTK's own theme (Adwaita, Default): its selection blue is a constant,
+// not a choice, so the desktop's accent comes first. Another theme's
+// accent is its author's choice and is kept.
+inline bool default_gtk_theme()
+{
+    gchar* name = nullptr;
+    g_object_get(gtk_settings_get_default(), "gtk-theme-name", &name, nullptr);
+    const std::string_view n = name ? name : "";
+    const bool builtin = n.empty() || n == "Adwaita" || n == "Adwaita-dark" || n == "Default" ||
+                         n == "Default-dark" || n == "Default-light";
+    g_free(name);
+    return builtin;
+}
+
+// The first of `names` the theme defines (and isn't transparent). The
+// lookup is deprecated in GTK 4 with nothing to replace it for named
+// colours, so it's kept until one exists.
+inline std::optional<color> named_color(GtkWidget* w, std::initializer_list<const char*> names)
+{
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    GtkStyleContext* ctx = gtk_widget_get_style_context(w);
+    for (const char* name : names)
+    {
+        GdkRGBA c;
+        if (gtk_style_context_lookup_color(ctx, name, &c) && c.alpha > 0) return to_color(c);
+    }
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    return std::nullopt;
+}
+
+// What the desktop says a role is: the theme's named colours (libadwaita's
+// names first, then the classic ones GTK's own themes and most others
+// define) and the settings portal's accent; nullopt where it says nothing.
+inline std::optional<color> desktop_color(GtkWidget* w, theme_color role)
+{
+    using tc = theme_color;
+    const std::optional<color> portal = theme_states().portal_accent;
+    const bool portal_first = portal && default_gtk_theme();
+    switch (role)
+    {
+    case tc::window: return named_color(w, {"window_bg_color", "theme_bg_color"});
+    case tc::window_text: return named_color(w, {"window_fg_color", "theme_fg_color"});
+    case tc::base: return named_color(w, {"view_bg_color", "theme_base_color"});
+    case tc::text: return named_color(w, {"view_fg_color", "theme_text_color"});
+    case tc::accent:
+    case tc::highlight:
+        if (portal_first) return portal;
+        if (auto c = named_color(w, {"accent_bg_color", "accent_color", "theme_selected_bg_color"}))
+            return c;
+        return portal;
+    case tc::highlight_text:
+        if (portal_first) return palette::text_on(*portal);
+        if (auto c = named_color(w, {"accent_fg_color", "theme_selected_fg_color"})) return c;
+        if (portal) return palette::text_on(*portal);
+        return std::nullopt;
+    case tc::link: return named_color(w, {"link_color", "theme_link_color"});
+    case tc::positive: return named_color(w, {"success_color", "theme_success_color"});
+    case tc::warning: return named_color(w, {"warning_color", "theme_warning_color"});
+    case tc::negative:
+        return named_color(w, {"error_color", "destructive_color", "theme_error_color"});
+    default: return std::nullopt;
+    }
+}
+
+inline color widget_text_color(GtkWidget* w)
+{
+    GdkRGBA fg;
+#if GTK_CHECK_VERSION(4, 0, 0)
+    gtk_widget_get_color(w, &fg);
+#else
+    GtkStyleContext* ctx = gtk_widget_get_style_context(w);
+    gtk_style_context_get_color(ctx, gtk_style_context_get_state(ctx), &fg);
+#endif
+    return to_color(fg);
+}
+
+inline color theme_color_of(GtkWidget* w, theme_color role)
+{
+    std::optional<color>& slot = theme_states().cache[size_t(role)];
+    if (slot) return *slot;
+    color c;
+    if (std::optional<color> d = desktop_color(w, role))
+        c = *d;
+    else
+    {
+        // A theme naming nothing: Adwaita's colours, dark when its text is
+        // light; every other role derived from these.
+        const color fg = widget_text_color(w);
+        const bool dark = palette::luminance(fg) > 0.5f;
+        using tc = theme_color;
+        switch (role)
+        {
+        case tc::window_text:
+        case tc::text: c = {fg.r, fg.g, fg.b, 255}; break;
+        case tc::window: c = dark ? color{0x24, 0x24, 0x24} : color{0xfa, 0xfa, 0xfa}; break;
+        case tc::base: c = dark ? color{0x1e, 0x1e, 0x1e} : color{0xff, 0xff, 0xff}; break;
+        case tc::accent: c = {0x35, 0x84, 0xe4}; break;
+        default:
+            c = palette::derived(role,
+                                 {theme_color_of(w, tc::window), theme_color_of(w, tc::window_text),
+                                  theme_color_of(w, tc::base), theme_color_of(w, tc::text),
+                                  theme_color_of(w, tc::accent)});
+        }
+    }
+    slot = c;
+    return c;
+}
+
+// A widget never shown, for looking up the theme's colours when no other
+// is at hand (rewriting CSS after a theme change).
+inline GtkWidget* theme_probe()
+{
+    static GtkWidget* w = GTK_WIDGET(g_object_ref_sink(gtk_label_new("")));
+    return w;
+}
+
+inline std::string css_rgb(color c)
+{
+    return "rgb(" + std::to_string(c.r) + "," + std::to_string(c.g) + "," + std::to_string(c.b) +
+           ")";
+}
+
+// CSS with theme colours written into it (a theme's @names aren't all
+// defined by every theme): `rule()` now, and again after every theme
+// change. GTK 4: one display-wide provider, kept for the process; GTK 3:
+// `w`'s own, rewritten until forget_theme_listener(owner).
+inline void load_css(GtkCssProvider* css, const std::string& rule)
+{
+#if GTK_CHECK_VERSION(4, 0, 0)
+    gtk_css_provider_load_from_string(css, rule.c_str());
+#else
+    gtk_css_provider_load_from_data(css, rule.c_str(), -1, nullptr);
+#endif
+}
+#if GTK_CHECK_VERSION(4, 0, 0)
+inline void themed_display_css(GtkWidget* w, std::string (*rule)())
+{
+    GtkCssProvider* css = gtk_css_provider_new();
+    load_css(css, rule());
+    gtk_style_context_add_provider_for_display(gtk_widget_get_display(w), GTK_STYLE_PROVIDER(css),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    on_theme_changed(css, [css, rule] { load_css(css, rule()); });
+}
+#else
+inline void themed_widget_css(GtkWidget* w, const void* owner, std::function<std::string()> rule)
+{
+    GtkCssProvider* css = gtk_css_provider_new();
+    load_css(css, rule());
+    gtk_style_context_add_provider(gtk_widget_get_style_context(w), GTK_STYLE_PROVIDER(css),
+                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    // The widget holds the provider; the listener goes with the list.
+    on_theme_changed(owner, [css, rule] { load_css(css, rule()); });
+    g_object_unref(css);
+}
+#endif
+
+// The settings portal's value for org.freedesktop.appearance `key`,
+// unwrapped; nullptr without one. ReadOne (portal version 2), else Read,
+// whose value is wrapped once more.
+inline GVariant* portal_setting(GDBusConnection* bus, const char* key)
+{
+    for (const char* method : {"ReadOne", "Read"})
+    {
+        GError* error = nullptr;
+        GVariant* reply = g_dbus_connection_call_sync(
+            bus, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings", method,
+            g_variant_new("(ss)", "org.freedesktop.appearance", key), G_VARIANT_TYPE("(v)"),
+            G_DBUS_CALL_FLAGS_NONE, 500, nullptr, &error);
+        g_clear_error(&error);
+        if (!reply) continue;
+        GVariant* value = nullptr;
+        g_variant_get(reply, "(v)", &value);
+        g_variant_unref(reply);
+        while (value && g_variant_is_of_type(value, G_VARIANT_TYPE_VARIANT))
+        {
+            GVariant* inner = g_variant_get_variant(value);
+            g_variant_unref(value);
+            value = inner;
+        }
+        if (value) return value;
+    }
+    return nullptr;
+}
+
+// The portal's accent-color, (ddd); none when it's out of range (unset).
+inline std::optional<color> portal_accent_of(GVariant* v)
+{
+    if (!v || !g_variant_is_of_type(v, G_VARIANT_TYPE("(ddd)"))) return std::nullopt;
+    double r = -1, g = -1, b = -1;
+    g_variant_get(v, "(ddd)", &r, &g, &b);
+    return palette::from_portal_accent(r, g, b);
+}
+
+// Theme changes GTK announces: a new theme, or its dark variant.
+inline void watch_gtk_theme()
+{
+    static bool watching = false;
+    if (watching) return;
+    watching = true;
+    GtkSettings* settings = gtk_settings_get_default();
+    for (const char* property : {"gtk-theme-name", "gtk-application-prefer-dark-theme",
+                                 "gtk-interface-color-scheme", "gtk-interface-contrast"})
+        if (g_object_class_find_property(G_OBJECT_GET_CLASS(settings), property))
+            g_signal_connect(settings, ("notify::" + std::string(property)).c_str(),
+                             G_CALLBACK(+[](GObject*, GParamSpec*, gpointer) { theme_changed(); }),
+                             nullptr);
+}
+
+// The desktop's appearance, which plain GTK doesn't follow (libadwaita
+// does): the Settings portal's org.freedesktop.appearance color-scheme,
+// else GNOME's own key where there's no portal, and the portal's
+// accent-color. `apply` gets 0 (no preference), 1 (dark) or 2 (light)
+// now, before anything is shown, and again on every change; with
+// RAPPORT_THEME=dark|light, that once and never the desktop's.
+inline void follow_color_scheme(void (*apply)(int scheme))
+{
+    static void (*on_change)(int) = apply;
+    watch_gtk_theme();
+    const int forced = palette::forced_scheme();
+    if (forced) apply(forced);
+    GError* error = nullptr;
+    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+    g_clear_error(&error);
+    if (bus)
+    {
+        GVariant* scheme = portal_setting(bus, "color-scheme");
+        GVariant* accent = portal_setting(bus, "accent-color");
+        const bool known = scheme && g_variant_is_of_type(scheme, G_VARIANT_TYPE_UINT32);
+        if (known && !forced) apply(int(g_variant_get_uint32(scheme)));
+        theme_states().portal_accent = portal_accent_of(accent);
+        if (scheme) g_variant_unref(scheme);
+        if (accent) g_variant_unref(accent);
+        if (known || accent)
+        {
+            g_dbus_connection_signal_subscribe(
+                bus, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Settings",
+                "SettingChanged", "/org/freedesktop/portal/desktop", "org.freedesktop.appearance",
+                G_DBUS_SIGNAL_FLAGS_NONE,
+                +[](GDBusConnection*, const gchar*, const gchar*, const gchar*, const gchar*,
+                    GVariant* params, gpointer)
+                {
+                    const gchar* ns = nullptr;
+                    const gchar* key = nullptr;
+                    GVariant* v = nullptr;
+                    g_variant_get(params, "(&s&sv)", &ns, &key, &v);
+                    if (g_strcmp0(key, "color-scheme") == 0 && !palette::forced_scheme() &&
+                        g_variant_is_of_type(v, G_VARIANT_TYPE_UINT32))
+                        on_change(int(g_variant_get_uint32(v)));
+                    if (g_strcmp0(key, "accent-color") == 0)
+                    {
+                        theme_states().portal_accent = portal_accent_of(v);
+                        theme_changed();
+                    }
+                    if (v) g_variant_unref(v);
+                },
+                nullptr, nullptr);
+            if (known) return;  // the bus stays referenced for the subscription
+        }
+        else
+            g_object_unref(bus);
+    }
+    if (forced) return;
+    GSettingsSchemaSource* source = g_settings_schema_source_get_default();
+    GSettingsSchema* schema =
+        source ? g_settings_schema_source_lookup(source, "org.gnome.desktop.interface", true)
+               : nullptr;
+    const bool has_key = schema && g_settings_schema_has_key(schema, "color-scheme");
+    if (schema) g_settings_schema_unref(schema);
+    if (!has_key) return;
+    GSettings* gnome = g_settings_new("org.gnome.desktop.interface");  // kept for the process
+    auto read = +[](GSettings* s)
+    {
+        gchar* v = g_settings_get_string(s, "color-scheme");
+        const int scheme = g_strcmp0(v, "prefer-dark") == 0    ? 1
+                           : g_strcmp0(v, "prefer-light") == 0 ? 2
+                                                               : 0;
+        g_free(v);
+        return scheme;
+    };
+    apply(read(gnome));
+    g_signal_connect(gnome, "changed::color-scheme",
+                     G_CALLBACK(+[](GSettings* s, gchar*, gpointer f)
+                                { on_change(reinterpret_cast<int (*)(GSettings*)>(f)(s)); }),
+                     reinterpret_cast<gpointer>(read));
 }
 
 }  // namespace rap::gtkcommon
