@@ -120,13 +120,13 @@ int main(int argc, char** argv)
 
     // Schemes named on the command line: the first now, the rest later.
     std::vector<rap::color_scheme> schemes;
-    bool settings = false, message = false;
+    bool settings = false, message = false, pages = false;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
-        if (a == "settings" || a == "message")
+        if (a == "settings" || a == "message" || a == "pages")
         {
-            (a == "settings" ? settings : message) = true;
+            (a == "settings" ? settings : a == "pages" ? pages : message) = true;
             continue;
         }
         schemes.push_back(a == "dark"    ? rap::color_scheme::dark
@@ -197,6 +197,30 @@ int main(int argc, char** argv)
                     buttons{{rap::dialog_role::cancel}, {rap::dialog_role::ok}},
                 }}}
                 .size(50_ch, 16_lines),
+            win.get());
+        dialog->show();
+    }
+    // Line-sized with sidebar pages that scroll, as a long settings dialog
+    // is: boxed lists in a scroll mustn't change its height.
+    if (pages)
+    {
+        auto page = [](const char* name)
+        {
+            return scroll{vbox{
+                group{name, form{{"Name", entry{}}, {"Mode", drop_down{{"One", "Two"}, 0}}}},
+                group{"More", form{{"Path", entry{}}, {"", check{"Enabled"}}}},
+                group{"Even more", form{{"Host", entry{}}, {"Port", entry{}}}},
+            }};
+        };
+        dialog = ui.create(
+            rap::layout::dialog{"Settings",
+                                {vbox{
+                                    tabs{{"General", page("General")}, {"Network", page("Network")}}
+                                        .sidebar()
+                                        .stretch(),
+                                    buttons{{rap::dialog_role::cancel}, {rap::dialog_role::ok}},
+                                }}}
+                .size(80_ch, 30_lines),
             win.get());
         dialog->show();
     }

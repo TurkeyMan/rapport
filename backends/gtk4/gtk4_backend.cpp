@@ -4098,8 +4098,12 @@ private:
         gtk_scrolled_window_set_propagate_natural_width(GTK_SCROLLED_WINDOW(scroller), true);
         gtk_widget_set_vexpand(scroller, true);
         if (!s.content.empty())
+        {
+            ++scrolled_;
             gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller),
                                           build(s.content.front(), orientation::vertical));
+            --scrolled_;
+        }
         return scroller;
     }
 
@@ -4445,13 +4449,17 @@ private:
         }
         gtk_box_append(GTK_BOX(box), list);
         // Boxed rows are taller than a grid's: the window's height in
-        // lines no longer fits, so it's measured instead.
-        g_object_set_data(G_OBJECT(win_.gtk_window()), "rapport-boxed", GINT_TO_POINTER(1));
+        // lines may no longer fit them, so it's measured too, unless they
+        // scroll (the scroll takes the taller rows, and its own natural
+        // height is small).
+        if (!scrolled_)
+            g_object_set_data(G_OBJECT(win_.gtk_window()), "rapport-boxed", GINT_TO_POINTER(1));
         return box;
     }
 
     window_impl& win_;
     build_sink& sink_;
+    int scrolled_ = 0;  // within a scroll, while building its content
 };
 
 // -- backend ------------------------------------------------------------------
@@ -4503,10 +4511,17 @@ public:
         auto win = std::make_unique<window_impl>(spec, static_cast<window_impl*>(parent));
         win->set_content(builder(*win, sink).build(spec.content, orientation::vertical),
                         spec.margins, spec.menu_bar);
-        // Sized in lines for a grid, but holding boxed lists: measured.
+        // Sized in lines for a grid, but holding boxed lists (not in a
+        // scroll): as tall as they need, never less than asked.
         if (spec.height.unit == extent::unit::lines &&
             g_object_get_data(G_OBJECT(win->gtk_window()), "rapport-boxed"))
-            gtk_window_set_default_size(GTK_WINDOW(win->gtk_window()), px(spec.width), -1);
+        {
+            int w = 0, h = 0, natural = 0;
+            gtk_window_get_default_size(GTK_WINDOW(win->gtk_window()), &w, &h);
+            gtk_widget_measure(win->gtk_window(), GTK_ORIENTATION_VERTICAL, w > 0 ? w : -1, nullptr,
+                               &natural, nullptr, nullptr);
+            if (natural > h) gtk_window_set_default_size(GTK_WINDOW(win->gtk_window()), w, natural);
+        }
         return win;
     }
 
