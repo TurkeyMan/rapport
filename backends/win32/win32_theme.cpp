@@ -153,7 +153,95 @@ LRESULT CALLBACK dark_edge_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
     return r;
 }
 
+// A separator (an etched static) in dark mode: its etched edge is drawn
+// white whatever WM_CTLCOLORSTATIC says, so the line is drawn here, a
+// pixel of the divider colour across its middle.
+LRESULT CALLBACK dark_separator_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (!dark_mode() || (msg != WM_PAINT && msg != WM_ERASEBKGND))
+        return DefSubclassProc(h, msg, wp, lp);
+    if (msg == WM_ERASEBKGND) return 1;
+    PAINTSTRUCT ps;
+    HDC dc = BeginPaint(h, &ps);
+    RECT c;
+    GetClientRect(h, &c);
+    FillRect(dc, &c, theme_brush(theme_color::window));
+    const bool vertical = (GetWindowLongPtrW(h, GWL_STYLE) & SS_TYPEMASK) == SS_ETCHEDVERT;
+    RECT line = c;
+    if (vertical)
+    {
+        line.left = (c.left + c.right) / 2;
+        line.right = line.left + 1;
+    }
+    else
+    {
+        line.top = (c.top + c.bottom) / 2;
+        line.bottom = line.top + 1;
+    }
+    FillRect(dc, &line, theme_brush(theme_color::divider));
+    EndPaint(h, &ps);
+    return 0;
+}
+
+// comctl32 opens the scroll bars of lists and trees with OpenNcThemeData,
+// as "ScrollBar" whatever the window's style: in dark mode they'd be
+// light (a light thumb line, a black segment). Its call is redirected
+// here, to Explorer's (dark, for a window allowed dark mode), as the
+// Windows Terminal and Notepad++ do.
+using open_nc_theme_fn = HTHEME(WINAPI*)(HWND, LPCWSTR);
+open_nc_theme_fn g_open_nc_theme = nullptr;
+
+HTHEME WINAPI open_nc_theme(HWND h, LPCWSTR classes)
+{
+    if (dark_mode() && classes && !wcscmp(classes, L"ScrollBar"))
+        return g_open_nc_theme(nullptr, L"Explorer::ScrollBar");
+    return g_open_nc_theme(h, classes);
+}
+
+// The address in `module`'s delay-load table that its calls to `dll`'s
+// export `ordinal` go through; nullptr without one.
+void** delay_import(HMODULE module, const char* dll, WORD ordinal)
+{
+    auto* base = reinterpret_cast<BYTE*>(module);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    const IMAGE_DATA_DIRECTORY& dir =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
+    if (!dir.VirtualAddress || !dir.Size) return nullptr;
+    for (auto* d = reinterpret_cast<IMAGE_DELAYLOAD_DESCRIPTOR*>(base + dir.VirtualAddress);
+         d->DllNameRVA; ++d)
+    {
+        if (_stricmp(reinterpret_cast<const char*>(base + d->DllNameRVA), dll) != 0) continue;
+        auto* names = reinterpret_cast<IMAGE_THUNK_DATA*>(base + d->ImportNameTableRVA);
+        auto* addresses = reinterpret_cast<IMAGE_THUNK_DATA*>(base + d->ImportAddressTableRVA);
+        for (; names->u1.Ordinal; ++names, ++addresses)
+            if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal) &&
+                IMAGE_ORDINAL(names->u1.Ordinal) == ordinal)
+                return reinterpret_cast<void**>(&addresses->u1.Function);
+    }
+    return nullptr;
+}
+
 }  // namespace
+
+void dark_scroll_bars()
+{
+    static bool done = false;
+    if (done || windows_build() < 17763) return;
+    done = true;
+    HMODULE uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    HMODULE comctl = GetModuleHandleW(L"comctl32.dll");  // v6, under the activation context
+    if (!uxtheme || !comctl) return;
+    g_open_nc_theme = reinterpret_cast<open_nc_theme_fn>(
+        reinterpret_cast<void*>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(49))));
+    void** slot = g_open_nc_theme ? delay_import(comctl, "uxtheme.dll", 49) : nullptr;
+    if (!slot) return;
+    DWORD old = 0;
+    if (!VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old)) return;
+    *slot = reinterpret_cast<void*>(&open_nc_theme);
+    VirtualProtect(slot, sizeof *slot, old, &old);
+}
 
 void theme_control(HWND h)
 {
@@ -202,6 +290,15 @@ void theme_control(HWND h)
         info.cbSize = sizeof info;
         if (GetComboBoxInfo(h, &info) && info.hwndList)
             SetWindowTheme(info.hwndList, explorer, nullptr);
+    }
+    else if (class_is(h, L"Static"))
+    {
+        const LONG_PTR type = style & SS_TYPEMASK;
+        if (type == SS_ETCHEDHORZ || type == SS_ETCHEDVERT)
+        {
+            SetWindowSubclass(h, dark_separator_proc, 0x7f, 0);
+            InvalidateRect(h, nullptr, TRUE);
+        }
     }
     else if (class_is(h, L"ListBox"))
     {

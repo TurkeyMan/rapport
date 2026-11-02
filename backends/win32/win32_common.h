@@ -119,6 +119,9 @@ DWORD windows_build();
 // top-level window's title bar, a control's visual style. Each follows
 // dark_mode() when called; call again after it changes.
 void apply_app_mode();
+// Lists' and trees' scroll bars dark in dark mode (comctl32 opens their
+// theme by class, not the window's style); once, after comctl32 v6 loads.
+void dark_scroll_bars();
 void theme_top_window(HWND h);
 void theme_control(HWND h);
 // Paints a dark menu bar (WM_UAHDRAWMENU, WM_UAHDRAWMENUITEM, and the
