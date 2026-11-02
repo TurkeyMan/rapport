@@ -342,6 +342,12 @@ http_response http_request(std::string_view method, const std::string& url,
                            std::string_view body = {}, const http_options& = {});
 http_response http_get(const std::string& url, const http_options& = {});
 
+// Whether the connection now is metered (charged by data, roaming, past a
+// cap), as the system has it: Windows' network cost; elsewhere
+// NetworkManager's, over D-Bus through gio, loaded when first used. False
+// when it can't tell. A quick query: fine before each background download.
+bool network_metered();
+
 // -- secrets ------------------------------------------------------------------
 
 // The user's keychain, for tokens and passwords: Windows' Credential Manager
