@@ -29,6 +29,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "gio_internal.h"
+
 extern char** environ;
 #endif
 
@@ -1021,7 +1023,22 @@ bool open_path(const fs::path& p)
 
 bool open_with(const fs::path& p)
 {
-    return shell_execute(L"openas", fs::absolute(p).make_preferred().wstring());
+    // Over the app's window in front, when one is: rapport's windows don't
+    // give sys their HWND.
+    HWND owner = GetForegroundWindow();
+    DWORD pid = 0;
+    if (owner) GetWindowThreadProcessId(owner, &pid);
+    if (pid != GetCurrentProcessId()) owner = nullptr;
+    const std::wstring file = fs::absolute(p).make_preferred().wstring();
+    OPENASINFO info{};
+    info.pcszFile = file.c_str();
+    info.oaifInFlags = OAIF_ALLOW_REGISTRATION | OAIF_EXEC;
+    return SUCCEEDED(SHOpenWithDialog(owner, &info));
+}
+
+bool open_with_available()
+{
+    return true;
 }
 
 bool open_url(std::string_view url)
@@ -1089,9 +1106,77 @@ bool open_url(std::string_view url)
     return spawn_detached({"xdg-open", std::string(url)});
 }
 
-bool open_with(const fs::path&)
+// The desktop portal's OpenURI (xdg-desktop-portal, with GNOME's, KDE's or
+// the GTK backend most desktops fall back to), asked for its chooser, which
+// `ask` needs version 3 for. Called on gio's shared session bus; the file
+// goes as a descriptor, as the portal wants it from a sandbox and takes it
+// from anyone.
+namespace
 {
-    return false;
+
+constexpr const char* portal_name = "org.freedesktop.portal.Desktop";
+constexpr const char* portal_path = "/org/freedesktop/portal/desktop";
+constexpr const char* open_uri = "org.freedesktop.portal.OpenURI";
+
+void* session_bus()
+{
+    const detail::gio_api* g = detail::gio();
+    static void* const bus = g ? g->bus(detail::session_bus) : nullptr;
+    return bus;
+}
+
+}  // namespace
+
+bool open_with_available()
+{
+    static const bool available = []
+    {
+        void* bus = session_bus();
+        if (!bus) return false;
+        const detail::gio_api& g = *detail::gio();
+        // D-Bus starts the portal for this if it isn't running yet.
+        void* reply = g.call(bus, portal_name, portal_path, "org.freedesktop.DBus.Properties",
+                             "Get", g.variant_new("(ss)", open_uri, "version"), "(v)",
+                             0 /* G_DBUS_CALL_FLAGS_NONE */, 5000, nullptr, nullptr);
+        if (!reply) return false;
+        void* boxed = g.child(reply, 0);
+        void* value = g.inner(boxed);
+        const bool ok = g.is_of_type(value, "u") && g.uint32(value) >= 3;
+        g.unref(value);
+        g.unref(boxed);
+        g.unref(reply);
+        return ok;
+    }();
+    return available;
+}
+
+bool open_with(const fs::path& p)
+{
+    if (!open_with_available()) return false;
+    void* bus = session_bus();
+    const detail::gio_api& g = *detail::gio();
+    const int fd = ::open(fs::absolute(p).c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    void* fds = g.fd_list_new();
+    void* error = nullptr;
+    const int index = g.fd_list_append(fds, fd, &error);  // keeps a duplicate
+    ::close(fd);
+    if (index < 0)
+    {
+        if (error) g.error_free(error);
+        g.object_unref(fds);
+        return false;
+    }
+    // No parent window: rapport's windows don't give sys their X11 id or
+    // Wayland handle, so the chooser comes up on its own.
+    void* reply =
+        g.call_with_fds(bus, portal_name, portal_path, open_uri, "OpenFile",
+                        g.variant_new_parsed("(%s, %h, {'ask': <true>})", "", index), "(o)",
+                        0 /* G_DBUS_CALL_FLAGS_NONE */, 5000, fds, nullptr, nullptr, nullptr);
+    g.object_unref(fds);
+    if (!reply) return false;
+    g.unref(reply);
+    return true;
 }
 
 bool reveal(const fs::path& p)

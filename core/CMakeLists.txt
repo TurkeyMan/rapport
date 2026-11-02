@@ -40,6 +40,10 @@ if(WIN32)
     target_sources(rapport PRIVATE src/gpu_d3d11.cpp)
     target_link_libraries(rapport PRIVATE shell32 ole32 uuid winhttp advapi32 windowscodecs d3d11 dxgi)
 endif()
+# D-Bus elsewhere through gio, loaded at run time.
+if(NOT WIN32)
+    target_sources(rapport PRIVATE src/gio.cpp)
+endif()
 # rap::gpu on Vulkan elsewhere: only the headers are needed, the loader is
 # opened at run time.
 if(NOT WIN32)

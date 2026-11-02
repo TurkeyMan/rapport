@@ -302,9 +302,16 @@ bool open_path(const std::filesystem::path&);
 // Opens a web address (https:, mailto:) in the user's browser or mail
 // program, without waiting.
 bool open_url(std::string_view url);
-// The system's "Open with" chooser for a file. Windows only (Linux desktops
-// have no common one): false elsewhere.
+// The system's "Open with" chooser for a file, without waiting for the
+// choice: Windows' SHOpenWithDialog (over the app's window in front, which
+// can make a program the type's default); elsewhere the desktop portal's
+// OpenURI asked to ask (xdg-desktop-portal 1.x, interface version 3), over
+// D-Bus through gio, loaded at run time. False if it couldn't be shown.
+// May wait for D-Bus to start the portal (up to 5 s).
 bool open_with(const std::filesystem::path&);
+// Whether open_with has a chooser to show: always on Windows; elsewhere
+// whether the portal's OpenURI answers, asked once and remembered.
+bool open_with_available();
 // Shows the file manager at the item, selected where the platform can
 // (Explorer; FileManager1 on Linux: Dolphin, Nautilus, Nemo, Thunar),
 // else at its folder.
