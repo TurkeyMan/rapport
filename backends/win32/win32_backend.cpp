@@ -324,17 +324,27 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
                 return true;
             }
         }
+        SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
+        // Light: the system's own face brush and text colour, as before dark
+        // mode. Themed controls (trackbars, statics) seeing that brush draw
+        // their parent's background instead, so they blend into a tab
+        // page's lighter body; a brush of the same colour of our own made
+        // them paint grey bands across it.
+        if (!dark_mode())
+        {
+            result = reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+            return true;
+        }
         // (Themed check boxes ignore the text colour: theirs is drawn by
         // check_impl in dark mode. A link takes it in dark mode, where
         // theme_control asks it to: the link colour.)
         wchar_t cls[16] = {};
         GetClassNameW(c, cls, 16);
-        const bool link = dark_mode() && !_wcsicmp(cls, WC_LINK);
+        const bool link = !_wcsicmp(cls, WC_LINK);
         SetTextColor(reinterpret_cast<HDC>(wp),
                      color_ref(theme_color_of(!IsWindowEnabled(c) ? theme_color::disabled_text
                                               : link              ? theme_color::link
                                                                   : theme_color::window_text)));
-        SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
         result = reinterpret_cast<LRESULT>(theme_brush(theme_color::window));
         return true;
     }
