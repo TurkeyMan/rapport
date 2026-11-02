@@ -2810,6 +2810,20 @@ public:
 
     void leave() { set_hot(std::nullopt); }
 
+    // QEvent::ToolTip on the rows: the model's text for the point, none hides it.
+    bool tooltip(QHelpEvent* e)
+    {
+        auto at = model_ ? cell_at(e->pos()) : std::nullopt;
+        const std::string text = at && at->row < model_->row_count()
+                                     ? model_->tooltip(at->row, at->column, at->in_cell)
+                                     : std::string();
+        if (text.empty())
+            QToolTip::hideText();
+        else
+            QToolTip::showText(e->globalPos(), qs(text), view_->viewport());
+        return true;
+    }
+
     // A system drag over the list: drop_in data, or this list's own rows
     // brought back after leaving it (a reorder). Anything else is ignored
     // and goes on to the window (files).
@@ -2916,19 +2930,6 @@ private:
                            float(pos.y() - row_rect(*row).y())}};
     }
 
-    // QEvent::ToolTip on the rows: the model's text for the point, none hides it.
-    bool tooltip(QHelpEvent* e)
-    {
-        auto at = model_ ? cell_at(e->pos()) : std::nullopt;
-        const std::string text = at && at->row < model_->row_count()
-                                     ? model_->tooltip(at->row, at->column, at->in_cell)
-                                     : std::string();
-        if (text.empty())
-            QToolTip::hideText();
-        else
-            QToolTip::showText(e->globalPos(), qs(text), view_->viewport());
-        return true;
-    }
 
     void show_sort_indicator()
     {
