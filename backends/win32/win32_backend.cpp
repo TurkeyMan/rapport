@@ -211,6 +211,8 @@ public:
     }
     virtual void scroll(WORD /*code*/) {}
     virtual bool draw_item(DRAWITEMSTRUCT*) { return false; }
+    // The desktop's colours or dark mode changed (after theme_control).
+    virtual void theme_changed() {}
 };
 
 std::unordered_map<HWND, handler*>& handlers()
@@ -297,10 +299,9 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         RECT c;
         GetClientRect(wnd, &c);
         const int saved = SaveDC(dc);
-        FillRect(dc, &c, GetSysColorBrush(COLOR_BTNFACE));
-        const bool any = paint_group_frames(wnd, dc);
+        FillRect(dc, &c, theme_brush(theme_color::window));
+        paint_group_frames(wnd, dc);
         RestoreDC(dc, saved);
-        if (!any) return false;  // (the fill was the default erase anyway)
         result = 1;
         return true;
     }
@@ -316,13 +317,31 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
             GetClassNameW(c, cls, 16);
             if (!_wcsicmp(cls, L"Edit"))
             {
-                SetBkColor(reinterpret_cast<HDC>(wp), GetSysColor(COLOR_WINDOW));
-                result = reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+                SetTextColor(reinterpret_cast<HDC>(wp),
+                             color_ref(theme_color_of(theme_color::text)));
+                SetBkColor(reinterpret_cast<HDC>(wp), color_ref(theme_color_of(theme_color::base)));
+                result = reinterpret_cast<LRESULT>(theme_brush(theme_color::base));
                 return true;
             }
         }
+        // (Themed check boxes ignore the text colour: theirs is drawn by
+        // check_impl in dark mode.)
+        SetTextColor(reinterpret_cast<HDC>(wp),
+                     color_ref(theme_color_of(IsWindowEnabled(c) ? theme_color::window_text
+                                                                 : theme_color::disabled_text)));
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
-        result = reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+        result = reinterpret_cast<LRESULT>(theme_brush(theme_color::window));
+        return true;
+    }
+    // Fields and drop-down lists, dark in dark mode (their defaults are
+    // the light system colours).
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    {
+        if (!dark_mode()) return false;
+        SetTextColor(reinterpret_cast<HDC>(wp), color_ref(theme_color_of(theme_color::text)));
+        SetBkColor(reinterpret_cast<HDC>(wp), color_ref(theme_color_of(theme_color::base)));
+        result = reinterpret_cast<LRESULT>(theme_brush(theme_color::base));
         return true;
     }
     }
@@ -363,8 +382,11 @@ void register_classes()
 HWND make_host(HWND parent, DWORD style = 0)
 {
     register_classes();
-    return CreateWindowExW(WS_EX_CONTROLPARENT, L"rapportHost", L"", WS_CHILD | WS_CLIPCHILDREN | style, 0, 0, 0,
-                           0, parent, nullptr, instance(), nullptr);
+    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT, L"rapportHost", L"",
+                             WS_CHILD | WS_CLIPCHILDREN | style, 0, 0, 0, 0, parent, nullptr,
+                             instance(), nullptr);
+    if (dark_mode()) theme_control(h);  // its scroll bars
+    return h;
 }
 
 // -- flicker-free painting ----------------------------------------------------
@@ -422,6 +444,7 @@ void set_tooltip_text(HWND control, const std::string& text)
                               CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, top, nullptr, instance(),
                               nullptr);
         SendMessageW(tip, TTM_SETMAXTIPWIDTH, 0, 480);
+        if (dark_mode()) theme_control(tip);
     }
     std::wstring w = wide(text);
     TOOLINFOW ti{};
@@ -681,6 +704,7 @@ HWND create_control(win_context& win, HWND parent, const wchar_t* cls, const std
     HWND h = CreateWindowExW(ex_style, cls, text.c_str(), WS_CHILD | style, 0, 0, 0, 0, parent, nullptr,
                              instance(), nullptr);
     SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font(win.dpi())), FALSE);
+    if (dark_mode()) theme_control(h);
     return h;
 }
 
@@ -1314,6 +1338,66 @@ public:
         const SIZE t = text_extent(h_, window_text(h_));
         return {t.cx + px(GetWindowTextLengthW(h_) ? 22 : 14), std::max<long>(t.cy, px(17))};
     }
+    // Dark mode's check box style draws its label black whatever the text
+    // colour: the box from the style and the label in the theme's colour.
+    LRESULT notify(NMHDR* hdr, bool& handled) override
+    {
+        handled = false;
+        if (hdr->code != NM_CUSTOMDRAW || !dark_mode()) return 0;
+        auto* cd = reinterpret_cast<NMCUSTOMDRAW*>(hdr);
+        handled = true;
+        if (cd->dwDrawStage != CDDS_PREPAINT) return CDRF_DODEFAULT;
+        HTHEME theme = OpenThemeData(h_, L"BUTTON");
+        if (!theme) return CDRF_DODEFAULT;
+        const LRESULT check = SendMessageW(h_, BM_GETCHECK, 0, 0);
+        const UINT item = cd->uItemState;
+        int state = check == BST_CHECKED         ? CBS_CHECKEDNORMAL
+                    : check == BST_INDETERMINATE ? CBS_MIXEDNORMAL
+                                                 : CBS_UNCHECKEDNORMAL;
+        if (item & CDIS_DISABLED)
+            state += 3;
+        else if (item & CDIS_SELECTED)
+            state += 2;
+        else if (item & CDIS_HOT)
+            state += 1;
+        HDC dc = cd->hdc;
+        const RECT r = cd->rc;
+        FillRect(dc, &r, theme_brush(theme_color::window));
+        SIZE box{px(13), px(13)};
+        GetThemePartSize(theme, dc, BP_CHECKBOX, state, nullptr, TS_DRAW, &box);
+        RECT b{r.left, r.top + (r.bottom - r.top - box.cy) / 2, r.left + box.cx, 0};
+        b.bottom = b.top + box.cy;
+        DrawThemeBackground(theme, dc, BP_CHECKBOX, state, &b, nullptr);
+        const std::wstring label = window_text(h_);
+        if (!label.empty())
+        {
+            HGDIOBJ old =
+                SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h_, WM_GETFONT, 0, 0)));
+            const LRESULT ui = SendMessageW(h_, WM_QUERYUISTATE, 0, 0);
+            DWORD flags = DT_SINGLELINE | DT_VCENTER | DT_LEFT;
+            if (ui & UISF_HIDEACCEL) flags |= DT_HIDEPREFIX;
+            RECT text{b.right + px(4), r.top, r.right, r.bottom};
+            DTTOPTS opts{};
+            opts.dwSize = sizeof opts;
+            opts.dwFlags = DTT_TEXTCOLOR;
+            opts.crText = color_ref(theme_color_of(
+                (item & CDIS_DISABLED) ? theme_color::disabled_text : theme_color::window_text));
+            DrawThemeTextEx(theme, dc, BP_CHECKBOX, state, label.c_str(), -1, flags, &text, &opts);
+            if ((item & CDIS_FOCUS) && !(ui & UISF_HIDEFOCUS))
+            {
+                RECT focus = text;
+                DrawThemeTextEx(theme, dc, BP_CHECKBOX, state, label.c_str(), -1,
+                                flags | DT_CALCRECT, &focus, &opts);
+                focus.top = text.top + (text.bottom - text.top - (focus.bottom - focus.top)) / 2;
+                focus.bottom = focus.top + (focus.bottom - focus.top);
+                InflateRect(&focus, px(1), 0);
+                DrawFocusRect(dc, &focus);
+            }
+            SelectObject(dc, old);
+        }
+        CloseThemeData(theme);
+        return CDRF_SKIPDEFAULT;
+    }
 
 private:
     std::function<void(bool)> toggled_;
@@ -1570,7 +1654,8 @@ public:
         // RichEdit holds 32,767 characters unless told otherwise, and cuts
         // longer text off silently (a big diff showed only its start).
         SendMessageW(h_, EM_EXLIMITTEXT, 0, 0x7ffffffe);
-        SendMessageW(h_, EM_SETBKGNDCOLOR, 0, LPARAM(GetSysColor(COLOR_WINDOW)));
+        SendMessageW(h_, EM_SETBKGNDCOLOR, 0, LPARAM(color_ref(theme_color_of(theme_color::base))));
+        set_text_colour(SCF_DEFAULT);
         if (mono_) SendMessageW(h_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font(win.dpi(), false, true)), FALSE);
         SetWindowSubclass(h_, wheel_proc, 1, reinterpret_cast<DWORD_PTR>(this));
         // No error beep for typing into a read-only view (RichEdit allows
@@ -1611,6 +1696,9 @@ public:
     }
     void set_text(const std::string& t, std::vector<span> spans) override
     {
+        text_ = t;
+        spans_ = spans;
+        appended_.clear();
         quiet_ = true;
         if (spans.empty())
             SetWindowTextW(h_, wide(t).c_str());
@@ -1621,6 +1709,7 @@ public:
     }
     void append(const std::string& t, const text_style& style) override
     {
+        appended_.emplace_back(t, style);
         quiet_ = true;
         // Positions from RichEdit itself: GetWindowTextLength counts each
         // line break as CR LF, two to RichEdit's one, which put the style a
@@ -1767,11 +1856,15 @@ private:
         }
         text(at, t.size());
 
+        // Unstyled text in the theme's text colour: RTF's automatic colour
+        // is the system's, light in dark mode.
+        const int plain = colour_index(theme_color::text);
         std::string out = "{\\rtf1\\ansi\\uc0{\\fonttbl{\\f0 " + narrow(lf.lfFaceName) + ";}{\\f1 Consolas;}}{\\colortbl;";
         for (COLORREF c : colours)
             out += "\\red" + std::to_string(GetRValue(c)) + "\\green" + std::to_string(GetGValue(c)) + "\\blue" +
                    std::to_string(GetBValue(c)) + ';';
-        out += "}\\f0\\fs" + std::to_string(half_points) + ' ' + body + '}';
+        out += "}\\f0\\cf" + std::to_string(plain) + "\\fs" + std::to_string(half_points) + ' ' +
+               body + '}';
         return out;
     }
     void stream_rtf(const std::string& rtf)
@@ -1823,10 +1916,52 @@ private:
         SendMessageW(h_, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
     }
 
+    // Text without a colour of its own in the theme's: RichEdit's
+    // automatic colour is the system's, light in dark mode.
+    void set_text_colour(WPARAM which)
+    {
+        CHARFORMAT2W cf{};
+        cf.cbSize = sizeof cf;
+        cf.dwMask = CFM_COLOR;
+        cf.crTextColor = color_ref(theme_color_of(theme_color::text));
+        SendMessageW(h_, EM_SETCHARFORMAT, which, reinterpret_cast<LPARAM>(&cf));
+    }
+    // The colours changed: styled text, whose colours were resolved when
+    // it went in, goes in again, where the scroll and selection were. Text
+    // the user may have edited keeps its own and takes the text colour.
+    void theme_changed() override
+    {
+        set_text_colour(SCF_DEFAULT);
+        const bool styled = !spans_.empty() || !appended_.empty();
+        if (!styled || !(GetWindowLongPtrW(h_, GWL_STYLE) & ES_READONLY))
+        {
+            if (!styled) set_text_colour(SCF_ALL);
+            return;
+        }
+        POINT scroll{};
+        SendMessageW(h_, EM_GETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll));
+        CHARRANGE sel{};
+        SendMessageW(h_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&sel));
+        SendMessageW(h_, WM_SETREDRAW, FALSE, 0);
+        const std::string t = text_;
+        std::vector<span> spans = spans_;
+        auto appended = std::move(appended_);
+        set_text(t, std::move(spans));
+        for (const auto& [text, style] : appended) append(text, style);
+        SendMessageW(h_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&sel));
+        SendMessageW(h_, EM_SETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll));
+        SendMessageW(h_, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+
     int wheel_ = 0;  // wheel delta × lines per notch not yet scrolled
     bool mono_;
     bool quiet_ = false;
     std::function<void()> changed_;
+    // What went in, to put in again in new colours.
+    std::string text_;
+    std::vector<span> spans_;
+    std::vector<std::pair<std::string, text_style>> appended_;
 };
 
 class separator_item : public item
@@ -1928,8 +2063,12 @@ public:
         RECT frame = rect_;
         frame.top += t.cy / 2;
         if (!theme_) theme_ = OpenThemeData(parent_, L"BUTTON");
-        HTHEME theme = theme_;
-        if (theme)
+        // In dark mode the style's frame and caption are a light theme's:
+        // drawn here in the dark colours instead.
+        HTHEME theme = dark_mode() ? nullptr : theme_;
+        if (dark_mode())
+            FrameRect(dc, &frame, theme_brush(theme_color::border));
+        else if (theme)
             DrawThemeBackground(theme, dc, BP_GROUPBOX, GBS_NORMAL, &frame, nullptr);
         else
             DrawEdge(dc, &frame, EDGE_ETCHED, BF_RECT);
@@ -1939,14 +2078,14 @@ public:
             RECT text{rect_.left + win_.px(9), rect_.top, rect_.left + win_.px(9) + t.cx, rect_.top + t.cy};
             RECT gap = text;
             InflateRect(&gap, win_.px(2), 0);
-            FillRect(dc, &gap, GetSysColorBrush(COLOR_BTNFACE));
+            FillRect(dc, &gap, theme_brush(theme_color::window));
             SetBkMode(dc, TRANSPARENT);
             if (theme)
                 DrawThemeText(theme, dc, BP_GROUPBOX, GBS_NORMAL, title_.c_str(), -1, DT_SINGLELINE | DT_LEFT, 0,
                               &text);
             else
             {
-                SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+                SetTextColor(dc, color_ref(theme_color_of(theme_color::window_text)));
                 DrawTextW(dc, title_.c_str(), -1, &text, DT_SINGLELINE | DT_LEFT);
             }
         }
@@ -2098,8 +2237,9 @@ public:
         adopt(create_control(win, parent, WC_TREEVIEWW, L"",
                              TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | WS_TABSTOP,
                              WS_EX_CLIENTEDGE));
-        // Explorer's look (chevrons, hover, no lines), as Windows' own trees have it.
-        SetWindowTheme(h_, L"Explorer", nullptr);
+        // Explorer's look (chevrons, hover, no lines), as Windows' own trees
+        // have it (its dark one in dark mode).
+        theme_control(h_);
         TreeView_SetExtendedStyle(h_, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
         set_items(s.items);
     }
@@ -2573,12 +2713,22 @@ public:
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
         RECT r = d->rcItem;
-        DrawFrameControl(d->hDC, &r, DFC_BUTTON, DFCS_BUTTONPUSH | ((d->itemState & ODS_SELECTED) ? DFCS_PUSHED : 0));
+        if (dark_mode())
+        {
+            // DrawFrameControl's button is the classic light one.
+            FillRect(d->hDC, &r,
+                     theme_brush((d->itemState & ODS_SELECTED) ? theme_color::pressed
+                                                               : theme_color::card));
+            FrameRect(d->hDC, &r, theme_brush(theme_color::border));
+        }
+        else
+            DrawFrameControl(d->hDC, &r, DFC_BUTTON,
+                             DFCS_BUTTONPUSH | ((d->itemState & ODS_SELECTED) ? DFCS_PUSHED : 0));
         InflateRect(&r, -px(5), -px(5));
         HBRUSH b = CreateSolidBrush(color_ref(color_));
         FillRect(d->hDC, &r, b);
         DeleteObject(b);
-        FrameRect(d->hDC, &r, GetSysColorBrush(COLOR_BTNSHADOW));
+        FrameRect(d->hDC, &r, theme_brush(theme_color::border));
         if (d->itemState & ODS_FOCUS)
         {
             InflateRect(&r, px(2), px(2));
@@ -2700,7 +2850,7 @@ public:
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
         RECT r = d->rcItem;
-        FillRect(d->hDC, &r, GetSysColorBrush(COLOR_BTNFACE));
+        FillRect(d->hDC, &r, theme_brush(theme_color::window));
         const bool pressed = d->itemState & ODS_SELECTED;
         const bool disabled = d->itemState & ODS_DISABLED;
         if (pressed || checked_ || hot_)
@@ -4160,6 +4310,7 @@ private:
                                    CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, h_, nullptr,
                                    instance(), nullptr);
             SendMessageW(tip_, TTM_SETMAXTIPWIDTH, 0, 480);
+            if (dark_mode()) theme_control(tip_);
         }
         std::wstring w = wide(text);
         TOOLINFOW ti{};
@@ -4637,6 +4788,72 @@ HRESULT list_drop_target::Drop(IDataObject* data, DWORD, POINTL pt, DWORD* effec
 
 // -- tabs ---------------------------------------------------------------------
 
+// The tab control has no dark style: in dark mode it's painted here, the
+// tabs on the window colour with the current one raised and underlined in
+// the accent, as Windows 11's own tabs are.
+LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (!dark_mode() || (msg != WM_PAINT && msg != WM_ERASEBKGND))
+        return DefSubclassProc(h, msg, wp, lp);
+    if (msg == WM_ERASEBKGND) return 1;
+    PAINTSTRUCT ps;
+    HDC dc = BeginPaint(h, &ps);
+    RECT c;
+    GetClientRect(h, &c);
+    FillRect(dc, &c, theme_brush(theme_color::window));
+    const UINT dpi = dpi_of(h);
+    auto px = [dpi](int v) { return MulDiv(v, int(dpi), 96); };
+    RECT page = c;
+    TabCtrl_AdjustRect(h, FALSE, &page);
+    InflateRect(&page, px(2), px(2));
+    FrameRect(dc, &page, theme_brush(theme_color::border));
+    HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)));
+    SetBkMode(dc, TRANSPARENT);
+    const LRESULT ui = SendMessageW(h, WM_QUERYUISTATE, 0, 0);
+    const int current = TabCtrl_GetCurSel(h), n = TabCtrl_GetItemCount(h);
+    POINT pointer;
+    GetCursorPos(&pointer);
+    ScreenToClient(h, &pointer);
+    for (int i = 0; i < n; ++i)
+    {
+        RECT r;
+        if (!TabCtrl_GetItemRect(h, i, &r)) continue;
+        const bool selected = i == current, hot = PtInRect(&r, pointer);
+        if (selected) InflateRect(&r, px(2), px(2));
+        FillRect(dc, &r,
+                 theme_brush(selected ? theme_color::card
+                             : hot    ? theme_color::hover
+                                      : theme_color::window));
+        FrameRect(dc, &r, theme_brush(theme_color::border));
+        if (selected)
+        {
+            RECT bar{r.left + px(1), r.bottom - px(3), r.right - px(1), r.bottom};
+            FillRect(dc, &bar, theme_brush(theme_color::accent));
+        }
+        wchar_t text[128] = {};
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = text;
+        item.cchTextMax = int(std::size(text));
+        TabCtrl_GetItem(h, i, &item);
+        SetTextColor(dc,
+                     color_ref(theme_color_of(IsWindowEnabled(h) ? theme_color::window_text
+                                                                 : theme_color::disabled_text)));
+        DWORD flags = DT_SINGLELINE | DT_VCENTER | DT_CENTER;
+        if (ui & UISF_HIDEACCEL) flags |= DT_HIDEPREFIX;
+        DrawTextW(dc, text, -1, &r, flags);
+        if (selected && GetFocus() == h && !(ui & UISF_HIDEFOCUS))
+        {
+            RECT focus = r;
+            InflateRect(&focus, -px(3), -px(3));
+            DrawFocusRect(dc, &focus);
+        }
+    }
+    SelectObject(dc, old);
+    EndPaint(h, &ps);
+    return 0;
+}
+
 class tabs_impl : public leaf<rap::tabs>
 {
 public:
@@ -4644,6 +4861,7 @@ public:
         : leaf(win)
     {
         adopt(create_control(win, parent, WC_TABCONTROLW, L"", WS_CLIPSIBLINGS | WS_TABSTOP));
+        SetWindowSubclass(h_, dark_tabs_proc, 1, 0);
         for (size_t i = 0; i < s.titles.size(); ++i)
         {
             std::wstring t = mnemonic(s.titles[i]);
@@ -4784,9 +5002,11 @@ public:
     {
         if (d->itemID == UINT(-1) || d->itemID >= titles_.size()) return false;
         const bool selected = d->itemState & ODS_SELECTED;
-        FillRect(d->hDC, &d->rcItem, GetSysColorBrush(selected ? COLOR_HIGHLIGHT : COLOR_WINDOW));
+        FillRect(d->hDC, &d->rcItem,
+                 theme_brush(selected ? theme_color::highlight : theme_color::base));
         SetBkMode(d->hDC, TRANSPARENT);
-        SetTextColor(d->hDC, GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
+        SetTextColor(d->hDC, color_ref(theme_color_of(selected ? theme_color::highlight_text
+                                                               : theme_color::text)));
         HGDIOBJ old = SelectObject(d->hDC, ui_font(win_.dpi()));
         RECT text = d->rcItem;
         text.left += px(8);
@@ -6141,6 +6361,10 @@ public:
         hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME : 0), L"rapportWindow",
                                 wide(spec.title).c_str(), style | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
                                 parent ? parent->hwnd_ : nullptr, nullptr, instance(), this);
+        // Before it's first shown, or the title bar flashes light.
+        theme_top_window(hwnd_);
+        dark_ = dark_mode();
+        palette_ = palette_now();
         initial_w_ = spec.width;
         initial_h_ = spec.height;
         windows().insert(this);
@@ -6166,6 +6390,47 @@ public:
         static std::set<window_impl*> w;
         return w;
     }
+
+    // Every role's colour now, to tell a change that matters from the
+    // many WM_SETTINGCHANGEs that don't.
+    static std::array<color, theme_color_count> palette_now()
+    {
+        std::array<color, theme_color_count> p;
+        for (int r = 0; r < theme_color_count; ++r) p[size_t(r)] = theme_color_of(theme_color(r));
+        return p;
+    }
+    // The desktop's colours changed: controls whose style or colours were
+    // set for the old mode get the new one's, and everything repaints.
+    void retheme()
+    {
+        const auto now = palette_now();
+        const bool mode = dark_ != dark_mode();
+        if (!mode && !std::memcmp(now.data(), palette_.data(), sizeof now)) return;
+        palette_ = now;
+        if (mode)
+        {
+            dark_ = dark_mode();
+            apply_app_mode();
+            theme_top_window(hwnd_);
+            SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                             SWP_FRAMECHANGED);
+        }
+        EnumChildWindows(
+            hwnd_,
+            [](HWND c, LPARAM) -> BOOL
+            {
+                theme_control(c);
+                if (handler* h = handler_of(c)) h->theme_changed();
+                return TRUE;
+            },
+            0);
+        if (GetMenu(hwnd_)) DrawMenuBar(hwnd_);
+        RedrawWindow(hwnd_, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
+    }
+    bool dark_ = false;  // the mode the frame and controls were last styled for
+    std::array<color, theme_color_count> palette_{};  // the colours they were last given
 
     HWND hwnd() const override { return hwnd_; }
     void relayout() override
@@ -6672,6 +6937,7 @@ private:
         auto* self = reinterpret_cast<window_impl*>(GetWindowLongPtrW(h, GWLP_USERDATA));
         LRESULT r = 0;
         if (self && forward_child_message(h, msg, wp, lp, r)) return r;
+        if (self && dark_menu_bar(h, msg, wp, lp, r)) return r;
         if (self)
         {
             switch (msg)
@@ -6714,12 +6980,14 @@ private:
             case WM_CLOSE: self->close_requested(); return 0;
             // The desktop's colours (accent, high contrast, the system
             // colours) may have changed: read them again and repaint all.
+            // Dark mode ("ImmersiveColorSet") too: every control and the
+            // frame take the new mode's style.
             case WM_SETTINGCHANGE:
             case WM_SYSCOLORCHANGE:
             case WM_DWMCOLORIZATIONCOLORCHANGED:
+            case WM_THEMECHANGED:
                 forget_theme_colors();
-                RedrawWindow(h, nullptr, nullptr,
-                             RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
+                self->retheme();
                 break;
             case WM_DROPFILES:
             {
@@ -7160,6 +7428,7 @@ public:
                                      ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES |
                                      ICC_UPDOWN_CLASS | ICC_STANDARD_CLASSES | ICC_LINK_CLASS};
         InitCommonControlsEx(&icc);
+        apply_app_mode();
         if (!d2d_factory() || !dwrite_factory()) return nullptr;
         return new win32_backend;
     }

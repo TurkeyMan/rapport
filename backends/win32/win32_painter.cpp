@@ -4,6 +4,7 @@
 
 #include <dwmapi.h>
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -261,16 +262,25 @@ color sys_color(int index)
 namespace
 {
 
+palette::basics dark_basics(color accent)
+{
+    auto c = [](theme_color r) { return *palette::windows_dark_color(r); };
+    return {c(theme_color::window), c(theme_color::window_text), c(theme_color::base),
+            c(theme_color::text), accent};
+}
+
 // What Windows says about colour beyond GetSysColor, read once and again
 // after forget_theme_colors() (the top-level windows call it on
 // WM_SETTINGCHANGE, WM_SYSCOLORCHANGE and WM_DWMCOLORIZATIONCOLORCHANGED).
 struct desktop_colors
 {
     bool high_contrast = false;
+    bool dark = false;                             // the app mode (palette::windows_dark)
     std::optional<palette::accent_shades> shades;  // the accent's light and dark steps
     color accent;
 };
 std::optional<desktop_colors> g_desktop;
+std::array<HBRUSH, theme_color_count> g_brushes{};
 
 // The user's accent colour: Settings > Personalisation > Colours, which
 // UISettings' UIColorType::Accent reports. Its shades from the Explorer
@@ -284,6 +294,14 @@ desktop_colors read_desktop_colors()
                       (hc.dwFlags & HCF_HIGHCONTRASTON);
     d.accent = sys_color(COLOR_HIGHLIGHT);
     if (d.high_contrast) return d;  // the system colours unchanged
+    DWORD light = 1, light_size = sizeof light;
+    const bool known =
+        RegGetValueW(
+            HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &light_size) == ERROR_SUCCESS;
+    d.dark = palette::windows_dark(false, palette::forced_scheme(),
+                                   known ? std::optional<uint32_t>(light) : std::nullopt,
+                                   windows_build());
     uint8_t bytes[32];
     DWORD size = sizeof bytes;
     if (RegGetValueW(HKEY_CURRENT_USER,
@@ -314,12 +332,54 @@ const desktop_colors& desktop()
 void forget_theme_colors()
 {
     g_desktop.reset();
+    for (HBRUSH& b : g_brushes)
+        if (b)
+        {
+            DeleteObject(b);
+            b = nullptr;
+        }
+}
+
+bool dark_mode()
+{
+    return desktop().dark;
+}
+
+bool high_contrast()
+{
+    return desktop().high_contrast;
+}
+
+HBRUSH theme_brush(theme_color role)
+{
+    HBRUSH& b = g_brushes[size_t(role)];
+    if (!b) b = CreateSolidBrush(color_ref(theme_color_of(role)));
+    return b;
 }
 
 color theme_color_of(theme_color role)
 {
     const desktop_colors& d = desktop();
-    const bool dark = false;
+    const bool dark = d.dark;
+    if (dark)
+    {
+        // GetSysColor stays light in dark mode: Explorer's dark colours,
+        // and the accent a step lighter, as Fluent fills with it there.
+        if (std::optional<color> c = palette::windows_dark_color(role)) return *c;
+        const color accent = d.shades ? d.shades->light(2) : d.accent;
+        switch (role)
+        {
+        case theme_color::accent:
+        case theme_color::highlight: return accent;
+        case theme_color::highlight_text: return palette::text_on(accent);
+        case theme_color::link:
+            return d.shades ? d.shades->light(3) : palette::derived(role, dark_basics(accent));
+        case theme_color::positive:
+        case theme_color::negative:
+        case theme_color::warning: return palette::fluent_status(role, true);
+        default: return palette::derived(role, dark_basics(accent));
+        }
+    }
     switch (role)
     {
     case theme_color::window: return sys_color(COLOR_BTNFACE);

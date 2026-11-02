@@ -108,6 +108,23 @@ color sys_color(int index);
 color theme_color_of(theme_color role);
 // The desktop's colours changed: read them again on next use.
 void forget_theme_colors();
+// Windows' dark app mode (palette::windows_dark), and high contrast.
+bool dark_mode();
+bool high_contrast();
+// A solid brush of a role, kept until the colours change.
+HBRUSH theme_brush(theme_color role);
+// The Windows build number (RtlGetVersion: GetVersionEx lies).
+DWORD windows_build();
+// Dark mode for native chrome (win32_theme.cpp): the app's menus, a
+// top-level window's title bar, a control's visual style. Each follows
+// dark_mode() when called; call again after it changes.
+void apply_app_mode();
+void theme_top_window(HWND h);
+void theme_control(HWND h);
+// Paints a dark menu bar (WM_UAHDRAWMENU, WM_UAHDRAWMENUITEM, and the
+// line under it after WM_NCPAINT and WM_NCACTIVATE); false to leave the
+// message to DefWindowProc.
+bool dark_menu_bar(HWND h, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result);
 inline COLORREF color_ref(color c)
 {
     return RGB(c.r, c.g, c.b);

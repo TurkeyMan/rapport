@@ -230,6 +230,47 @@ inline int forced_scheme()
     return v ? scheme_from_name(v) : 0;
 }
 
+// Windows' app mode: dark when Settings > Personalisation > Colours says
+// so (AppsUseLightTheme 0) or RAPPORT_THEME forces it, never in high
+// contrast (whose colours are the system's), and only from 1809 (build
+// 17763), the first with dark common controls.
+inline bool windows_dark(bool high_contrast, int forced_scheme,
+                         std::optional<uint32_t> apps_use_light_theme, uint32_t build)
+{
+    if (high_contrast || build < 17763) return false;
+    if (forced_scheme) return forced_scheme == 1;
+    return apps_use_light_theme && *apps_use_light_theme == 0;
+}
+
+// Windows' dark mode surfaces (GetSysColor stays light in dark mode):
+// Explorer's and Fluent's dark values for what isn't the accent's.
+inline std::optional<color> windows_dark_color(theme_color role)
+{
+    switch (role)
+    {
+    case theme_color::window: return color{0x20, 0x20, 0x20};
+    case theme_color::base: return color{0x19, 0x19, 0x19};
+    case theme_color::alternate_base: return color{0x23, 0x23, 0x23};
+    case theme_color::window_text:
+    case theme_color::text:
+    case theme_color::header_text:
+    case theme_color::tooltip_text:
+    case theme_color::highlight_inactive_text:
+    case theme_color::focus: return color{0xff, 0xff, 0xff};
+    case theme_color::placeholder_text:
+    case theme_color::neutral: return color{0x9a, 0x9a, 0x9a};
+    case theme_color::mid: return color{0x6b, 0x6b, 0x6b};
+    case theme_color::header:
+    case theme_color::card:
+    case theme_color::tooltip: return color{0x2b, 0x2b, 0x2b};
+    case theme_color::highlight_inactive: return color{0x3a, 0x3a, 0x3a};
+    case theme_color::border: return color{0x50, 0x50, 0x50};
+    case theme_color::divider: return color{0x33, 0x33, 0x33};
+    case theme_color::disabled_text: return color{0x78, 0x78, 0x78};
+    default: return std::nullopt;  // the accent's, the status colours, hover and pressed
+    }
+}
+
 // -- defaults -----------------------------------------------------------------
 
 // Status colours in two design languages, for desktops that name none.

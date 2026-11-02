@@ -10,7 +10,7 @@ if(NOT TARGET rapport::headers)
     find_package(rapport REQUIRED)
 endif()
 
-set(sources win32_backend.cpp win32_painter.cpp)
+set(sources win32_backend.cpp win32_painter.cpp win32_theme.cpp)
 if(RAPPORT_STATIC)
     add_library(rapport_win32 STATIC ${sources})
 else()

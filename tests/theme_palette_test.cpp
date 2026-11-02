@@ -104,6 +104,27 @@ int main()
     eq(std::to_string(p::scheme_from_name("light")), "2", "scheme light");
     eq(std::to_string(p::scheme_from_name("auto")), "0", "scheme other");
 
+    // Windows' app mode: the user's choice, RAPPORT_THEME over it, never in
+    // high contrast or before 1809.
+    eq(p::windows_dark(false, 0, 0u, 22631) ? "dark" : "light", "dark", "AppsUseLightTheme 0");
+    eq(p::windows_dark(false, 0, 1u, 22631) ? "dark" : "light", "light", "AppsUseLightTheme 1");
+    eq(p::windows_dark(false, 0, std::nullopt, 22631) ? "dark" : "light", "light",
+       "no AppsUseLightTheme");
+    eq(p::windows_dark(false, 1, 1u, 22631) ? "dark" : "light", "dark", "RAPPORT_THEME=dark");
+    eq(p::windows_dark(false, 2, 0u, 22631) ? "dark" : "light", "light", "RAPPORT_THEME=light");
+    eq(p::windows_dark(true, 1, 0u, 22631) ? "dark" : "light", "light",
+       "high contrast stays the system's");
+    eq(p::windows_dark(false, 0, 0u, 17134) ? "dark" : "light", "light", "before 1809");
+    for (theme_color r :
+         {theme_color::window, theme_color::base, theme_color::card, theme_color::header})
+        if (!p::windows_dark_color(r) || !p::is_dark(*p::windows_dark_color(r)))
+            eq("light", "dark", "Windows' dark surfaces are dark");
+    if (const auto t = p::windows_dark_color(theme_color::text);
+        !t || p::contrast(*t, *p::windows_dark_color(theme_color::base)) < 7)
+        eq("low", "AAA", "Windows' dark text reads");
+    eq(hex(p::windows_dark_color(theme_color::accent)), "none",
+       "Windows' dark accent is the user's");
+
     // Text on an accent: white on a mid or dark one, black on a light one.
     eq(hex(p::text_on({0x00, 0x78, 0xd4})), "#ffffffff", "text on Windows blue");
     eq(hex(p::text_on({0xff, 0xe1, 0x00})), "#000000ff", "text on yellow");
