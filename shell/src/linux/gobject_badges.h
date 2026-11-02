@@ -96,28 +96,30 @@ inline void remember(GObject* file, const std::filesystem::path& path)
     s.sweep_at = std::max<size_t>(1024, s.files.size() * 2);
 }
 
-// Tells the file manager to ask about `path` again, if it's still shown.
-inline void invalidate(std::unordered_map<std::string, GWeakRef>::iterator it)
-{
-    shown_files& s = shown();
-    if (GObject* f = static_cast<GObject*>(g_weak_ref_get(&it->second)))
-    {
-        s.invalidate(f);
-        g_object_unref(f);
-    }
-}
-
+// Tells the file manager to ask again about the changed files still shown.
+// They're gathered first: a file manager that asks again from inside
+// invalidate_extension_info reaches remember(), which may sweep the map.
 inline gboolean on_changed(gpointer data)
 {
     std::unique_ptr<std::vector<std::filesystem::path>> paths(
         static_cast<std::vector<std::filesystem::path>*>(data));
     shown_files& s = shown();
     if (!s.invalidate) return G_SOURCE_REMOVE;
+    std::vector<GObject*> files;
+    auto take = [&](GWeakRef& ref)
+    {
+        if (GObject* f = static_cast<GObject*>(g_weak_ref_get(&ref))) files.push_back(f);
+    };
     if (paths->empty())
-        for (auto it = s.files.begin(); it != s.files.end(); ++it) invalidate(it);
+        for (auto& [p, ref] : s.files) take(ref);
     else
         for (const auto& p : *paths)
-            if (auto it = s.files.find(p.string()); it != s.files.end()) invalidate(it);
+            if (auto it = s.files.find(p.string()); it != s.files.end()) take(it->second);
+    for (GObject* f : files)
+    {
+        s.invalidate(f);
+        g_object_unref(f);
+    }
     return G_SOURCE_REMOVE;
 }
 

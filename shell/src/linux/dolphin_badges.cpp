@@ -27,6 +27,20 @@ using namespace rap::shell::adapter;
 
 class badge_overlays;
 
+// The workers that ask the provider, its own: Dolphin and KIO share Qt's
+// global pool, and an answer can take a while. Never deleted, since the
+// plugin may outlive the statics.
+QThreadPool* askers()
+{
+    static QThreadPool* pool = []
+    {
+        auto* p = new QThreadPool;
+        p->setMaxThreadCount(4);
+        return p;
+    }();
+    return pool;
+}
+
 // The plugins alive, for the provider's word that badges changed, which
 // comes from its own thread: a process may make more than one.
 QMutex alive_lock;
@@ -81,7 +95,7 @@ private:
     {
         if (!asking_.insert(path).second) return;
         QPointer<badge_overlays> self(this);
-        QThreadPool::globalInstance()->start(
+        askers()->start(
             [self, path, url]
             {
                 std::string icon = badge_icon(path);
@@ -109,6 +123,8 @@ private:
     }
 
     // The provider's word: these paths' badges (or all, for none) changed.
+    // For all, those with a badge are asked again (one may have gone), and
+    // those without are forgotten, to be asked when Dolphin next shows them.
     void changed(const std::vector<std::filesystem::path>& paths)
     {
         auto again = [&](const std::string& p)
@@ -117,9 +133,13 @@ private:
         };
         if (paths.empty())
         {
-            std::vector<std::string> all;
-            for (const auto& [p, icon] : known_) all.push_back(p);
-            for (const std::string& p : all) again(p);
+            std::vector<std::string> badged;
+            for (auto it = known_.begin(); it != known_.end();)
+                if (it->second.empty())
+                    it = known_.erase(it);
+                else
+                    badged.push_back((it++)->first);
+            for (const std::string& p : badged) again(p);
         }
         else
             for (const auto& p : paths) again(p.string());
