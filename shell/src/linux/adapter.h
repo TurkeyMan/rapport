@@ -1,6 +1,6 @@
 // What the Linux file managers' adapters share: asking the provider without
-// letting anything escape into the file manager, and keeping the provider
-// that made a menu alive until one of its items is chosen.
+// letting anything escape into the file manager, keeping the provider that
+// made a menu alive until one of its items is chosen, and the badges.
 #pragma once
 
 #include <rapport/shell.h>
@@ -41,5 +41,18 @@ std::string icon_spec(const std::string& icon);
 
 // Whether Shift is held, from the toolkit the file manager has loaded.
 bool shift_held() noexcept;
+
+// The badge for `path` as an icon theme's name, from the provider kept for
+// badges; empty for none (or a badge whose icon isn't a theme's: emblems
+// and overlays are named, not files). Any thread; may wait on the provider.
+std::string badge_icon(const std::filesystem::path& path) noexcept;
+
+// Whether the provider has badges at all, so an adapter can skip asking.
+bool has_badges() noexcept;
+
+// Asks the badges' provider to watch for changes (once per process; later
+// calls do nothing): `changed` gets the paths, or none for all of them,
+// from any thread.
+void watch_badges(provider::badges_changed changed) noexcept;
 
 }  // namespace rap::shell::adapter

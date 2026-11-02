@@ -1,10 +1,11 @@
 // The provider as a Caja extension (libcaja-extension), in
 // <libdir>/caja/extensions-2.0. Caja lists it under Edit > Preferences >
-// Extensions.
-#include "gobject_menu.h"
+// Extensions. Badges are emblems, drawn over the icon.
+#include "gobject_badges.h"
 
 #include <libcaja-extension/caja-extension-types.h>
 #include <libcaja-extension/caja-file-info.h>
+#include <libcaja-extension/caja-info-provider.h>
 #include <libcaja-extension/caja-menu-provider.h>
 
 namespace
@@ -49,6 +50,39 @@ void menu_provider_init(gpointer iface, gpointer)
     i->get_background_items = background_items;
 }
 
+struct badge_fm
+{
+    using file_info = CajaFileInfo;
+    using info_provider = CajaInfoProvider;
+    using handle = CajaOperationHandle;
+    static GFile* location(file_info* f) { return caja_file_info_get_location(f); }
+    static void add_emblem(file_info* f, const char* name) { caja_file_info_add_emblem(f, name); }
+    static void invalidate(file_info* f) { caja_file_info_invalidate_extension_info(f); }
+    static void complete(GClosure* done, info_provider* p, handle* h)
+    {
+        caja_info_provider_update_complete_invoke(done, p, h, CAJA_OPERATION_COMPLETE);
+    }
+};
+
+CajaOperationResult update_file_info(CajaInfoProvider* provider, CajaFileInfo* file, GClosure* done,
+                                     CajaOperationHandle** handle)
+{
+    return start_badge<badge_fm>(provider, file, done, handle) ? CAJA_OPERATION_IN_PROGRESS
+                                                               : CAJA_OPERATION_COMPLETE;
+}
+
+void cancel_update(CajaInfoProvider*, CajaOperationHandle* handle)
+{
+    cancel_badge(handle);
+}
+
+void info_provider_init(gpointer iface, gpointer)
+{
+    auto* i = static_cast<CajaInfoProviderIface*>(iface);
+    i->update_file_info = update_file_info;
+    i->cancel_update = cancel_update;
+}
+
 GType provider_type = 0;
 
 }  // namespace
@@ -61,6 +95,8 @@ extern "C" G_MODULE_EXPORT void caja_module_initialize(GTypeModule* module)
         g_type_module_register_type(module, G_TYPE_OBJECT, type_name("Caja"), &info, GTypeFlags(0));
     static const GInterfaceInfo menu{.interface_init = menu_provider_init};
     g_type_module_add_interface(module, provider_type, CAJA_TYPE_MENU_PROVIDER, &menu);
+    static const GInterfaceInfo badges{.interface_init = info_provider_init};
+    g_type_module_add_interface(module, provider_type, CAJA_TYPE_INFO_PROVIDER, &badges);
 }
 
 extern "C" G_MODULE_EXPORT void caja_module_shutdown() {}

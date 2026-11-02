@@ -1,7 +1,8 @@
 // The provider as a Nautilus 4 extension (libnautilus-extension-4), in
 // <libdir>/nautilus/extensions-4. Nautilus 4's menus show no icons and no
-// separators.
-#include "gobject_menu.h"
+// separators. Badges are emblems, which Nautilus 43 and later draw beside
+// the icon (grid view) or after the name (list view), not over the icon.
+#include "gobject_badges.h"
 
 #include <nautilus-extension.h>
 
@@ -47,6 +48,42 @@ void menu_provider_init(gpointer iface, gpointer)
     i->get_background_items = background_items;
 }
 
+struct badge_fm
+{
+    using file_info = NautilusFileInfo;
+    using info_provider = NautilusInfoProvider;
+    using handle = NautilusOperationHandle;
+    static GFile* location(file_info* f) { return nautilus_file_info_get_location(f); }
+    static void add_emblem(file_info* f, const char* name)
+    {
+        nautilus_file_info_add_emblem(f, name);
+    }
+    static void invalidate(file_info* f) { nautilus_file_info_invalidate_extension_info(f); }
+    static void complete(GClosure* done, info_provider* p, handle* h)
+    {
+        nautilus_info_provider_update_complete_invoke(done, p, h, NAUTILUS_OPERATION_COMPLETE);
+    }
+};
+
+NautilusOperationResult update_file_info(NautilusInfoProvider* provider, NautilusFileInfo* file,
+                                         GClosure* done, NautilusOperationHandle** handle)
+{
+    return start_badge<badge_fm>(provider, file, done, handle) ? NAUTILUS_OPERATION_IN_PROGRESS
+                                                               : NAUTILUS_OPERATION_COMPLETE;
+}
+
+void cancel_update(NautilusInfoProvider*, NautilusOperationHandle* handle)
+{
+    cancel_badge(handle);
+}
+
+void info_provider_init(gpointer iface, gpointer)
+{
+    auto* i = static_cast<NautilusInfoProviderInterface*>(iface);
+    i->update_file_info = update_file_info;
+    i->cancel_update = cancel_update;
+}
+
 GType provider_type = 0;
 
 }  // namespace
@@ -59,6 +96,8 @@ extern "C" G_MODULE_EXPORT void nautilus_module_initialize(GTypeModule* module)
                                                 GTypeFlags(0));
     static const GInterfaceInfo menu{.interface_init = menu_provider_init};
     g_type_module_add_interface(module, provider_type, NAUTILUS_TYPE_MENU_PROVIDER, &menu);
+    static const GInterfaceInfo badges{.interface_init = info_provider_init};
+    g_type_module_add_interface(module, provider_type, NAUTILUS_TYPE_INFO_PROVIDER, &badges);
 }
 
 extern "C" G_MODULE_EXPORT void nautilus_module_shutdown() {}

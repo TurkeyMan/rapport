@@ -2,7 +2,9 @@
 
 #include <dlfcn.h>
 
+#include <mutex>
 #include <system_error>
+#include <unordered_map>
 
 namespace rap::shell::adapter
 {
@@ -52,6 +54,40 @@ std::string relabel(std::string_view label, char mark, std::string_view escape)
             out += c;
     }
     return out;
+}
+
+// The provider badges are asked of, one for the process (badge() is asked
+// from several threads at once, which providers allow), and its kinds' theme
+// icons. Never destroyed: the file manager may ask from its threads as it
+// exits.
+struct badge_source
+{
+    provider* p = nullptr;
+    std::unordered_map<std::string, std::string> icons;  // kind id to icon name
+};
+
+const badge_source& badges()
+{
+    static const badge_source* s = []
+    {
+        auto* out = new badge_source;
+        try
+        {
+            out->p = make_provider().release();
+            if (out->p)
+                for (const badge_kind& k : out->p->badge_kinds())
+                {
+                    const std::string spec = icon_spec(k.icon);
+                    if (!spec.empty() && spec.front() != '/') out->icons[k.id] = spec;
+                }
+        }
+        catch (...)
+        {
+            out->icons.clear();
+        }
+        return out;
+    }();
+    return *s;
 }
 
 }  // namespace
@@ -131,6 +167,43 @@ bool shift_held() noexcept
     if (keymap && keymap_state)
         if (void* k = keymap(display)) return keymap_state(k) & shift_mask;
     return false;
+}
+
+bool has_badges() noexcept
+{
+    return !badges().icons.empty();
+}
+
+std::string badge_icon(const std::filesystem::path& path) noexcept
+{
+    const badge_source& s = badges();
+    if (s.icons.empty()) return {};
+    try
+    {
+        auto it = s.icons.find(s.p->badge(path));
+        return it == s.icons.end() ? std::string() : it->second;
+    }
+    catch (...)
+    {
+        return {};
+    }
+}
+
+void watch_badges(provider::badges_changed changed) noexcept
+{
+    static std::once_flag once;
+    try
+    {
+        std::call_once(once,
+                       [&]
+                       {
+                           const badge_source& s = badges();
+                           if (!s.icons.empty()) s.p->watch_badges(std::move(changed));
+                       });
+    }
+    catch (...)
+    {
+    }
 }
 
 }  // namespace rap::shell::adapter

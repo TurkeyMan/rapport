@@ -1,6 +1,6 @@
 // rapport shell: an app's entries in the file manager's context menu, and
 // badges on its icons, through each platform's own extension point
-// (badges: Explorer so far).
+// (badges: Explorer, Nautilus, Nemo, Caja and Dolphin).
 //
 // An app writes a provider, built with rapport_add_shell_extension() into an
 // extension the file manager loads: a COM DLL for Explorer, a plugin each for
@@ -11,6 +11,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -72,6 +73,16 @@ public:
     // for the purpose: answer from a cache, thread-safely, never by doing
     // the work.
     virtual std::string badge(const std::filesystem::path&) { return {}; }
+
+    // Badges that changed: their paths, or none for any of them.
+    using badges_changed = std::function<void(std::vector<std::filesystem::path>)>;
+    // The Linux file managers ask for a file's badge again only when told
+    // to, which only the extension can: it calls this once, on the provider
+    // badge() is asked of, before asking. The provider then watches as it
+    // can and calls `changed` from any thread, for as long as the process
+    // runs; it mustn't block. Explorer is told by the app itself
+    // (SHChangeNotify), and never calls it.
+    virtual void watch_badges(badges_changed changed) { (void)changed; }
 };
 
 // The extension's own directory. On Windows its icons and its app sit beside

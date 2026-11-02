@@ -1,9 +1,10 @@
 // The provider as a Nemo extension (libnemo-extension), in
 // <libdir>/nemo/extensions-3.0. Nemo lists it in Plugins, where it can be
-// turned off.
-#include "gobject_menu.h"
+// turned off. Badges are emblems, drawn over the icon.
+#include "gobject_badges.h"
 
 #include <libnemo-extension/nemo-file-info.h>
+#include <libnemo-extension/nemo-info-provider.h>
 #include <libnemo-extension/nemo-menu-provider.h>
 #include <libnemo-extension/nemo-name-and-desc-provider.h>
 
@@ -53,14 +54,47 @@ void menu_provider_init(gpointer iface, gpointer)
 // "Name:::Description", as Nemo's Plugins list shows it.
 GList* name_and_desc(NemoNameAndDescProvider*)
 {
-    const std::string s =
-        std::string(rap::shell::this_extension.name) + ":::Entries in the context menu";
+    const std::string s = std::string(rap::shell::this_extension.name) +
+                          ":::Entries in the context menu, and badges on icons";
     return g_list_append(nullptr, g_strdup(s.c_str()));
 }
 
 void name_and_desc_init(gpointer iface, gpointer)
 {
     static_cast<NemoNameAndDescProviderInterface*>(iface)->get_name_and_desc = name_and_desc;
+}
+
+struct badge_fm
+{
+    using file_info = NemoFileInfo;
+    using info_provider = NemoInfoProvider;
+    using handle = NemoOperationHandle;
+    static GFile* location(file_info* f) { return nemo_file_info_get_location(f); }
+    static void add_emblem(file_info* f, const char* name) { nemo_file_info_add_emblem(f, name); }
+    static void invalidate(file_info* f) { nemo_file_info_invalidate_extension_info(f); }
+    static void complete(GClosure* done, info_provider* p, handle* h)
+    {
+        nemo_info_provider_update_complete_invoke(done, p, h, NEMO_OPERATION_COMPLETE);
+    }
+};
+
+NemoOperationResult update_file_info(NemoInfoProvider* provider, NemoFileInfo* file, GClosure* done,
+                                     NemoOperationHandle** handle)
+{
+    return start_badge<badge_fm>(provider, file, done, handle) ? NEMO_OPERATION_IN_PROGRESS
+                                                               : NEMO_OPERATION_COMPLETE;
+}
+
+void cancel_update(NemoInfoProvider*, NemoOperationHandle* handle)
+{
+    cancel_badge(handle);
+}
+
+void info_provider_init(gpointer iface, gpointer)
+{
+    auto* i = static_cast<NemoInfoProviderInterface*>(iface);
+    i->update_file_info = update_file_info;
+    i->cancel_update = cancel_update;
 }
 
 GType provider_type = 0;
@@ -75,6 +109,8 @@ extern "C" G_MODULE_EXPORT void nemo_module_initialize(GTypeModule* module)
         g_type_module_register_type(module, G_TYPE_OBJECT, type_name("Nemo"), &info, GTypeFlags(0));
     static const GInterfaceInfo menu{.interface_init = menu_provider_init};
     g_type_module_add_interface(module, provider_type, NEMO_TYPE_MENU_PROVIDER, &menu);
+    static const GInterfaceInfo badges{.interface_init = info_provider_init};
+    g_type_module_add_interface(module, provider_type, NEMO_TYPE_INFO_PROVIDER, &badges);
     static const GInterfaceInfo desc{.interface_init = name_and_desc_init};
     g_type_module_add_interface(module, provider_type, NEMO_TYPE_NAME_AND_DESC_PROVIDER, &desc);
 }
