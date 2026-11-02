@@ -347,6 +347,10 @@ http_response http_get(const std::string& url, const http_options& = {});
 // NetworkManager's, over D-Bus through gio, loaded when first used. False
 // when it can't tell. A quick query: fine before each background download.
 bool network_metered();
+// Whether the system reaches the internet: false only when it says it
+// doesn't (no connection, a captive portal, a local network only), so a
+// failure can be put down to being offline; true when it can't tell.
+bool network_online();
 
 // -- secrets ------------------------------------------------------------------
 
