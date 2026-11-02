@@ -1074,8 +1074,10 @@ inline bool default_gtk_theme()
     gchar* name = nullptr;
     g_object_get(gtk_settings_get_default(), "gtk-theme-name", &name, nullptr);
     const std::string_view n = name ? name : "";
-    const bool builtin = n.empty() || n == "Adwaita" || n == "Adwaita-dark" || n == "Default" ||
-                         n == "Default-dark" || n == "Default-light";
+    // (libadwaita sets Adwaita-empty, its stylesheet being its own.)
+    const bool builtin = n.empty() || n == "Adwaita" || n == "Adwaita-dark" ||
+                         n == "Adwaita-empty" || n == "Default" || n == "Default-dark" ||
+                         n == "Default-light";
     g_free(name);
     return builtin;
 }
@@ -1168,7 +1170,16 @@ inline color theme_color_of(GtkWidget* w, theme_color role)
     if (slot) return *slot;
     color c;
     if (std::optional<color> d = desktop_color(w, role))
+    {
         c = *d;
+        // A surface a theme gives as a tint (libadwaita's dark cards are
+        // white at 8%) as it shows on the window, so it can be painted
+        // anywhere.
+        using tc = theme_color;
+        if (c.a < 255 && (role == tc::header || role == tc::card || role == tc::tooltip ||
+                          role == tc::highlight_inactive))
+            c = palette::over(c, theme_color_of(w, tc::window));
+    }
     else
     {
         // A theme naming nothing: Adwaita's colours, dark when its text is

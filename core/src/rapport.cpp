@@ -313,7 +313,7 @@ std::expected<std::unique_ptr<ui>, std::string> ui::load(int& argc, char** argv,
     {
         if (auto it = builtins().find(name); it != builtins().end())
         {
-            if (rap::backend* b = it->second(abi_version, &argc, argv))
+            if (rap::backend* b = it->second(abi_version, &argc, argv, opts.look))
                 return std::unique_ptr<ui>(new ui(std::unique_ptr<rap::backend>(b)));
             errors += "  " + name + ": built in, but failed to start (no display?)\n";
             continue;
@@ -344,7 +344,7 @@ std::expected<std::unique_ptr<ui>, std::string> ui::load(int& argc, char** argv,
             }
             // Never unload: toolkits register atexit handlers and TLS.
             lib->release();
-            if (rap::backend* b = create(abi_version, &argc, argv))
+            if (rap::backend* b = create(abi_version, &argc, argv, opts.look))
                 return std::unique_ptr<ui>(new ui(std::unique_ptr<rap::backend>(b)));
             errors += "  " + name + ": " + sys::path_to_utf8(path) + " failed to start (ABI mismatch or no display)\n";
         }

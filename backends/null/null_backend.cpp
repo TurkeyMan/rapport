@@ -605,7 +605,7 @@ private:
 class null_backend : public backend
 {
 public:
-    static backend* create(int*, char**) { return new null_backend; }
+    static backend* create(int*, char**, const look_options&) { return new null_backend; }
 
     std::string_view name() const override { return "null"; }
 

@@ -4635,7 +4635,7 @@ private:
 class gtk3_backend : public backend
 {
 public:
-    static backend* create(int* argc, char** argv)
+    static backend* create(int* argc, char** argv, const look_options&)
     {
         // Under WSLg, GTK keeps its own choice, Wayland: WSLg's X server
         // doesn't keep the pointer's shape up to date, leaving whatever was

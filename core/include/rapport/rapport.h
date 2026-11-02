@@ -27,6 +27,8 @@ struct load_options
     // (colon-separated) is searched next, then next to the executable,
     // then the install directory.
     std::vector<std::string> search_paths;
+    // How far to take on the desktop's own look (libadwaita under GTK 4).
+    look_options look;
 };
 
 struct detection
@@ -120,6 +122,7 @@ private:
 
 // RAPPORT_BUILTIN_BACKEND(gtk3) registers the statically linked gtk3 backend.
 #define RAPPORT_BUILTIN_BACKEND(name)                                                              \
-    extern "C" rap::backend* rapport_create_backend_##name(int, int*, char**);                     \
+    extern "C" rap::backend* rapport_create_backend_##name(int, int*, char**,                      \
+                                                           const rap::look_options&);              \
     static const bool rapport_builtin_backend_##name =                                             \
         (rap::register_builtin_backend(#name, &rapport_create_backend_##name), true)

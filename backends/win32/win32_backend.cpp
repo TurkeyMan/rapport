@@ -7413,7 +7413,7 @@ private:
 class win32_backend : public backend
 {
 public:
-    static backend* create(int*, char**)
+    static backend* create(int*, char**, const look_options&)
     {
         // Per-monitor DPI awareness (v2) where the system has it.
         using fn_t = BOOL(WINAPI*)(HANDLE);

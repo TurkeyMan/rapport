@@ -6,9 +6,10 @@
 #include <gtk/gtk.h>
 
 #include "builtin_icons.h"
-#include "gtk_common.h"
 #include "frame_layer.h"
 #include "gpu_readback.h"
+#include "gtk4_adwaita.h"
+#include "gtk_common.h"
 
 #include <memory>
 
@@ -4336,31 +4337,36 @@ private:
 class gtk4_backend : public backend
 {
 public:
-    static backend* create(int*, char**)
+    static backend* create(int*, char**, const look_options& look)
     {
         // Under WSLg, Wayland, as for GTK 3: on its X server the pointer can
         // vanish over the window. (Its X11 does draw faster: 23 against 20 fps
         // for a panning canvas; gtk3 39 against 29.)
         if (!gtk_init_check()) return nullptr;
-        // Dark when the desktop says so, as the user's theme draws it.
-        follow_color_scheme(
-            +[](int scheme)
-            {
-                GtkSettings* settings = gtk_settings_get_default();
-                // 4.20 and later: the interface colour scheme, which also
-                // picks the theme's dark variant (the older property now
-                // warns at run time); before, that property.
-                if (g_object_class_find_property(G_OBJECT_GET_CLASS(settings),
-                                                 "gtk-interface-color-scheme"))
-                    g_object_set(settings, "gtk-interface-color-scheme",
-                                 scheme == 1   ? 2   // GTK_INTERFACE_COLOR_SCHEME_DARK
-                                 : scheme == 2 ? 3   // _LIGHT
-                                               : 1,  // _DEFAULT
-                                 nullptr);
-                else
-                    g_object_set(settings, "gtk-application-prefer-dark-theme", scheme == 1,
-                                 nullptr);
-            });
+        // libadwaita where it's the norm, which follows the desktop's
+        // colour scheme and accent itself; else dark when the desktop says
+        // so, as the user's theme draws it.
+        if (adw::adopt(look))
+            watch_gtk_theme();
+        else
+            follow_color_scheme(+[](int scheme)
+                                {
+                                    GtkSettings* settings = gtk_settings_get_default();
+                                    // 4.20 and later: the interface colour scheme, which also
+                                    // picks the theme's dark variant (the older property now
+                                    // warns at run time); before, that property.
+                                    if (g_object_class_find_property(G_OBJECT_GET_CLASS(settings),
+                                                                     "gtk-interface-color-scheme"))
+                                        g_object_set(settings, "gtk-interface-color-scheme",
+                                                     scheme == 1
+                                                         ? 2  // GTK_INTERFACE_COLOR_SCHEME_DARK
+                                                     : scheme == 2 ? 3   // _LIGHT
+                                                                   : 1,  // _DEFAULT
+                                                     nullptr);
+                                    else
+                                        g_object_set(settings, "gtk-application-prefer-dark-theme",
+                                                     scheme == 1, nullptr);
+                                });
         init_metrics();
         return new gtk4_backend;
     }

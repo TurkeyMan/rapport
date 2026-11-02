@@ -19,7 +19,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 55;
+inline constexpr int abi_version = 56;
 
 // For list::set_column_order: whether `order` names each of `n` columns once.
 inline bool is_column_order(const std::vector<size_t>& order, size_t n)
@@ -158,6 +158,24 @@ public:
     [[nodiscard]] virtual subscription timer(int ms, bool repeat, std::function<void()> fn) = 0;
 };
 
+// How far an app takes on its desktop's own look beyond the toolkit's
+// (load_options::look). Each backend takes what applies to it.
+struct look_options
+{
+    // GTK 4: libadwaita, GNOME's own stylesheet, metrics, colour scheme and
+    // accent, as GNOME's apps have them. auto adopts it where it's the
+    // norm: GTK's own theme in use (no other chosen in GTK's settings or
+    // GTK_THEME) and libadwaita installed (loaded at run time, never
+    // linked). off keeps plain GTK, whatever is installed, so an app's
+    // metrics never change under it. RAPPORT_ADWAITA=off|auto overrides.
+    enum class adwaita_mode
+    {
+        auto_,
+        off,
+    };
+    adwaita_mode adwaita = adwaita_mode::auto_;
+};
+
 // Backend entry point. Returns nullptr if the ABI doesn't match or the
 // toolkit can't start (e.g. no display), so the loader can fall back.
 //
@@ -165,7 +183,7 @@ public:
 // RAPPORT_BACKEND_ENTRY), so several can be linked into one program: as
 // plugins they are dlopened by name, and statically linked ones are
 // registered with RAPPORT_BUILTIN_BACKEND (rapport.h).
-using create_backend_fn = backend*(int abi, int* argc, char** argv);
+using create_backend_fn = backend*(int abi, int* argc, char** argv, const look_options& look);
 inline std::string create_backend_symbol(std::string_view name)
 {
     return "rapport_create_backend_" + std::string(name);
@@ -180,10 +198,10 @@ inline std::string create_backend_symbol(std::string_view name)
 #endif
 
 // In the backend: RAPPORT_BACKEND_ENTRY(gtk3, rap::gtk3::gtk3_backend)
-#define RAPPORT_BACKEND_ENTRY(name, ...)                                                             \
-    extern "C" RAPPORT_EXPORT rap::backend* rapport_create_backend_##name(int abi, int* argc,        \
-                                                                        char** argv)               \
+#define RAPPORT_BACKEND_ENTRY(name, ...)                                                           \
+    extern "C" RAPPORT_EXPORT rap::backend* rapport_create_backend_##name(                         \
+        int abi, int* argc, char** argv, const rap::look_options& look)                            \
     {                                                                                              \
-        if (abi != rap::abi_version) return nullptr;                                             \
-        return __VA_ARGS__::create(argc, argv);                                                    \
+        if (abi != rap::abi_version) return nullptr;                                               \
+        return __VA_ARGS__::create(argc, argv, look);                                              \
     }

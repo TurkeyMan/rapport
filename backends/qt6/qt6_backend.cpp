@@ -4415,7 +4415,7 @@ void force_scheme(bool dark)
 class qt6_backend : public backend
 {
 public:
-    static backend* create(int* argc, char** argv)
+    static backend* create(int* argc, char** argv, const look_options&)
     {
         QApplication* app = nullptr;  // one made here, deleted with the backend
         if (!qApp)

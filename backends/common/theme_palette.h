@@ -25,6 +25,14 @@ inline color mix(color a, color b, float t)
     return {m(a.r, b.r), m(a.g, b.g), m(a.b, b.b), m(a.a, b.a)};
 }
 
+// `top` composited over opaque `under`.
+inline color over(color top, color under)
+{
+    color c = mix(under, color{top.r, top.g, top.b, 255}, top.a / 255.f);
+    c.a = 255;
+    return c;
+}
+
 // WCAG relative luminance, 0 (black) to 1 (white).
 inline float luminance(color c)
 {
@@ -49,13 +57,14 @@ inline bool is_dark(color background)
 }
 
 // White or black on `background` (an accent may be very light or very
-// dark): white wherever it meets WCAG AA, as desktops put white on their
-// mid blues, else whichever reads better.
+// dark): white wherever it reads as a control's label must (WCAG's 3:1),
+// as desktops put white on their mid blues (GNOME's #3584e4 is 3.7:1),
+// else whichever reads better.
 inline color text_on(color background)
 {
     const color white{255, 255, 255}, black{0, 0, 0};
     const float w = contrast(white, background);
-    return w >= 4.5f || w >= contrast(black, background) ? white : black;
+    return w >= 3 || w >= contrast(black, background) ? white : black;
 }
 
 // `c` with its HSL lightness set to `l` (hue and saturation kept).
