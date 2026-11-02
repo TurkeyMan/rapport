@@ -7,9 +7,13 @@
 // live switch unattended, schemes to set one after another, 200 ms apart,
 // the first before the window shows:
 //   RAPPORT_SNAPSHOT=switched.png ./rapport-theme-roles dark light
+// "settings" opens a settings dialog over it (snapshotted instead), and
+// "message" a message box: GNOME's idioms where libadwaita is adopted and
+// they're asked for (RAPPORT_HIG=1).
 #include <rapport/rapport.h>
 
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -116,9 +120,15 @@ int main(int argc, char** argv)
 
     // Schemes named on the command line: the first now, the rest later.
     std::vector<rap::color_scheme> schemes;
+    bool settings = false, message = false;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
+        if (a == "settings" || a == "message")
+        {
+            (a == "settings" ? settings : message) = true;
+            continue;
+        }
         schemes.push_back(a == "dark"    ? rap::color_scheme::dark
                           : a == "light" ? rap::color_scheme::light
                                          : rap::color_scheme::system);
@@ -164,6 +174,40 @@ int main(int argc, char** argv)
         diff->set_text(text, {{0, 15, hunk}, {16, 24, removed}, {25, 31, added}});
     }
     win->show();
+    // A settings dialog: a group that maps onto a boxed list, and one that
+    // doesn't (a spin), which stays a grid.
+    std::unique_ptr<rap::window> dialog;
+    if (settings)
+    {
+        dialog = ui.create(
+            rap::layout::dialog{
+                "Preferences",
+                {vbox{
+                    group{"General",
+                          form{
+                              {"Name", entry{}.placeholder("Your name")},
+                              {"Theme", drop_down{{"System", "Light", "Dark"}, 0}},
+                              {"", check{"Show hidden files", rap::check_state::checked}},
+                          }},
+                    group{"Cache",
+                          form{
+                              {"Size (MB)", spin{0, 4096, 256}},
+                              {"Location", entry{}.placeholder("~/.cache")},
+                          }},
+                    buttons{{rap::dialog_role::cancel}, {rap::dialog_role::ok}},
+                }}}
+                .size(50_ch, 16_lines),
+            win.get());
+        dialog->show();
+    }
+    if (message)
+        ui.message(win.get(),
+                   {.icon = rap::message_spec::icon::question,
+                    .title = "Discard changes?",
+                    .text = "Discard changes?",
+                    .detail = "The changes to 3 files will be lost.",
+                    .buttons = {rap::dialog_role::cancel, rap::dialog_role::ok}},
+                   [](rap::dialog_role r) { std::printf("message: %d\n", int(r)); });
     size_t next = 1;
     rap::subscription switching;
     if (schemes.size() > 1)

@@ -364,6 +364,11 @@ struct window_spec
     // Menus across the top, outside the margins. Item shortcuts are display
     // hints: the window's on_key handles the keys.
     std::vector<menu_bar_item> menu_bar;
+    // A header bar in place of the title bar, holding the dialog's buttons,
+    // where the app asked for GNOME's idioms (look_options::header_bars)
+    // and libadwaita is adopted: unset, for dialogs only; false keeps the
+    // window's own chrome (a viewer's menu bar, toolbar and status bar).
+    std::optional<bool> header_bar;
 };
 
 // -- builders -----------------------------------------------------------------

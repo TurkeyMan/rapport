@@ -19,7 +19,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 57;
+inline constexpr int abi_version = 58;
 
 // Light or dark: as the desktop has it (system), or the app's own choice
 // (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for
@@ -189,6 +189,19 @@ struct look_options
     adwaita_mode adwaita = adwaita_mode::auto_;
     // The scheme from the start, as ui::set_color_scheme sets it later.
     rap::color_scheme color_scheme = color_scheme::system;
+    // GNOME's idioms (its Human Interface Guidelines), where libadwaita is
+    // adopted; each opt-in, nothing changes without it. RAPPORT_HIG=1 turns
+    // all three on, for a look at an app that hasn't.
+    //  header_bars: dialogs' title and buttons in a header bar, Cancel at its
+    //    start and the affirmative (suggested) at its end, in place of the
+    //    row of buttons; a window says for itself (window_spec::header_bar).
+    //  boxed_lists: a group whose form rows all map cleanly (text, entries,
+    //    drop-downs, check boxes) as a boxed list under its title, a row
+    //    per field; any other group, whole, stays a grid.
+    //  alert_dialogs: message boxes as libadwaita's alert dialog (1.5).
+    bool header_bars = false;
+    bool boxed_lists = false;
+    bool alert_dialogs = false;
 };
 
 // Backend entry point. Returns nullptr if the ABI doesn't match or the

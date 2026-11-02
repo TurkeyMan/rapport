@@ -3552,6 +3552,14 @@ public:
         auto* win = GTK_WINDOW(win_);
         gtk_window_set_title(win, spec.title.c_str());
         gtk_window_set_default_size(win, px(spec.width), px(spec.height));
+        // GNOME's header bar, for dialogs where the app asked for it, or a
+        // window that asks itself; the dialog's buttons go into it.
+        if (adw::adopted() &&
+            spec.header_bar.value_or(spec.dialog && adw::idiom(&look_options::header_bars)))
+        {
+            header_bar = gtk_header_bar_new();
+            gtk_window_set_titlebar(win, header_bar);
+        }
         if (parent) gtk_window_set_transient_for(win, GTK_WINDOW(parent->win_));
         gtk_window_set_resizable(win, spec.resizable);
         // Window keys come first (capture phase), except while a text field
@@ -3846,6 +3854,7 @@ public:
         std::unique_ptr<menu_actions> actions;
     };
     GtkWidget* menu_bar = nullptr;
+    GtkWidget* header_bar = nullptr;  // GNOME's, when the window has one
     std::vector<std::unique_ptr<bar_menu>> bars;
     bool menu_bar_wanted = true;
 
@@ -4096,6 +4105,7 @@ private:
 
     GtkWidget* make(const node&, const spec::group& s, orientation)
     {
+        if (adw::idiom(&look_options::boxed_lists) && boxes_cleanly(s)) return boxed_group(s);
         GtkWidget* frame = gtk_frame_new(s.title.c_str());
         if (!s.content.empty())
         {
@@ -4311,6 +4321,7 @@ private:
 
     GtkWidget* make(const node&, const spec::buttons& s, orientation)
     {
+        if (win_.header_bar) return header_buttons(s);
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         gtk_widget_set_margin_top(box, 6);
         auto ordered = s.buttons;
@@ -4335,6 +4346,110 @@ private:
         return box;
     }
 
+    // A dialog's buttons in its header bar, as GNOME's HIG has them: Cancel
+    // (and the other non-affirmative roles) at the start, the affirmative
+    // at the end, suggested; then no close button, Cancel being it.
+    GtkWidget* header_buttons(const spec::buttons& s)
+    {
+        auto* bar = GTK_HEADER_BAR(win_.header_bar);
+        auto ordered = s.buttons;
+        std::ranges::stable_sort(ordered, {}, [](auto& b) { return gnome_order(b.role); });
+        std::vector<GtkWidget*> end;
+        bool cancels = false;
+        for (auto& b : ordered)
+        {
+            auto* w = new button_impl(b.text.empty() ? stock_label(b.role) : b.text);
+            win_.parts.emplace_back(w);
+            if (!b.on_click) win_.add_role_button(w->outer(), b.role);
+            sink_.created(b, *w);
+            const bool affirmative = b.role == dialog_role::ok || b.role == dialog_role::yes ||
+                                     b.role == dialog_role::apply;
+            if (affirmative)
+                end.push_back(w->outer());
+            else
+                gtk_header_bar_pack_start(bar, w->outer());
+            cancels = cancels || b.role == dialog_role::cancel || b.role == dialog_role::no ||
+                      b.role == dialog_role::close;
+        }
+        // pack_end places each before the last: the order kept, the last
+        // outermost.
+        for (auto it = end.rbegin(); it != end.rend(); ++it) gtk_header_bar_pack_end(bar, *it);
+        if (cancels || !end.empty()) gtk_header_bar_set_show_title_buttons(bar, false);
+        GtkWidget* none = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_visible(none, false);
+        return none;
+    }
+
+    // Whether a group maps cleanly onto a boxed list: one form, plain
+    // labels, and only fields a row holds as GNOME's do.
+    static bool boxes_cleanly(const spec::group& g)
+    {
+        if (g.content.size() != 1) return false;
+        auto* f = std::get_if<spec::form>(&g.content.front().spec);
+        if (!f || f->fields.empty() || !f->label_widgets.empty() || !f->align_group.empty())
+            return false;
+        for (const node& n : f->fields)
+            if (!std::holds_alternative<spec::entry>(n.spec) &&
+                !std::holds_alternative<spec::drop_down>(n.spec) &&
+                !std::holds_alternative<spec::combo>(n.spec) &&
+                !std::holds_alternative<spec::check>(n.spec) &&
+                !std::holds_alternative<spec::label>(n.spec))
+                return false;
+        return true;
+    }
+
+    // A group as GNOME's preferences group: the title above a boxed list,
+    // a row per field with its label at the start and the control at the
+    // end (a check box its own row).
+    GtkWidget* boxed_group(const spec::group& g)
+    {
+        const auto& f = std::get<spec::form>(g.content.front().spec);
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+        if (!g.title.empty())
+        {
+            GtkWidget* title = gtk_label_new(g.title.c_str());
+            gtk_label_set_xalign(GTK_LABEL(title), 0);
+            gtk_widget_add_css_class(title, "heading");
+            gtk_box_append(GTK_BOX(box), title);
+        }
+        GtkWidget* list = gtk_list_box_new();
+        gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+        gtk_widget_add_css_class(list, "boxed-list");
+        for (size_t i = 0; i < f.fields.size(); ++i)
+        {
+            GtkWidget* field = build(f.fields[i], orientation::horizontal);
+            GtkWidget* row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+            gtk_widget_set_margin_start(row, 12);
+            gtk_widget_set_margin_end(row, 12);
+            gtk_widget_set_margin_top(row, 8);
+            gtk_widget_set_margin_bottom(row, 8);
+            if (!f.labels[i].empty())
+            {
+                GtkWidget* label = gtk_label_new(f.labels[i].c_str());
+                gtk_label_set_xalign(GTK_LABEL(label), 0);
+                gtk_widget_set_hexpand(label, true);
+                gtk_box_append(GTK_BOX(row), label);
+                gtk_widget_set_valign(field, GTK_ALIGN_CENTER);
+                if (!fills_form_row(f.fields[i].spec)) gtk_widget_set_halign(field, GTK_ALIGN_END);
+            }
+            else
+                gtk_widget_set_hexpand(field, true);
+            gtk_box_append(GTK_BOX(row), field);
+            GtkWidget* item = gtk_list_box_row_new();
+            gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(item), false);
+            gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(item), row);
+            gtk_list_box_append(GTK_LIST_BOX(list), item);
+            // set_visible on the field shows and hides its whole row.
+            g_object_set_data(G_OBJECT(field), "rapport-form-label", item);
+            if (!f.fields[i].common.visible) gtk_widget_set_visible(item, false);
+        }
+        gtk_box_append(GTK_BOX(box), list);
+        // Boxed rows are taller than a grid's: the window's height in
+        // lines no longer fits, so it's measured instead.
+        g_object_set_data(G_OBJECT(win_.gtk_window()), "rapport-boxed", GINT_TO_POINTER(1));
+        return box;
+    }
+
     window_impl& win_;
     build_sink& sink_;
 };
@@ -4347,6 +4462,7 @@ public:
     static backend* create(int*, char**, const look_options& look)
     {
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
+        adw::look() = look;
         // Under WSLg, Wayland, as for GTK 3: on its X server the pointer can
         // vanish over the window. (Its X11 does draw faster: 23 against 20 fps
         // for a panning canvas; gtk3 39 against 29.)
@@ -4387,6 +4503,10 @@ public:
         auto win = std::make_unique<window_impl>(spec, static_cast<window_impl*>(parent));
         win->set_content(builder(*win, sink).build(spec.content, orientation::vertical),
                         spec.margins, spec.menu_bar);
+        // Sized in lines for a grid, but holding boxed lists: measured.
+        if (spec.height.unit == extent::unit::lines &&
+            g_object_get_data(G_OBJECT(win->gtk_window()), "rapport-boxed"))
+            gtk_window_set_default_size(GTK_WINDOW(win->gtk_window()), px(spec.width), -1);
         return win;
     }
 
@@ -4433,6 +4553,9 @@ public:
     void message(rap::window* parent, const message_spec& m,
                  std::function<void(dialog_role)> done) override
     {
+        if (adw::idiom(&look_options::alert_dialogs) && adw::adopted()->alert_dialog_new &&
+            adw::adopted()->alert_dialog_choose)
+            return adw_message(parent, m, std::move(done));
         GtkAlertDialog* dlg = gtk_alert_dialog_new("%s", m.text.c_str());
         if (!m.detail.empty()) gtk_alert_dialog_set_detail(dlg, m.detail.c_str());
 
@@ -4866,6 +4989,62 @@ public:
     }
 
 private:
+    // libadwaita's alert dialog: the text as its heading, the detail as
+    // its body, the responses in GNOME's order with the affirmative
+    // suggested (where there's a choice) and Cancel or No the close
+    // response.
+    void adw_message(rap::window* parent, const message_spec& m,
+                     std::function<void(dialog_role)> done)
+    {
+        const adw::api& a = *adw::adopted();
+        GtkWidget* dlg =
+            a.alert_dialog_new(m.text.c_str(), m.detail.empty() ? nullptr : m.detail.c_str());
+        struct context
+        {
+            std::vector<dialog_role> roles;
+            std::function<void(dialog_role)> done;
+        };
+        auto* ctx = new context{m.buttons, std::move(done)};
+        if (ctx->roles.empty()) ctx->roles = {dialog_role::ok};
+        std::ranges::stable_sort(ctx->roles, {}, gnome_order);
+        for (size_t i = 0; i < ctx->roles.size(); ++i)
+        {
+            const dialog_role r = ctx->roles[i];
+            const std::string id = std::to_string(i);
+            a.alert_dialog_add_response(dlg, id.c_str(), stock_label(r).c_str());
+            const bool affirmative = r == dialog_role::ok || r == dialog_role::yes;
+            if (affirmative)
+            {
+                if (ctx->roles.size() > 1)
+                    a.alert_dialog_set_response_appearance(dlg, id.c_str(),
+                                                           adw::response_suggested);
+                a.alert_dialog_set_default_response(dlg, id.c_str());
+            }
+            if ((r == dialog_role::cancel || r == dialog_role::no) &&
+                a.alert_dialog_set_close_response)
+                a.alert_dialog_set_close_response(dlg, id.c_str());
+        }
+        GtkWindow* owner = parent_window(parent);
+        a.alert_dialog_choose(
+            dlg, owner ? GTK_WIDGET(owner) : nullptr, nullptr,
+            +[](GObject* src, GAsyncResult* res, gpointer p)
+            {
+                std::unique_ptr<context> ctx(static_cast<context*>(p));
+                const char* id = adw::adopted()->alert_dialog_choose_finish(GTK_WIDGET(src), res);
+                const size_t i = id ? size_t(std::strtoul(id, nullptr, 10)) : size_t(-1);
+                const dialog_role role =
+                    i < ctx->roles.size() ? ctx->roles[i] : dialog_role::cancel;
+                if (ctx->done) ctx->done(role);
+            },
+            ctx);
+        // RAPPORT_SNAPSHOT: the alert's own window (over a plain GtkWindow
+        // it has one) is the one to save.
+        if (std::getenv("RAPPORT_SNAPSHOT"))
+            if (GtkRoot* root = gtk_widget_get_root(dlg);
+                root && GTK_WIDGET(root) != GTK_WIDGET(owner))
+                window_impl::last_shown() = GTK_WIDGET(root);
+    }
+
     static GtkWindow* parent_window(rap::window* w)
     {
         return w ? GTK_WINDOW(static_cast<window_impl*>(w)->gtk_window()) : nullptr;
