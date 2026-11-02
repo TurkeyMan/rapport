@@ -3527,6 +3527,7 @@ public:
             int w = extent_px(win.hwnd(), c.width, false);
             col.cx = w > 0 ? w : px(100);
             widths_.push_back(col.cx);
+            restored_.push_back(false);
             ListView_InsertColumn(h_, int(i), &col);
         }
         set_model(s.model);
@@ -3616,14 +3617,23 @@ public:
         fill_last();
         InvalidateRect(h_, nullptr, FALSE);
     }
+    // A width of 0 (or less) leaves its column alone, as the other
+    // backends do: a stretch column left so still gets its share of the
+    // width when the list first has a size, rather than 0 px. Those given
+    // a width keep it (restored widths win over the first fit).
     void set_column_widths(const std::vector<float>& w) override
     {
         for (size_t i = 0; i < w.size() && i < columns_.size(); ++i)
         {
+            if (!(w[i] > 0)) continue;
             widths_[i] = px(w[i]);
+            restored_[i] = true;
             if (visible_[i]) ListView_SetColumnWidth(h_, int(i), widths_[i]);
         }
-        fitted_ = true;  // restored widths win over the first fit
+        bool to_fit = false;
+        for (size_t i = 0; i < columns_.size(); ++i)
+            to_fit = to_fit || (columns_[i].stretch && !restored_[i]);
+        if (!to_fit) fitted_ = true;
     }
     bool column_visible(size_t c) const override { return c < visible_.size() && visible_[c]; }
     void set_column_visible(size_t c, bool v) override
@@ -3854,10 +3864,12 @@ public:
         long fixed = 0;
         int stretchers = 0;
         const int filled = filled_column();  // has its share, then fill_last's rest
+        // A stretch column given its width (set_column_widths) keeps it.
+        auto stretches = [this](size_t i) { return columns_[i].stretch && !restored_[i]; };
         for (size_t i = 0; i < columns_.size(); ++i)
         {
             if (!visible_[i]) continue;
-            if (columns_[i].stretch)
+            if (stretches(i))
                 ++stretchers;
             else
                 fixed += ListView_GetColumnWidth(h_, int(i));
@@ -3865,7 +3877,8 @@ public:
         if (!stretchers) return;
         const long each = std::max<long>(px(40), (c.right - fixed) / stretchers);
         for (size_t i = 0; i < columns_.size(); ++i)
-            if (visible_[i] && columns_[i].stretch && int(i) != filled) ListView_SetColumnWidth(h_, int(i), each);
+            if (visible_[i] && stretches(i) && int(i) != filled)
+                ListView_SetColumnWidth(h_, int(i), each);
     }
     bool fills() const override { return true; }
     bool expands_in_form() const override { return true; }
@@ -4885,6 +4898,7 @@ private:
     std::wstring text_;  // LVN_GETDISPINFO's buffer
     bool quiet_ = false;
     bool fitted_ = false;  // stretch columns have had their share of the width
+    std::vector<bool> restored_;  // per column: given its width by set_column_widths
     bool sel_pending_ = false;  // a selection change is posted, not yet reported
     com<ID2D1DCRenderTarget> row_target_;
     std::map<std::string, com<ID2D1Bitmap>> file_icons_;  // per extension, for row_target_
