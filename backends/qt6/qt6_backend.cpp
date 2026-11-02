@@ -78,6 +78,8 @@
 #include <QDropEvent>
 #include <QDrag>
 #include <QColorDialog>
+#include <QHelpEvent>
+#include <QToolTip>
 
 #include <algorithm>
 #include <cmath>
@@ -2789,14 +2791,9 @@ public:
             if (i.isValid())
             {
                 row = size_t(i.row());
-                const int col = view_->header()->logicalIndexAt(e->pos().x());
-                if (cell_menu_ && col >= 0)
+                if (auto at = cell_menu_ ? cell_at(e->pos()) : std::nullopt)
                 {
-                    const QRect r = row_rect(*row);
-                    const point_f at{
-                        float(e->pos().x() - view_->header()->sectionViewportPosition(col)),
-                        float(e->pos().y() - r.y())};
-                    show_popup_menu(cell_menu_(*row, size_t(col), at), view_, global);
+                    show_popup_menu(cell_menu_(at->row, at->column, at->in_cell), view_, global);
                     return;
                 }
             }
@@ -2901,6 +2898,36 @@ private:
         const QModelIndex i = view_->indexAt(QPoint(0, y));
         if (!i.isValid()) return std::nullopt;
         return size_t(i.row());
+    }
+
+    // The cell at a viewport point, and the point in it.
+    struct cell_point
+    {
+        size_t row, column;
+        point_f in_cell;
+    };
+    std::optional<cell_point> cell_at(QPoint pos) const
+    {
+        auto row = row_at(pos.y());
+        const int col = view_->header()->logicalIndexAt(pos.x());
+        if (!row || col < 0) return std::nullopt;
+        return cell_point{*row, size_t(col),
+                          {float(pos.x() - view_->header()->sectionViewportPosition(col)),
+                           float(pos.y() - row_rect(*row).y())}};
+    }
+
+    // QEvent::ToolTip on the rows: the model's text for the point, none hides it.
+    bool tooltip(QHelpEvent* e)
+    {
+        auto at = model_ ? cell_at(e->pos()) : std::nullopt;
+        const std::string text = at && at->row < model_->row_count()
+                                     ? model_->tooltip(at->row, at->column, at->in_cell)
+                                     : std::string();
+        if (text.empty())
+            QToolTip::hideText();
+        else
+            QToolTip::showText(e->globalPos(), qs(text), view_->viewport());
+        return true;
     }
 
     void show_sort_indicator()
@@ -3249,18 +3276,13 @@ private:
             (e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier)))
             return false;
         const QPoint pos = e->position().toPoint();
-        auto row = row_at(pos.y());
-        const int col = view_->header()->logicalIndexAt(pos.x());
-        if (!row || col < 0) return false;
-        const QRect r = row_rect(*row);
-        auto start =
-            cell_drag_.begin(*row, size_t(col),
-                            {float(pos.x() - view_->header()->sectionViewportPosition(col)),
-                             float(pos.y() - r.y())});
+        auto at = cell_at(pos);
+        if (!at) return false;
+        auto start = cell_drag_.begin(at->row, at->column, at->in_cell);
         if (!start) return false;
         cell_.pressed = true;
         cell_.origin = cell_.pos = pos;
-        cell_.from = *row;
+        cell_.from = at->row;
         cell_.start = std::move(*start);
         return true;
     }
@@ -3452,6 +3474,7 @@ void list_view::dropEvent(QDropEvent* e)
 bool list_view::viewportEvent(QEvent* e)
 {
     if (e->type() == QEvent::Leave && owner) owner->leave();
+    if (e->type() == QEvent::ToolTip && owner) return owner->tooltip(static_cast<QHelpEvent*>(e));
     return QTreeView::viewportEvent(e);
 }
 

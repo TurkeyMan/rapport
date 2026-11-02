@@ -1848,6 +1848,12 @@ public:
         connect(
             w_, "button-press-event", +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
             { return static_cast<list_impl*>(p)->button_pressed(e); }, this);
+        // The model's tooltips, asked again as the pointer moves.
+        gtk_widget_set_has_tooltip(w_, true);
+        connect(
+            w_, "query-tooltip",
+            +[](GtkWidget*, int x, int y, gboolean keyboard, GtkTooltip* tip, gpointer p) -> gboolean
+            { return !keyboard && static_cast<list_impl*>(p)->query_tooltip(x, y, tip); }, this);
         connect(
             w_, "motion-notify-event", +[](GtkWidget*, GdkEventMotion* e, gpointer p) -> gboolean
             { return static_cast<list_impl*>(p)->drag_motion(e); }, this);
@@ -2922,6 +2928,40 @@ private:
         return false;
     }
 
+    // The cell at a point of the rows' (bin) window, and the point in it.
+    struct cell_point
+    {
+        size_t row, column;
+        point_f in_cell;
+    };
+    std::optional<cell_point> cell_at(double x, double y) const
+    {
+        auto* view = GTK_TREE_VIEW(w_);
+        GtkTreePath* path = nullptr;
+        GtkTreeViewColumn* col = nullptr;
+        if (!gtk_tree_view_get_path_at_pos(view, int(x), int(y), &path, &col, nullptr, nullptr)) return std::nullopt;
+        GdkRectangle area;
+        gtk_tree_view_get_cell_area(view, path, col, &area);
+        const size_t row = size_t(gtk_tree_path_get_indices(path)[0]);
+        gtk_tree_path_free(path);
+        auto c = std::find(cols_.begin(), cols_.end(), col);
+        if (c == cols_.end()) return std::nullopt;
+        return cell_point{row, size_t(c - cols_.begin()), {float(x - area.x), float(y - area.y)}};
+    }
+
+    bool query_tooltip(int x, int y, GtkTooltip* tip)
+    {
+        if (!alive_ || !model_) return false;
+        int bx = 0, by = 0;
+        gtk_tree_view_convert_widget_to_bin_window_coords(GTK_TREE_VIEW(w_), x, y, &bx, &by);
+        auto at = cell_at(bx, by);
+        if (!at || at->row >= model_->row_count()) return false;
+        const std::string text = model_->tooltip(at->row, at->column, at->in_cell);
+        if (text.empty()) return false;
+        gtk_tooltip_set_text(tip, text.c_str());
+        return true;
+    }
+
     // A press on something the app lets you drag out of a cell. Selection
     // still happens as for any click; the drag starts past the threshold.
     bool cell_pressed(GdkEventButton* e)
@@ -2930,19 +2970,11 @@ private:
         if (!cell_drag_.begin || e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_PRIMARY ||
             !on_bin_window(reinterpret_cast<GdkEvent*>(e)) || (e->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK)))
             return false;
-        auto* view = GTK_TREE_VIEW(w_);
-        GtkTreePath* path = nullptr;
-        GtkTreeViewColumn* col = nullptr;
-        if (!gtk_tree_view_get_path_at_pos(view, int(e->x), int(e->y), &path, &col, nullptr, nullptr)) return false;
-        GdkRectangle area;
-        gtk_tree_view_get_cell_area(view, path, col, &area);
-        const size_t row = size_t(gtk_tree_path_get_indices(path)[0]);
-        gtk_tree_path_free(path);
-        auto c = std::find(cols_.begin(), cols_.end(), col);
-        if (c == cols_.end()) return false;
-        auto start = cell_drag_.begin(row, size_t(c - cols_.begin()), {float(e->x - area.x), float(e->y - area.y)});
+        auto at = cell_at(e->x, e->y);
+        if (!at) return false;
+        auto start = cell_drag_.begin(at->row, at->column, at->in_cell);
         if (!start) return false;
-        cell_ = {true, false, e->x, e->y, e->x, e->y, row, std::move(*start), std::nullopt};
+        cell_ = {true, false, e->x, e->y, e->x, e->y, at->row, std::move(*start), std::nullopt};
         return true;
     }
 
@@ -3059,12 +3091,7 @@ private:
                                           nullptr, nullptr))
         {
             row = size_t(gtk_tree_path_get_indices(path)[0]);
-            if (auto c = std::find(cols_.begin(), cols_.end(), col); c != cols_.end())
-            {
-                GdkRectangle area;
-                gtk_tree_view_get_cell_area(GTK_TREE_VIEW(w_), path, col, &area);
-                at = {size_t(c - cols_.begin()), point_f{float(e->x - area.x), float(e->y - area.y)}};
-            }
+            if (auto hit = cell_at(e->x, e->y)) at = {hit->column, hit->in_cell};
             // Keep a multi-selection when right-clicking inside it (two
             // revisions to compare). set_cursor would select only its row,
             // so the cursor moves only with a new selection.

@@ -1914,6 +1914,13 @@ public:
         ctx_menu_ = std::make_unique<menu_actions>(w_, "ctx");
         if (s.auto_scroll) enable_auto_scroll();
 
+        // The model's tooltips, asked again as the pointer moves.
+        gtk_widget_set_has_tooltip(w_, true);
+        connect(
+            w_, "query-tooltip",
+            +[](GtkWidget*, int x, int y, gboolean keyboard, GtkTooltip* tip, gpointer p) -> gboolean
+            { return !keyboard && static_cast<list_impl*>(p)->query_tooltip(x, y, tip); }, this);
+
         connect(
             sel_, "selection-changed",
             +[](GtkSelectionModel*, guint, guint, gpointer p)
@@ -2253,6 +2260,25 @@ private:
         }
         return std::nullopt;
     }
+    // The point (of the column view) in that cell's coordinates.
+    point_f in_cell(const cell_hit& hit, double x, double y) const
+    {
+        graphene_point_t in = GRAPHENE_POINT_INIT(float(x), float(y)), out;
+        if (!gtk_widget_compute_point(w_, hit.cell, &in, &out)) out = in;
+        return {out.x, out.y};
+    }
+
+    bool query_tooltip(int x, int y, GtkTooltip* tip)
+    {
+        if (!alive_ || !model_) return false;
+        auto hit = cell_at(x, y);
+        if (!hit || hit->row >= model_->row_count()) return false;
+        const std::string text = model_->tooltip(hit->row, hit->column, in_cell(*hit, x, y));
+        if (text.empty()) return false;
+        gtk_tooltip_set_text(tip, text.c_str());
+        return true;
+    }
+
     static GtkWidget* row_widget(GtkWidget* cell)
     {
         for (GtkWidget* w = cell; w; w = gtk_widget_get_parent(w))
@@ -2274,12 +2300,7 @@ private:
         cell_ = {};
         auto hit = cell_at(x, y);
         std::optional<cell_drag_start> start;
-        if (hit && model_)
-        {
-            graphene_point_t in = GRAPHENE_POINT_INIT(float(x), float(y)), out;
-            if (!gtk_widget_compute_point(w_, hit->cell, &in, &out)) out = in;
-            start = cell_drag_.begin(hit->row, hit->column, point_f{out.x, out.y});
-        }
+        if (hit && model_) start = cell_drag_.begin(hit->row, hit->column, in_cell(*hit, x, y));
         if (!start)
         {
             gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_DENIED);  // an ordinary click

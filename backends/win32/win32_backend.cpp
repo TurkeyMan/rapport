@@ -3241,10 +3241,12 @@ public:
         if (soft_) SetWindowSubclass(h_, hot_proc, 3, reinterpret_cast<DWORD_PTR>(this));
         SetWindowSubclass(h_, selection_proc, 4, reinterpret_cast<DWORD_PTR>(this));
         SetWindowSubclass(h_, size_proc, 8, reinterpret_cast<DWORD_PTR>(this));
+        SetWindowSubclass(h_, tooltip_proc, 10, reinterpret_cast<DWORD_PTR>(this));
     }
     ~list_impl() override
     {
         if (anchor_) DestroyWindow(anchor_);
+        if (tip_) DestroyWindow(tip_);
         if (g_dragging == this) g_dragging = nullptr;
         if (g_drag_out == this) g_drag_out = nullptr;
         if (drop_target_)
@@ -3458,14 +3460,10 @@ public:
                 hit.pt = a->ptAction;
                 ListView_SubItemHitTest(h_, &hit);
                 const int col = std::max(hit.iSubItem, 0);
-                RECT cell{};
-                ListView_GetSubItemRect(h_, a->iItem, col, LVIR_BOUNDS, &cell);
-                const float s = win_.scale();
                 POINT pt;
                 GetCursorPos(&pt);
                 show_popup_menu(GetAncestor(h_, GA_ROOT),
-                          cell_menu_(size_t(a->iItem), size_t(col),
-                                    point_f{(a->ptAction.x - cell.left) / s, (a->ptAction.y - cell.top) / s}),
+                          cell_menu_(size_t(a->iItem), size_t(col), in_cell(a->iItem, col, a->ptAction)),
                           pt);
             }
             else if (context_)
@@ -4155,6 +4153,59 @@ private:
         std::optional<size_t> target;
         POINT pt{};  // pointer, client coordinates
     };
+    // A client point in logical px from the top left of the cell at `row`,
+    // `col`, as the model's cell callbacks take it.
+    point_f in_cell(int row, int col, POINT p) const
+    {
+        RECT cell{};
+        ListView_GetSubItemRect(h_, row, col, LVIR_BOUNDS, &cell);
+        const float s = win_.scale();
+        return {(p.x - cell.left) / s, (p.y - cell.top) / s};
+    }
+
+    // The model's tooltip for the point under the pointer, asked as it
+    // moves: a tool over the whole list whose text follows it (none: no tool).
+    static LRESULT CALLBACK tooltip_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<list_impl*>(data);
+        if (msg == WM_MOUSEMOVE && self->model_)
+        {
+            std::string text;
+            LVHITTESTINFO hit{};
+            hit.pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (ListView_SubItemHitTest(h, &hit) >= 0 && (hit.flags & LVHT_ONITEM) &&
+                size_t(hit.iItem) < self->model_->row_count())
+                text = self->model_->tooltip(size_t(hit.iItem), size_t(hit.iSubItem),
+                                             self->in_cell(hit.iItem, hit.iSubItem, hit.pt));
+            if (text != self->tip_text_) self->set_tip(std::move(text));
+        }
+        return DefSubclassProc(h, msg, wp, lp);
+    }
+    void set_tip(std::string text)
+    {
+        if (!tip_)
+        {
+            tip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, h_, nullptr,
+                                   instance(), nullptr);
+            SendMessageW(tip_, TTM_SETMAXTIPWIDTH, 0, 480);
+        }
+        std::wstring w = wide(text);
+        TOOLINFOW ti{};
+        ti.cbSize = sizeof ti;
+        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        ti.hwnd = GetParent(h_);
+        ti.uId = reinterpret_cast<UINT_PTR>(h_);
+        ti.lpszText = w.data();
+        if (text.empty())
+            SendMessageW(tip_, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+        else if (tip_text_.empty())
+            SendMessageW(tip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+        else
+            SendMessageW(tip_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+        tip_text_ = std::move(text);
+    }
+
     static LRESULT CALLBACK cell_press_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
         auto* self = reinterpret_cast<list_impl*>(data);
@@ -4165,11 +4216,8 @@ private:
             hit.pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             if (ListView_SubItemHitTest(h, &hit) >= 0 && (hit.flags & LVHT_ONITEM) && size_t(hit.iItem) < self->model_->row_count())
             {
-                RECT cell{};
-                ListView_GetSubItemRect(h, hit.iItem, hit.iSubItem, LVIR_BOUNDS, &cell);
-                const float s = self->win_.scale();
                 if (auto start = self->cell_drag_.begin(size_t(hit.iItem), size_t(hit.iSubItem),
-                                                        point_f{(hit.pt.x - cell.left) / s, (hit.pt.y - cell.top) / s}))
+                                                        self->in_cell(hit.iItem, hit.iSubItem, hit.pt)))
                     self->cell_ = {true, false, size_t(hit.iItem), std::move(*start), std::nullopt, hit.pt};
             }
         }
@@ -4564,6 +4612,8 @@ private:
     std::vector<bool> visible_;
     std::vector<int> widths_;
     list_model* model_ = nullptr;
+    HWND tip_ = nullptr;    // the cells' tooltips (tooltip_proc)
+    std::string tip_text_;  // its text now; empty: no tool
     std::wstring text_;  // LVN_GETDISPINFO's buffer
     bool quiet_ = false;
     bool fitted_ = false;  // stretch columns have had their share of the width

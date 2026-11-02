@@ -405,6 +405,10 @@ public:
     // decides what that means (TortoiseGit's lists apply it to the whole
     // selection when the row is selected) and reports what changed.
     virtual void toggle_checked(size_t /*row*/) {}
+    // The tooltip at a point of a cell (cell coordinates, as cell_drag::begin
+    // gets them): asked again as the pointer moves within the cell, so a
+    // painted cell can say something different over each part. Empty: none.
+    virtual std::string tooltip(size_t /*row*/, size_t /*column*/, point_f /*in_cell*/) const { return {}; }
 
     void add_observer(list_observer* o) { observers_.push_back(o); }
     void remove_observer(list_observer* o) { std::erase(observers_, o); }
