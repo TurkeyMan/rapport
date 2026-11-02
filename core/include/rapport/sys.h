@@ -302,9 +302,9 @@ bool open_path(const std::filesystem::path&);
 // Opens a web address (https:, mailto:) in the user's browser or mail
 // program, without waiting.
 bool open_url(std::string_view url);
-// The system's "Open with" chooser for a file, without waiting for the
-// choice: Windows' SHOpenWithDialog (over the app's window in front, which
-// can make a program the type's default); elsewhere the desktop portal's
+// The system's "Open with" chooser for a file: Windows' SHOpenWithDialog
+// (modal over the app's window in front, returning once it's closed; it can
+// make a program the type's default); elsewhere, without waiting, the desktop portal's
 // OpenURI asked to ask (xdg-desktop-portal 1.x, interface version 3), over
 // D-Bus through gio, loaded at run time. False if it couldn't be shown.
 // May wait for D-Bus to start the portal (up to 5 s).
