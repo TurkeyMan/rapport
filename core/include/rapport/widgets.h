@@ -712,6 +712,22 @@ public:
     virtual void select(size_t begin, size_t end) = 0;
 };
 
+// Keys held with a pointer action (a canvas's events, a list drop).
+enum modifier : unsigned
+{
+    mod_shift = 1,
+    mod_ctrl = 2,
+    mod_alt = 4,
+    mod_meta = 8,  // Super / Windows / Command
+};
+
+// What a drop does with what was dragged.
+enum class drop_action
+{
+    move,
+    copy,
+};
+
 // Data offered by a drag (and, later, the clipboard) in one or more
 // formats, best first: MIME type and bytes (binary-safe). An app's own
 // type ("application/x-tortilla-commits") travels between its windows and
@@ -764,6 +780,15 @@ public:
     // data and sets the new selection; return false to refuse the drop.
     using reorder_fn = std::function<bool(const std::vector<size_t>& rows, size_t destination)>;
     virtual void on_reorder(reorder_fn) = 0;
+    // A reorder that can also copy, in place of on_reorder: dropped with
+    // the keys of `copy_modifiers` held (mod_ctrl, as file managers), the
+    // rows are copied rather than moved, and while they're held the pointer
+    // shows the toolkit's copy cursor where it has one. The keys are read
+    // as the drag goes and at the drop, not at the press (Ctrl-click
+    // selects).
+    using reorder_copy_fn =
+        std::function<bool(const std::vector<size_t>& rows, size_t destination, drop_action)>;
+    virtual void on_reorder_or_copy(reorder_copy_fn, unsigned copy_modifiers) = 0;
     virtual void set_reorderable(bool) = 0;  // on once on_reorder is set
 
     // Dragging something out of a cell (not the row itself) onto another
@@ -840,14 +865,6 @@ public:
 };
 
 // -- canvas -------------------------------------------------------------------
-
-enum modifier : unsigned
-{
-    mod_shift = 1,
-    mod_ctrl = 2,
-    mod_alt = 4,
-    mod_meta = 8,  // Super / Windows / Command
-};
 
 enum class pointer_event_type
 {

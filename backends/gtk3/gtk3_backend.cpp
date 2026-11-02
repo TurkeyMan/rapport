@@ -1733,6 +1733,8 @@ private:
 
 // -- list ---------------------------------------------------------------------
 
+unsigned modifiers(guint state);  // the canvas's
+
 class list_impl : public widget_base<rap::list>, public list_observer
 {
 public:
@@ -2003,7 +2005,19 @@ public:
     }
     void on_header_menu(std::function<menu(size_t)> f) override { header_menu_ = std::move(f); }
     void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)> f) override { cell_menu_ = std::move(f); }
-    void on_reorder(reorder_fn f) override { reorder_ = std::move(f); }
+    void on_reorder(reorder_fn f) override
+    {
+        reorder_copy_fn moves;
+        if (f)
+            moves = [f = std::move(f)](const std::vector<size_t>& rows, size_t at, drop_action)
+            { return f(rows, at); };
+        on_reorder_or_copy(std::move(moves), 0);
+    }
+    void on_reorder_or_copy(reorder_copy_fn f, unsigned copy_modifiers) override
+    {
+        reorder_ = std::move(f);
+        copy_modifiers_ = copy_modifiers;
+    }
     void on_drag_out(drag_out d) override
     {
         const bool first = !drag_out_.begin;
@@ -2397,6 +2411,7 @@ private:
         double x0 = 0, y0 = 0;
         size_t row = 0;
         bool out_asked = false;  // drag_out.begin had its say (once a press)
+        double x = 0, y = 0;     // the pointer now, bin window coordinates
     };
     // A cell_drag in progress: from a press `begin` accepted.
     struct cell_drag_state
@@ -2419,13 +2434,15 @@ private:
     // Works in bin-window coordinates, clamped to the visible rows, so a
     // pointer over the header (above the rows) targets the first visible row
     // rather than counting as "past the end".
-    size_t drop_target(double bx, double by)
+    size_t drop_target(double bx, double by, guint state)
     {
         size_t dest = insertion_at(bx, by);
         // Dropping a contiguous block onto its own place changes nothing, so
         // that shows no drop line and a "not allowed" cursor.
         bool noop = is_noop_drop(dest);
-        set_drag_cursor(noop ? "not-allowed" : "grabbing");
+        set_drag_cursor(noop                                    ? "not-allowed"
+                        : action_of(state) == drop_action::copy ? "copy"
+                                                                : "grabbing");
         show_drop_line(noop ? std::nullopt : std::optional(dest));
         return dest;
     }
@@ -2467,6 +2484,19 @@ private:
     }
 
     bool reorders() const { return reorder_ && reorderable_; }
+    // A drop with these keys held: a copy with copy_modifiers_.
+    drop_action action_of(guint state) const
+    {
+        return copy_modifiers_ && (modifiers(state) & copy_modifiers_) == copy_modifiers_
+                   ? drop_action::copy
+                   : drop_action::move;
+    }
+    // The keyboard's state now, for a system drag, which carries none.
+    guint keys_held() const
+    {
+        return gdk_keymap_get_modifier_state(
+            gdk_keymap_get_for_display(gtk_widget_get_display(w_)));
+    }
 
     // drag_out: the system drag, begun from drag_motion once the rows leave
     // the list (or, with no reordering, past the threshold). The tree view's
@@ -2710,7 +2740,7 @@ private:
         }
         if (reorders_own(ctx))
         {
-            gtk_drag_finish(ctx, reorder_(selection(), at), false, time);
+            gtk_drag_finish(ctx, reorder_(selection(), at, action_of(keys_held())), false, time);
             return true;
         }
         auto type = offered_type(ctx);
@@ -2740,6 +2770,29 @@ public:
                                         GTK_TREE_VIEW_DROP_BEFORE);
         list->set_drag_cursor(nullptr);
         return true;
+    }
+    // A modifier key going down or up during a drag: the cursor says again
+    // whether the drop would move or copy.
+    static void drag_keys_changed(GdkEventKey* e)
+    {
+        list_impl* list = active;
+        if (!list || !list->drag_.dragging) return;
+        guint mask = 0;
+        switch (e->keyval)
+        {
+        case GDK_KEY_Control_L:
+        case GDK_KEY_Control_R: mask = GDK_CONTROL_MASK; break;
+        case GDK_KEY_Shift_L:
+        case GDK_KEY_Shift_R: mask = GDK_SHIFT_MASK; break;
+        case GDK_KEY_Alt_L:
+        case GDK_KEY_Alt_R: mask = GDK_MOD1_MASK; break;
+        case GDK_KEY_Super_L:
+        case GDK_KEY_Super_R: mask = GDK_SUPER_MASK; break;
+        default: return;
+        }
+        // The event's state is from before the key.
+        const guint state = e->type == GDK_KEY_PRESS ? e->state | mask : e->state & ~mask;
+        list->drop_target(list->drag_.x, list->drag_.y, state);
     }
 
 private:
@@ -2859,7 +2912,9 @@ private:
         if (drag_out_.begin && !drag_.out_asked &&
             (wx < 0 || wy < 0 || wx >= width || wy >= height) && begin_drag_out(e))
             return true;
-        drop_target(e->x, e->y);
+        drag_.x = e->x;
+        drag_.y = e->y;
+        drop_target(e->x, e->y, e->state);
 
         // Scroll when the pointer nears the top or bottom edge.
         int edge = 24;
@@ -2884,10 +2939,10 @@ private:
         if (active == this) active = nullptr;
         if (d.dragging)
         {
-            size_t dest = drop_target(e->x, e->y);
+            size_t dest = drop_target(e->x, e->y, e->state);
             gtk_tree_view_set_drag_dest_row(GTK_TREE_VIEW(w_), nullptr, GTK_TREE_VIEW_DROP_BEFORE);
             set_drag_cursor(nullptr);
-            if (reorder_ && !is_noop_drop(dest)) reorder_(selection(), dest);
+            if (reorder_ && !is_noop_drop(dest)) reorder_(selection(), dest, action_of(e->state));
             return true;
         }
         if (d.defer_select)
@@ -3113,7 +3168,8 @@ private:
     std::function<menu(std::optional<size_t>)> context_menu_;
     std::function<menu(size_t)> header_menu_;
     std::function<menu(size_t, size_t, point_f)> cell_menu_;
-    reorder_fn reorder_;
+    reorder_copy_fn reorder_;
+    unsigned copy_modifiers_ = 0;
     bool reorderable_ = true;
     drag drag_;
     cell_drag cell_drag_;
@@ -3711,8 +3767,21 @@ public:
         gtk_window_set_resizable(win, spec.resizable);
         // First in line, so Esc ends a list drag rather than the dialog.
         connect(
-            win_, "key-press-event", +[](GtkWidget*, GdkEventKey* e, gpointer) -> gboolean
-            { return e->keyval == GDK_KEY_Escape && list_impl::cancel_active_drag(); }, this);
+            win_, "key-press-event",
+            +[](GtkWidget*, GdkEventKey* e, gpointer) -> gboolean
+            {
+                list_impl::drag_keys_changed(e);
+                return e->keyval == GDK_KEY_Escape && list_impl::cancel_active_drag();
+            },
+            this);
+        connect(
+            win_, "key-release-event",
+            +[](GtkWidget*, GdkEventKey* e, gpointer) -> gboolean
+            {
+                list_impl::drag_keys_changed(e);
+                return false;
+            },
+            this);
         if (dialog_)
         {
             gtk_window_set_modal(win, parent != nullptr && spec.modal);

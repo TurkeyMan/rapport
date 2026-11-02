@@ -2531,7 +2531,16 @@ public:
     }
     void on_reorder(reorder_fn f) override
     {
+        reorder_copy_fn moves;
+        if (f)
+            moves = [f = std::move(f)](const std::vector<size_t>& rows, size_t at, drop_action)
+            { return f(rows, at); };
+        on_reorder_or_copy(std::move(moves), 0);
+    }
+    void on_reorder_or_copy(reorder_copy_fn f, unsigned copy_modifiers) override
+    {
         reorder_ = std::move(f);
+        copy_modifiers_ = copy_modifiers;
         accept_drops();
     }
     void on_drag_out(drag_out d) override
@@ -2586,6 +2595,15 @@ public:
         list->view_->viewport()->unsetCursor();
         list->view_->viewport()->update();
         return true;
+    }
+    // A modifier key going down or up during a drag: the cursor says again
+    // whether the drop would move or copy.
+    static void drag_keys_changed(Qt::KeyboardModifiers held)
+    {
+        list_impl* list = active;
+        if (!list || !list->drag_.dragging) return;
+        list->drag_.keys = held;
+        list->drop_target(list->drag_.y);
     }
 
     // -- called by list_view --------------------------------------------------
@@ -2760,6 +2778,7 @@ public:
         }
         if (drag_.pressed && (e->buttons() & Qt::LeftButton))
         {
+            drag_.keys = e->modifiers();
             drag_motion(pos);
             return;
         }
@@ -2795,11 +2814,12 @@ public:
             if (active == this) active = nullptr;
             if (d.dragging)
             {
-                const size_t dest = drop_target(e->position().toPoint().y());
+                const size_t dest = row_gap_at(e->position().toPoint().y());
                 drop_y_.reset();
                 view_->viewport()->unsetCursor();
                 view_->viewport()->update();
-                if (reorder_ && !is_noop_drop(dest)) reorder_(selection(), dest);
+                if (reorder_ && !is_noop_drop(dest))
+                    reorder_(selection(), dest, action_of(e->modifiers()));
                 return;
             }
             if (d.defer_select)
@@ -2938,7 +2958,8 @@ public:
         const size_t at = row_gap_at(e->position().toPoint().y());
         if (d.self)
         {
-            if (!is_noop_drop(at)) reorder_(selection(), at);
+            if (!is_noop_drop(at))
+                reorder_(selection(), at, action_of(QGuiApplication::queryKeyboardModifiers()));
             e->setDropAction(Qt::CopyAction);
             e->accept();
             return;
@@ -3137,6 +3158,8 @@ private:
         QPoint start;
         size_t row = 0;
         bool asked_out = false;  // drag_out's begin had its say
+        int y = 0;               // the pointer now
+        Qt::KeyboardModifiers keys;
     };
     // A cell_drag in progress: from a press `begin` accepted.
     struct cell_drag_state
@@ -3180,6 +3203,13 @@ private:
     }
 
     bool reorders() const { return reorder_ && reorderable_; }
+    // A drop with these keys held: a copy with copy_modifiers_.
+    drop_action action_of(Qt::KeyboardModifiers held) const
+    {
+        return copy_modifiers_ && (modifiers_of(held) & copy_modifiers_) == copy_modifiers_
+                   ? drop_action::copy
+                   : drop_action::move;
+    }
 
     // The row in front of which something dropped at `y` goes.
     size_t row_gap_at(int y) const
@@ -3210,7 +3240,10 @@ private:
     {
         const size_t dest = row_gap_at(y);
         const bool noop = is_noop_drop(dest);
-        view_->viewport()->setCursor(noop ? Qt::ForbiddenCursor : Qt::ClosedHandCursor);
+        view_->viewport()->setCursor(noop ? Qt::ForbiddenCursor
+                                     : action_of(drag_.keys) == drop_action::copy
+                                         ? Qt::DragCopyCursor
+                                         : Qt::ClosedHandCursor);
         set_drop_line(rows_->count && !noop ? std::optional(dest) : std::nullopt);
         return dest;
     }
@@ -3252,6 +3285,7 @@ private:
             drag_.asked_out = true;
             if (start_drag_out()) return;
         }
+        drag_.y = pos.y();
         drop_target(pos.y());
         edge_scroll(pos.y());
         view_->viewport()->update();
@@ -3436,7 +3470,8 @@ private:
     std::function<menu(std::optional<size_t>)> context_menu_;
     std::function<menu(size_t)> header_menu_;
     std::function<menu(size_t, size_t, point_f)> cell_menu_;
-    reorder_fn reorder_;
+    reorder_copy_fn reorder_;
+    unsigned copy_modifiers_ = 0;
     bool reorderable_ = true;
     cell_drag cell_drag_;
     drag drag_;
@@ -3797,6 +3832,9 @@ public:
         if (k->key() == Qt::Key_Escape && e->type() == QEvent::KeyPress &&
             list_impl::cancel_active_drag())
             return true;
+        if (k->key() == Qt::Key_Control || k->key() == Qt::Key_Shift || k->key() == Qt::Key_Alt ||
+            k->key() == Qt::Key_Meta)
+            list_impl::drag_keys_changed(k->modifiers());  // as they are after the key
         if (!on_key_) return false;
         // While typing, only Escape and the function keys come here.
         auto* plain = qobject_cast<QPlainTextEdit*>(focus);

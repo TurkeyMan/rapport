@@ -1742,6 +1742,8 @@ void read_to_end(GInputStream* in, std::function<void(std::optional<std::string>
 
 // -- list ---------------------------------------------------------------------
 
+unsigned modifiers(GdkModifierType state);  // the canvas's
+
 class list_impl : public widget_base<rap::list>, public list_observer
 {
 public:
@@ -2031,7 +2033,16 @@ public:
     void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)> f) override { cell_menu_ = std::move(f); }
     void on_reorder(reorder_fn f) override
     {
+        reorder_copy_fn moves;
+        if (f)
+            moves = [f = std::move(f)](const std::vector<size_t>& rows, size_t at, drop_action)
+            { return f(rows, at); };
+        on_reorder_or_copy(std::move(moves), 0);
+    }
+    void on_reorder_or_copy(reorder_copy_fn f, unsigned copy_modifiers) override
+    {
         reorder_ = std::move(f);
+        copy_modifiers_ = copy_modifiers;
         if (reorder_) enable_rows_drag();
     }
     void set_reorderable(bool v) override { reorderable_ = v; }
@@ -2375,6 +2386,17 @@ private:
         return contiguous && dest >= sel.front() && dest <= sel.back() + 1;
     }
     bool reorders() const { return reorder_ && reorderable_; }
+    // A drop now, with the keys held now: a copy with copy_modifiers_. The
+    // keyboard's state rather than an event's, as the pointer may rest
+    // while Ctrl goes down (the tick asks again each frame).
+    drop_action action_now() const
+    {
+        if (!copy_modifiers_) return drop_action::move;
+        GdkSeat* seat = gdk_display_get_default_seat(gtk_widget_get_display(w_));
+        GdkDevice* keyboard = seat ? gdk_seat_get_keyboard(seat) : nullptr;
+        const unsigned held = keyboard ? modifiers(gdk_device_get_modifier_state(keyboard)) : 0;
+        return (held & copy_modifiers_) == copy_modifiers_ ? drop_action::copy : drop_action::move;
+    }
 
     // The insertion line: a top or bottom edge drawn in the theme's
     // highlight colour on the row it's against. The rule is display-wide,
@@ -2535,7 +2557,9 @@ private:
         const size_t dest = insertion_at(rd_.x, rd_.y);
         const bool noop = is_noop_drop(dest);
         show_line(noop ? std::nullopt : std::optional<size_t>(dest));
-        gtk_widget_set_cursor_from_name(w_, noop ? "not-allowed" : "grabbing");
+        gtk_widget_set_cursor_from_name(w_, noop                                ? "not-allowed"
+                                            : action_now() == drop_action::copy ? "copy"
+                                                                                : "grabbing");
     }
     void rows_drag_end(bool drop)
     {
@@ -2547,7 +2571,7 @@ private:
         gtk_widget_set_cursor(w_, nullptr);
         if (!drop || !d.dragging || !reorders()) return;
         const size_t dest = insertion_at(d.x, d.y);
-        if (!is_noop_drop(dest)) reorder_(selection(), dest);
+        if (!is_noop_drop(dest)) reorder_(selection(), dest, action_now());
     }
     bool outside_list(double x, double y) const
     {
@@ -2721,7 +2745,8 @@ private:
         const size_t at = insertion_at(x, y);
         if (h.reorder)
         {
-            const bool ok = reorders() && !is_noop_drop(at) && reorder_(selection(), at);
+            const bool ok =
+                reorders() && !is_noop_drop(at) && reorder_(selection(), at, action_now());
             gdk_drop_finish(drop, ok ? GDK_ACTION_COPY : GdkDragAction(0));
             return true;
         }
@@ -2828,7 +2853,8 @@ private:
         update_reorder();
     }
 
-    reorder_fn reorder_;
+    reorder_copy_fn reorder_;
+    unsigned copy_modifiers_ = 0;
     bool reorderable_ = true;
     drag_out drag_out_;
     drop_in drop_in_;

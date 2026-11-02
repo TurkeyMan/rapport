@@ -4,7 +4,9 @@
 // line) and as "text/plain", so they also drop into a text editor; dragged
 // within itself it reorders, and the system drag starts once the pointer
 // leaves it. The right list takes either type and inserts the rows where
-// they're dropped; it takes text from other programs too.
+// they're dropped; it takes text from other programs too. Ctrl held at the
+// drop copies rows within the left list instead of moving them
+// (list::on_reorder_or_copy).
 //   rapport-list-dnd           both windows in one process
 //   rapport-list-dnd --left    only the left (run --right in another
 //   rapport-list-dnd --right   process: the drag crosses processes)
@@ -108,17 +110,27 @@ int main(int argc, char** argv)
         left_win = (*ui)->create(window{
             "Drag from here",
             {vbox{
-                label{"Drag rows to the other window, or within this one to reorder."},
+                label{"Drag rows to the other window, or within this one to reorder (Ctrl "
+                      "copies)."},
                 list{{{"Fruit", {}, true}}, &left_rows}
-                    .on_reorder(
-                        [&](const std::vector<size_t>& rows, size_t dest)
+                    .on_reorder_or_copy(
+                        [&](const std::vector<size_t>& rows, size_t dest, rap::drop_action action)
                         {
-                            const size_t first = left_rows.move(rows, dest);
+                            size_t first = dest;
+                            if (action == rap::drop_action::copy)
+                            {
+                                std::vector<std::string> copies;
+                                for (size_t r : rows) copies.push_back(left_rows.at(r));
+                                left_rows.insert(dest, copies);
+                            }
+                            else
+                                first = left_rows.move(rows, dest);
                             std::vector<size_t> sel;
                             for (size_t i = 0; i < rows.size(); ++i) sel.push_back(first + i);
                             left_list->select(sel);
                             return true;
-                        })
+                        },
+                        rap::mod_ctrl)
                     .on_drag_out(
                         {[&](const std::vector<size_t>& rows) -> std::optional<rap::data_offer>
                          {

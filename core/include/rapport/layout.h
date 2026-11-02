@@ -272,6 +272,8 @@ struct list
     std::function<menu(std::optional<size_t>)> on_context_menu;
     std::function<menu(size_t)> on_header_menu;
     rap::list::reorder_fn on_reorder;
+    rap::list::reorder_copy_fn on_reorder_or_copy;
+    unsigned copy_modifiers = 0;
     rap::list::cell_drag on_cell_drag;
     rap::list::drag_out on_drag_out;
     rap::list::drop_in on_drop_in;
@@ -907,6 +909,12 @@ public:
     list& on_reorder(rap::list::reorder_fn f)
     {
         s().on_reorder = std::move(f);
+        return *this;
+    }
+    list& on_reorder_or_copy(rap::list::reorder_copy_fn f, unsigned copy_modifiers)
+    {
+        s().on_reorder_or_copy = std::move(f);
+        s().copy_modifiers = copy_modifiers;
         return *this;
     }
     list& on_drag_out(rap::list::drag_out d)

@@ -3642,7 +3642,16 @@ public:
     void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)> f) override { cell_menu_ = std::move(f); }
     void on_reorder(reorder_fn f) override
     {
+        reorder_copy_fn moves;
+        if (f)
+            moves = [f = std::move(f)](const std::vector<size_t>& rows, size_t at, drop_action)
+            { return f(rows, at); };
+        on_reorder_or_copy(std::move(moves), 0);
+    }
+    void on_reorder_or_copy(reorder_copy_fn f, unsigned copy_modifiers) override
+    {
         reorder_ = std::move(f);
+        copy_modifiers_ = copy_modifiers;
         reorderable_ = bool(reorder_);
         accept_drops();
     }
@@ -4350,6 +4359,23 @@ private:
         if (mark.iItem < 0) return count;
         return size_t(mark.iItem) + ((mark.dwFlags & LVIM_AFTER) ? 1 : 0);
     }
+    // A drop with these keys held: a copy with copy_modifiers_.
+    drop_action action_of(unsigned held) const
+    {
+        return copy_modifiers_ && (held & copy_modifiers_) == copy_modifiers_ ? drop_action::copy
+                                                                              : drop_action::move;
+    }
+    // ...with the keys held now, as of the message being handled.
+    drop_action action_now() const { return action_of(key_modifiers()); }
+    // ...with an OLE drag's grfKeyState.
+    drop_action action_of_ole(DWORD keys) const
+    {
+        unsigned held = 0;
+        if (keys & MK_CONTROL) held |= mod_ctrl;
+        if (keys & MK_SHIFT) held |= mod_shift;
+        if (keys & MK_ALT) held |= mod_alt;
+        return action_of(held);
+    }
     // A contiguous selection dropped onto its own place moves nothing.
     bool noop(size_t target) const
     {
@@ -4370,10 +4396,26 @@ private:
         }
         SendMessageW(h_, LVM_SETINSERTMARK, 0, reinterpret_cast<LPARAM>(&mark));
     }
+    // The arrow with a "+" that OLE's drag loop shows for a copy. There's
+    // no stock one (IDC_*): it's ole32's own cursor group 3 (1 no-drop, 2
+    // move, 3 copy, 4 link; 5 to 7 the old monochrome ones), as Windows 10
+    // and 11's ole32.dll have them; the arrow if it's ever missing.
+    static HCURSOR copy_cursor()
+    {
+        static const HCURSOR c = []
+        {
+            HMODULE ole = GetModuleHandleW(L"ole32.dll");
+            HCURSOR found = ole ? LoadCursorW(ole, MAKEINTRESOURCEW(3)) : nullptr;
+            return found ? found : LoadCursorW(nullptr, IDC_ARROW);
+        }();
+        return c;
+    }
     void show_mark(size_t target)
     {
         const bool none = noop(target);
-        SetCursor(LoadCursorW(nullptr, none ? IDC_NO : IDC_ARROW));
+        SetCursor(none                                ? LoadCursorW(nullptr, IDC_NO)
+                  : action_now() == drop_action::copy ? copy_cursor()
+                                                      : LoadCursorW(nullptr, IDC_ARROW));
         set_mark(none ? std::nullopt : std::optional<size_t>(target));
     }
     // A step of scrolling with the pointer (client coordinates) near the
@@ -4407,7 +4449,7 @@ private:
         {
             const std::vector<size_t> rows = selection();
             const size_t target = drop_target(pt);
-            if (!rows.empty() && !noop(target)) reorder_(rows, target);
+            if (!rows.empty() && !noop(target)) reorder_(rows, target, action_now());
         }
     }
     // cell_drag: the press is noted before the list_view sees it (it selects
@@ -4713,12 +4755,29 @@ private:
         case WM_CAPTURECHANGED:
         case WM_CANCELMODE: self->end_drag(false, pt); return 0;
         case WM_KEYDOWN:
-            if (wp == VK_ESCAPE)
+        case WM_KEYUP:
+        case WM_SYSKEYDOWN:  // with Alt down
+        case WM_SYSKEYUP:
+        {
+            if (msg == WM_KEYDOWN && wp == VK_ESCAPE)
             {
                 self->end_drag(false, pt);
                 return 0;
             }
+            // A modifier down or up: the cursor says again whether the drop
+            // would move or copy (lp is no point here).
+            if (wp == VK_CONTROL || wp == VK_SHIFT || wp == VK_MENU)
+            {
+                POINT at;
+                GetCursorPos(&at);
+                ScreenToClient(h, &at);
+                self->show_mark(self->drop_target(at));
+                return 0;
+            }
+            // Alt's keys stay here mid-drag, not the window's menu's.
+            if (msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) return 0;
             break;
+        }
         }
         return DefSubclassProc(h, msg, wp, lp);
     }
@@ -4738,7 +4797,10 @@ private:
         *source.put() = new drop_source;
         g_drag_out = this;
         DWORD effect = 0;
-        DoDragDrop(data.get(), source.get(), DROPEFFECT_COPY, &effect);
+        // A move too, only so the rows coming back can show one (dnd_over):
+        // elsewhere nothing is taken from the list whatever the target does.
+        DoDragDrop(data.get(), source.get(), DROPEFFECT_COPY | (reorderable_ ? DROPEFFECT_MOVE : 0),
+                   &effect);
         if (g_drag_out == this) g_drag_out = nullptr;  // cleared already if the list went
         return true;
     }
@@ -4813,12 +4875,18 @@ private:
 
 public:
     // list_drop_target's calls (screen coordinates), returning the effect.
-    DWORD dnd_enter(IDataObject* data, POINT pt)
+    // `keys`: the drag's grfKeyState. This list's own rows say whether
+    // they'd move or copy, so the system's cursor shows the "+" for a copy.
+    DWORD dnd_enter(IDataObject* data, POINT pt, DWORD keys)
     {
         dnd_ = dnd_offered(data);
-        return dnd_over(pt);
+        return dnd_over(pt, keys);
     }
-    DWORD dnd_over(POINT pt)
+    DWORD own_rows_effect(DWORD keys) const
+    {
+        return action_of_ole(keys) == drop_action::copy ? DROPEFFECT_COPY : DROPEFFECT_MOVE;
+    }
+    DWORD dnd_over(POINT pt, DWORD keys)
     {
         if (!dnd_) return DROPEFFECT_NONE;
         if (dnd_->kind == dnd_state::what::files) return DROPEFFECT_COPY;
@@ -4827,14 +4895,15 @@ public:
         const size_t at = drop_target(pt);
         const bool ok = dnd_can_drop(at);
         set_mark(ok ? std::optional<size_t>(at) : std::nullopt);
-        return ok ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        if (!ok) return DROPEFFECT_NONE;
+        return dnd_->kind == dnd_state::what::own_rows ? own_rows_effect(keys) : DROPEFFECT_COPY;
     }
     void dnd_leave()
     {
         if (dnd_) set_mark(std::nullopt);
         dnd_.reset();
     }
-    DWORD dnd_drop(IDataObject* data, POINT pt)
+    DWORD dnd_drop(IDataObject* data, POINT pt, DWORD keys)
     {
         if (!dnd_) return DROPEFFECT_NONE;
         ScreenToClient(h_, &pt);
@@ -4846,8 +4915,8 @@ public:
         switch (d.kind)
         {
         case dnd_state::what::own_rows:
-            reorder_(selection(), at);
-            return DROPEFFECT_COPY;
+            reorder_(selection(), at, action_of_ole(keys));
+            return own_rows_effect(keys);
         case dnd_state::what::files:
             // To the window, as a drop there would have gone.
             if (std::optional<std::string> bytes = data_of(data, CF_HDROP))
@@ -4865,7 +4934,8 @@ public:
     }
 
 private:
-    reorder_fn reorder_;
+    reorder_copy_fn reorder_;
+    unsigned copy_modifiers_ = 0;
     bool reorderable_ = false, dragging_ = false;
     drag_out drag_out_;
     drop_in drop_in_;
@@ -4903,16 +4973,16 @@ private:
     std::function<menu(size_t, size_t, point_f)> cell_menu_;
 };
 
-// The list answers a copy or nothing; `*effect` comes in as what the
-// drag's source allows.
-HRESULT list_drop_target::DragEnter(IDataObject* data, DWORD, POINTL pt, DWORD* effect)
+// The list answers a copy or nothing, or for its own rows a move or a
+// copy; `*effect` comes in as what the drag's source allows.
+HRESULT list_drop_target::DragEnter(IDataObject* data, DWORD keys, POINTL pt, DWORD* effect)
 {
-    *effect = list ? list->dnd_enter(data, {pt.x, pt.y}) & *effect : DROPEFFECT_NONE;
+    *effect = list ? list->dnd_enter(data, {pt.x, pt.y}, keys) & *effect : DROPEFFECT_NONE;
     return S_OK;
 }
-HRESULT list_drop_target::DragOver(DWORD, POINTL pt, DWORD* effect)
+HRESULT list_drop_target::DragOver(DWORD keys, POINTL pt, DWORD* effect)
 {
-    *effect = list ? list->dnd_over({pt.x, pt.y}) & *effect : DROPEFFECT_NONE;
+    *effect = list ? list->dnd_over({pt.x, pt.y}, keys) & *effect : DROPEFFECT_NONE;
     return S_OK;
 }
 HRESULT list_drop_target::DragLeave()
@@ -4920,15 +4990,15 @@ HRESULT list_drop_target::DragLeave()
     if (list) list->dnd_leave();
     return S_OK;
 }
-HRESULT list_drop_target::Drop(IDataObject* data, DWORD, POINTL pt, DWORD* effect)
+HRESULT list_drop_target::Drop(IDataObject* data, DWORD keys, POINTL pt, DWORD* effect)
 {
-    if (!list || !(*effect & DROPEFFECT_COPY))
+    if (!list || !(*effect & DROPEFFECT_COPY))  // this list's own rows allow one too
     {
         if (list) list->dnd_leave();
         *effect = DROPEFFECT_NONE;
         return S_OK;
     }
-    *effect = list->dnd_drop(data, {pt.x, pt.y});
+    *effect = list->dnd_drop(data, {pt.x, pt.y}, keys) & *effect;
     return S_OK;
 }
 
