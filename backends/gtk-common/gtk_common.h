@@ -1047,8 +1047,10 @@ struct theme_state
 };
 inline theme_state& theme_states()
 {
-    static theme_state t;
-    return t;
+    // Never destroyed: widgets kept in statics (an app's windows) forget
+    // their listeners during static teardown, after it would have gone.
+    static theme_state* t = new theme_state;
+    return *t;
 }
 
 // `f` runs after every theme change, until forget_theme_listener(owner).
