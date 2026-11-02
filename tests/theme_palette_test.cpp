@@ -129,6 +129,30 @@ int main()
     eq(hex(p::derived(theme_color::highlight_text, b)), "#000000ff", "derived highlight text");
     eq(hex(p::derived(theme_color::warning, b)), "#9c6e03ff", "derived warning, light");
     eq(hex(p::fluent_status(theme_color::positive, true)), "#6ccb5fff", "Fluent success, dark");
+    const p::basics light_basics{
+        {0xfa, 0xfa, 0xfa}, {0, 0, 0}, {255, 255, 255}, {0, 0, 0}, {0x00, 0x78, 0xd7}};
+    eq(hex(p::derived(theme_color::highlight_inactive, light_basics)), "#d9d9d9ff",
+       "derived inactive selection, Explorer's grey");
+    eq(hex(p::derived(theme_color::hover, light_basics)), "#e6f4ffff",
+       "derived hover, the soft tint");
+    eq(hex(p::derived(theme_color::card, light_basics)), "#ffffffff", "derived card, light");
+    const p::basics dark_basics{{0x24, 0x24, 0x24},
+                                {255, 255, 255},
+                                {0x1e, 0x1e, 0x1e},
+                                {255, 255, 255},
+                                {0x35, 0x84, 0xe4}};
+    const color card = p::derived(theme_color::card, dark_basics);
+    eq(p::luminance(card) > p::luminance(dark_basics.window) ? "raised" : hex(card), "raised",
+       "derived card, dark, lighter than the window");
+    const color disabled = p::derived(theme_color::disabled_text, dark_basics);
+    eq(p::contrast(disabled, dark_basics.window) <
+               p::contrast(dark_basics.window_text, dark_basics.window)
+           ? "dimmer"
+           : hex(disabled),
+       "dimmer", "derived disabled text, dimmer than text");
+    for (int r = 0; r < rap::theme_color_count; ++r)
+        if (rap::print_color(theme_color(r)).a != 255)
+            eq("transparent", "opaque", "print colour for every role");
 
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;

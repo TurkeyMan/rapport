@@ -127,6 +127,28 @@ inline color theme_color_of(const QWidget* w, theme_color role)
         case theme_color::warning:
             if (kde.neutral) return *kde.neutral;
             break;
+        case theme_color::header:
+            if (kde.header) return *kde.header;
+            break;
+        case theme_color::header_text:
+            return kde.header_text ? *kde.header_text : get(QPalette::WindowText);
+        case theme_color::card: return base;  // Plasma's cards are the View set's
+        case theme_color::tooltip: return get(QPalette::ToolTipBase);
+        case theme_color::tooltip_text: return get(QPalette::ToolTipText);
+        // Hover and pressed tint with Plasma's hover decoration, else the
+        // accent, as the soft-selection lists do.
+        case theme_color::hover:
+            return palette::soft_selection(base, kde.hover ? *kde.hover : accent).hover;
+        case theme_color::pressed:
+            return palette::soft_selection(base, kde.hover ? *kde.hover : accent).hover_selected;
+        case theme_color::focus: return kde.focus ? *kde.focus : accent;
+        case theme_color::highlight_inactive:
+            return from_q_color(pal.color(QPalette::Inactive, QPalette::Highlight));
+        case theme_color::highlight_inactive_text:
+            return from_q_color(pal.color(QPalette::Inactive, QPalette::HighlightedText));
+        case theme_color::disabled_text:
+            return from_q_color(pal.color(QPalette::Disabled, QPalette::WindowText));
+        default: break;
         }
         return palette::derived(role, basics());
 }

@@ -80,8 +80,28 @@ enum class theme_color
     negative,
     neutral,
     warning,
+    // Surfaces in layers, for what an app draws itself: a header or title
+    // area (GNOME's header bars, Plasma's Header colours), a raised
+    // container on the window (a card, a boxed list), a tooltip.
+    header,
+    header_text,
+    card,
+    tooltip,
+    tooltip_text,
+    // Interaction: a hovered and a pressed item's background, the focus
+    // ring, and the selection while the window isn't active.
+    hover,
+    pressed,
+    focus,
+    highlight_inactive,
+    highlight_inactive_text,
+    // Structure: a frame's edge, a line between items, text that can't be
+    // used now.
+    border,
+    divider,
+    disabled_text,
 };
-inline constexpr int theme_color_count = int(theme_color::warning) + 1;
+inline constexpr int theme_color_count = int(theme_color::disabled_text) + 1;
 
 // Either a fixed colour or a theme role resolved at paint time.
 using paint = std::variant<theme_color, color>;
@@ -108,8 +128,21 @@ inline color print_color(theme_color c)
     case theme_color::negative: return {207, 34, 46};
     case theme_color::neutral: return {101, 109, 118};
     case theme_color::warning: return {154, 103, 0};
+    case theme_color::header: return {240, 240, 240};
+    case theme_color::card:
+    case theme_color::tooltip: return {255, 255, 255};
+    case theme_color::header_text:
+    case theme_color::tooltip_text:
+    case theme_color::highlight_inactive_text: return {0, 0, 0};
+    case theme_color::hover: return {235, 235, 235};
+    case theme_color::pressed: return {215, 215, 215};
+    case theme_color::focus: return {0, 90, 180};
+    case theme_color::highlight_inactive: return {225, 225, 225};
+    case theme_color::border: return {160, 160, 160};
+    case theme_color::divider: return {200, 200, 200};
+    case theme_color::disabled_text: return {128, 128, 128};
     }
-    return {0, 0, 0};
+    return {0, 0, 0, 0};  // none: rapport-theme-palette-test fails on a role missing here
 }
 
 struct text_style

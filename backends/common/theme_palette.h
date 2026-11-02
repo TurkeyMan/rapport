@@ -301,6 +301,22 @@ inline color derived(theme_color role, const basics& b)
     case theme_color::positive:
     case theme_color::negative:
     case theme_color::warning: return adwaita_status(role, dark);
+    case theme_color::header: return mix(b.window, b.window_text, dark ? 0.06f : 0.04f);
+    case theme_color::header_text: return b.window_text;
+    // Raised: the view's colour on light themes, a step lighter than the
+    // window on dark ones (where light is near).
+    case theme_color::card: return dark ? mix(b.window, b.window_text, 0.06f) : b.base;
+    case theme_color::tooltip: return dark ? mix(b.window, b.window_text, 0.1f) : b.base;
+    case theme_color::tooltip_text: return b.text;
+    case theme_color::hover: return soft_selection(b.base, b.accent).hover;
+    case theme_color::pressed: return soft_selection(b.base, b.accent).hover_selected;
+    case theme_color::focus: return b.accent;
+    // An unfocused window's selection: grey, as Explorer's and GTK's.
+    case theme_color::highlight_inactive: return mix(b.base, b.text, dark ? 0.2f : 0.15f);
+    case theme_color::highlight_inactive_text: return b.text;
+    case theme_color::border: return mix(b.window, b.window_text, dark ? 0.25f : 0.22f);
+    case theme_color::divider: return mix(b.base, b.text, dark ? 0.15f : 0.1f);
+    case theme_color::disabled_text: return mix(b.window, b.window_text, 0.45f);
     }
     return b.text;
 }

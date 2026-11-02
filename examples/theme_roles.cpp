@@ -35,6 +35,19 @@ const role_name roles[] = {
     {theme_color::negative, "negative"},
     {theme_color::neutral, "neutral"},
     {theme_color::warning, "warning"},
+    {theme_color::header, "header"},
+    {theme_color::header_text, "header_text"},
+    {theme_color::card, "card"},
+    {theme_color::tooltip, "tooltip"},
+    {theme_color::tooltip_text, "tooltip_text"},
+    {theme_color::hover, "hover"},
+    {theme_color::pressed, "pressed"},
+    {theme_color::focus, "focus"},
+    {theme_color::highlight_inactive, "highlight_inactive"},
+    {theme_color::highlight_inactive_text, "highlight_inactive_text"},
+    {theme_color::border, "border"},
+    {theme_color::divider, "divider"},
+    {theme_color::disabled_text, "disabled_text"},
 };
 static_assert(std::size(roles) == size_t(rap::theme_color_count), "a name for every role");
 
@@ -49,7 +62,7 @@ std::string hex(rap::color c)
 void paint_swatches(rap::painter& p, rap::size_f size)
 {
     p.rect({0, 0, size.w, size.h}, 0, rap::paint{theme_color::window}, std::nullopt);
-    const float pad = 8, w = 200, h = 34;
+    const float pad = 8, w = 210, h = 34;
     const int per_column = int(std::max(1.f, (size.h - pad) / (h + pad)));
     rap::text_style label, value;
     label.fg = theme_color::window_text;
@@ -116,7 +129,7 @@ int main(int argc, char** argv)
                 list{{{"Solid selection", {}, true}}, &model}.bind(solid).stretch(),
             }
                 .height(7_lines),
-        }}}.size(660_px, 620_px));
+        }}}.size(880_px, 640_px));
     soft->select({1});
     solid->select({1});
     win->show();

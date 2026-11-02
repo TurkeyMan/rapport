@@ -349,8 +349,29 @@ color theme_color_of(theme_color role)
     case theme_color::positive:
     case theme_color::negative:
     case theme_color::warning: return palette::fluent_status(role, dark);
+    case theme_color::header_text: return sys_color(COLOR_BTNTEXT);
+    case theme_color::card: return sys_color(COLOR_WINDOW);
+    // Themed tooltips ignore COLOR_INFOBK (classic yellow) and draw on the
+    // window colour; high contrast's are the info colours.
+    case theme_color::tooltip: return sys_color(d.high_contrast ? COLOR_INFOBK : COLOR_WINDOW);
+    case theme_color::tooltip_text:
+        return sys_color(d.high_contrast ? COLOR_INFOTEXT : COLOR_WINDOWTEXT);
+    // Fluent's focus ring is the text's colour, not the accent's.
+    case theme_color::focus: return sys_color(COLOR_WINDOWTEXT);
+    case theme_color::highlight_inactive:
+        if (d.high_contrast) return sys_color(COLOR_BTNFACE);
+        break;
+    case theme_color::highlight_inactive_text:
+        if (d.high_contrast) return sys_color(COLOR_BTNTEXT);
+        break;
+    case theme_color::border: return sys_color(COLOR_3DSHADOW);
+    case theme_color::divider: return sys_color(d.high_contrast ? COLOR_WINDOWTEXT : COLOR_3DLIGHT);
+    case theme_color::disabled_text: return sys_color(COLOR_GRAYTEXT);
+    default: break;
     }
-    return color{0, 0, 0, 255};
+    return palette::derived(role, {sys_color(COLOR_BTNFACE), sys_color(COLOR_BTNTEXT),
+                                   sys_color(COLOR_WINDOW), sys_color(COLOR_WINDOWTEXT),
+                                   d.high_contrast ? sys_color(COLOR_HIGHLIGHT) : d.accent});
 }
 
 // -- images -------------------------------------------------------------------

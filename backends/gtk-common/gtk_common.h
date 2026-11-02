@@ -1126,6 +1126,26 @@ inline std::optional<color> desktop_color(GtkWidget* w, theme_color role)
     case tc::warning: return named_color(w, {"warning_color", "theme_warning_color"});
     case tc::negative:
         return named_color(w, {"error_color", "destructive_color", "theme_error_color"});
+    case tc::header: return named_color(w, {"headerbar_bg_color", "theme_header_bg_color"});
+    case tc::header_text: return named_color(w, {"headerbar_fg_color", "theme_header_fg_color"});
+    case tc::card: return named_color(w, {"card_bg_color"});
+    // GTK's own theme draws tooltips black at 80% over anything, with
+    // white text; others may name theirs.
+    case tc::tooltip:
+        if (auto c = named_color(w, {"tooltip_bg_color", "theme_tooltip_bg_color"})) return c;
+        if (default_gtk_theme()) return color{0x33, 0x33, 0x33};
+        return std::nullopt;
+    case tc::tooltip_text:
+        if (auto c = named_color(w, {"tooltip_fg_color", "theme_tooltip_fg_color"})) return c;
+        if (default_gtk_theme()) return color{0xff, 0xff, 0xff};
+        return std::nullopt;
+    // Hover and pressed as GTK's soft-selection lists tint their rows.
+    case tc::hover: return soft_hover_color(w);
+    case tc::pressed: return soft_selection_colors(w).first;
+    case tc::highlight_inactive: return named_color(w, {"theme_unfocused_selected_bg_color"});
+    case tc::highlight_inactive_text: return named_color(w, {"theme_unfocused_selected_fg_color"});
+    case tc::border: return named_color(w, {"borders", "border_color"});
+    case tc::disabled_text: return named_color(w, {"insensitive_fg_color"});
     default: return std::nullopt;
     }
 }
