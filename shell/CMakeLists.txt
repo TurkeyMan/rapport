@@ -101,6 +101,10 @@ if(UNIX AND NOT APPLE)
         set(RAPPORT_SHELL_DIR_dolphin ${QT6_INSTALL_PLUGINS}/kf6/kfileitemaction CACHE INTERNAL "")
         set(RAPPORT_SHELL_DOLPHIN_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/linux/dolphin.cpp
             CACHE INTERNAL "")
+        # Its badges: an overlay icon plugin, a module of its own.
+        set(RAPPORT_SHELL_DIR_dolphin_badges ${QT6_INSTALL_PLUGINS}/kf6/overlayicon CACHE INTERNAL "")
+        set(RAPPORT_SHELL_DOLPHIN_BADGES_SOURCE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/linux/dolphin_badges.cpp CACHE INTERNAL "")
         list(APPEND file_managers dolphin)
     else()
         message(${skip_level} "rapport: skipping the dolphin extension (KF6 KIO not found)")

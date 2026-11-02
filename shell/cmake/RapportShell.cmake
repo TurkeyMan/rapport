@@ -9,7 +9,8 @@
 #                   is installed (nautilus, nemo, caja, thunar, dolphin),
 #                   installed into its extension directory as the install
 #                   component <target>-<fm>; RAPPORT_SHELL_FILE_MANAGERS
-#                   lists them. RESOURCE_DIR is where the app installs the
+#                   lists them. Dolphin's badges are a second module,
+#                   <target>-dolphin-badges, in the same component. RESOURCE_DIR is where the app installs the
 #                   menu's icons (rap::shell::resource_dir()).
 #   <target>-probe  prints the provider's menu for some paths, for testing
 # Link the provider's own dependencies to <target>_provider.
@@ -71,6 +72,27 @@ function(rapport_add_shell_extension target)
             target_link_libraries(${target}-${fm} PRIVATE rapport_shell_linux KF6::KIOWidgets
                                   Qt6::Widgets)
             set_target_properties(${target}-${fm} PROPERTIES AUTOMOC ON)
+
+            # The badges: KIO's overlay icon plugin, a module of its own.
+            set(badges ${target}-dolphin-badges)
+            file(CONFIGURE OUTPUT ${meta}/rapport-shell-dolphin-badges.json @ONLY CONTENT [=[
+{
+    "KPlugin": {
+        "Name": "@ARG_NAME@"
+    }
+}
+]=])
+            add_library(${badges} MODULE ${info} ${RAPPORT_SHELL_DOLPHIN_BADGES_SOURCE})
+            target_include_directories(${badges} PRIVATE ${meta})
+            target_link_libraries(${badges} PRIVATE rapport_shell_linux KF6::KIOCore
+                                  $<LINK_LIBRARY:WHOLE_ARCHIVE,${target}_provider>)
+            target_link_options(${badges} PRIVATE
+                                -Wl,--version-script=${RAPPORT_SHELL_EXTENSION_MAP} -Wl,--no-undefined)
+            set_target_properties(${badges} PROPERTIES
+                AUTOMOC ON PREFIX "" CXX_VISIBILITY_PRESET hidden
+                LINK_DEPENDS ${RAPPORT_SHELL_EXTENSION_MAP})
+            install(TARGETS ${badges} LIBRARY DESTINATION ${RAPPORT_SHELL_DIR_dolphin_badges}
+                    COMPONENT ${target}-${fm})
         else()
             target_link_libraries(${target}-${fm} PRIVATE
                                   $<LINK_LIBRARY:WHOLE_ARCHIVE,rapport::shell_${fm}>)
