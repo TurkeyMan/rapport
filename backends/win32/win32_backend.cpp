@@ -7594,7 +7594,6 @@ public:
                                      ICC_UPDOWN_CLASS | ICC_STANDARD_CLASSES | ICC_LINK_CLASS};
         InitCommonControlsEx(&icc);
         apply_app_mode();
-        dark_scroll_bars();
         if (!d2d_factory() || !dwrite_factory()) return nullptr;
         return new win32_backend;
     }
