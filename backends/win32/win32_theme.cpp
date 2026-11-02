@@ -80,11 +80,13 @@ void apply_app_mode()
 {
     const uxtheme_dark& u = uxtheme();
     if (!u.set_app_mode) return;
-    // Menus follow the app mode: Default 0, AllowDark 1 (as the system
-    // says), ForceDark 2, ForceLight 3. RAPPORT_THEME forces one; high
-    // contrast keeps Windows' own. 1809's AllowDarkModeForApp takes a BOOL.
+    // Menus follow the app mode: Default 0 (light), AllowDark 1 (as the
+    // system says), ForceDark 2. RAPPORT_THEME=dark forces dark; light is
+    // Default rather than ForceLight, which left the tab control without
+    // its labels; high contrast keeps Windows' own. 1809's
+    // AllowDarkModeForApp takes a BOOL.
     const int forced = palette::forced_scheme();
-    int mode = high_contrast() ? 0 : forced == 1 ? 2 : forced == 2 ? 3 : 1;
+    int mode = high_contrast() || forced == 2 ? 0 : forced == 1 ? 2 : 1;
     if (windows_build() < 18362) mode = dark_mode() ? 1 : 0;
     u.set_app_mode(mode);
     if (u.refresh_policy) u.refresh_policy();
@@ -104,6 +106,55 @@ void theme_top_window(HWND h)
     }
 }
 
+namespace
+{
+
+// A list's column headers in dark mode: the ItemsView style draws their
+// text dark unless told the colour (the header's custom draw, which goes to
+// the list).
+LRESULT CALLBACK dark_header_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg == WM_NOTIFY && dark_mode())
+    {
+        auto* hdr = reinterpret_cast<NMHDR*>(lp);
+        if (hdr->code == NM_CUSTOMDRAW && hdr->hwndFrom == ListView_GetHeader(h))
+        {
+            auto* cd = reinterpret_cast<NMCUSTOMDRAW*>(lp);
+            if (cd->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if (cd->dwDrawStage == CDDS_ITEMPREPAINT)
+            {
+                SetTextColor(cd->hdc, color_ref(theme_color_of(theme_color::header_text)));
+                return CDRF_DODEFAULT;
+            }
+        }
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
+// A sunken edge (WS_EX_CLIENTEDGE) in dark mode: rich text and list boxes
+// draw theirs white; over it, the border colour outside and the field's
+// inside.
+LRESULT CALLBACK dark_edge_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg != WM_NCPAINT || !dark_mode() ||
+        !(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_CLIENTEDGE))
+        return DefSubclassProc(h, msg, wp, lp);
+    const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+    if (HDC dc = GetWindowDC(h))
+    {
+        RECT w;
+        GetWindowRect(h, &w);
+        OffsetRect(&w, -w.left, -w.top);
+        FrameRect(dc, &w, theme_brush(theme_color::border));
+        InflateRect(&w, -1, -1);
+        FrameRect(dc, &w, theme_brush(theme_color::base));
+        ReleaseDC(h, dc);
+    }
+    return r;
+}
+
+}  // namespace
+
 void theme_control(HWND h)
 {
     const bool dark = dark_mode();
@@ -118,6 +169,7 @@ void theme_control(HWND h)
         if (HWND header = ListView_GetHeader(h))
             SetWindowTheme(header, dark ? L"DarkMode_ItemsView" : nullptr, nullptr);
         if (HWND tip = ListView_GetToolTips(h)) SetWindowTheme(tip, explorer, nullptr);
+        SetWindowSubclass(h, dark_header_proc, 0x7d, 0);
         ListView_SetBkColor(h, color_ref(theme_color_of(theme_color::base)));
         ListView_SetTextBkColor(h, color_ref(theme_color_of(theme_color::base)));
         ListView_SetTextColor(h, color_ref(theme_color_of(theme_color::text)));
@@ -151,9 +203,17 @@ void theme_control(HWND h)
         if (GetComboBoxInfo(h, &info) && info.hwndList)
             SetWindowTheme(info.hwndList, explorer, nullptr);
     }
+    else if (class_is(h, L"ListBox"))
+    {
+        SetWindowTheme(h, explorer, nullptr);
+        SetWindowSubclass(h, dark_edge_proc, 0x7e, 0);
+        RedrawWindow(h, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE);
+    }
     else if (class_is(h, L"RICHEDIT50W"))
     {
         SetWindowTheme(h, explorer, nullptr);
+        SetWindowSubclass(h, dark_edge_proc, 0x7e, 0);
+        RedrawWindow(h, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE);
         SendMessageW(h, EM_SETBKGNDCOLOR, 0, LPARAM(color_ref(theme_color_of(theme_color::base))));
     }
     else if (class_is(h, TOOLTIPS_CLASSW) || class_is(h, L"rapportHost") ||

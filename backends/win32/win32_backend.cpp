@@ -3043,6 +3043,11 @@ public:
 
     LRESULT notify(NMHDR* n, bool& handled) override
     {
+        if (n->code == NM_CUSTOMDRAW && dark_mode())
+        {
+            handled = true;
+            return dark_draw(reinterpret_cast<NMTBCUSTOMDRAW*>(n));
+        }
         handled = n->code == TBN_GETINFOTIPW;
         if (!handled) return 0;
         auto* tip = reinterpret_cast<NMTBGETINFOTIPW*>(n);
@@ -3054,6 +3059,37 @@ public:
             tip->pszText[len] = 0;
         }
         return 0;
+    }
+    // The toolbar has no dark style: its background and its buttons' hover,
+    // pressed and checked states in the theme's colours, the icons (drawn
+    // in the text colour) left to it.
+    LRESULT dark_draw(NMTBCUSTOMDRAW* cd)
+    {
+        switch (cd->nmcd.dwDrawStage)
+        {
+        case CDDS_PREPAINT:
+            FillRect(cd->nmcd.hdc, &cd->nmcd.rc, theme_brush(theme_color::window));
+            return CDRF_NOTIFYITEMDRAW;
+        case CDDS_ITEMPREPAINT:
+        {
+            const UINT st = cd->nmcd.uItemState;
+            if (st & (CDIS_SELECTED | CDIS_CHECKED | CDIS_HOT))
+                FillRect(cd->nmcd.hdc, &cd->nmcd.rc,
+                         theme_brush(st & CDIS_SELECTED  ? theme_color::pressed
+                                     : st & CDIS_CHECKED ? theme_color::highlight_inactive
+                                                         : theme_color::hover));
+            return TBCDRF_NOBACKGROUND | TBCDRF_NOEDGES | TBCDRF_NOOFFSET | TBCDRF_NOMARK |
+                   TBCDRF_NOETCHEDEFFECT;
+        }
+        }
+        return CDRF_DODEFAULT;
+    }
+    // New colours: the icons again in the new text colour.
+    void theme_changed() override
+    {
+        icon_px_ = 0;
+        rescale();
+        InvalidateRect(h_, nullptr, TRUE);
     }
     void command(WORD, WORD id) override
     {
