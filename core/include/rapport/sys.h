@@ -325,22 +325,40 @@ struct http_response
 
 struct http_options
 {
-    http_headers headers;  // Authorization, Accept, User-Agent, ...
+    // Authorization, Accept, User-Agent, ... Authorization and Cookie go only
+    // to the scheme, host and port asked for: a redirect elsewhere (a signed
+    // download on a storage host) goes on without them.
+    http_headers headers;
+    // The whole request's limit; or, with `stall` set, only connecting's.
     std::chrono::milliseconds timeout{15000};
+    // Set: no limit on the whole, but fails when no data comes for this long
+    // (a large download on a slow line).
+    std::chrono::milliseconds stall{0};
     std::size_t max_bytes = std::size_t(4) << 20;  // a longer body is cut short; 0: no limit
     const std::atomic<bool>* cancelled = nullptr;  // checked as data arrives
+    // Set: the final response's body goes here, piece by piece, rather than
+    // into http_response::body (max_bytes doesn't apply); false stops it,
+    // the response then saying why ("stopped").
+    std::function<bool(std::string_view)> sink;
+    // As the body arrives: bytes so far, and of how many (the Content-Length,
+    // when it's given and the body isn't compressed on the way).
+    std::function<void(std::uint64_t received, std::optional<std::uint64_t> total)> progress;
 };
 
-// An HTTP(S) request, blocking: for a worker thread. TLS, certificates,
-// proxies and redirects are the platform's: WinHTTP on Windows; elsewhere
-// libcurl, loaded when first used (without it, the response says so). The
-// body is sent as it is, its Content-Type among the options' headers. A
-// response is a response whatever its status: a 400 comes with its body.
-// Redirects: a 307 or 308 sends the body again, a 301, 302 or 303 goes on as
-// a GET.
+// An HTTP(S) request, blocking: for a worker thread. TLS, certificates and
+// proxies are the platform's: WinHTTP on Windows; elsewhere libcurl, loaded
+// when first used (without it, the response says so). The body is sent as it
+// is, its Content-Type among the options' headers. A response is a response
+// whatever its status: a 400 comes with its body. Redirects (up to 10): a 307
+// or 308 sends the body again, a 301, 302 or 303 goes on as a GET.
 http_response http_request(std::string_view method, const std::string& url,
                            std::string_view body = {}, const http_options& = {});
 http_response http_get(const std::string& url, const http_options& = {});
+// A GET into a file: written as `to` with ".part" added, renamed to `to`
+// once whole and the status is 2xx, removed otherwise. The response has no
+// body; options.sink is its own.
+http_response http_download(const std::string& url, const std::filesystem::path& to,
+                            const http_options& = {});
 
 // Whether the connection now is metered (charged by data, roaming, past a
 // cap), as the system has it: Windows' network cost; elsewhere
