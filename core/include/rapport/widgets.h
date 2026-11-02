@@ -177,7 +177,7 @@ struct icon
     static icon for_file(std::string file_name) { return {{}, std::move(file_name), {}, {}}; }
     static icon drawn(std::function<void(rap::painter&, rap::size_f)> f)
     {
-        return {{}, {}, std::move(f)};
+        return {{}, {}, std::move(f), {}};
     }
     explicit operator bool() const { return !name.empty() || !file.empty() || bool(draw); }
 };
