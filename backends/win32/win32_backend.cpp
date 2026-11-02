@@ -315,6 +315,18 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         {
             wchar_t cls[16] = {};
             GetClassNameW(c, cls, 16);
+            // A selectable label's edit is on the window's, as a label.
+            if (!_wcsicmp(cls, L"Edit") && GetPropW(c, L"rapport-label"))
+            {
+                SetTextColor(
+                    reinterpret_cast<HDC>(wp),
+                    color_ref(theme_color_of(IsWindowEnabled(c) ? theme_color::window_text
+                                                                : theme_color::disabled_text)));
+                SetBkColor(reinterpret_cast<HDC>(wp),
+                           color_ref(theme_color_of(theme_color::window)));
+                result = reinterpret_cast<LRESULT>(theme_brush(theme_color::window));
+                return true;
+            }
             if (!_wcsicmp(cls, L"Edit"))
             {
                 SetTextColor(reinterpret_cast<HDC>(wp),
@@ -1186,6 +1198,7 @@ public:
             adopt(create_control(win, parent, L"EDIT", to_crlf(wide(s.text)),
                                  ES_READONLY | ES_MULTILINE | (wrap_ ? 0 : ES_AUTOHSCROLL)));
             SendMessageW(h_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+            SetPropW(h_, L"rapport-label", h_);  // its colours: a label's (WM_CTLCOLORSTATIC)
             SetWindowSubclass(h_, selectable_proc, 4, 0);
         }
         else
@@ -1310,7 +1323,7 @@ private:
     }
     // A selectable label's edit: Tab and Enter go on to the dialog (a
     // multi-line edit asks for every key, which kept the focus in it), and
-    // its margins stay none when its font changes.
+    // its margins stay none when its font changes; its label mark goes with it.
     static LRESULT CALLBACK selectable_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
                                             DWORD_PTR)
     {
@@ -1318,6 +1331,7 @@ private:
             return DefSubclassProc(h, msg, wp, lp) & ~(DLGC_WANTALLKEYS | DLGC_WANTTAB);
         const LRESULT r = DefSubclassProc(h, msg, wp, lp);
         if (msg == WM_SETFONT) SendMessageW(h, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        if (msg == WM_NCDESTROY) RemovePropW(h, L"rapport-label");
         return r;
     }
     bool ellipsize_;
