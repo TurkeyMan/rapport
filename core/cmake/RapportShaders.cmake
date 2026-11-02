@@ -87,9 +87,12 @@ function(rapport_add_shader target)
         endforeach()
         set(language spirv)
         set(out ${dir}/${S_NAME}.spv)
+        # --hlsl-iomap maps by HLSL register class, as DXC's -fvk-*-shift do:
+        # without it glslang files a RWByteAddressBuffer (u0) as a storage
+        # buffer, which no shift moves, and it lands on t0's binding.
         set(command ${RAPPORT_SHADER_COMPILER} -V -D -S ${glslang_stage} -e ${S_ENTRY} --source-entrypoint ${S_ENTRY}
-                    -I${source_dir} --shift-texture-binding 0 --shift-sampler-binding 16 --shift-UBO-binding 24
-                    --shift-UAV-binding 25 ${defines} -o ${out} ${source})
+                    -I${source_dir} --hlsl-iomap --shift-texture-binding 0 --shift-sampler-binding 16
+                    --shift-UBO-binding 24 --shift-UAV-binding 25 ${defines} -o ${out} ${source})
     endif()
 
     set(header ${dir}/${S_NAME}.h)
