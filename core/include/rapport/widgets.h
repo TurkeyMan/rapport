@@ -752,6 +752,7 @@ public:
     virtual void set_sort_indicator(std::optional<size_t> column, sort_order) = 0;
 
     virtual std::vector<float> column_widths() const = 0;  // for saving state
+    // A width of 0 leaves its column as it is.
     virtual void set_column_widths(const std::vector<float>&) = 0;
     virtual bool column_visible(size_t column) const = 0;
     virtual void set_column_visible(size_t column, bool) = 0;
