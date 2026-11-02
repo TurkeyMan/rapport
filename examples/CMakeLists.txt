@@ -33,6 +33,9 @@ target_link_libraries(rapport-theme-roles PRIVATE rapport::rapport)
 add_executable(rapport-list-dnd list_dnd.cpp)
 target_link_libraries(rapport-list-dnd PRIVATE rapport::rapport)
 
+add_executable(rapport-split-show split_show.cpp)
+target_link_libraries(rapport-split-show PRIVATE rapport::rapport)
+
 add_executable(rapport-gallery gallery.cpp)
 target_link_libraries(rapport-gallery PRIVATE rapport::rapport)
 if(NOT MSVC)
@@ -54,7 +57,7 @@ if(RAPPORT_STATIC)
     endforeach()
     file(GENERATE OUTPUT ${builtins_cpp} CONTENT "${builtins}")
     foreach(example rapport-demo rapport-gallery rapport-canvas rapport-frame rapport-gpu rapport-print rapport-list-dnd
-                    rapport-theme-roles)
+                    rapport-theme-roles rapport-split-show)
         if(NOT TARGET ${example})
             continue()
         endif()

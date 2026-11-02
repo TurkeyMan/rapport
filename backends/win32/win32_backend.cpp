@@ -315,6 +315,18 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         {
             wchar_t cls[16] = {};
             GetClassNameW(c, cls, 16);
+            // A selectable label's edit is on the window's, as a label.
+            if (!_wcsicmp(cls, L"Edit") && GetPropW(c, L"rapport-label"))
+            {
+                SetTextColor(
+                    reinterpret_cast<HDC>(wp),
+                    color_ref(theme_color_of(IsWindowEnabled(c) ? theme_color::window_text
+                                                                : theme_color::disabled_text)));
+                SetBkColor(reinterpret_cast<HDC>(wp),
+                           color_ref(theme_color_of(theme_color::window)));
+                result = reinterpret_cast<LRESULT>(theme_brush(theme_color::window));
+                return true;
+            }
             if (!_wcsicmp(cls, L"Edit"))
             {
                 SetTextColor(reinterpret_cast<HDC>(wp),
@@ -869,24 +881,109 @@ public:
         return dir_ == orientation::horizontal ? SIZE{main, cross} : SIZE{cross, main};
     }
 
+    // In a column, its width and the room it leaves decide how tall text
+    // that wraps is; in a row, each child's share of the width does.
+    long measure_height(long width) override
+    {
+        const std::vector<item*> shown = shown_children();
+        if (shown.empty()) return natural().cy;
+        if (dir_ == orientation::horizontal)
+        {
+            const std::vector<long> sizes = shares(shown, width - 2 * margin_, 0);
+            long h = 0;
+            for (size_t i = 0; i < shown.size(); ++i)
+                h = std::max(h, height_of(shown[i], sizes[i]));
+            return h + 2 * (margin_ / 2);
+        }
+        const long inner = width - 2 * (margin_ / 2);
+        long h = spacing_ * long(shown.size() - 1) + 2 * margin_;
+        for (item* c : shown) h += height_of(c, cross_of(c, inner));
+        return h;
+    }
+
     void place(RECT r) override
     {
         if (dir_ == orientation::horizontal)
             InflateRect(&r, -margin_, -(margin_ / 2));
         else
             InflateRect(&r, -(margin_ / 2), -margin_);
-        std::vector<item*> shown;
-        for (item* c : children)
-            if (c->visible) shown.push_back(c);
+        const std::vector<item*> shown = shown_children();
         if (shown.empty()) return;
         const long total = dir_ == orientation::horizontal ? r.right - r.left : r.bottom - r.top;
         const long cross_total = dir_ == orientation::horizontal ? r.bottom - r.top : r.right - r.left;
+        const std::vector<long> sizes = shares(shown, total, cross_total);
+        long pos = dir_ == orientation::horizontal ? r.left : r.top;
+        for (size_t i = 0; i < shown.size(); ++i)
+        {
+            item* c = shown[i];
+            long cross_size, cross_pos;
+            if (dir_ == orientation::horizontal)
+            {
+                // Single-line things sit centred across a row.
+                cross_size =
+                    c->fills() ? cross_total : std::min(cross_total, height_of(c, sizes[i]));
+                cross_pos = r.top + (cross_total - cross_size) / 2;
+            }
+            else
+            {
+                // In a column, left-aligned.
+                cross_size = cross_of(c, cross_total);
+                cross_pos = r.left;
+            }
+            RECT cr = dir_ == orientation::horizontal
+                          ? RECT{pos, cross_pos, pos + sizes[i], cross_pos + cross_size}
+                          : RECT{cross_pos, pos, cross_pos + cross_size, pos + sizes[i]};
+            c->place(cr);
+            pos += sizes[i] + spacing_;
+        }
+    }
+
+    void show_all(bool shown) override
+    {
+        for (item* c : children) c->show_all(shown && visible);
+    }
+
+private:
+    SIZE size_of(item* c)
+    {
+        SIZE s = c->natural();
+        if (c->fixed_w > 0) s.cx = c->fixed_w;
+        if (c->fixed_h > 0) s.cy = c->fixed_h;
+        return s;
+    }
+    long along(SIZE s) const { return dir_ == orientation::horizontal ? s.cx : s.cy; }
+    long across(SIZE s) const { return dir_ == orientation::horizontal ? s.cy : s.cx; }
+    static long height_of(item* c, long width)
+    {
+        return c->fixed_h > 0 ? c->fixed_h : c->height_at(width);
+    }
+    std::vector<item*> shown_children() const
+    {
+        std::vector<item*> shown;
+        for (item* c : children)
+            if (c->visible) shown.push_back(c);
+        return shown;
+    }
+    // A child's width in a column `cross_total` wide: its natural width, or
+    // all of it for what fills or would be wider.
+    long cross_of(item* c, long cross_total)
+    {
+        const long w = size_of(c).cx;
+        const bool fill = c->fills() || c->expands_in_form();
+        return fill || w > cross_total ? cross_total : w;
+    }
+    // Each shown child's size along the box, `total` long (in a column,
+    // `cross_total` wide, which decides how tall wrapped text is).
+    std::vector<long> shares(const std::vector<item*>& shown, long total, long cross_total)
+    {
         std::vector<long> sizes;
         long used = spacing_ * long(shown.size() - 1);
         int stretch_sum = 0;
         for (item* c : shown)
         {
-            sizes.push_back(along(size_of(c)));
+            sizes.push_back(dir_ == orientation::horizontal
+                                ? size_of(c).cx
+                                : height_of(c, cross_of(c, cross_total)));
             used += sizes.back();
             stretch_sum += c->stretch;
         }
@@ -920,7 +1017,7 @@ public:
                 given = target;
             }
         }
-        else if (used > total)
+        if (used > total)
         {
             // Too small: shrink the last item first (what overflows gets clipped).
             long over = used - total;
@@ -931,41 +1028,8 @@ public:
                 over -= cut;
             }
         }
-        long pos = dir_ == orientation::horizontal ? r.left : r.top;
-        for (size_t i = 0; i < shown.size(); ++i)
-        {
-            item* c = shown[i];
-            const SIZE nat = size_of(c);
-            long cross_size = across(nat), cross_pos;
-            const bool fill = c->fills() || (dir_ == orientation::vertical && c->expands_in_form());
-            if (fill || cross_size > cross_total) cross_size = cross_total;
-            // Single-line things sit centred across a row; in a column, left-aligned.
-            if (dir_ == orientation::horizontal)
-                cross_pos = r.top + (cross_total - cross_size) / 2;
-            else
-                cross_pos = r.left;
-            RECT cr = dir_ == orientation::horizontal ? RECT{pos, cross_pos, pos + sizes[i], cross_pos + cross_size}
-                                                      : RECT{cross_pos, pos, cross_pos + cross_size, pos + sizes[i]};
-            c->place(cr);
-            pos += sizes[i] + spacing_;
-        }
+        return sizes;
     }
-
-    void show_all(bool shown) override
-    {
-        for (item* c : children) c->show_all(shown && visible);
-    }
-
-private:
-    SIZE size_of(item* c)
-    {
-        SIZE s = c->natural();
-        if (c->fixed_w > 0) s.cx = c->fixed_w;
-        if (c->fixed_h > 0) s.cy = c->fixed_h;
-        return s;
-    }
-    long along(SIZE s) const { return dir_ == orientation::horizontal ? s.cx : s.cy; }
-    long across(SIZE s) const { return dir_ == orientation::horizontal ? s.cy : s.cx; }
 
     orientation dir_;
     int spacing_;
@@ -1116,7 +1180,8 @@ public:
     label_impl(win_context& win, HWND parent, const spec::label& s)
         : leaf(win)
         , ellipsize_(s.ellipsize)
-        , wrap_(s.wrap && !s.link && !s.selectable)
+        , wrap_(s.wrap && !s.link)
+        , selectable_(s.selectable && !s.link)
         , link_(s.link)
         , on_click_(s.on_click)
         , icon_(s.icon)
@@ -1136,14 +1201,25 @@ public:
             paint_buffered(h_, buffer_bg::parent);
         }
         else if (s.selectable)
-            adopt(create_control(win, parent, L"EDIT", wide(s.text), ES_READONLY | ES_AUTOHSCROLL));
+        {
+            // A read-only edit, without its frame or margins so its text
+            // sits where a label's would; multi-line, so it shows every line
+            // and wraps when asked to (a single-line one ran off its pane).
+            adopt(create_control(win, parent, L"EDIT", to_crlf(wide(s.text)),
+                                 ES_READONLY | ES_MULTILINE | (wrap_ ? 0 : ES_AUTOHSCROLL)));
+            SendMessageW(h_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+            SetPropW(h_, L"rapport-label", h_);  // its colours: a label's (WM_CTLCOLORSTATIC)
+            SetWindowSubclass(h_, selectable_proc, 4, 0);
+        }
         else
             adopt(create_control(win, parent, L"STATIC", wide(s.text),
                                 SS_LEFT | SS_NOPREFIX | (s.ellipsize ? SS_ENDELLIPSIS : 0)));
     }
     void set_text(const std::string& t) override
     {
-        SetWindowTextW(h_, link_ ? link_markup(t).c_str() : wide(t).c_str());
+        SetWindowTextW(h_, link_         ? link_markup(t).c_str()
+                           : selectable_ ? to_crlf(wide(t)).c_str()
+                                         : wide(t).c_str());
         if (!ellipsize_) win_.relayout();
     }
     ~label_impl() override
@@ -1229,11 +1305,22 @@ public:
         if (ellipsize_) s.cx = std::min<long>(s.cx, px(40));
         return s;
     }
+    // Wrapped text takes more lines narrower than its natural width, fewer wider.
+    long measure_height(long width) override
+    {
+        const SIZE n = natural();
+        if (!wrap_ || width == n.cx) return n.cy;
+        const int icon = icon_h_ ? px(16) + px(4) : 0;
+        const long h =
+            text_extent(h_, window_text(h_), true, int(std::max<long>(1, width - icon))).cy;
+        return icon_h_ ? std::max<long>(h, px(16)) : h;
+    }
     // Measured at a token width so it never widens a window, it still shows
     // its whole text in a row with room for it, as GTK and Qt do.
     long wants_wider() const override { return ellipsize_ ? std::max(0L, full_cx_ - px(40)) : 0; }
-    // Its natural width is a token one, so it fills across a column.
-    bool expands_in_form() const override { return ellipsize_; }
+    // An ellipsized label's natural width is a token one, so it fills
+    // across a column; text that wraps fills it too and wraps at its width.
+    bool expands_in_form() const override { return ellipsize_ || wrap_; }
 
 private:
     // SysLink takes its text as markup: <a> around it, & doubled (it marks
@@ -1244,8 +1331,22 @@ private:
         for (wchar_t c : wide(text)) out += c == L'&' ? std::wstring(L"&&") : std::wstring(1, c);
         return out + L"</a>";
     }
+    // A selectable label's edit: Tab and Enter go on to the dialog (a
+    // multi-line edit asks for every key, which kept the focus in it), and
+    // its margins stay none when its font changes; its label mark goes with it.
+    static LRESULT CALLBACK selectable_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                            DWORD_PTR)
+    {
+        if (msg == WM_GETDLGCODE)
+            return DefSubclassProc(h, msg, wp, lp) & ~(DLGC_WANTALLKEYS | DLGC_WANTTAB);
+        const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+        if (msg == WM_SETFONT) SendMessageW(h, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        if (msg == WM_NCDESTROY) RemovePropW(h, L"rapport-label");
+        return r;
+    }
     bool ellipsize_;
     bool wrap_;
+    bool selectable_;
     long full_cx_ = 0;
     bool link_;
     std::function<void()> on_click_;
@@ -2044,6 +2145,10 @@ public:
     {
         const SIZE c = content ? content->natural() : SIZE{0, 0};
         return {std::max(c.cx, title_size().cx + win_.px(16)) + 2 * pad(), c.cy + top() + pad()};
+    }
+    long measure_height(long width) override
+    {
+        return (content ? content->height_at(width - 2 * pad()) : 0) + top() + pad();
     }
     void place(RECT r) override
     {
@@ -5152,16 +5257,22 @@ public:
     bool has_focus() const override { return false; }
     void on_moved(std::function<void()> f) override { moved_ = std::move(f); }
     float divider() const override { return float(bar()) / win_.scale(); }
+    // The sizes it was given or dragged to, else those it was laid out at.
     std::vector<float> sizes() const override
     {
         std::vector<float> out;
-        for (long s : sizes_) out.push_back(s / win_.scale());
+        for (long s : sizes_.size() == panes.size() ? sizes_ : placed_)
+            out.push_back(std::max(0L, s) / win_.scale());
         return out;
     }
+    // A size of 0 leaves that pane's as it was.
     void set_sizes(const std::vector<float>& s) override
     {
-        sizes_.clear();
-        for (float v : s) sizes_.push_back(long(v * win_.scale()));
+        std::vector<long> was = sizes_.size() == panes.size() ? sizes_ : placed_;
+        was.resize(panes.size(), 0);
+        sizes_.assign(panes.size(), 0);
+        for (size_t i = 0; i < panes.size(); ++i)
+            sizes_[i] = i < s.size() && s[i] > 0 ? long(s[i] * win_.scale()) : was[i];
         win_.relayout();
     }
 
@@ -5170,14 +5281,16 @@ public:
     SIZE measure() override
     {
         long main = 0, cross = 0;
+        int shown = 0;
         for (item* p : panes)
         {
             if (!p->visible) continue;
-            const SIZE s = p->natural();
+            const SIZE s = size_of(p);
             main += dir_ == orientation::horizontal ? s.cx : s.cy;
             cross = std::max(cross, dir_ == orientation::horizontal ? s.cy : s.cx);
+            ++shown;
         }
-        main += bar() * long(panes.size() - 1);
+        main += bar() * long(std::max(shown, 1) - 1);
         return dir_ == orientation::horizontal ? SIZE{main, cross} : SIZE{cross, main};
     }
     void place(RECT r) override
@@ -5198,8 +5311,7 @@ public:
             for (size_t i : shown)
                 if (!panes[i]->stretch)
                 {
-                    const SIZE n = panes[i]->natural();
-                    sz[i] = dir_ == orientation::horizontal ? n.cx : n.cy;
+                    sz[i] = natural_along(i);
                     fixed += sz[i];
                 }
             if (stretch_sum)
@@ -5224,6 +5336,8 @@ public:
             // The pane that stretches (else the first) takes what the window
             // gains or loses; the others keep the sizes they were dragged to,
             // down to their natural sizes if the window gets too small for that.
+            // One never sized (hidden when the others were) starts at its
+            // natural size.
             size_t flex = shown[0];
             for (size_t i : shown)
                 if (panes[i]->stretch > 0)
@@ -5235,7 +5349,7 @@ public:
             for (size_t i : shown)
                 if (i != flex)
                 {
-                    sz[i] = sizes_[i];
+                    sz[i] = sizes_[i] > 0 ? sizes_[i] : natural_along(i);
                     given += sz[i];
                 }
             sz[flex] = rest - given;
@@ -5283,9 +5397,19 @@ public:
 
 private:
     int bar() const { return win_.px(5); }
+    // A pane's size: natural, or the width or height it was given (as a
+    // box takes it). Ignoring that, a pane of wrapping text 60 characters
+    // wide asked for its text's whole single-line width.
+    static SIZE size_of(item* p)
+    {
+        SIZE s = p->natural();
+        if (p->fixed_w > 0) s.cx = p->fixed_w;
+        if (p->fixed_h > 0) s.cy = p->fixed_h;
+        return s;
+    }
     long natural_along(size_t i) const
     {
-        const SIZE n = panes[i]->natural();
+        const SIZE n = size_of(panes[i]);
         return dir_ == orientation::horizontal ? n.cx : n.cy;
     }
     LRESULT bar_message(size_t index, HWND h, UINT msg, LPARAM lp, bool& handled)
@@ -5341,11 +5465,7 @@ private:
         // No pane goes below its natural size: its content doesn't shrink,
         // so less would overlap the next pane or run past the window.
         std::vector<long> least(sz.size());
-        for (size_t k = 0; k < sz.size(); ++k)
-        {
-            const SIZE n = panes[shown[k]]->natural();
-            least[k] = std::min(sz[k], dir_ == orientation::horizontal ? n.cx : n.cy);
-        }
+        for (size_t k = 0; k < sz.size(); ++k) least[k] = std::min(sz[k], natural_along(shown[k]));
         long below = 0;  // what the panes after the bar can give up
         for (size_t k = index + 1; k < sz.size(); ++k) below += sz[k] - least[k];
         delta = std::clamp(delta, least[index] - sz[index], std::max(0L, below));
@@ -5437,7 +5557,10 @@ private:
         RECT client;
         GetClientRect(host_, &client);
         const SIZE n = content->natural();
-        const long h = std::max<long>(n.cy, client.bottom), w = horizontal_ ? std::max<long>(n.cx, client.right) : client.right;
+        // As tall as the content is at the width it's given: text that wraps
+        // takes more lines when narrower than its natural width.
+        const long w = horizontal_ ? std::max<long>(n.cx, client.right) : client.right;
+        const long h = std::max<long>(content->height_at(w), client.bottom);
         SCROLLINFO si{sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, int(h - 1), UINT(client.bottom), 0, 0};
         y_ = std::clamp(y_, 0L, std::max(0L, h - client.bottom));
         si.nPos = int(y_);

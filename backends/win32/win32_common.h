@@ -258,6 +258,19 @@ public:
         return measured_;
     }
     virtual SIZE measure() = 0;
+    // Height when laid out `width` across: text that wraps takes more lines
+    // in less room than its natural width. Once per layout pass and width.
+    long height_at(long width)
+    {
+        if (height_in_ != g_layout_pass || height_width_ != width)
+        {
+            height_ = measure_height(width);
+            height_in_ = g_layout_pass;
+            height_width_ = width;
+        }
+        return height_;
+    }
+    virtual long measure_height(long) { return natural().cy; }
     virtual void place(RECT r) = 0;       // position (and size) everything
     virtual void show_all(bool shown) = 0;  // show/hide HWNDs (respecting own visibility)
     // Fills the cross axis of a box (multi-line things, containers).
@@ -276,6 +289,8 @@ public:
 private:
     SIZE measured_{};
     unsigned measured_in_ = 0;
+    long height_ = 0, height_width_ = -1;
+    unsigned height_in_ = 0;
 };
 
 using item_ptr = std::unique_ptr<item>;
