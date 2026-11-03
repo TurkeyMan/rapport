@@ -122,7 +122,8 @@ int main()
         d::view_snapshots s;
         s.publish(s.begin(), {}, in(dir, false));
         s.change_site([] {});
-        check(s.publish(s.begin(), {}, in(other, false)), "the new site's right-click lands");
+        check(!s.publish(s.begin(), {}, in(other, false)),
+              "the new site's right-click about the same items keeps no view");
         check(!s.take({}), "the last site's slow call, first: no view, never the new site's");
         check(!s.take({}), "the new site's own: no view either, it can't be told apart");
         check(s.publish(s.begin(), {}, in(other, false)) && same(s.take({}), other, false),
@@ -133,6 +134,28 @@ int main()
         s.publish(s.begin(), {dir}, in(dir, false));
         check(same(s.take({dir}), dir, false) && !s.take({file}),
               "the new site's right-click about other items keeps its view");
+    }
+
+    // A new site before the last one's ask lands: Explorer still makes that
+    // right-click's slow call, which mustn't take the new site's snapshot.
+    {
+        d::view_snapshots s;
+        const auto asked = s.begin();
+        s.change_site([] {});
+        check(!s.publish(asked, {}, in(dir, false)), "the last site's ask keeps no view");
+        check(!s.publish(s.begin(), {}, in(other, false)),
+              "the new site's right-click about the same items keeps none either");
+        check(!s.take({}), "the last site's slow call, first: no view, never the new site's");
+        check(!s.take({}), "the new site's own: no view, it can't be told apart");
+        check(s.publish(s.begin(), {}, in(other, false)) && same(s.take({}), other, false),
+              "once both have come, a right-click gets its own again");
+
+        const auto alone = s.begin();
+        s.change_site([] {});
+        s.publish(alone, {dir}, in(dir, false));
+        check(!s.take({dir}), "a last-site ask alone: its slow call gets no view");
+        check(s.publish(s.begin(), {dir}, in(dir, false)) && same(s.take({dir}), dir, false),
+              "and is owed no more after it");
     }
 
     // Past the most tracked: none is dropped (its slow call could take a

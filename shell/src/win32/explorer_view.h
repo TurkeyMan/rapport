@@ -11,9 +11,10 @@
 //  - A new site poisons what the last one said: its slow calls may still
 //    come, and mustn't take the new site's snapshot for the same items.
 //  - Past `most` items tracked at once, it gives up: no view from then on.
+//  - An ask of the last site that was under way when the new one came
+//    keeps no view, but its slow call is owed all the same.
 // The site, its generation and the snapshots share one lock, so a new site
-// takes effect in one step, and an ask of the last one that's under way
-// doesn't land. With no view, the click is taken as its items: a background
+// takes effect in one step. With no view, the click is taken as its items: a background
 // click then counts as its folder, which is wrong but harmless.
 //
 // No COM here, so tests/explorer_view_test.cpp can check it.
@@ -69,19 +70,22 @@ public:
         return begin([] {});
     }
 
-    // After: kept for the slow call about the same items, unless the site
-    // changed meanwhile. A second about items already waiting makes them
+    // After: kept for the slow call about the same items. If the site
+    // changed meanwhile, the view isn't kept, but its slow call is still owed
+    // (Explorer is told E_PENDING either way), so those items get no view
+    // until it's come. A second about items already waiting makes them
     // ambiguous: no view for any of their slow calls.
     bool publish(std::uint64_t site, paths items, view_info view)
     {
         std::lock_guard<std::mutex> lock(lock_);
-        if (lost_ || site != site_) return false;
+        if (lost_) return false;
+        const bool current = site == site_;
         for (snapshot& s : pending_)
             if (s.items == items)
             {
                 s.view.reset();
                 ++s.calls;
-                return true;
+                return false;
             }
         if (pending_.size() == most)
         {
@@ -90,8 +94,9 @@ public:
             pending_.clear();
             return false;
         }
-        pending_.push_back({std::move(items), std::move(view), 1});
-        return true;
+        pending_.push_back({std::move(items),
+                            current ? std::optional<view_info>(std::move(view)) : std::nullopt, 1});
+        return current;
     }
 
     // The slow call: what the view said about these items, once, or
