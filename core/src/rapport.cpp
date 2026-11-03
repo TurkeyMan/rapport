@@ -218,6 +218,7 @@ private:
         if (s.on_selection_changed) t.on_selection_changed(s.on_selection_changed);
         if (s.on_activate) t.on_activate(s.on_activate);
         if (s.on_context_menu) t.on_context_menu(s.on_context_menu);
+        if (s.on_toggled) t.on_toggled(s.on_toggled);
         bind(s.bind, w);
     }
     static void apply(const spec::date_picker& s, widget& w)

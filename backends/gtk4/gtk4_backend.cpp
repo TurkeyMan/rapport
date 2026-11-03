@@ -787,7 +787,8 @@ public:
 // A menu button showing the date, with a calendar in its popover.
 // -- tree ---------------------------------------------------------------------
 
-// A GtkListView over a GtkTreeListModel, rows a GtkTreeExpander and label.
+// A GtkListView over a GtkTreeListModel, rows a GtkTreeExpander holding a
+// box (hidden for items without one) and a label.
 // The models hold GtkStringObjects naming the app's ids; labels and children
 // come from nodes_.
 class tree_impl : public widget_base<rap::tree>
@@ -813,6 +814,15 @@ public:
                 +[](GtkSignalListItemFactory*, GObject* li, gpointer p)
                 { static_cast<tree_impl*>(p)->bind_row(GTK_LIST_ITEM(li)); },
                 this);
+        connect(
+            factory, "teardown",
+            +[](GtkSignalListItemFactory*, GObject* li, gpointer p)
+            {
+                auto* self = static_cast<tree_impl*>(p);
+                std::erase_if(self->boxes_, [li](GtkWidget* b)
+                              { return g_object_get_data(G_OBJECT(b), "rapport-item") == li; });
+            },
+            this);
         w_ = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(sel_)), factory);
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
         gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
@@ -846,6 +856,15 @@ public:
                 +[](GtkEventControllerKey*, guint key, guint, GdkModifierType state, gpointer p) -> gboolean
                 {
                     auto* self = static_cast<tree_impl*>(p);
+                    // Space on an item with a box: as a click on it.
+                    if (key == GDK_KEY_space && !(state & (GDK_CONTROL_MASK | GDK_ALT_MASK)))
+                    {
+                        const std::optional<std::string> id = self->selected();
+                        auto it = id ? self->nodes_.find(*id) : self->nodes_.end();
+                        if (it == self->nodes_.end() || !it->second.check) return false;
+                        if (self->toggled_) self->toggled_(*id);
+                        return true;
+                    }
                     if (key != GDK_KEY_Menu && !(key == GDK_KEY_F10 && (state & GDK_SHIFT_MASK))) return false;
                     self->popup(self->selected(), 16, 16);
                     return true;
@@ -924,6 +943,20 @@ public:
     void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
     void on_context_menu(std::function<menu(std::optional<std::string>)> f) override { context_ = std::move(f); }
+    void set_check(const std::string& id, check_state st) override
+    {
+        const auto it = nodes_.find(id);
+        if (it == nodes_.end() || !it->second.check) return;
+        it->second.check = st;
+        // The row showing it, if one is.
+        for (GtkWidget* b : boxes_)
+        {
+            auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
+            auto* row = li ? GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)) : nullptr;
+            if (row && id_of(row) == id) show_check(b, st);
+        }
+    }
+    void on_toggled(std::function<void(const std::string&)> f) override { toggled_ = std::move(f); }
 
 protected:
     void on_disconnect() override
@@ -939,6 +972,7 @@ private:
         std::string label;
         std::vector<std::string> children;
         bool expanded = false;
+        std::optional<check_state> check;
     };
     struct quiet
     {
@@ -955,7 +989,7 @@ private:
 
     void add(const tree_item& t, const std::string& parent)
     {
-        node n{t.label, {}, t.expanded};
+        node n{t.label, {}, t.expanded, t.check};
         for (const tree_item& c : t.children)
         {
             n.children.push_back(c.id);
@@ -980,9 +1014,21 @@ private:
     void setup(GtkListItem* li)
     {
         GtkWidget* expander = gtk_tree_expander_new();
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+        // The box: clicks only; Space on the row is the keyboard's (focus
+        // stays on the rows). Like the gesture below, its signal goes with
+        // the row.
+        GtkWidget* check = gtk_check_button_new();
+        gtk_widget_set_focusable(check, false);
+        gtk_widget_set_visible(check, false);
+        g_object_set_data(G_OBJECT(check), "rapport-item", li);
+        g_signal_connect(check, "toggled", G_CALLBACK(check_toggled), this);
+        boxes_.push_back(check);
         GtkWidget* label = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(label), 0);
-        gtk_tree_expander_set_child(GTK_TREE_EXPANDER(expander), label);
+        gtk_box_append(GTK_BOX(box), check);
+        gtk_box_append(GTK_BOX(box), label);
+        gtk_tree_expander_set_child(GTK_TREE_EXPANDER(expander), box);
         gtk_list_item_set_child(li, expander);
         // A right-click on the row: selects it, then its menu. GTK recycles
         // and drops rows, so this isn't one of the connections the window
@@ -1009,14 +1055,41 @@ private:
         if (!gtk_widget_compute_point(row, self->w_, &in, &out)) out = in;
         self->popup(self->id_at(pos), out.x, out.y);
     }
+    // A box clicked: GTK has flipped it, so it goes back to the app's state
+    // and the app says what the click means.
+    static void check_toggled(GtkCheckButton* b, gpointer p)
+    {
+        auto* self = static_cast<tree_impl*>(p);
+        if (!self->alive_ || self->binding_) return;
+        auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
+        const guint pos = li ? gtk_list_item_get_position(li) : GTK_INVALID_LIST_POSITION;
+        if (pos == GTK_INVALID_LIST_POSITION) return;
+        const std::string id = self->id_at(pos);
+        auto it = self->nodes_.find(id);
+        if (it == self->nodes_.end() || !it->second.check) return;
+        self->show_check(GTK_WIDGET(b), *it->second.check);
+        if (self->toggled_) self->toggled_(id);
+    }
+    void show_check(GtkWidget* b, check_state st)
+    {
+        binding_ = true;
+        gtk_check_button_set_inconsistent(GTK_CHECK_BUTTON(b), st == check_state::indeterminate);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(b), st == check_state::checked);
+        binding_ = false;
+    }
     void bind_row(GtkListItem* li)
     {
         auto* row = GTK_TREE_LIST_ROW(gtk_list_item_get_item(li));
         GtkWidget* expander = gtk_list_item_get_child(li);
         gtk_tree_expander_set_list_row(GTK_TREE_EXPANDER(expander), row);
         auto it = nodes_.find(id_of(row));
-        gtk_label_set_text(GTK_LABEL(gtk_tree_expander_get_child(GTK_TREE_EXPANDER(expander))),
-                           it != nodes_.end() ? it->second.label.c_str() : "");
+        GtkWidget* box = gtk_tree_expander_get_child(GTK_TREE_EXPANDER(expander));
+        GtkWidget* check = gtk_widget_get_first_child(box);
+        GtkWidget* label = gtk_widget_get_next_sibling(check);
+        gtk_label_set_text(GTK_LABEL(label), it != nodes_.end() ? it->second.label.c_str() : "");
+        const bool has = it != nodes_.end() && it->second.check;
+        gtk_widget_set_visible(check, has);
+        if (has) show_check(check, *it->second.check);
     }
     guint rows() const { return g_list_model_get_n_items(G_LIST_MODEL(model_)); }
     static std::string id_of(GtkTreeListRow* row)
@@ -1083,8 +1156,11 @@ private:
     std::function<void()> changed_;
     std::function<void(const std::string&)> activate_;
     std::function<menu(std::optional<std::string>)> context_;
+    std::function<void(const std::string&)> toggled_;
+    std::vector<GtkWidget*> boxes_;  // the rows' boxes, as GTK makes and drops rows
     bool quiet_ = false;
     bool alive_ = true;
+    bool binding_ = false;  // a box set to the app's state, not clicked
 };
 
 class date_picker_impl : public widget_base<rap::date_picker>

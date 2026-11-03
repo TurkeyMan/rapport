@@ -962,6 +962,22 @@ public:
                          {
                              if (!quiet_ && changed_) changed_();
                          });
+        // A box clicked (or Space): Qt has flipped it already, so it goes
+        // back to the app's state and the app says what the click means.
+        QObject::connect(view(), &QTreeWidget::itemChanged, view(),
+                         [this](QTreeWidgetItem* i, int column)
+                         {
+                             if (quiet_ || !i || column != 0) return;
+                             const std::string id = id_of(i);
+                             const auto it = checks_.find(id);
+                             if (it == checks_.end() || i->checkState(0) == qt_check(it->second))
+                                 return;
+                             {
+                                 quiet q(*this);
+                                 i->setCheckState(0, qt_check(it->second));
+                             }
+                             if (toggled_) toggled_(id);
+                         });
         QObject::connect(view(), &QTreeWidget::itemActivated, view(),
                          [this](QTreeWidgetItem* i, int)
                          {
@@ -985,6 +1001,7 @@ public:
         quiet q(*this);
         view()->clear();
         by_id_.clear();
+        checks_.clear();
         insert(items, nullptr, open);
         if (keep) select_quietly(*keep);
     }
@@ -1005,8 +1022,23 @@ public:
     void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
     void on_context_menu(std::function<menu(std::optional<std::string>)> f) override { context_ = std::move(f); }
+    void set_check(const std::string& id, check_state st) override
+    {
+        const auto it = checks_.find(id);
+        if (it == checks_.end()) return;
+        it->second = st;
+        quiet q(*this);
+        by_id_[id]->setCheckState(0, qt_check(st));
+    }
+    void on_toggled(std::function<void(const std::string&)> f) override { toggled_ = std::move(f); }
 
 private:
+    static Qt::CheckState qt_check(check_state s)
+    {
+        return s == check_state::checked         ? Qt::Checked
+               : s == check_state::indeterminate ? Qt::PartiallyChecked
+                                                 : Qt::Unchecked;
+    }
     struct quiet
     {
         explicit quiet(tree_impl& t)
@@ -1031,6 +1063,12 @@ private:
             auto* i = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(view());
             i->setText(0, qs(t.label));
             i->setData(0, Qt::UserRole, qs(t.id));
+            if (t.check)
+            {
+                i->setFlags(i->flags() | Qt::ItemIsUserCheckable);
+                i->setCheckState(0, qt_check(*t.check));
+                checks_[t.id] = *t.check;
+            }
             by_id_[t.id] = i;
             insert(t.children, i, open);
             const auto was = open.find(t.id);
@@ -1069,7 +1107,9 @@ private:
     std::function<void()> changed_;
     std::function<void(const std::string&)> activate_;
     std::function<menu(std::optional<std::string>)> context_;
+    std::function<void(const std::string&)> toggled_;
     std::unordered_map<std::string, QTreeWidgetItem*> by_id_;
+    std::unordered_map<std::string, check_state> checks_;  // the items with boxes
     bool quiet_ = false;
 };
 

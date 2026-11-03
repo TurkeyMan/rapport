@@ -2337,7 +2337,9 @@ private:
 // -- tree ---------------------------------------------------------------------
 
 // The common controls' tree view. Items are found by the app's ids; each
-// item's lParam is its index into ids_.
+// item's lParam is its index into ids_. Boxes are state images of our own
+// (TVS_CHECKBOXES has no mixed state, and flips them itself): 1 unchecked,
+// 2 checked, 3 mixed, 0 none.
 class tree_impl : public leaf<rap::tree>
 {
 public:
@@ -2353,6 +2355,10 @@ public:
         TreeView_SetExtendedStyle(h_, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
         set_items(s.items);
     }
+    ~tree_impl() override
+    {
+        if (state_images_) ImageList_Destroy(state_images_);
+    }
 
     void set_items(std::vector<tree_item> items) override
     {
@@ -2366,6 +2372,8 @@ public:
         TreeView_DeleteAllItems(h_);
         ids_.clear();
         by_id_.clear();
+        checks_.clear();
+        if (!state_images_ && has_check(items)) make_state_images();
         insert(items, TVI_ROOT, open);
         if (keep) select_quietly(*keep);
         SendMessageW(h_, WM_SETREDRAW, TRUE, 0);
@@ -2388,11 +2396,33 @@ public:
     void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
     void on_context_menu(std::function<menu(std::optional<std::string>)> f) override { context_ = std::move(f); }
+    void set_check(const std::string& id, check_state st) override
+    {
+        const auto c = checks_.find(id);
+        if (c == checks_.end()) return;
+        c->second = st;
+        TreeView_SetItemState(h_, by_id_[id], INDEXTOSTATEIMAGEMASK(int(st) + 1),
+                              TVIS_STATEIMAGEMASK);
+    }
+    void on_toggled(std::function<void(const std::string&)> f) override { toggled_ = std::move(f); }
 
     LRESULT notify(NMHDR* n, bool& handled) override
     {
         switch (n->code)
         {
+        case NM_CLICK:
+        {
+            // A click on an item's box: reported, the app sets the state.
+            TVHITTESTINFO hit{};
+            GetCursorPos(&hit.pt);
+            ScreenToClient(h_, &hit.pt);
+            const HTREEITEM h = TreeView_HitTest(h_, &hit);
+            if (!h || !(hit.flags & TVHT_ONITEMSTATEICON)) return 0;
+            const std::string id = id_of(h);
+            if (!checks_.contains(id)) return 0;
+            if (toggled_) toggled_(id);
+            return 1;
+        }
         case TVN_SELCHANGEDW:
             if (!quiet_ && changed_) changed_();
             return 0;
@@ -2416,6 +2446,11 @@ public:
             if (key == VK_RETURN && h && activate_)
             {
                 activate_(id_of(h));
+                return 1;
+            }
+            if (key == VK_SPACE && h && checks_.contains(id_of(h)))
+            {
+                if (toggled_) toggled_(id_of(h));
                 return 1;
             }
             if (key == VK_APPS || (key == VK_F10 && GetKeyState(VK_SHIFT) < 0))
@@ -2461,9 +2496,12 @@ private:
             TVINSERTSTRUCTW in{};
             in.hParent = parent;
             in.hInsertAfter = TVI_LAST;
-            in.item.mask = TVIF_TEXT | TVIF_PARAM;
+            in.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_STATE;
             in.item.pszText = text.data();
             in.item.lParam = LPARAM(ids_.size());
+            in.item.stateMask = TVIS_STATEIMAGEMASK;
+            in.item.state = INDEXTOSTATEIMAGEMASK(i.check ? int(*i.check) + 1 : 0);
+            if (i.check) checks_[i.id] = *i.check;
             const HTREEITEM h = TreeView_InsertItem(h_, &in);
             if (!h) continue;
             ids_.push_back(i.id);
@@ -2480,6 +2518,61 @@ private:
         TreeView_SelectItem(h_, it->second);  // opens its ancestors
         TreeView_EnsureVisible(h_, it->second);
         return true;
+    }
+    static bool has_check(const std::vector<tree_item>& items)
+    {
+        for (const tree_item& i : items)
+            if (i.check || has_check(i.children)) return true;
+        return false;
+    }
+    // The theme's check box in each state (the classic one without a
+    // theme), at the window's dpi when the first box is needed.
+    void make_state_images()
+    {
+        const int n = px(13);
+        state_images_ = ImageList_Create(n, n, ILC_COLOR32, 4, 0);
+        if (!state_images_) return;
+        BITMAPINFO bi{};
+        bi.bmiHeader = {.biSize = sizeof(BITMAPINFOHEADER),
+                        .biWidth = n,
+                        .biHeight = -n,
+                        .biPlanes = 1,
+                        .biBitCount = 32,
+                        .biCompression = BI_RGB};
+        HDC dc = CreateCompatibleDC(nullptr);
+        HTHEME theme = OpenThemeData(h_, L"BUTTON");
+        // Image 0 stays empty: state image 0 is "none".
+        for (int image = 0; image < 4; ++image)
+        {
+            void* bits = nullptr;
+            HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+            if (!bmp) break;
+            HGDIOBJ old = SelectObject(dc, bmp);
+            RECT r{0, 0, n, n};
+            const check_state st = check_state(std::max(image - 1, 0));
+            if (image > 0 && theme)
+                DrawThemeBackground(theme, dc, BP_CHECKBOX,
+                                    st == check_state::checked         ? CBS_CHECKEDNORMAL
+                                    : st == check_state::indeterminate ? CBS_MIXEDNORMAL
+                                                                       : CBS_UNCHECKEDNORMAL,
+                                    &r, nullptr);
+            else if (image > 0)
+            {
+                DrawFrameControl(dc, &r, DFC_BUTTON,
+                                 DFCS_BUTTONCHECK |
+                                     (st != check_state::unchecked ? DFCS_CHECKED : 0) |
+                                     (st == check_state::indeterminate ? DFCS_INACTIVE : 0));
+                auto* px32 = static_cast<uint32_t*>(bits);
+                for (int k = 0; k < n * n; ++k) px32[k] |= 0xFF000000u;  // GDI leaves alpha 0
+            }
+            GdiFlush();
+            SelectObject(dc, old);
+            ImageList_Add(state_images_, bmp, nullptr);
+            DeleteObject(bmp);
+        }
+        if (theme) CloseThemeData(theme);
+        DeleteDC(dc);
+        TreeView_SetImageList(h_, state_images_, TVSIL_STATE);
     }
     std::string id_of(HTREEITEM h) const
     {
@@ -2509,6 +2602,9 @@ private:
     std::function<menu(std::optional<std::string>)> context_;
     std::vector<std::string> ids_;
     std::unordered_map<std::string, HTREEITEM> by_id_;
+    std::unordered_map<std::string, check_state> checks_;  // the items with boxes
+    std::function<void(const std::string&)> toggled_;
+    HIMAGELIST state_images_ = nullptr;
     bool quiet_ = false;
 };
 
