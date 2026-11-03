@@ -1116,6 +1116,15 @@ struct gpu_frame
     std::function<void()> release;
 };
 
+// How a canvas shows its last frame while its size changes in a burst
+// (canvas::stretch_while_resizing).
+enum class resize_stretch
+{
+    none,     // painted at each size, as ever
+    uniform,  // scaled to fit, its shape kept, centred on a background
+    fill,     // stretched to the new size, its shape not kept
+};
+
 // A surface the app draws itself (an image view, a chart). Everything else
 // in a window should stay a native widget.
 class canvas : public widget
@@ -1131,6 +1140,18 @@ public:
     virtual void on_paint(std::function<void(rap::painter&, rap::size_f)>) = 0;
     // Size changed, or the device scale did (moved to another monitor).
     virtual void on_resize(std::function<void(size_f)>) = 0;
+    // A burst of size changes (a window or a splitter dragged) is over: none
+    // has come for about 150 ms. The time for what's too slow to do at each.
+    virtual void on_resize_settled(std::function<void(size_f)>) = 0;
+    // While its size changes in a burst, the canvas shows the last frame it
+    // showed, as shown (the presented frame and on_paint's drawing), scaled
+    // to each new size, rather than painting at each: on_paint isn't called
+    // and no presented frame is drawn until the burst settles, then it
+    // paints as ever (on_resize is called all along). An invalidate() or a
+    // present() during the burst shows once it settles. The scaling is a
+    // moment's preview, filtered as the display's values (sRGB), not in
+    // linear light. `background`: around a uniform frame.
+    virtual void stretch_while_resizing(resize_stretch, paint background = theme_color::window) = 0;
     // Input handlers return true when they used the event.
     virtual void on_pointer(std::function<bool(const pointer_event&)>) = 0;
     virtual void on_scroll(std::function<bool(const scroll_event&)>) = 0;

@@ -12,6 +12,7 @@
 #include "frame_layer.h"
 #include "gpu_readback.h"
 #include "list_press.h"
+#include "resize_burst.h"
 
 #include <QAbstractTableModel>
 #include <QAction>
@@ -2084,6 +2085,16 @@ public:
         frames_ = new QTimer(c);
         frames_->setTimerType(Qt::PreciseTimer);
         QObject::connect(frames_, &QTimer::timeout, c, [this] { tick(); });
+        settle_ = new QTimer(c);
+        settle_->setSingleShot(true);
+        settle_->setInterval(frames::settle_ms);
+        QObject::connect(settle_, &QTimer::timeout, c,
+                         [this]
+                         {
+                             const bool was = burst_.stretching;
+                             burst_.settle(size());
+                             if (was) w_->update();
+                         });
     }
     ~canvas_impl() override
     {
@@ -2124,6 +2135,18 @@ public:
     }
     void on_paint(std::function<void(rap::painter&, rap::size_f)> f) override { paint_ = std::move(f); }
     void on_resize(std::function<void(size_f)> f) override { resize_ = std::move(f); }
+    void on_resize_settled(std::function<void(size_f)> f) override { burst_.settled = std::move(f); }
+    void stretch_while_resizing(resize_stretch how, paint background) override
+    {
+        burst_.how = how;
+        burst_.background = background;
+        if (how == resize_stretch::none)
+        {
+            burst_.stretching = false;
+            kept_ = {};
+        }
+        w_->update();
+    }
     void on_pointer(std::function<bool(const pointer_event&)> f) override { pointer_ = std::move(f); }
     void on_scroll(std::function<bool(const scroll_event&)> f) override { scroll_ = std::move(f); }
     void on_key(std::function<bool(const key_event&)> f) override { key_ = std::move(f); }
@@ -2207,14 +2230,50 @@ public:
         }
         if (!paint_ && !frame_) return;
         qt_painter p(qp, w_);
-        frame_.paint(p, size());
-        if (paint_) paint_(p, size());
+        // While a resize burst lasts, the last frame kept, scaled
+        // (canvas::stretch_while_resizing); else painted, and kept if asked.
+        if (burst_.stretching && !kept_.isNull())
+        {
+            const size_f was{float(kept_.width()) / float(kept_.devicePixelRatio()),
+                             float(kept_.height()) / float(kept_.devicePixelRatio())};
+            const rect_f to = frames::stretched(was, size(), burst_.how);
+            p.rect({0, 0, size().w, size().h}, 0, burst_.background, std::nullopt);
+            qp.setRenderHint(QPainter::SmoothPixmapTransform);
+            qp.drawImage(QRectF(to.x, to.y, to.w, to.h), kept_);
+            return;
+        }
+        if (!burst_.keeps())
+        {
+            frame_.paint(p, size());
+            if (paint_) paint_(p, size());
+            return;
+        }
+        const QSize pixels(int(std::ceil(size().w * scale)), int(std::ceil(size().h * scale)));
+        if (pixels.isEmpty()) return;
+        if (kept_.size() != pixels) kept_ = QImage(pixels, QImage::Format_ARGB32_Premultiplied);
+        kept_.setDevicePixelRatio(scale);
+        kept_.fill(Qt::transparent);
+        {
+            QPainter kq(&kept_);
+            qt_painter k(kq, w_);
+            frame_.paint(k, size());
+            if (paint_) paint_(k, size());
+        }
+        qp.drawImage(QPointF(0, 0), kept_);
     }
     void resized()
     {
         if (!laid_out_) return;
         if (resize_) resize_(size());
         if (frame_target_) frame_target_(target());
+    }
+    // A size change from the layout: a burst begins or goes on, over once
+    // none has come for a while.
+    void burst()
+    {
+        if (!laid_out_ || (!burst_.keeps() && !burst_.settled)) return;
+        burst_.resized(!kept_.isNull());
+        settle_->start();
     }
     // Shown, so laid out: its size is real from now on.
     void shown()
@@ -2258,6 +2317,9 @@ private:
     std::function<void(size_f)> resize_;
     frames::frame_layer frame_;
     frames::gpu_readback readback_;  // GPU textures shown as pixels
+    frames::resize_burst burst_;
+    QImage kept_;     // the last frame shown, while burst_ keeps it
+    QTimer* settle_;  // the burst's end
     std::function<void(const rap::frame_target&)> frame_target_;
     std::function<bool(const pointer_event&)> pointer_;
     std::function<bool(const scroll_event&)> scroll_;
@@ -2280,7 +2342,9 @@ void canvas_widget::paintEvent(QPaintEvent*)
 
 void canvas_widget::resizeEvent(QResizeEvent*)
 {
-    if (owner) owner->resized();
+    if (!owner) return;
+    owner->resized();
+    owner->burst();
 }
 
 void canvas_widget::showEvent(QShowEvent*)

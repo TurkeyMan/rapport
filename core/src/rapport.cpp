@@ -233,6 +233,8 @@ private:
         auto& c = static_cast<canvas&>(w);
         if (s.on_paint) c.on_paint(s.on_paint);
         if (s.on_resize) c.on_resize(s.on_resize);
+        if (s.on_resize_settled) c.on_resize_settled(s.on_resize_settled);
+        if (s.stretch != resize_stretch::none) c.stretch_while_resizing(s.stretch, s.stretch_background);
         if (s.on_pointer) c.on_pointer(s.on_pointer);
         if (s.on_scroll) c.on_scroll(s.on_scroll);
         if (s.on_key) c.on_key(s.on_key);

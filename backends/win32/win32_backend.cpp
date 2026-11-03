@@ -4,6 +4,7 @@
 #include "win32_common.h"
 
 #include "frame_layer.h"
+#include "resize_burst.h"
 
 #include "rapport/gpu_d3d11.h"
 #include "rapport/i18n.h"
@@ -6615,6 +6616,19 @@ public:
     }
     void on_paint(std::function<void(rap::painter&, rap::size_f)> f) override { paint_ = std::move(f); }
     void on_resize(std::function<void(size_f)> f) override { resize_ = std::move(f); }
+    void on_resize_settled(std::function<void(size_f)> f) override { burst_.settled = std::move(f); }
+    void stretch_while_resizing(resize_stretch how, paint background) override
+    {
+        burst_.how = how;
+        burst_.background = background;
+        if (how == resize_stretch::none)
+        {
+            burst_.stretching = false;
+            kept_.reset();
+            kept_cpu_.reset();
+        }
+        invalidate();
+    }
     void on_pointer(std::function<bool(const pointer_event&)> f) override { pointer_ = std::move(f); }
     void on_scroll(std::function<bool(const scroll_event&)> f) override { scroll_ = std::move(f); }
     void on_key(std::function<bool(const key_event&)> f) override { key_ = std::move(f); }
@@ -6822,6 +6836,14 @@ private:
                 }
                 return 0;
             }
+            if (wp == k_settle_timer)
+            {
+                KillTimer(h_, k_settle_timer);
+                const bool was = burst_.stretching;
+                burst_.settle(size());
+                if (was) invalidate();
+                return 0;
+            }
             if (wp != k_reads_timer) return DefWindowProcW(h_, msg, wp, lp);
             finish_reads(false);
             return 0;
@@ -6910,6 +6932,13 @@ private:
         told_ = px;
         if (resize_) resize_(size());
         if (frame_target_) frame_target_(target());
+        // A burst begins or goes on, over once no change has come for a
+        // while (WM_TIMER keeps coming in a window's size loop).
+        if (burst_.keeps() || burst_.settled)
+        {
+            burst_.resized(gpu_ ? bool(kept_) : bool(kept_cpu_));
+            SetTimer(h_, k_settle_timer, frames::settle_ms, nullptr);
+        }
     }
 
     // On the GPU's device when there is one (see gpu), on the CPU until then.
@@ -6922,7 +6951,8 @@ private:
         const std::shared_ptr<gpu_shared> dev = gpu::device(painted_);
         if (gpu_ && gpu_->device() != dev) gpu_.reset();  // lost, by another canvas
         if (gpu_frame_ && gpu_frame_->device != dev) drop_gpu_frame();
-        if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h)))
+        // Onto the GPU, but not while a burst stretches what the CPU kept.
+        if (!gpu_ && dev && !(burst_.stretching && kept_cpu_) && (gpu_ = gpu_target::make(dev, h_, w, h)))
             drop_cpu();
         if (gpu_)
         {
@@ -6938,7 +6968,13 @@ private:
             }
             if (ID2D1DeviceContext* dc = gpu_->begin(w, h))
             {
-                draw(dc, dev->key, dc);
+                if (kept_ && kept_device_ != dev) kept_.reset();  // another device's
+                if (burst_.stretching && kept_)
+                    draw_stretched(dc, kept_.get(), dev->key);
+                else if (burst_.keeps())
+                    draw_kept(dc, dev, w, h);
+                else
+                    draw(dc, dev->key, dc);
                 if (gpu_->end())
                 {
                     painted_ = true;
@@ -6963,7 +6999,13 @@ private:
             cpu_key_ = new_resource_key();
         }
         cpu_->BeginDraw();
-        draw(cpu_.get(), cpu_key_);
+        if (burst_.stretching && kept_cpu_)
+            draw_stretched(cpu_.get(), kept_cpu_.get(), cpu_key_);
+        else
+        {
+            draw(cpu_.get(), cpu_key_);
+            if (burst_.keeps()) keep_cpu(w, h);
+        }
         if (cpu_->EndDraw() == D2DERR_RECREATE_TARGET) drop_cpu();
         if (!painted_)
         {
@@ -6984,6 +7026,69 @@ private:
             frame_.paint(p, size());
             if (paint_) paint_(p, size());
         }
+    }
+    // Drawn into a bitmap of its own, kept to stretch while a resize burst
+    // lasts (canvas::stretch_while_resizing), and from there to the window.
+    void draw_kept(ID2D1DeviceContext* dc, const std::shared_ptr<gpu_shared>& dev, UINT w, UINT h)
+    {
+        com<ID2D1Image> screen;
+        dc->GetTarget(screen.put());
+        if (!kept_ || kept_->GetPixelSize().width != w || kept_->GetPixelSize().height != h)
+        {
+            kept_.reset();
+            const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+                D2D1_BITMAP_OPTIONS_TARGET, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            if (FAILED(dc->CreateBitmap(D2D1::SizeU(w, h), nullptr, 0, &props, kept_.put())))
+            {
+                kept_.reset();
+                return draw(dc, dev->key, dc);
+            }
+            kept_device_ = dev;
+        }
+        dc->SetTarget(kept_.get());
+        draw(dc, dev->key, dc);
+        dc->SetTarget(screen.get());
+        kept_size_ = size();
+        dc->SetDpi(96, 96);
+        dc->SetTransform(D2D1::Matrix3x2F::Identity());
+        dc->DrawBitmap(kept_.get(), D2D1::RectF(0, 0, float(w), float(h)), 1, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                       nullptr, nullptr);
+    }
+    // On the CPU (the first frame, or no GPU): what was drawn copied out, to
+    // stretch while a resize burst lasts.
+    void keep_cpu(UINT w, UINT h)
+    {
+        if (!kept_cpu_ || kept_cpu_->GetPixelSize().width != w || kept_cpu_->GetPixelSize().height != h)
+        {
+            kept_cpu_.reset();
+            const D2D1_BITMAP_PROPERTIES props =
+                D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            if (FAILED(cpu_->CreateBitmap(D2D1::SizeU(w, h), props, kept_cpu_.put())))
+            {
+                kept_cpu_.reset();
+                return;
+            }
+        }
+        const D2D1_POINT_2U at{0, 0};
+        const D2D1_RECT_U from{0, 0, w, h};
+        if (FAILED(kept_cpu_->CopyFromRenderTarget(&at, cpu_.get(), &from)))
+            kept_cpu_.reset();
+        else
+            kept_size_ = size();
+    }
+    // A kept bitmap scaled to the canvas as it is now, on its background.
+    void draw_stretched(ID2D1RenderTarget* rt, ID2D1Bitmap* kept, uint64_t key)
+    {
+        {
+            d2d_painter p(rt, win_.scale(), key);
+            p.rect({0, 0, size().w, size().h}, 0, burst_.background, std::nullopt);
+        }
+        const float s = win_.scale();
+        const rect_f to = frames::stretched(kept_size_, size(), burst_.how);
+        rt->SetDpi(96, 96);
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        rt->DrawBitmap(kept, D2D1::RectF(to.x * s, to.y * s, (to.x + to.w) * s, (to.y + to.h) * s), 1,
+                       D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
     }
     // The app's texture, one of its pixels to one of the window's, top left.
     void draw_gpu_frame(ID2D1DeviceContext* dc)
@@ -7056,6 +7161,7 @@ private:
     }
     void drop_cpu()
     {
+        kept_cpu_.reset();
         cpu_.reset();
         if (cpu_key_) retire_resource_key(cpu_key_);
         cpu_key_ = 0;
@@ -7081,6 +7187,11 @@ private:
     std::function<bool(const key_event&)> key_;
     frames::frame_layer frame_;
     std::function<void(const rap::frame_target&)> frame_target_;
+    frames::resize_burst burst_;
+    com<ID2D1Bitmap1> kept_;    // the last frame shown, while burst_ keeps it: on the GPU,
+    com<ID2D1Bitmap> kept_cpu_;  // or on the CPU (cpu_'s)
+    std::shared_ptr<gpu_shared> kept_device_;
+    size_f kept_size_;
 
     // A GPU frame being shown: the app's texture, opened on our device.
     struct shown_frame
@@ -7102,7 +7213,7 @@ private:
         std::function<void()> release;
     };
     std::vector<pending_read> reads_;
-    static constexpr UINT_PTR k_reads_timer = 0xf4a3, k_device_timer = 0xf4a4;
+    static constexpr UINT_PTR k_reads_timer = 0xf4a3, k_device_timer = 0xf4a4, k_settle_timer = 0xf4a5;
     bool gpu_reported_ = false;
 };
 
