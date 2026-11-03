@@ -165,14 +165,33 @@ inline constexpr int max_buffers = 4;
 class program;  // a compiled pixel shader, from device::program
 using program_ptr = std::shared_ptr<const program>;
 
-// In flight, a pass holds its program and textures; run() copies uniforms.
+// A pass's or dispatch's uniform block, copied when it's set: the bytes it
+// was given (a struct local to an inner block, say) may be gone by run().
+class uniform_bytes
+{
+public:
+    uniform_bytes() = default;
+    uniform_bytes(std::span<const std::byte> b)
+        : bytes_(b.begin(), b.end())
+    {
+    }
+    const std::byte* data() const { return bytes_.data(); }
+    size_t size() const { return bytes_.size(); }
+    bool empty() const { return bytes_.empty(); }
+    operator std::span<const std::byte>() const { return bytes_; }
+
+private:
+    std::vector<std::byte> bytes_;
+};
+
+// In flight, a pass holds its program, textures and uniforms.
 struct pass
 {
     program_ptr program;
     std::vector<texture_ptr> inputs;
     std::vector<sampler> samplers;  // one per input; nearest_clamp when short
     std::vector<buffer_ptr> buffers;  // read only (t8..t11)
-    std::span<const std::byte> uniforms;
+    uniform_bytes uniforms;
     texture_ptr target;
     int target_level = 0;  // the mip level drawn into (the app makes its levels itself)
     rect region;           // only part of the target (a tile), in that level's pixels; empty = all
@@ -189,7 +208,7 @@ struct dispatch
     std::vector<texture_ptr> inputs;
     std::vector<sampler> samplers;
     std::vector<buffer_ptr> buffers;
-    std::span<const std::byte> uniforms;
+    uniform_bytes uniforms;
     // Thread groups in x, y, z: each at most max_groups (both APIs' limit).
     // A group's size is the shader's [numthreads]: the app divides by it.
     int groups[3] = {1, 1, 1};
