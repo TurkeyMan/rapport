@@ -112,7 +112,8 @@ std::wstring file_path(IShellItem* item)
     return s;
 }
 
-// The folder a background click was in: the site is Explorer's view.
+// The folder a background click was in: the site is Explorer's view, whose
+// objects belong to its UI thread, so this is asked there.
 std::wstring site_folder(IUnknown* site, bool& has_selection)
 {
     has_selection = false;
@@ -140,8 +141,10 @@ std::wstring site_folder(IUnknown* site, bool& has_selection)
 }
 
 // What was right-clicked. Explorer gives a background click its folder as
-// the one item, so that's told apart by the view having nothing selected.
-rap::shell::selection selection_of(IShellItemArray* items, IUnknown* site)
+// the one item, so that's told apart by the view (in `folder`) having nothing
+// selected.
+rap::shell::selection selection_of(IShellItemArray* items, const std::wstring& folder,
+                                   bool has_selection)
 {
     rap::shell::selection sel;
     DWORD n = 0;
@@ -154,8 +157,6 @@ rap::shell::selection selection_of(IShellItemArray* items, IUnknown* site)
         item->Release();
         if (!p.empty()) sel.paths.emplace_back(std::move(p));
     }
-    bool has_selection = false;
-    const std::wstring folder = site_folder(site, has_selection);
     if (!has_selection && !folder.empty() &&
         (sel.paths.empty() || (sel.paths.size() == 1 && sel.paths.front() == folder)))
     {
@@ -221,14 +222,20 @@ public:
     STDMETHODIMP SetSite(IUnknown* site) override
     {
         if (site) site->AddRef();
-        if (site_) site_->Release();
-        site_ = site;
+        IUnknown* old = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(state_lock_);
+            old = site_;
+            site_ = site;
+        }
+        if (old) old->Release();
         return S_OK;
     }
     STDMETHODIMP GetSite(REFIID riid, void** out) override
     {
         if (!out) return E_POINTER;
         *out = nullptr;
+        std::lock_guard<std::mutex> lock(state_lock_);
         return site_ ? site_->QueryInterface(riid, out) : E_FAIL;
     }
 
@@ -273,7 +280,8 @@ public:
     }
 
     // The entry builds the menu, which may be slow (a repository's state),
-    // so off Explorer's UI thread: it asks again there after E_PENDING.
+    // so off Explorer's UI thread: it asks again there after E_PENDING. The
+    // view is asked first, on the UI thread.
     STDMETHODIMP GetState(IShellItemArray* items, BOOL ok_to_be_slow, EXPCMDSTATE* out) override
     try
     {
@@ -284,7 +292,11 @@ public:
             *out = item_->enabled ? ECS_ENABLED : ECS_DISABLED;
             return S_OK;
         }
-        if (!ok_to_be_slow) return E_PENDING;
+        if (!ok_to_be_slow)
+        {
+            ask_view();
+            return E_PENDING;
+        }
         if (!build(items)->items.empty()) *out = ECS_ENABLED;
         return S_OK;
     }
@@ -329,11 +341,36 @@ private:
         return state_;
     }
 
+    // On the UI thread: the view's folder and whether it has a selection.
+    void ask_view()
+    {
+        IUnknown* site = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(state_lock_);
+            site = site_;
+            if (site) site->AddRef();
+        }
+        bool has_selection = false;
+        std::wstring folder = site_folder(site, has_selection);
+        if (site) site->Release();
+        std::lock_guard<std::mutex> lock(state_lock_);
+        view_folder_ = std::move(folder);
+        view_has_selection_ = has_selection;
+    }
+
+    // Off the UI thread: uses what ask_view found, never the site.
     std::shared_ptr<menu_state> build(IShellItemArray* items)
     {
+        std::wstring folder;
+        bool has_selection = false;
+        {
+            std::lock_guard<std::mutex> lock(state_lock_);
+            folder = view_folder_;
+            has_selection = view_has_selection_;
+        }
         auto state = std::make_shared<menu_state>();
         state->provider = rap::shell::make_provider();
-        state->sel = selection_of(items, site_);
+        state->sel = selection_of(items, folder, has_selection);
         if (state->provider && (!state->sel.paths.empty() || state->sel.background))
             state->items = flatten(state->provider->menu(state->sel), state->icon);
         state->built = true;
@@ -343,10 +380,12 @@ private:
     }
 
     std::atomic<ULONG> refs_{1};
-    mutable std::mutex state_lock_;
+    mutable std::mutex state_lock_;  // over state_, site_ and the view's
     std::shared_ptr<menu_state> state_;
     const menu_item* item_ = nullptr;  // in state_->items; null for the entry
     IUnknown* site_ = nullptr;
+    std::wstring view_folder_;
+    bool view_has_selection_ = false;
 };
 
 // The items under the entry, or under one of its submenus.
