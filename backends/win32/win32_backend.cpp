@@ -717,8 +717,20 @@ void move_now(HWND h, int x, int y, int w, int hgt)
         SetWindowPos(h, nullptr, x, y, w, hgt, move_flags_for(h, w, hgt));
 }
 
+// Where hidden controls go, kept until they show (show_now): a hidden
+// control moved or sized still runs its own handling of that, and a
+// trackbar's or a label's is slow. A pane's hidden tab pages hold most of
+// its controls, and dragging a splitter moved them all at every step.
+std::unordered_map<HWND, RECT> g_parked;
+
 void move_control(HWND h, int x, int y, int w, int hgt)
 {
+    if (!(GetWindowLongPtrW(h, GWL_STYLE) & WS_VISIBLE))
+    {
+        g_parked[h] = RECT{x, y, x + w, y + hgt};
+        return;
+    }
+    g_parked.erase(h);
     if (placed_at(h, x, y, w, hgt)) return;
     if (g_moves)
         g_moves->moves[GetParent(h)].push_back({h, RECT{x, y, x + w, y + hgt}});
@@ -776,6 +788,13 @@ void show_now(HWND h, bool shown)
 {
     const LONG_PTR style = GetWindowLongPtrW(h, GWL_STYLE);
     if (bool(style & WS_VISIBLE) == shown) return;
+    if (const auto it = g_parked.find(h); shown && it != g_parked.end())
+    {
+        const RECT r = it->second;
+        g_parked.erase(it);
+        if (!placed_at(h, r.left, r.top, r.right - r.left, r.bottom - r.top))
+            SetWindowPos(h, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, move_flags | SWP_NOCOPYBITS);
+    }
     if (IsWindowVisible(GetAncestor(h, GA_ROOT)))
         ShowWindow(h, shown ? SW_SHOWNA : SW_HIDE);
     else
@@ -6064,24 +6083,20 @@ private:
     // in one go: a posted relayout, and WM_PAINT after it, waited behind
     // the stream of mouse moves, leaving stale pixels where the bar had
     // passed. Only the splitter is laid out again (nothing else changes
-    // size, and its measurements hold), with drawing off in the window it
-    // lies in, so no control shows half moved or erased and not yet
-    // painted; then that window paints whole, the bars' old places and
-    // new, in one pass before the next mouse move is read. Whole, not just
-    // the splitter: a control elsewhere in it that wanted painting while
-    // drawing was off (an app's toolbar, updated as a pane's canvas
-    // resized) lost that, and stayed blank until the drag ended.
+    // size, and its measurements hold), its moves in one batch, and then
+    // the window paints whole, the bars' old places and new, in one pass
+    // before the next mouse move is read. Drawing isn't turned off around
+    // it (WM_SETREDRAW): that hides the window from DWM's point of view, and
+    // while it was off DWM composed the window without its canvases' GPU
+    // layers, showing the GDI surface under them (never painted there, so
+    // whatever was once drawn where they lie) for frames at a time.
     void relayout_dragged()
     {
-        // (WM_SETREDRAW TRUE shows a hidden window: only on a shown one.)
-        const bool hold = IsWindowVisible(parent_);
-        if (hold) SendMessageW(parent_, WM_SETREDRAW, FALSE, 0);
         {
             moves_in_one_pass batch;
             place(rect_);
         }
-        if (!hold) return;
-        SendMessageW(parent_, WM_SETREDRAW, TRUE, 0);
+        if (!IsWindowVisible(parent_)) return;
         RedrawWindow(parent_, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
