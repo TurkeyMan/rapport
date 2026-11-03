@@ -5923,8 +5923,11 @@ private:
     // passed. Only the splitter is laid out again (nothing else changes
     // size, and its measurements hold), with drawing off in the window it
     // lies in, so no control shows half moved or erased and not yet
-    // painted; then all of it, the bars' old places and new, paints in one
-    // pass before the next mouse move is read.
+    // painted; then that window paints whole, the bars' old places and
+    // new, in one pass before the next mouse move is read. Whole, not just
+    // the splitter: a control elsewhere in it that wanted painting while
+    // drawing was off (an app's toolbar, updated as a pane's canvas
+    // resized) lost that, and stayed blank until the drag ended.
     void relayout_dragged()
     {
         // (WM_SETREDRAW TRUE shows a hidden window: only on a shown one.)
@@ -5936,7 +5939,7 @@ private:
         }
         if (!hold) return;
         SendMessageW(parent_, WM_SETREDRAW, TRUE, 0);
-        RedrawWindow(parent_, &rect_, nullptr,
+        RedrawWindow(parent_, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
 
