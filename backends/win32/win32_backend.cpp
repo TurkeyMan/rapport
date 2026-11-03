@@ -3465,6 +3465,12 @@ private:
 };
 
 // A drag's end: a drop when the button comes up, none on Esc.
+// A list's own rows, dragged out and back over it, that would move there:
+// the drag only ever offers a copy (anything outside the list, Explorer
+// with files say, must never be offered a move), so the plain arrow is
+// shown here instead of the copy cursor.
+bool g_rows_would_move = false;
+
 class drop_source final : public com_object<IDropSource>
 {
 public:
@@ -3473,7 +3479,12 @@ public:
         if (escape) return DRAGDROP_S_CANCEL;
         return keys & MK_LBUTTON ? S_OK : DRAGDROP_S_DROP;
     }
-    HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+    HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD effect) override
+    {
+        if (!g_rows_would_move || !(effect & DROPEFFECT_COPY)) return DRAGDROP_S_USEDEFAULTCURSORS;
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        return S_OK;
+    }
 };
 
 // -- list ---------------------------------------------------------------------
@@ -4797,10 +4808,8 @@ private:
         *source.put() = new drop_source;
         g_drag_out = this;
         DWORD effect = 0;
-        // A move too, only so the rows coming back can show one (dnd_over):
-        // elsewhere nothing is taken from the list whatever the target does.
-        DoDragDrop(data.get(), source.get(), DROPEFFECT_COPY | (reorderable_ ? DROPEFFECT_MOVE : 0),
-                   &effect);
+        DoDragDrop(data.get(), source.get(), DROPEFFECT_COPY, &effect);
+        g_rows_would_move = false;
         if (g_drag_out == this) g_drag_out = nullptr;  // cleared already if the list went
         return true;
     }
@@ -4875,19 +4884,17 @@ private:
 
 public:
     // list_drop_target's calls (screen coordinates), returning the effect.
-    // `keys`: the drag's grfKeyState. This list's own rows say whether
-    // they'd move or copy, so the system's cursor shows the "+" for a copy.
+    // `keys`: the drag's grfKeyState. This list's own rows answer a copy
+    // (all the drag offers) and say through g_rows_would_move whether
+    // they'd move, so the cursor shows the "+" only for a copy.
     DWORD dnd_enter(IDataObject* data, POINT pt, DWORD keys)
     {
         dnd_ = dnd_offered(data);
         return dnd_over(pt, keys);
     }
-    DWORD own_rows_effect(DWORD keys) const
-    {
-        return action_of_ole(keys) == drop_action::copy ? DROPEFFECT_COPY : DROPEFFECT_MOVE;
-    }
     DWORD dnd_over(POINT pt, DWORD keys)
     {
+        g_rows_would_move = false;
         if (!dnd_) return DROPEFFECT_NONE;
         if (dnd_->kind == dnd_state::what::files) return DROPEFFECT_COPY;
         ScreenToClient(h_, &pt);
@@ -4896,10 +4903,13 @@ public:
         const bool ok = dnd_can_drop(at);
         set_mark(ok ? std::optional<size_t>(at) : std::nullopt);
         if (!ok) return DROPEFFECT_NONE;
-        return dnd_->kind == dnd_state::what::own_rows ? own_rows_effect(keys) : DROPEFFECT_COPY;
+        g_rows_would_move =
+            dnd_->kind == dnd_state::what::own_rows && action_of_ole(keys) == drop_action::move;
+        return DROPEFFECT_COPY;
     }
     void dnd_leave()
     {
+        g_rows_would_move = false;
         if (dnd_) set_mark(std::nullopt);
         dnd_.reset();
     }
@@ -4915,8 +4925,8 @@ public:
         switch (d.kind)
         {
         case dnd_state::what::own_rows:
-            reorder_(selection(), at, action_of_ole(keys));
-            return own_rows_effect(keys);
+            reorder_(selection(), at, action_of_ole(keys));  // the keys, not the effect
+            return DROPEFFECT_COPY;
         case dnd_state::what::files:
             // To the window, as a drop there would have gone.
             if (std::optional<std::string> bytes = data_of(data, CF_HDROP))
@@ -4973,8 +4983,8 @@ private:
     std::function<menu(size_t, size_t, point_f)> cell_menu_;
 };
 
-// The list answers a copy or nothing, or for its own rows a move or a
-// copy; `*effect` comes in as what the drag's source allows.
+// The list answers a copy or nothing; `*effect` comes in as what the
+// drag's source allows.
 HRESULT list_drop_target::DragEnter(IDataObject* data, DWORD keys, POINTL pt, DWORD* effect)
 {
     *effect = list ? list->dnd_enter(data, {pt.x, pt.y}, keys) & *effect : DROPEFFECT_NONE;
@@ -4992,7 +5002,7 @@ HRESULT list_drop_target::DragLeave()
 }
 HRESULT list_drop_target::Drop(IDataObject* data, DWORD keys, POINTL pt, DWORD* effect)
 {
-    if (!list || !(*effect & DROPEFFECT_COPY))  // this list's own rows allow one too
+    if (!list || !(*effect & DROPEFFECT_COPY))
     {
         if (list) list->dnd_leave();
         *effect = DROPEFFECT_NONE;
