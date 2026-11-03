@@ -25,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef ECF_ISSEPARATOR
@@ -342,6 +343,10 @@ private:
     }
 
     // On the UI thread: the view's folder and whether it has a selection.
+    // Explorer's first GetState (not ok to be slow) comes on its UI thread,
+    // after SetSite, and the second on a background thread. That order is
+    // relied on, not documented: without it a background click is taken
+    // for its folder, which is wrong but harmless.
     void ask_view()
     {
         IUnknown* site = nullptr;
@@ -358,15 +363,17 @@ private:
         view_has_selection_ = has_selection;
     }
 
-    // Off the UI thread: uses what ask_view found, never the site.
+    // Off the UI thread: uses what ask_view found, never the site. That's
+    // used once, so a right-click Explorer didn't first ask about on its UI
+    // thread (the entry kept from an earlier one) gets no view, not the last.
     std::shared_ptr<menu_state> build(IShellItemArray* items)
     {
         std::wstring folder;
         bool has_selection = false;
         {
             std::lock_guard<std::mutex> lock(state_lock_);
-            folder = view_folder_;
-            has_selection = view_has_selection_;
+            folder = std::exchange(view_folder_, {});
+            has_selection = std::exchange(view_has_selection_, false);
         }
         auto state = std::make_shared<menu_state>();
         state->provider = rap::shell::make_provider();
