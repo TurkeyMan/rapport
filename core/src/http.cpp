@@ -10,6 +10,10 @@
 #include <fstream>
 
 #if defined(_WIN32)
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -363,14 +367,166 @@ struct handle
     explicit operator bool() const { return h != nullptr; }
 };
 
+// What WinHTTP's thread says of a request's call: whether it's done, and how.
+struct completion
+{
+    std::mutex m;
+    std::condition_variable cv;
+    bool ready = false, closed = false;
+    DWORD error = 0;  // the call's, if it failed
+    DWORD bytes = 0;  // a read's
+};
+
+void CALLBACK on_status(HINTERNET, DWORD_PTR context, DWORD status, void* info, DWORD length)
+{
+    auto* c = reinterpret_cast<completion*>(context);
+    if (!c) return;
+    std::lock_guard<std::mutex> lock(c->m);
+    switch (status)
+    {
+    case WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE:
+    case WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE: break;
+    case WINHTTP_CALLBACK_STATUS_READ_COMPLETE: c->bytes = length; break;
+    case WINHTTP_CALLBACK_STATUS_REQUEST_ERROR: c->error = static_cast<WINHTTP_ASYNC_RESULT*>(info)->dwError; break;
+    case WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING: c->closed = true; break;
+    default: return;
+    }
+    c->ready = true;
+    c->cv.notify_all();
+}
+
+// A request in WinHTTP's asynchronous mode, each call begun and then waited
+// for here: the way to end one on time, as only an asynchronous request may
+// be closed while a call of its is under way. (A synchronous one's calls
+// can't be cut short, and its own timeouts go by each wait rather than the
+// whole, in coarse steps: a read on a quiet server ran on to the next 4 s.)
+class async_request
+{
+public:
+    // How a call ended: on its own, or by the wait's limit or the request
+    // being cancelled, which close the request.
+    enum class end { done, failed, timed_out, cancelled };
+    using time = std::chrono::steady_clock::time_point;
+
+    async_request(HINTERNET connection, const std::wstring& verb, const std::wstring& target, bool secure)
+        : c_(new completion)
+    {
+        h_ = WinHttpOpenRequest(connection, verb.c_str(), target.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0);
+        const DWORD_PTR context = DWORD_PTR(c_);
+        if (h_ && (WinHttpSetStatusCallback(h_, on_status,
+                                            WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS | WINHTTP_CALLBACK_FLAG_HANDLES,
+                                            0) == WINHTTP_INVALID_STATUS_CALLBACK ||
+                   !WinHttpSetOption(h_, WINHTTP_OPTION_CONTEXT_VALUE, const_cast<DWORD_PTR*>(&context),
+                                     sizeof context)))
+        {
+            c_->error = GetLastError();
+            WinHttpCloseHandle(std::exchange(h_, nullptr));  // calls back with no context, if at all
+        }
+        else if (!h_)
+            c_->error = GetLastError();
+    }
+    // Closed, and its completion freed once WinHTTP is done with it.
+    ~async_request()
+    {
+        close();
+        delete c_;
+    }
+    async_request(const async_request&) = delete;
+    async_request& operator=(const async_request&) = delete;
+
+    explicit operator bool() const { return h_ != nullptr; }
+    HINTERNET get() const { return h_; }
+    // The last call's error, when it failed.
+    DWORD error() const { return c_ ? c_->error : 0; }
+
+    end send(const std::wstring& headers, std::string_view body, time until, const std::atomic<bool>* cancelled)
+    {
+        if (!arm()) return end::failed;
+        void* data = body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data());
+        return wait(WinHttpSendRequest(h_, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+                                       DWORD(-1L), data, DWORD(body.size()), DWORD(body.size()), DWORD_PTR(c_)),
+                    until, cancelled);
+    }
+    end receive(time until, const std::atomic<bool>* cancelled)
+    {
+        if (!arm()) return end::failed;
+        return wait(WinHttpReceiveResponse(h_, nullptr), until, cancelled);
+    }
+    // Into `buf`, which WinHTTP writes to until the call ends; `got` 0 at
+    // the body's end.
+    end read(char* buf, DWORD size, DWORD& got, time until, const std::atomic<bool>* cancelled)
+    {
+        got = 0;
+        if (!arm()) return end::failed;
+        const end e = wait(WinHttpReadData(h_, buf, size, nullptr), until, cancelled);
+        if (e == end::done) got = c_->bytes;
+        return e;
+    }
+
+private:
+    bool arm()
+    {
+        if (!h_) return false;
+        std::lock_guard<std::mutex> lock(c_->m);
+        c_->ready = false;
+        c_->error = c_->bytes = 0;
+        return true;
+    }
+
+    // The call begun's end; at `until`, or once cancelled, the request
+    // closed. `cancelled` is a flag, so it's looked at every 50 ms.
+    end wait(BOOL begun, time until, const std::atomic<bool>* cancelled)
+    {
+        using namespace std::chrono_literals;
+        std::unique_lock<std::mutex> lock(c_->m);
+        if (!begun)
+        {
+            c_->error = GetLastError();
+            return end::failed;
+        }
+        for (;;)
+        {
+            if (c_->ready) return c_->error ? end::failed : end::done;
+            const auto now = std::chrono::steady_clock::now();
+            const end e = cancelled && *cancelled ? end::cancelled : now >= until ? end::timed_out : end::done;
+            if (e != end::done)
+            {
+                lock.unlock();
+                close();
+                return e;
+            }
+            c_->cv.wait_until(lock, std::min(until, now + 50ms));
+        }
+    }
+
+    // Closes the request, ending a call under way, and waits for WinHTTP's
+    // last word on it; should that not come, the completion is left to it.
+    void close()
+    {
+        if (!h_) return;
+        WinHttpCloseHandle(std::exchange(h_, nullptr));
+        std::unique_lock<std::mutex> lock(c_->m);
+        if (!c_->cv.wait_for(lock, std::chrono::seconds(5), [&] { return c_->closed; }))
+        {
+            lock.unlock();
+            c_ = nullptr;
+        }
+    }
+
+    HINTERNET h_ = nullptr;
+    completion* c_;
+};
+
 }  // namespace
 
 http_response http_request(std::string_view method, const std::string& url, std::string_view body,
                            const http_options& o)
 {
+    using clock = std::chrono::steady_clock;
     http_response r;
     handle session(WinHttpOpen(L"rapport", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-                               WINHTTP_NO_PROXY_BYPASS, 0));
+                               WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC));
     if (!session)
     {
         r.error = failure("WinHTTP unavailable");
@@ -380,7 +536,28 @@ http_response http_request(std::string_view method, const std::string& url, std:
     WinHttpSetOption(session.h, WINHTTP_OPTION_DECOMPRESSION, &decompress, sizeof decompress);
 
     chain hops(method, url, o);
-    handle connection, request;
+    handle connection;
+    std::unique_ptr<async_request> request;  // after the connection: closed before it
+    // Waiting for the response, and for each piece of the body: within the
+    // stall time, once connected, or what's left of the whole request's
+    // limit. Connecting is within that limit, or with a stall time, within
+    // its own.
+    const auto data_by = [&] { return clock::now() + (o.stall.count() ? o.stall : hops.left()); };
+    // Why a call didn't end well, in words ("" when it did).
+    const auto outcome = [&](async_request::end e, const char* what, bool data) -> std::string
+    {
+        switch (e)
+        {
+        case async_request::end::done: return {};
+        case async_request::end::cancelled: return "cancelled";
+        case async_request::end::timed_out:
+            return data && o.stall.count() ? "timed out (no data for " + std::to_string(o.stall.count()) + " ms)"
+                                           : "timed out";
+        case async_request::end::failed: break;
+        }
+        SetLastError(request->error());
+        return failure(what);
+    };
     DWORD status = 0;
     for (;;)
     {
@@ -403,50 +580,58 @@ http_response http_request(std::string_view method, const std::string& url, std:
         const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
         const std::wstring target = std::wstring(parts.lpszUrlPath, parts.dwUrlPathLength) +
                                     std::wstring(parts.lpszExtraInfo, parts.dwExtraInfoLength);
-        request = handle();
+        request.reset();
         connection = handle(WinHttpConnect(session.h, host.c_str(), parts.nPort, 0));
-        if (connection)
-            request = handle(WinHttpOpenRequest(connection.h, wide(h.method).c_str(), target.c_str(), nullptr,
-                                                WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                                parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0));
-        if (!request)
+        if (!connection)
         {
             r.error = failure("could not connect");
             return r;
         }
-        // Each wait within what's left of the whole request's limit, or,
-        // once connected, within the stall time.
-        const int left = int(hops.left().count()),
-                  wait = o.stall.count() ? int(o.stall.count()) : left;
-        WinHttpSetTimeouts(request.h, left, left, wait, wait);
-        // Redirects are ours (above): WinHTTP's would send the headers on.
-        DWORD never = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
-        WinHttpSetOption(request.h, WINHTTP_OPTION_REDIRECT_POLICY, &never, sizeof never);
-        std::wstring extra;
-        for (const auto& [name, value] : headers_for(h, o.headers)) extra += wide(name) + L": " + wide(value) + L"\r\n";
-        const std::string_view sent = h.with_body ? body : std::string_view();
-        void* data = sent.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(sent.data());
-        if (!WinHttpSendRequest(request.h, extra.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : extra.c_str(), DWORD(-1L),
-                                data, DWORD(sent.size()), DWORD(sent.size()), 0) ||
-            !WinHttpReceiveResponse(request.h, nullptr))
+        request = std::make_unique<async_request>(connection.h, wide(h.method), target,
+                                                  parts.nScheme == INTERNET_SCHEME_HTTPS);
+        if (!*request)
         {
-            r.error = failure("request failed");
+            SetLastError(request->error());
+            r.error = failure("could not connect");
             return r;
         }
-        if (o.cancelled && *o.cancelled) return {.error = "cancelled"};
+        // Ending the request on time is ours (above): WinHTTP's own limits,
+        // for resolving and connecting what's left, for sending and
+        // receiving only a backstop well after ours, as its coarse timer
+        // goes off early as well as late.
+        const auto left = hops.left();
+        const int backstop = int(std::max(left, o.stall).count()) + 5000;
+        WinHttpSetTimeouts(request->get(), int(left.count()), int(left.count()), backstop, backstop);
+        // Redirects are ours (above): WinHTTP's would send the headers on.
+        DWORD never = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        WinHttpSetOption(request->get(), WINHTTP_OPTION_REDIRECT_POLICY, &never, sizeof never);
+        std::wstring extra;
+        for (const auto& [name, value] : headers_for(h, o.headers)) extra += wide(name) + L": " + wide(value) + L"\r\n";
+        // Sent (connected, through TLS, the request and its body out), then
+        // its response's headers in.
+        std::string why = outcome(request->send(extra, h.with_body ? body : std::string_view(),
+                                                clock::now() + left, o.cancelled),
+                                  "request failed", false);
+        if (why.empty()) why = outcome(request->receive(data_by(), o.cancelled), "request failed", true);
+        if (why == "cancelled") return {.error = "cancelled"};
+        if (!why.empty())
+        {
+            r.error = std::move(why);
+            return r;
+        }
 
         status = 0;
         DWORD size = sizeof status;
-        WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WinHttpQueryHeaders(request->get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                             WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
         r.headers.clear();
         size = 0;
-        WinHttpQueryHeaders(request.h, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &size,
-                            WINHTTP_NO_HEADER_INDEX);
+        WinHttpQueryHeaders(request->get(), WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX, nullptr,
+                            &size, WINHTTP_NO_HEADER_INDEX);
         if (size)
         {
             std::wstring raw(size / sizeof(wchar_t), L'\0');
-            if (WinHttpQueryHeaders(request.h, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX,
+            if (WinHttpQueryHeaders(request->get(), WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX,
                                     raw.data(), &size, WINHTTP_NO_HEADER_INDEX))
             {
                 const std::string text = narrow(raw.c_str(), size / sizeof(wchar_t));
@@ -468,21 +653,12 @@ http_response http_request(std::string_view method, const std::string& url, std:
     char buf[65536];
     for (;;)
     {
-        if (o.cancelled && *o.cancelled) return {.error = "cancelled"};
-        if (hops.late())
-        {
-            r.error = "timed out";
-            break;
-        }
-        if (!o.stall.count())
-        {
-            DWORD left = DWORD(hops.left().count());  // each read within what's left
-            WinHttpSetOption(request.h, WINHTTP_OPTION_RECEIVE_TIMEOUT, &left, sizeof left);
-        }
         DWORD got = 0;
-        if (!WinHttpReadData(request.h, buf, sizeof buf, &got))
+        std::string why = outcome(request->read(buf, sizeof buf, got, data_by(), o.cancelled), "read failed", true);
+        if (why == "cancelled") return {.error = "cancelled"};
+        if (!why.empty())
         {
-            r.error = failure("read failed");
+            r.error = std::move(why);
             break;
         }
         if (got == 0 || !in.take(buf, got)) break;
@@ -513,9 +689,9 @@ constexpr int opt_writedata = 10001, opt_url = 10002, opt_postfields = 10015, op
 constexpr int opt_protocols_str = 10318, opt_redir_protocols_str = 10319, opt_protocols = 181,
               opt_redir_protocols = 182;
 constexpr long proto_http = 1 << 0, proto_https = 1 << 1;
-constexpr int info_response_code = 0x200002, info_redirect_url = 0x10001F;
+constexpr int info_response_code = 0x200002, info_redirect_url = 0x10001F, info_pretransfer_time_t = 0x600035;
 constexpr long global_default = 3;
-constexpr int curle_write_error = 23;
+constexpr int curle_write_error = 23, curle_operation_timedout = 28;
 
 struct curl_api
 {
@@ -575,8 +751,11 @@ struct transfer
 {
     receiver& in;
     const http_options& o;
+    const curl_api& c;
+    CURL* e;
     int status = 0;
     bool started = false;
+    bool connected = false;  // through TLS: the stall time runs from then
     std::chrono::steady_clock::time_point last_data = std::chrono::steady_clock::now();
     bool stalled = false;
 };
@@ -586,6 +765,7 @@ size_t on_body(char* data, size_t size, size_t count, void* p)
     auto& t = *static_cast<transfer*>(p);
     const size_t n = size * count;
     t.last_data = std::chrono::steady_clock::now();
+    t.connected = true;
     if (is_redirect(t.status) && header(t.in.r.headers, "Location")) return n;  // followed below
     if (!t.started) t.in.start(), t.started = true;
     return t.in.take(data, n) ? n : 0;  // 0 stops the transfer
@@ -601,11 +781,19 @@ size_t on_header(char* data, size_t size, size_t count, void* p)
     return size * count;
 }
 
-// About once a second, data or not: cancelled, or nothing for the stall time.
+// About once a second, data or not: cancelled, or nothing for the stall time
+// since connected (connecting has the time limit, as WinHTTP's does).
 int on_progress(void* p, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
 {
     auto& t = *static_cast<transfer*>(p);
-    if (t.o.stall.count() && std::chrono::steady_clock::now() - t.last_data > t.o.stall) t.stalled = true;
+    if (t.o.stall.count() && !t.connected)
+    {
+        curl_off_t ready = 0;  // microseconds to the transfer's start; 0 before
+        if (t.c.easy_getinfo(t.e, info_pretransfer_time_t, &ready) == 0 && ready > 0)
+            t.connected = true, t.last_data = std::chrono::steady_clock::now();
+    }
+    if (t.o.stall.count() && t.connected && std::chrono::steady_clock::now() - t.last_data > t.o.stall)
+        t.stalled = true;
     return (t.o.cancelled && *t.o.cancelled) || t.stalled ? 1 : 0;  // non-zero aborts
 }
 
@@ -665,7 +853,7 @@ http_response http_request(std::string_view method, const std::string& url, std:
         const long left = long(hops.left().count());
         c.easy_setopt(e, opt_connecttimeout_ms, left);
         if (!o.stall.count()) c.easy_setopt(e, opt_timeout_ms, left);
-        transfer t{in, o};
+        transfer t{in, o, c, e};
         c.easy_setopt(e, opt_writedata, &t);
         c.easy_setopt(e, opt_headerdata, &t);
         c.easy_setopt(e, opt_xferinfodata, &t);
@@ -708,7 +896,10 @@ http_response http_request(std::string_view method, const std::string& url, std:
     if (o.cancelled && *o.cancelled) return {.error = "cancelled"};
     if (!(rc == curle_write_error && in.ended_early()) && rc != 0)
     {
-        r.error = stalled ? "timed out (no data for " + std::to_string(o.stall.count()) + " ms)" : c.easy_strerror(rc);
+        // Timeouts in WinHTTP's words, the same everywhere.
+        r.error = stalled                           ? "timed out (no data for " + std::to_string(o.stall.count()) + " ms)"
+                  : rc == curle_operation_timedout ? "timed out"
+                                                   : c.easy_strerror(rc);
         if (!status) r.body.clear();
     }
     r.status = int(status);

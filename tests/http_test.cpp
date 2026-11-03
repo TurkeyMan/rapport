@@ -138,7 +138,9 @@ void origins()
 }
 
 // An HTTP/1.1 server on 127.0.0.1, one connection at a time, each closed
-// after its response: `answer` maps a request's path to the response.
+// after its response: `answer` maps a request's path to the response. A
+// path starting /quiet is then held open, silent, for up to 3 s, until the
+// client goes.
 class server
 {
 public:
@@ -201,8 +203,26 @@ private:
                 const std::string reply =
                     answer_(std::string_view(request).substr(from, to - from));
                 ::send(c, reply.data(), int(reply.size()), 0);
+                if (std::string_view(request).substr(from).starts_with("/quiet")) hold(c);
             }
             close_socket(c);
+        }
+    }
+
+    // Until the client closes its end, 3 s pass, or the server stops.
+    void hold(socket_t c)
+    {
+        for (int i = 0; i < 60 && !stop_; ++i)
+        {
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(c, &readable);
+            timeval wait{0, 50000};
+            if (::select(int(c) + 1, &readable, nullptr, nullptr, &wait) > 0)
+            {
+                char b;
+                if (::recv(c, &b, 1, 0) <= 0) return;
+            }
         }
     }
 
@@ -247,6 +267,10 @@ void requests()
             if (path == "/spaced") return response("302 Found", "/a b?q=c d", "");
             // libcurl resolves a redirect itself, a query's space as '+'.
             if (path == "/a%20b?q=c%20d" || path == "/a%20b?q=c+d") return response("200 OK", {}, "spaced");
+            // /quiet: some of a long body, then nothing (held open above).
+            if (path == "/quiet")
+                return "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1000000\r\n\r\n" +
+                       std::string(65536, 'x');
             // /slow/N: each answer 700 ms late, N redirects before the last.
             if (path.starts_with("/slow/"))
             {
@@ -307,6 +331,35 @@ void requests()
         std::printf("     url [%s], error [%s]\n", spaced.url.c_str(), spaced.error.c_str());
     check(spaced.status == 200 && spaced.body == "spaced" && spaced.url.find(' ') == std::string::npos,
           "http: a redirect's spaces are escaped");
+
+    // A server gone quiet mid-body ends the request on time, not some
+    // seconds after (WinHTTP's own timeouts go in steps of 4 s), whether by
+    // the stall time, the whole request's limit, or being cancelled. libcurl
+    // looks about once a second, hence the slack.
+    const auto quiet = [&](const rap::sys::http_options& o, const char* what, auto ok)
+    {
+        const auto from = std::chrono::steady_clock::now();
+        auto r = rap::sys::http_get(s.url("/quiet"), o);
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - from);
+        const bool good = ok(r) && ms < 2000ms;
+        if (!good) std::printf("     error [%s], took %lld ms\n", r.error.c_str(), (long long)ms.count());
+        check(good, what);
+    };
+    quiet({.stall = 500ms}, "http: a stall ends a quiet transfer on time",
+          [](const auto& r) { return r.error.find("no data for 500 ms") != std::string::npos; });
+    quiet({.timeout = 1000ms}, "http: the time limit ends a quiet transfer on time",
+          [](const auto& r) { return r.error == "timed out"; });
+    std::atomic<bool> cancel = false;
+    std::thread canceller(
+        [&]
+        {
+            std::this_thread::sleep_for(300ms);
+            cancel = true;
+        });
+    quiet({.timeout = 10000ms, .cancelled = &cancel}, "http: cancelling ends a quiet transfer at once",
+          [](const auto& r) { return r.error == "cancelled"; });
+    canceller.join();
 
     std::filesystem::remove(secret);
 }
