@@ -4206,12 +4206,28 @@ public:
         const int last = last_visible_column();
         return last >= 0 && columns_[size_t(last)].stretch ? last : -1;
     }
-    void fill_last()
+    // The client width a list_view of client w x h will have once it's added
+    // the vertical scroll bar its rows need at that height (and before it
+    // has: on its way to a new size).
+    long width_after(long w, long h) const
+    {
+        if (GetWindowLongPtrW(h_, GWL_STYLE) & WS_VSCROLL) return w;  // in the width already
+        const int rows = ListView_GetItemCount(h_);
+        RECT item{}, header{};
+        if (rows <= 0 || !ListView_GetItemRect(h_, 0, &item, LVIR_BOUNDS)) return w;
+        if (HWND hd = ListView_GetHeader(h_); hd && IsWindowVisible(hd)) GetWindowRect(hd, &header);
+        const long needed = long(rows) * (item.bottom - item.top) + (header.bottom - header.top);
+        return needed > h ? w - GetSystemMetricsForDpi(SM_CXVSCROLL, win_.dpi()) : w;
+    }
+    // `width`: the client width to fill, if not the one it has now (a
+    // WM_SIZE on its way in).
+    void fill_last(long width = -1)
     {
         const int last = filled_column();
         if (last < 0) return;
         RECT c;
         GetClientRect(h_, &c);
+        if (width >= 0) c.right = width;
         if (c.right <= 0) return;
         long others = 0;
         for (size_t i = 0; i < columns_.size(); ++i)
@@ -5051,8 +5067,14 @@ private:
     }
     static LRESULT CALLBACK size_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
+        auto* self = reinterpret_cast<list_impl*>(data);
+        // The last column fitted to the new width before the list_view sees
+        // it: after, the list_view had shown a horizontal scroll bar for the
+        // old widths, a flash before the column shrank. Again after, for a
+        // vertical scroll bar the new size brought or took away.
+        if (msg == WM_SIZE) self->fill_last(self->width_after(LOWORD(lp), HIWORD(lp)));
         const LRESULT r = DefSubclassProc(h, msg, wp, lp);
-        if (msg == WM_SIZE || msg == wm_rapport_fill_last) reinterpret_cast<list_impl*>(data)->fill_last();
+        if (msg == WM_SIZE || msg == wm_rapport_fill_last) self->fill_last();
         return r;
     }
     static LRESULT CALLBACK auto_scroll_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
