@@ -1200,14 +1200,19 @@ public:
     entry_icon_action(QLineEdit* edit, const spec::entry_action& s)
         : edit_(edit)
         , icon_(s.icon)
+        , menu_(s.on_menu)
     {
-        action_ = edit->addAction(QIcon(), QLineEdit::TrailingPosition);
+        action_ = edit->addAction(QIcon(), s.leading ? QLineEdit::LeadingPosition
+                                                     : QLineEdit::TrailingPosition);
         action_->setToolTip(qs(s.tooltip));
         action_->setText(qs(s.tooltip));
         QObject::connect(action_, &QAction::triggered, action_,
-                         [click = s.on_click]
+                         [this, click = s.on_click]
                          {
-                             if (click) click();
+                             if (menu_)
+                                 drop_menu();
+                             else if (click)
+                                 click();
                          });
         refresh();
         if (s.bind) *s.bind = this;
@@ -1225,16 +1230,46 @@ public:
     }
     bool checked() const override { return checked_; }
     void set_enabled(bool e) override { action_->setEnabled(e); }
+    void on_menu(std::function<menu()> f) override
+    {
+        menu_ = std::move(f);
+        refresh();
+    }
 
 private:
+    // Under the icon's button, its left edges lined up.
+    void drop_menu()
+    {
+        menu items = menu_();
+        QWidget* button = nullptr;
+        for (QObject* o : action_->associatedObjects())
+            if (auto* w = qobject_cast<QWidget*>(o); w && w != edit_) button = w;
+        QWidget* under = button ? button : edit_;
+        show_popup_menu(std::move(items), edit_, under->mapToGlobal(QPoint(0, under->height())));
+    }
+    // A checked one shows its icon as the style draws a selected one (the
+    // line edit draws no checked state); a menu's has a drop arrow over its
+    // corner.
     void refresh()
     {
         QIcon shown = to_q_icon(icon_, 16, edit_);
+        const qreal dpr = edit_->devicePixelRatioF();
+        if (menu_ && !shown.isNull())
+        {
+            QPixmap both = shown.pixmap(QSize(16, 16), dpr);
+            QPainter p(&both);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(edit_->palette().color(QPalette::Text));
+            p.drawPolygon(QPolygonF({QPointF(10, 12), QPointF(16, 12), QPointF(13, 15.5)}));
+            p.end();
+            shown = QIcon(both);
+        }
         if (checked_ && !shown.isNull())
         {
             QStyleOption opt;
             opt.initFrom(edit_);
-            const QPixmap normal = shown.pixmap(QSize(16, 16), edit_->devicePixelRatioF());
+            const QPixmap normal = shown.pixmap(QSize(16, 16), dpr);
             shown = QIcon(edit_->style()->generatedIconPixmap(QIcon::Selected, normal, &opt));
         }
         action_->setIcon(shown);
@@ -1243,6 +1278,7 @@ private:
     QLineEdit* edit_;
     QAction* action_ = nullptr;
     icon icon_;
+    std::function<menu()> menu_;
     bool checked_ = false;
 };
 

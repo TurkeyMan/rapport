@@ -130,6 +130,7 @@ public:
     void set_checked(bool c) override { on = c; }
     bool checked() const override { return on; }
     void set_enabled(bool) override {}
+    void on_menu(std::function<menu()>) override {}
     bool on = false;
 };
 

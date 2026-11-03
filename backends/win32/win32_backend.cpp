@@ -1644,10 +1644,12 @@ LRESULT CALLBACK frameless_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT
     return 0;
 }
 
-// A button inside an edit control at its end (spec::entry_action, and the
-// clear button): a child of the edit, owner drawn as the flat tool buttons
-// are, with the edit's right margin kept clear of text for it. The edit
-// passes its WM_COMMAND and WM_DRAWITEM on (edit_buttons_subclass).
+// A button inside an edit control at its start or end (spec::entry_action,
+// and the clear button): a child of the edit, owner drawn as the flat tool
+// buttons are, with the edit's margin on that side kept clear of text for
+// it. The edit passes its WM_COMMAND and WM_DRAWITEM on
+// (edit_buttons_subclass). With a menu it's wider, a drop arrow after the
+// icon, and the menu drops down under it.
 class edit_button : public rap::entry_action, public handler
 {
 public:
@@ -1681,9 +1683,23 @@ public:
     }
     bool checked() const override { return checked_; }
     void set_enabled(bool e) override { EnableWindow(h_, e); }
+    void on_menu(std::function<menu()> f) override
+    {
+        menu_ = std::move(f);
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+    bool has_menu() const { return bool(menu_); }
     void command(WORD code) override
     {
-        if (code == BN_CLICKED && click_) click_();
+        if (code != BN_CLICKED) return;
+        if (!menu_)
+        {
+            if (click_) click_();
+            return;
+        }
+        RECT r{};
+        GetWindowRect(h_, &r);
+        show_popup_menu(h_, menu_(), POINT{r.left, r.bottom});
     }
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
@@ -1705,13 +1721,30 @@ public:
             DeleteObject(b);
         }
         const int size = win_.px(16);
-        RECT ir{r.left + (r.right - r.left - size) / 2, r.top + (r.bottom - r.top - size) / 2, 0,
-                0};
+        const int arrow = menu_ ? win_.px(8) : 0;
+        RECT ir{r.left + (r.right - r.left - size - arrow) / 2,
+                r.top + (r.bottom - r.top - size) / 2, 0, 0};
         ir.right = ir.left + size;
         ir.bottom = ir.top + size;
-        draw_icon_on_dc(d->hDC, ir, icon_, win_.scale(),
-                        disabled ? theme_color_of(theme_color::placeholder_text)
-                                 : theme_color_of(theme_color::text));
+        const color ink = disabled ? theme_color_of(theme_color::placeholder_text)
+                                   : theme_color_of(theme_color::text);
+        draw_icon_on_dc(d->hDC, ir, icon_, win_.scale(), ink);
+        if (menu_)
+        {
+            // A small down-pointing triangle after the icon.
+            const int cx = ir.right + arrow / 2, cy = (r.top + r.bottom) / 2;
+            const int half = win_.px(3);
+            const POINT tri[3] = {{cx - half, cy - half / 2},
+                                  {cx + half + 1, cy - half / 2},
+                                  {cx, cy + half - half / 2}};
+            HBRUSH b = CreateSolidBrush(RGB(ink.r, ink.g, ink.b));
+            HGDIOBJ old_brush = SelectObject(d->hDC, b);
+            HGDIOBJ old_pen = SelectObject(d->hDC, GetStockObject(NULL_PEN));
+            Polygon(d->hDC, tri, 3);
+            SelectObject(d->hDC, old_pen);
+            SelectObject(d->hDC, old_brush);
+            DeleteObject(b);
+        }
         return true;
     }
     HWND hwnd() const { return h_; }
@@ -1740,6 +1773,7 @@ private:
     HWND h_ = nullptr;
     icon icon_;
     std::function<void()> click_;
+    std::function<menu()> menu_;
     bool checked_ = false, hot_ = false;
 };
 
@@ -1766,11 +1800,12 @@ public:
                                                    });
         for (const spec::entry_action& a : s.actions)
         {
-            actions_.push_back(
-                std::make_unique<edit_button>(win, h_, a.icon, a.tooltip, a.on_click));
-            if (a.bind) *a.bind = actions_.back().get();
+            auto& side = a.leading ? leading_ : actions_;
+            side.push_back(std::make_unique<edit_button>(win, h_, a.icon, a.tooltip, a.on_click));
+            if (a.on_menu) side.back()->on_menu(a.on_menu);
+            if (a.bind) *a.bind = side.back().get();
         }
-        if (clear_ || !actions_.empty())
+        if (clear_ || !actions_.empty() || !leading_.empty())
         {
             SetWindowSubclass(h_, edit_buttons_subclass, 3, reinterpret_cast<DWORD_PTR>(this));
             place_buttons();
@@ -1815,20 +1850,28 @@ public:
     }
 
 private:
-    // Square buttons the client area's height at its right end, the
-    // actions outermost, the clear button (while there's text) inside them;
-    // the text kept clear of them.
+    // Square buttons the client area's height (a menu's wider, for its
+    // arrow): the leading ones at its left end, the trailing ones at its
+    // right end outermost, the clear button (while there's text) inside
+    // them; the text kept clear of them.
     void place_buttons()
     {
-        if (!clear_ && actions_.empty()) return;
+        if (!clear_ && actions_.empty() && leading_.empty()) return;
         RECT c{};
         GetClientRect(h_, &c);
         const int size = c.bottom - c.top;
+        auto width = [&](const edit_button& b) { return size + (b.has_menu() ? px(8) : 0); };
+        int left = 0;
+        for (const auto& b : leading_)
+        {
+            MoveWindow(b->hwnd(), left, 0, width(*b), size, TRUE);
+            left += width(*b);
+        }
         int x = c.right;
         for (auto it = actions_.rbegin(); it != actions_.rend(); ++it)
         {
-            x -= size;
-            MoveWindow((*it)->hwnd(), x, 0, size, size, TRUE);
+            x -= width(**it);
+            MoveWindow((*it)->hwnd(), x, 0, width(**it), size, TRUE);
         }
         if (clear_)
         {
@@ -1840,7 +1883,8 @@ private:
             }
             ShowWindow(clear_->hwnd(), any ? SW_SHOWNA : SW_HIDE);
         }
-        SendMessageW(h_, EM_SETMARGINS, EC_RIGHTMARGIN, MAKELPARAM(0, c.right - x));
+        SendMessageW(h_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                     MAKELPARAM(left, c.right - x));
     }
     static LRESULT CALLBACK edit_buttons_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
                                                   DWORD_PTR data)
@@ -1876,7 +1920,7 @@ private:
     }
 
     std::unique_ptr<edit_button> clear_;
-    std::vector<std::unique_ptr<edit_button>> actions_;
+    std::vector<std::unique_ptr<edit_button>> leading_, actions_;
     bool quiet_ = false;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
