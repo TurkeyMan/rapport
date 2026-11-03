@@ -782,26 +782,29 @@ public:
     // change its icon, tooltip or held-down state later.
     entry& trailing_action(icon i, std::string tooltip, std::function<void()> on_click)
     {
-        s().actions.push_back({std::move(i), std::move(tooltip), std::move(on_click), nullptr});
+        s().actions.push_back(
+            {std::move(i), std::move(tooltip), std::move(on_click), nullptr, false, {}});
         return *this;
     }
     entry& trailing_action(icon i, std::string tooltip, std::function<void()> on_click,
                            rap::entry_action*& bind)
     {
-        s().actions.push_back({std::move(i), std::move(tooltip), std::move(on_click), &bind});
+        s().actions.push_back(
+            {std::move(i), std::move(tooltip), std::move(on_click), &bind, false, {}});
         return *this;
     }
     // The same at the box's start, before the text.
     entry& leading_action(icon i, std::string tooltip, std::function<void()> on_click)
     {
         s().actions.push_back(
-            {std::move(i), std::move(tooltip), std::move(on_click), nullptr, true});
+            {std::move(i), std::move(tooltip), std::move(on_click), nullptr, true, {}});
         return *this;
     }
     entry& leading_action(icon i, std::string tooltip, std::function<void()> on_click,
                           rap::entry_action*& bind)
     {
-        s().actions.push_back({std::move(i), std::move(tooltip), std::move(on_click), &bind, true});
+        s().actions.push_back(
+            {std::move(i), std::move(tooltip), std::move(on_click), &bind, true, {}});
         return *this;
     }
     // A menu at the box's start (a search's options, as TortoiseGit's
