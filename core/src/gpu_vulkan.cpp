@@ -294,7 +294,7 @@ public:
     const vk_device* owner = nullptr;
     core_ptr c;
     VkShaderModule module = VK_NULL_HANDLE;
-    std::string entry;
+    std::string name, entry;
     mutable std::map<VkFormat, VkPipeline> pipelines;  // by target format; under the device's lock
     VkPipeline compute = VK_NULL_HANDLE;                 // a compute program's
 };
@@ -581,6 +581,7 @@ public:
             p->owner = this;
             p->c = c_;
             p->entry = pixel.entry;
+            p->name = pixel.name.empty() ? "shader" : pixel.name;
             VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
             mi.codeSize = f.code.size();
             mi.pCode = reinterpret_cast<const uint32_t*>(f.code.data());
@@ -1122,8 +1123,16 @@ private:
         gi.pDynamicState = &ds;
         gi.layout = layout_;
         VkPipeline pipeline = VK_NULL_HANDLE;
-        if (c.vkCreateGraphicsPipelines(c.device, VK_NULL_HANDLE, 1, &gi, nullptr, &pipeline) != VK_SUCCESS)
+        if (const VkResult r = c.vkCreateGraphicsPipelines(c.device, VK_NULL_HANDLE, 1, &gi, nullptr, &pipeline);
+            r != VK_SUCCESS)
+        {
+            // Its passes are skipped, their targets left as they were: said
+            // once, not silently.
+            std::fprintf(stderr, "rapport: vulkan: no pipeline for %s into format %d (VkResult %d): its passes are skipped\n",
+                         p.name.c_str(), int(f), int(r));
+            p.pipelines[f] = VK_NULL_HANDLE;
             return VK_NULL_HANDLE;
+        }
         p.pipelines[f] = pipeline;
         return pipeline;
     }
