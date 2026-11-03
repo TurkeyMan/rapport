@@ -102,6 +102,47 @@ int run_check(std::FILE* log)
     say("upload rgb16 -> rgba16, scale pass -> rgba8, readback: %.1f ms; largest difference %d, %zu of %zu values differ\n",
         ms, worst, off, size_t(w) * h * 4);
 
+    // Two passes in one run, the second reading what the first drew: into a
+    // larger rgba16f target over a region only (as an app's first resample
+    // pass draws the rows it needs), then from it into rgba8. As the single
+    // pass above, with a gain of 1 twice.
+    {
+        auto mid = dev->create({w + 40, h + 30, gpu::format::rgba16f, 1, true});
+        auto twice = dev->create({w, h, gpu::format::rgba8, 1, true});
+        struct
+        {
+            float gain = 1.0f, pad[3] = {};
+        } unit;
+        gpu::pass chain[2];
+        chain[0].program = scale.program;
+        chain[0].inputs = {src};
+        chain[0].uniforms = bytes_of(unit);
+        chain[0].target = mid;
+        chain[0].region = {0, 0, w, h};
+        chain[1].program = scale.program;
+        chain[1].inputs = {mid};
+        chain[1].uniforms = bytes_of(unit);
+        chain[1].target = twice;
+        dev->run(std::span(chain));
+        std::vector<std::byte> got2(size_t(w) * h * 4);
+        dev->readback(twice, got2, size_t(w) * 4).wait();
+        int worst2 = 0;
+        size_t off2 = 0, zero2 = 0;
+        for (size_t i = 0; i < size_t(w) * h; ++i)
+            for (int c = 0; c < 4; ++c)
+            {
+                const float v = c < 3 ? rgb[i * 3 + size_t(c)] / 65535.0f : 1.0f;
+                const int want = int(std::lround(v * 255.0f));
+                const int got = std::to_integer<int>(got2[i * 4 + size_t(c)]);
+                worst2 = std::max(worst2, std::abs(got - want));
+                off2 += got != want;
+                zero2 += c == 3 && got == 0;
+            }
+        say("two passes in one run (rgba16 -> region of rgba16f -> rgba8): largest difference %d, %zu of %zu values differ, %zu "
+            "pixels with no alpha\n",
+            worst2, off2, size_t(w) * h * 4, zero2);
+    }
+
     // The second level of a three-level texture, drawn and read alone.
     auto mips = dev->create({64, 48, gpu::format::rgba8, 3, true});
     struct
