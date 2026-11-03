@@ -236,6 +236,63 @@ class window_impl;  // forward
 bool paint_group_frames(HWND h, HDC dc);
 void forget_group_themes(HWND h);
 
+// Controls on a tab control's page sit above it, on its themed body, which
+// in light mode isn't the window's colour (Windows 10 and 11: a shade
+// lighter): their backgrounds take the body's, or each control is a band of
+// the window's on it. Measured once per tab control, from what it prints.
+std::map<HWND, HBRUSH>& tab_bodies()
+{
+    static std::map<HWND, HBRUSH> m;
+    return m;
+}
+void forget_tab_bodies()
+{
+    for (auto& [tab, brush] : tab_bodies()) DeleteObject(brush);
+    tab_bodies().clear();
+}
+HBRUSH tab_body_brush(HWND tab)
+{
+    auto& m = tab_bodies();
+    if (auto it = m.find(tab); it != m.end()) return it->second;
+    RECT client;
+    GetClientRect(tab, &client);
+    RECT body = client;
+    TabCtrl_AdjustRect(tab, FALSE, &body);
+    if (client.right <= 0 || client.bottom <= 0 || body.right <= body.left || body.bottom <= body.top) return nullptr;
+    HDC screen = GetDC(tab), mem = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, client.right, client.bottom);
+    HGDIOBJ old = SelectObject(mem, bitmap);
+    SendMessageW(tab, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND);
+    const COLORREF colour = GetPixel(mem, (body.left + body.right) / 2, (body.top + body.bottom) / 2);
+    SelectObject(mem, old);
+    DeleteObject(bitmap);
+    DeleteDC(mem);
+    ReleaseDC(tab, screen);
+    if (colour == CLR_INVALID) return nullptr;
+    return m[tab] = CreateSolidBrush(colour);
+}
+// The body brush of a visible tab control `control` lies wholly over (a
+// sibling, as its pages' controls are), if any.
+HBRUSH tab_body_under(HWND control)
+{
+    RECT at;
+    GetWindowRect(control, &at);
+    for (HWND s = GetWindow(control, GW_HWNDFIRST); s; s = GetWindow(s, GW_HWNDNEXT))
+    {
+        if (s == control || !IsWindowVisible(s)) continue;
+        wchar_t cls[32] = {};
+        GetClassNameW(s, cls, 32);
+        if (_wcsicmp(cls, WC_TABCONTROLW)) continue;
+        RECT body;
+        GetClientRect(s, &body);
+        TabCtrl_AdjustRect(s, FALSE, &body);
+        MapWindowPoints(s, nullptr, reinterpret_cast<POINT*>(&body), 2);
+        RECT overlap;
+        if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s);
+    }
+    return nullptr;
+}
+
 bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result)
 {
     switch (msg)
@@ -290,6 +347,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
     }
     case WM_THEMECHANGED:
         forget_group_themes(wnd);
+        forget_tab_bodies();
         return false;
     case WM_ERASEBKGND:
     {
@@ -347,7 +405,8 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
                                               : link              ? theme_color::link
                                                                   : theme_color::window_text)));
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
-        result = reinterpret_cast<LRESULT>(theme_brush(theme_color::window));
+        HBRUSH on_tab = dark_mode() ? nullptr : tab_body_under(c);
+        result = reinterpret_cast<LRESULT>(on_tab ? on_tab : theme_brush(theme_color::window));
         return true;
     }
     // Fields and drop-down lists, dark in dark mode (their defaults are
