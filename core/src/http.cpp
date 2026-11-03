@@ -71,6 +71,18 @@ std::string resolve(const std::string& base, const std::string& location)
     return root + rest.substr(0, rest.rfind('/') + 1) + location;
 }
 
+// Spaces after the authority as %20: servers send "Location: /a b" unescaped,
+// and browsers follow it so. One in the authority stays, for url_origin to
+// refuse, as it does every other control character anywhere.
+std::string spaces_escaped(std::string url)
+{
+    const size_t colon = url.find("://");
+    if (colon == std::string::npos) return url;
+    const size_t path = url.find_first_of("/?#", colon + 3);
+    for (size_t at = path; (at = url.find(' ', at)) != std::string::npos; at += 3) url.replace(at, 1, "%20");
+    return url;
+}
+
 // One request of a chain of redirects.
 struct hop
 {
@@ -146,12 +158,12 @@ public:
     bool late() const { return !o_.stall.count() && std::chrono::steady_clock::now() >= deadline_; }
 
     // A response came: true, and the next hop current, if it's a redirect
-    // to follow (`location` as sent, or absolute).
+    // to follow (`location` as sent, or absolute; its spaces escaped).
     bool follow(int status, const std::string* location)
     {
         if (!is_redirect(status) || !location) return false;
         ++redirects_;
-        hop_ = redirected(hop_, status, resolve(hop_.url, *location), first_);
+        hop_ = redirected(hop_, status, spaces_escaped(resolve(hop_.url, *location)), first_);
         return true;
     }
 

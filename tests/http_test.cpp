@@ -244,6 +244,9 @@ void requests()
             if (path == "/to-file") return response("302 Found", secret_url, "");
             if (path == "/to-ftp") return response("302 Found", "ftp://127.0.0.1/x", "");
             if (path == "/loop") return response("302 Found", "/loop", "");
+            if (path == "/spaced") return response("302 Found", "/a b?q=c d", "");
+            // libcurl resolves a redirect itself, a query's space as '+'.
+            if (path == "/a%20b?q=c%20d" || path == "/a%20b?q=c+d") return response("200 OK", {}, "spaced");
             // /slow/N: each answer 700 ms late, N redirects before the last.
             if (path.starts_with("/slow/"))
             {
@@ -297,6 +300,13 @@ void requests()
           "http: the time limit is for the whole chain of redirects");
     auto in_time = rap::sys::http_get(s.url("/slow/1"), {.timeout = 3000ms});
     check(in_time.status == 200 && in_time.body == "done", "http: redirects within the limit");
+
+    // A Location with spaces, as some servers send it: followed escaped.
+    auto spaced = rap::sys::http_get(s.url("/spaced"));
+    if (spaced.body != "spaced")
+        std::printf("     url [%s], error [%s]\n", spaced.url.c_str(), spaced.error.c_str());
+    check(spaced.status == 200 && spaced.body == "spaced" && spaced.url.find(' ') == std::string::npos,
+          "http: a redirect's spaces are escaped");
 
     std::filesystem::remove(secret);
 }
