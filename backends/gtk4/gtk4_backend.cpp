@@ -10,6 +10,7 @@
 #include "gpu_readback.h"
 #include "gtk4_adwaita.h"
 #include "gtk_common.h"
+#include "list_press.h"
 
 #include <memory>
 
@@ -856,10 +857,10 @@ public:
                 +[](GtkEventControllerKey*, guint key, guint, GdkModifierType state, gpointer p) -> gboolean
                 {
                     auto* self = static_cast<tree_impl*>(p);
-                    // Space on an item with a box: as a click on it.
+                    // Space on the focused item, with a box: as a click on it.
                     if (key == GDK_KEY_space && !(state & (GDK_CONTROL_MASK | GDK_ALT_MASK)))
                     {
-                        const std::optional<std::string> id = self->selected();
+                        const std::optional<std::string> id = self->focused();
                         auto it = id ? self->nodes_.find(*id) : self->nodes_.end();
                         if (it == self->nodes_.end() || !it->second.check) return false;
                         if (self->toggled_) self->toggled_(*id);
@@ -919,6 +920,22 @@ public:
             }
         gtk_single_selection_set_selected(sel_, GTK_INVALID_LIST_POSITION);
         if (keep) select_quietly(*keep);
+    }
+    // The item with the keyboard focus (the list view's cursor, which
+    // Ctrl+arrows move off the selection), else the selected one.
+    std::optional<std::string> focused() const
+    {
+        GtkRoot* root = gtk_widget_get_root(w_);
+        GtkWidget* f = root ? gtk_root_get_focus(root) : nullptr;
+        if (f && f != w_ && gtk_widget_is_ancestor(f, w_))
+        {
+            while (gtk_widget_get_parent(f) != w_) f = gtk_widget_get_parent(f);
+            GtkWidget* child = gtk_widget_get_first_child(f);
+            if (child && GTK_IS_TREE_EXPANDER(child))
+                if (GtkTreeListRow* row = gtk_tree_expander_get_list_row(GTK_TREE_EXPANDER(child)))
+                    return id_at(gtk_tree_list_row_get_position(row));
+        }
+        return selected();
     }
     std::optional<std::string> selected() const override
     {
@@ -1978,8 +1995,9 @@ public:
         w_ = gtk_column_view_new(GTK_SELECTION_MODEL(g_object_ref(sel_)));
         if (checks_)
         {
-            // Space toggles the selected row's box (the column view has no
-            // cursor to ask; the model applies it to the selection).
+            // Space toggles the focused row's box (the model applies it to
+            // the selection), as the other backends' cursor row: the box
+            // the selection's new state comes from.
             GtkEventController* space = gtk_event_controller_key_new();
             gtk_event_controller_set_propagation_phase(space, GTK_PHASE_CAPTURE);
             g_signal_connect(
@@ -1991,10 +2009,8 @@ public:
                                if (key != GDK_KEY_space ||
                                    (mods & gtk_accelerator_get_default_mod_mask()) || !self->model_)
                                    return false;
-                               GtkBitset* sel = gtk_selection_model_get_selection(self->sel_);
-                               if (!gtk_bitset_is_empty(sel))
-                                   self->model_->toggle_checked(gtk_bitset_get_minimum(sel));
-                               gtk_bitset_unref(sel);
+                               if (auto row = self->focused_row())
+                                   self->model_->toggle_checked(*row);
                                return true;
                            }),
                 this);
@@ -2590,6 +2606,18 @@ private:
             if (std::string_view(gtk_widget_get_css_name(c)) == "listview") return c;
         return w_;
     }
+    // The row with the keyboard focus, the column view's cursor (it has no
+    // other to ask): the focus is on its row widget, or a cell in it.
+    std::optional<size_t> focused_row() const
+    {
+        GtkRoot* root = gtk_widget_get_root(w_);
+        GtkWidget* f = root ? gtk_root_get_focus(root) : nullptr;
+        if (!f || !gtk_widget_is_ancestor(f, w_)) return std::nullopt;
+        for (; f && f != w_; f = gtk_widget_get_parent(f))
+            if (std::string_view(gtk_widget_get_css_name(f)) == "row")
+                if (auto i = row_index(f)) return i;
+        return std::nullopt;
+    }
     // A row widget's index, from the tagged cells in it.
     static std::optional<size_t> row_index(GtkWidget* row)
     {
@@ -2708,6 +2736,7 @@ private:
         double x0 = 0, y0 = 0;   // the press, in w_
         double x = 0, y = 0;     // the pointer now
         size_t row = 0;
+        list_press::drag on_drag = list_press::drag::keep;
     };
     void enable_rows_drag()
     {
@@ -2761,17 +2790,26 @@ private:
         rd_ = {};
         const GdkModifierType mods =
             gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(g));
-        GtkWidget* row =
-            (reorders() || drag_out_.begin) && !(mods & (GDK_SHIFT_MASK | GDK_CONTROL_MASK))
-                ? row_widget_at(w_, x, y)
-                : nullptr;  // Shift and Ctrl clicks select
+        GtkWidget* row = reorders() || drag_out_.begin ? row_widget_at(w_, x, y) : nullptr;
         std::optional<size_t> index = row ? row_index(row) : std::nullopt;
-        if (!index)
+        // The row's own click selects at its release, Ctrl's toggle too, so
+        // nothing is held back here: only what a drag takes is decided.
+        std::optional<list_press::plan> plan;
+        if (index)
         {
-            // Not on a row (the header, or below the rows).
+            GtkBitset* sel = gtk_selection_model_get_selection(sel_);
+            plan = list_press::plan_press(mods & GDK_SHIFT_MASK, mods & GDK_CONTROL_MASK,
+                                          gtk_bitset_contains(sel, guint(*index)),
+                                          size_t(gtk_bitset_get_size(sel)));
+            gtk_bitset_unref(sel);
+        }
+        if (!plan)
+        {
+            // Not on a row (the header, or below the rows), or Shift's range.
             gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_DENIED);
             return;
         }
+        rd_.on_drag = plan->on_drag;
         rd_.pressed = true;
         rd_.x0 = rd_.x = x;
         rd_.y0 = rd_.y = y;
@@ -2787,12 +2825,14 @@ private:
             int threshold = 8;
             g_object_get(gtk_widget_get_settings(w_), "gtk-dnd-drag-threshold", &threshold,
                          nullptr);
-            if (std::abs(dx) < threshold && std::abs(dy) < threshold) return;
+            if (!list_press::past_threshold(dx, dy, threshold)) return;
             rd_.dragging = true;
             gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-            // A press on an unselected row drags that row alone.
-            if (!gtk_selection_model_is_selected(sel_, guint(rd_.row)))
-                gtk_selection_model_select_item(sel_, guint(rd_.row), true);
+            // The rows that drag: a plain press's row alone, Ctrl's added.
+            if (rd_.on_drag != list_press::drag::keep &&
+                !gtk_selection_model_is_selected(sel_, guint(rd_.row)))
+                gtk_selection_model_select_item(sel_, guint(rd_.row),
+                                                rd_.on_drag == list_press::drag::select_only);
             gtk_widget_grab_focus(w_);  // Esc reaches the key controller
             if (!reorders())
             {
