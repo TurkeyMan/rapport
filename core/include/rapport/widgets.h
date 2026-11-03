@@ -690,6 +690,9 @@ public:
     virtual void set_checked(bool) = 0;
     virtual bool checked() const = 0;
     virtual void set_enabled(bool) = 0;
+    // Clicking drops this menu down under the icon, built as it opens, in
+    // place of on_click (spec::entry_action::on_menu).
+    virtual void on_menu(std::function<menu()>) = 0;
 };
 
 // Single-line text entry.
