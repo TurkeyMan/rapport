@@ -4493,10 +4493,20 @@ private:
 class gtk4_backend : public backend
 {
 public:
-    static backend* create(int*, char**, const look_options& look)
+    static backend* create(int* argc, char** argv, const look_options& look)
     {
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
         adw::look() = look;
+        // The program's name, as GTK 3's gtk_init takes it from argv: GTK 4's
+        // takes no arguments, and without a name its windows' Wayland app id
+        // is "GTK Application", so the desktop shows a generic icon and name
+        // rather than those of the app's .desktop file.
+        if (!g_get_prgname() && argc && *argc > 0 && argv && argv[0])
+        {
+            gchar* name = g_path_get_basename(argv[0]);
+            g_set_prgname(name);
+            g_free(name);
+        }
         // Under WSLg, Wayland, as for GTK 3: on its X server the pointer can
         // vanish over the window. (Its X11 does draw faster: 23 against 20 fps
         // for a panning canvas; gtk3 39 against 29.)
