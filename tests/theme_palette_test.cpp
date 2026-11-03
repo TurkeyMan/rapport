@@ -135,6 +135,28 @@ int main()
     eq(p::is_dark({0x1e, 0x1e, 0x1e}) ? "dark" : "light", "dark", "#1e1e1e is dark");
     eq(p::is_dark({0x80, 0x80, 0x80}) ? "dark" : "light", "light", "mid grey is light");
 
+    // Scheme colours: the shade for the ground they're drawn on, a list's
+    // base unless asked otherwise; fixed colours and roles pass through.
+    {
+        const rap::scheme_color status{{0, 50, 160}, {110, 160, 255}};
+        eq(hex(p::shade_for(status, {0xff, 0xff, 0xff})), "#0032a0ff", "scheme on white");
+        eq(hex(p::shade_for(status, {0x1e, 0x1e, 0x1e})), "#6ea0ffff", "scheme on #1e1e1e");
+        eq(hex(p::shade_for(status, {0x2d, 0x2d, 0x2d})), "#6ea0ffff", "scheme on #2d2d2d");
+        eq(hex(p::shade_for(status, {0x80, 0x80, 0x80})), "#0032a0ff", "scheme on mid grey");
+        const rap::color dark_base{0x20, 0x20, 0x20}, light_window{0xf0, 0xf0, 0xf0};
+        auto role_of = [&](theme_color r)
+        {
+            if (r == theme_color::base) return dark_base;
+            if (r == theme_color::window) return light_window;
+            return rap::color{1, 2, 3};
+        };
+        eq(hex(p::resolve(status, role_of)), "#6ea0ffff", "scheme on the base");
+        eq(hex(p::resolve(status, role_of, theme_color::window)), "#0032a0ff",
+           "scheme on the window");
+        eq(hex(p::resolve(theme_color::link, role_of)), "#010203ff", "a role resolves");
+        eq(hex(p::resolve(rap::color{9, 8, 7}, role_of)), "#090807ff", "a colour is itself");
+    }
+
     // Soft selection: Explorer's tints of #0078D7 on light; a mix on dark.
     const p::soft_colors light = p::soft_selection({255, 255, 255}, {0x00, 0x78, 0xd7});
     eq(hex(light.selected), "#cce8ffff", "soft selected, light");

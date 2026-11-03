@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <optional>
 #include <string_view>
+#include <variant>
 
 namespace rap::palette
 {
@@ -55,6 +56,25 @@ inline float contrast(color a, color b)
 inline bool is_dark(color background)
 {
     return luminance(background) < 0.18f;
+}
+
+// A scheme colour's shade for what it's drawn on: the dark one on a
+// background dark enough for light text, else the light one.
+inline color shade_for(const scheme_color& c, color background)
+{
+    return is_dark(background) ? c.dark : c.light;
+}
+
+// A paint's colour: a fixed colour as it is, a role through `role_of`, and
+// a scheme colour by the darkness of `ground` (the role it's drawn on: a
+// list's base, by default), so it turns with the scheme the roles turn with.
+template <class RoleOf>
+color resolve(const paint& p, RoleOf&& role_of, theme_color ground = theme_color::base)
+{
+    if (const color* c = std::get_if<color>(&p)) return *c;
+    if (const scheme_color* s = std::get_if<scheme_color>(&p))
+        return shade_for(*s, role_of(ground));
+    return role_of(std::get<theme_color>(p));
 }
 
 // White or black on `background` (an accent may be very light or very

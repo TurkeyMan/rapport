@@ -2177,7 +2177,7 @@ private:
         std::vector<COLORREF> colours;
         auto colour_index = [&](const paint& p)
         {
-            const COLORREF c = color_ref(std::holds_alternative<color>(p) ? std::get<color>(p) : theme_color_of(std::get<theme_color>(p)));
+            const COLORREF c = color_ref(win32::resolve(p));
             auto it = std::find(colours.begin(), colours.end(), c);
             if (it == colours.end()) it = colours.insert(colours.end(), c);
             return int(it - colours.begin()) + 1;  // 0 is the default colour
@@ -2274,7 +2274,7 @@ private:
         cf.cbSize = sizeof cf;
         cf.dwMask = CFM_BOLD | CFM_ITALIC;
         cf.dwEffects = (st.bold ? CFE_BOLD : 0) | (st.italic ? CFE_ITALIC : 0);
-        auto colour = [](const paint& p) { return std::holds_alternative<color>(p) ? std::get<color>(p) : theme_color_of(std::get<theme_color>(p)); };
+        auto colour = [](const paint& p) { return win32::resolve(p); };
         if (st.fg)
         {
             cf.dwMask |= CFM_COLOR;

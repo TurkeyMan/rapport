@@ -227,10 +227,26 @@ QFont styled_font(QFont f, const text_style& s)
     return f;
 }
 
-// Text formats remember the theme roles they were given (role + 1), so a
-// palette change can recolour them (recolour_roles).
+// Text formats remember the theme roles they were given (role + 1), and
+// scheme colours both their shades (scheme_bits), so a palette change can
+// recolour them (recolour_roles).
 constexpr int fg_role_property = QTextFormat::UserProperty + 1;
 constexpr int bg_role_property = QTextFormat::UserProperty + 2;
+constexpr int fg_scheme_property = QTextFormat::UserProperty + 3;
+constexpr int bg_scheme_property = QTextFormat::UserProperty + 4;
+
+qulonglong scheme_bits(const scheme_color& s)
+{
+    auto bits = [](color c) { return qulonglong(c.r) << 24 | c.g << 16 | c.b << 8 | c.a; };
+    return bits(s.light) << 32 | bits(s.dark);
+}
+
+scheme_color from_scheme_bits(qulonglong v)
+{
+    auto rgba = [](qulonglong b)
+    { return color{uint8_t(b >> 24), uint8_t(b >> 16), uint8_t(b >> 8), uint8_t(b)}; };
+    return {rgba(v >> 32), rgba(v & 0xffffffffu)};
+}
 
 QTextCharFormat char_format(const QWidget* w, const text_style& s)
 {
@@ -241,6 +257,10 @@ QTextCharFormat char_format(const QWidget* w, const text_style& s)
         f.setProperty(fg_role_property, int(std::get<theme_color>(*s.fg)) + 1);
     if (s.bg && std::holds_alternative<theme_color>(*s.bg))
         f.setProperty(bg_role_property, int(std::get<theme_color>(*s.bg)) + 1);
+    if (auto* sc = s.fg ? std::get_if<scheme_color>(&*s.fg) : nullptr)
+        f.setProperty(fg_scheme_property, scheme_bits(*sc));
+    if (auto* sc = s.bg ? std::get_if<scheme_color>(&*s.bg) : nullptr)
+        f.setProperty(bg_scheme_property, scheme_bits(*sc));
     if (s.bold) f.setFontWeight(QFont::Bold);
     if (s.italic) f.setFontItalic(true);
     if (s.monospace)
@@ -274,6 +294,12 @@ void recolour_roles(QTextDocument* doc, const QWidget* w)
             if (cf.hasProperty(bg_role_property))
                 change.setBackground(
                     qcolor(theme_color_of(w, theme_color(cf.intProperty(bg_role_property) - 1))));
+            if (cf.hasProperty(fg_scheme_property))
+                change.setForeground(qcolor(
+                    resolve(w, from_scheme_bits(cf.property(fg_scheme_property).toULongLong()))));
+            if (cf.hasProperty(bg_scheme_property))
+                change.setBackground(qcolor(
+                    resolve(w, from_scheme_bits(cf.property(bg_scheme_property).toULongLong()))));
             if (!change.isEmpty())
                 runs.push_back({f.position(), f.position() + f.length(), change});
         }

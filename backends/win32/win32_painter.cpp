@@ -357,6 +357,11 @@ HBRUSH theme_brush(theme_color role)
     return b;
 }
 
+color resolve(const paint& p)
+{
+    return palette::resolve(p, [](theme_color r) { return theme_color_of(r); });
+}
+
 color theme_color_of(theme_color role)
 {
     const desktop_colors& d = desktop();
@@ -532,10 +537,14 @@ d2d_painter::~d2d_painter()
 
 color d2d_painter::resolve(const paint& p) const
 {
-    if (const color* c = std::get_if<color>(&p)) return *c;
-    const theme_color role = std::get<theme_color>(p);
-    if (auto it = overrides_.find(int(role)); it != overrides_.end()) return it->second;
-    return printing_ ? print_color(role) : theme_color_of(role);
+    // Through the overrides, so on paper a scheme colour takes its light shade.
+    return palette::resolve(p,
+                            [this](theme_color role)
+                            {
+                                if (auto it = overrides_.find(int(role)); it != overrides_.end())
+                                    return it->second;
+                                return printing_ ? print_color(role) : theme_color_of(role);
+                            });
 }
 
 ID2D1SolidColorBrush* d2d_painter::brush(const paint& p)

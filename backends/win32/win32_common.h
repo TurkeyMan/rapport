@@ -106,6 +106,8 @@ int extent_px(HWND h, extent e, bool vertical);
 
 color sys_color(int index);
 color theme_color_of(theme_color role);
+// A paint in the desktop's colours (scheme colours by the base's darkness).
+color resolve(const paint& p);
 // The desktop's colours changed: read them again on next use.
 void forget_theme_colors();
 // Windows' dark app mode (palette::windows_dark), and high contrast.
