@@ -1,4 +1,5 @@
 #include "rapport/sys.h"
+#include "launch.h"  // common/: shared with the shell extensions
 
 #include <algorithm>
 #include <cctype>
@@ -472,32 +473,7 @@ std::wstring widen(std::string_view s)
     return path_from_utf8(s).wstring();
 }
 
-// Quotes one argument the way the MSVC runtime parses a command line.
-void append_arg(std::wstring& cmd, const std::wstring& a)
-{
-    if (!cmd.empty()) cmd += L' ';
-    if (!a.empty() && a.find_first_of(L" \t\"") == std::wstring::npos)
-    {
-        cmd += a;
-        return;
-    }
-    cmd += L'"';
-    std::size_t slashes = 0;
-    for (wchar_t c : a)
-    {
-        if (c == L'\\')
-        {
-            ++slashes;
-            continue;
-        }
-        // Backslashes before a quote double, and the quote is escaped.
-        cmd.append(c == L'"' ? slashes * 2 + 1 : slashes, L'\\');
-        slashes = 0;
-        cmd += c;
-    }
-    cmd.append(slashes * 2, L'\\');  // ...as they do before the closing quote
-    cmd += L'"';
-}
+using launch::append_quoted;  // common/launch.h
 
 // The caller's environment with `overrides` applied, as a CreateProcess block.
 std::wstring environment_block(const std::vector<std::pair<std::string, std::string>>& overrides)
@@ -538,8 +514,8 @@ process::start(std::string_view program, std::span<const std::string> args, cons
                     &inherit, OPEN_EXISTING, 0, nullptr);
 
     std::wstring cmd;
-    append_arg(cmd, widen(program));
-    for (auto& a : args) append_arg(cmd, widen(a));
+    append_quoted(cmd, widen(program));
+    for (auto& a : args) append_quoted(cmd, widen(a));
     std::wstring env = environment_block(opt.env);
 
     // The child inherits only these handles: with plain inheritance, two
@@ -741,12 +717,16 @@ int process::wait()
     }
     std::lock_guard lock(impl_->mutex);
     int status = 0;
-    while (waitpid(impl_->pid, &status, 0) < 0 && errno == EINTR)
+    pid_t got;
+    while ((got = waitpid(impl_->pid, &status, 0)) < 0 && errno == EINTR)
     {
     }
     impl_->reaped = true;
-    impl_->code = WIFEXITED(status) ? WEXITSTATUS(status)
-                                    : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    // A failed wait (the child reaped already: SIGCHLD ignored) knows no
+    // exit, and isn't a success.
+    impl_->code = got != impl_->pid   ? -1
+                  : WIFEXITED(status) ? WEXITSTATUS(status)
+                                      : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
     return impl_->code;
 }
 
@@ -1057,30 +1037,7 @@ bool reveal(const fs::path& p)
 namespace
 {
 
-// Starts a program and doesn't wait for it, without fork() (unsafe with
-// other threads running: only async-signal-safe calls may follow it). A
-// shell is spawned to background the program and exits at once, so the
-// program is reparented to init and nothing is left to reap; the arguments
-// stay argv, so nothing needs quoting. A program not found fails (127).
-bool spawn_detached(const std::vector<std::string>& argv)
-{
-    std::vector<std::string> owned{
-        "/bin/sh", "-c",
-        "command -v \"$0\" >/dev/null 2>&1 || exit 127\n"
-        "exec </dev/null >/dev/null 2>&1\n"
-        "if command -v setsid >/dev/null; then setsid \"$0\" \"$@\" & else \"$0\" \"$@\" & fi"};
-    owned.insert(owned.end(), argv.begin(), argv.end());
-    std::vector<char*> args;
-    for (std::string& a : owned) args.push_back(a.data());
-    args.push_back(nullptr);
-    pid_t sh;
-    if (posix_spawn(&sh, "/bin/sh", nullptr, nullptr, args.data(), environ) != 0) return false;
-    int status = 0;
-    while (waitpid(sh, &status, 0) < 0 && errno == EINTR)
-    {
-    }
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
+using launch::spawn_detached;  // common/launch.h
 
 std::string file_uri(const fs::path& p)
 {

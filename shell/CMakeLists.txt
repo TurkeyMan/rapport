@@ -10,8 +10,11 @@ include(cmake/RapportShell.cmake)
 
 # What every extension and its probe share; also what an app links to
 # register its extension (rap::shell::install).
-add_library(rapport_shell STATIC src/shell.cpp src/install.cpp src/resource_dir.cpp)
+# common/launch.cpp is compiled in, not linked from the core.
+add_library(rapport_shell STATIC src/shell.cpp src/install.cpp src/resource_dir.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/launch.cpp)
 add_library(rapport::shell ALIAS rapport_shell)
+target_include_directories(rapport_shell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 target_include_directories(rapport_shell PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
