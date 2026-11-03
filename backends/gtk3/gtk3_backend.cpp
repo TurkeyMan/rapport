@@ -3866,7 +3866,8 @@ private:
                    {
                        cairo_painter kept(off, w);
                        paint(kept);
-                   });
+                   },
+                   [&] { return burst_.keeps(); });
     }
     // A size change: a burst begins or goes on, over once none has come
     // for a while.
@@ -3881,9 +3882,9 @@ private:
             {
                 auto* self = static_cast<canvas_impl*>(p);
                 self->settle_ = 0;
-                const bool was = self->burst_.stretching;
-                self->burst_.settle(self->size());
-                if (was) gtk_widget_queue_draw(self->w_);
+                const size_f size = self->size();
+                if (self->burst_.stretching) gtk_widget_queue_draw(self->w_);
+                if (const auto tell = self->burst_.settle()) tell(size);  // last: it may end the canvas
                 return G_SOURCE_REMOVE;
             },
             this);

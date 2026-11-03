@@ -37,11 +37,13 @@ struct resize_burst
     {
         if (keeps() && have_last) stretching = true;
     }
-    // The settle timer: the burst is over; the backend paints anew.
-    void settle(size_f size)
+    // The settle timer: the burst is over. The backend asks for its new
+    // frame, then calls what this returns last of all: the app may close
+    // the window from it, the canvas going with it.
+    std::function<void(size_f)> settle()
     {
         stretching = false;
-        if (settled) settled(size);
+        return settled;
     }
 };
 

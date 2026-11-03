@@ -6839,9 +6839,9 @@ private:
             if (wp == k_settle_timer)
             {
                 KillTimer(h_, k_settle_timer);
-                const bool was = burst_.stretching;
-                burst_.settle(size());
-                if (was) invalidate();
+                const size_f now = size();
+                if (burst_.stretching) invalidate();
+                if (const auto tell = burst_.settle()) tell(now);  // last: it may end the canvas
                 return 0;
             }
             if (wp != k_reads_timer) return DefWindowProcW(h_, msg, wp, lp);
@@ -7033,26 +7033,28 @@ private:
     {
         com<ID2D1Image> screen;
         dc->GetTarget(screen.put());
-        if (!kept_ || kept_->GetPixelSize().width != w || kept_->GetPixelSize().height != h)
+        // Into a bitmap held here, the last one's reused: on_paint may turn
+        // keeping off, dropping kept_, while it's being drawn into.
+        com<ID2D1Bitmap1> next = std::move(kept_);
+        if (!next || next->GetPixelSize().width != w || next->GetPixelSize().height != h)
         {
-            kept_.reset();
+            next.reset();
             const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
                 D2D1_BITMAP_OPTIONS_TARGET, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-            if (FAILED(dc->CreateBitmap(D2D1::SizeU(w, h), nullptr, 0, &props, kept_.put())))
-            {
-                kept_.reset();
+            if (FAILED(dc->CreateBitmap(D2D1::SizeU(w, h), nullptr, 0, &props, next.put())))
                 return draw(dc, dev->key, dc);
-            }
-            kept_device_ = dev;
         }
-        dc->SetTarget(kept_.get());
+        dc->SetTarget(next.get());
         draw(dc, dev->key, dc);
         dc->SetTarget(screen.get());
-        kept_size_ = size();
         dc->SetDpi(96, 96);
         dc->SetTransform(D2D1::Matrix3x2F::Identity());
-        dc->DrawBitmap(kept_.get(), D2D1::RectF(0, 0, float(w), float(h)), 1, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+        dc->DrawBitmap(next.get(), D2D1::RectF(0, 0, float(w), float(h)), 1, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
                        nullptr, nullptr);
+        if (!burst_.keeps()) return;
+        kept_ = std::move(next);
+        kept_device_ = dev;
+        kept_size_ = size();
     }
     // On the CPU (the first frame, or no GPU): what was drawn copied out, to
     // stretch while a resize burst lasts.

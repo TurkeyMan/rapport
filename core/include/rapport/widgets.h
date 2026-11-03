@@ -1142,6 +1142,7 @@ public:
     virtual void on_resize(std::function<void(size_f)>) = 0;
     // A burst of size changes (a window or a splitter dragged) is over: none
     // has come for about 150 ms. The time for what's too slow to do at each.
+    // Its first size settles too, once it's shown.
     virtual void on_resize_settled(std::function<void(size_f)>) = 0;
     // While its size changes in a burst, the canvas shows the last frame it
     // showed, as shown (the presented frame and on_paint's drawing), scaled

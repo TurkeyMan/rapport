@@ -2091,9 +2091,9 @@ public:
         QObject::connect(settle_, &QTimer::timeout, c,
                          [this]
                          {
-                             const bool was = burst_.stretching;
-                             burst_.settle(size());
-                             if (was) w_->update();
+                             const size_f now = size();
+                             if (burst_.stretching) w_->update();
+                             if (const auto tell = burst_.settle()) tell(now);  // last: it may end the canvas
                          });
     }
     ~canvas_impl() override
@@ -2250,16 +2250,20 @@ public:
         }
         const QSize pixels(int(std::ceil(size().w * scale)), int(std::ceil(size().h * scale)));
         if (pixels.isEmpty()) return;
-        if (kept_.size() != pixels) kept_ = QImage(pixels, QImage::Format_ARGB32_Premultiplied);
-        kept_.setDevicePixelRatio(scale);
-        kept_.fill(Qt::transparent);
+        // Into an image of its own, the last one's reused: on_paint may turn
+        // keeping off, dropping kept_, while it's being painted.
+        QImage next = std::move(kept_);
+        if (next.size() != pixels) next = QImage(pixels, QImage::Format_ARGB32_Premultiplied);
+        next.setDevicePixelRatio(scale);
+        next.fill(Qt::transparent);
         {
-            QPainter kq(&kept_);
+            QPainter kq(&next);
             qt_painter k(kq, w_);
             frame_.paint(k, size());
             if (paint_) paint_(k, size());
         }
-        qp.drawImage(QPointF(0, 0), kept_);
+        qp.drawImage(QPointF(0, 0), next);
+        if (burst_.keeps()) kept_ = std::move(next);
     }
     void resized()
     {
@@ -2282,6 +2286,7 @@ public:
         laid_out_ = true;
         scale_ = float(w_->devicePixelRatioF());
         resized();
+        burst();  // its first size settles too, as elsewhere
     }
     bool pointer(const pointer_event& e) { return pointer_ && pointer_(e); }
     bool scroll(const scroll_event& e) { return scroll_ && scroll_(e); }

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -99,6 +100,91 @@ int main(int argc, char** argv)
         std::fflush(stdout);
         (*ui)->quit(fails ? 1 : 0);
     };
+
+    // Then a canvas that turns stretching off from its own on_paint, while
+    // it paints, and closes its own window from on_resize_settled at the end
+    // of a stretched burst: neither may touch what's gone.
+    std::unique_ptr<rap::window> win2;
+    rap::canvas* canvas2 = nullptr;
+    rap::splitter* split2 = nullptr;
+    int paints2 = 0, settles2 = 0, waited2 = 0, step2 = 0, before2 = 0;
+    bool off_in_paint = false, close_on_settle = false, closed = false;
+    rap::subscription waiting2, check2, steps2, end2;
+    const auto second = [&]
+    {
+        win2 = (*ui)->create(window{
+            "Canvas stretch, closed",
+            {splitter{horizontal,
+                      rap::layout::canvas{}
+                          .on_paint(
+                              [&](rap::painter& p, rap::size_f size)
+                              {
+                                  ++paints2;
+                                  if (off_in_paint)
+                                  {
+                                      off_in_paint = false;
+                                      canvas2->stretch_while_resizing(rap::resize_stretch::none);
+                                  }
+                                  p.rect({0, 0, size.w, size.h}, 0, rap::color{200, 100, 50, 255}, std::nullopt);
+                              })
+                          .on_resize_settled(
+                              [&](rap::size_f)
+                              {
+                                  ++settles2;
+                                  if (!close_on_settle) return;
+                                  close_on_settle = false;
+                                  closed = true;
+                                  win2.reset();  // the canvas with it
+                              })
+                          .stretch_while_resizing(rap::resize_stretch::fill)
+                          .bind(canvas2),
+                      label{"Info"}}
+                 .bind(split2)}}
+                                  .margins(false));
+        win2->resize({480, 240});
+        split2->set_sizes({240, 240});
+        win2->show();
+        waiting2 = (*ui)->timer(
+            50, true,
+            [&]
+            {
+                if (++waited2 < 40 && (paints2 == 0 || settles2 == 0)) return;
+                waiting2 = {};
+                before2 = paints2;
+                off_in_paint = true;
+                canvas2->invalidate();
+                check2 = (*ui)->timer(
+                    250, false,
+                    [&]
+                    {
+                        expect(paints2 > before2 && !off_in_paint, "stretching turned off from on_paint, as it paints");
+                        canvas2->stretch_while_resizing(rap::resize_stretch::fill);
+                        canvas2->invalidate();
+                        close_on_settle = true;
+                        steps2 = (*ui)->timer(
+                            30, true,
+                            [&]
+                            {
+                                if (closed || ++step2 > 4)
+                                {
+                                    steps2 = {};
+                                    return;
+                                }
+                                std::vector<float> sizes = split2->sizes();
+                                const float total = sizes.size() == 2 ? sizes[0] + sizes[1] : 400;
+                                const float left = 200.f + 20.f * float(step2);
+                                split2->set_sizes({left, total - left});
+                            });
+                        end2 = (*ui)->timer(
+                            800, false,
+                            [&]
+                            {
+                                expect(closed && !win2, "the window closed from on_resize_settled, in a burst");
+                                finish();
+                            });
+                    });
+            });
+    };
     waiting = (*ui)->timer(
         50, true,
         [&]
@@ -108,6 +194,7 @@ int main(int argc, char** argv)
             expect(st.paints > 0, "the canvas painted before the resize (" + std::to_string(canvas->size().w) + " x " +
                                       std::to_string(canvas->size().h) + ")");
             if (st.paints == 0) return finish();
+            expect(st.settles >= 1, "a canvas's first size settles");
             paints_before = st.paints, resizes_before = st.resizes, settles_before = st.settles;
             if (std::getenv("RAPPORT_TEST_VERBOSE"))
             {
@@ -165,7 +252,7 @@ int main(int argc, char** argv)
                                        std::to_string(painted) + " paints)");
                             expect(st.painted.w == canvas->size().w && st.painted.h == canvas->size().h,
                                    "the last paint is at the settled size");
-                            finish();
+                            second();
                         });
                 });
         });
