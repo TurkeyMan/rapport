@@ -7,9 +7,10 @@
 #include <gtk/gtk.h>
 
 #include "builtin_icons.h"
-#include "gtk_common.h"
 #include "frame_layer.h"
 #include "gpu_readback.h"
+#include "gtk_common.h"
+#include "list_press.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -2384,6 +2385,7 @@ private:
             if (checks_ && index == 0)
             {
                 GtkCellRenderer* box = gtk_cell_renderer_toggle_new();
+                box_cell_ = box;
                 g_object_set(box, "activatable", TRUE, nullptr);
                 gtk_tree_view_column_pack_start(col, box, false);
                 gtk_tree_view_column_set_cell_data_func(
@@ -2614,7 +2616,7 @@ private:
     {
         bool pressed = false;
         bool dragging = false;
-        bool defer_select = false;  // pressed inside a multi-selection
+        list_press::plan plan;  // what the press does, let go or dragged
         double x0 = 0, y0 = 0;
         size_t row = 0;
         bool out_asked = false;  // drag_out.begin had its say (once a press)
@@ -3026,22 +3028,78 @@ private:
         drag_ = {};
         if (!(reorders() || drag_out_.begin) || e->type != GDK_BUTTON_PRESS ||
             e->button != GDK_BUTTON_PRIMARY || !on_bin_window(reinterpret_cast<GdkEvent*>(e)) ||
-            (e->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK)))
+            on_check_box(e->x, e->y))
             return false;
         GtkTreePath* path = nullptr;
         if (!gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(w_), int(e->x), int(e->y), &path, nullptr,
                                            nullptr, nullptr))
             return false;
-        bool selected = gtk_tree_selection_path_is_selected(sel_, path);
-        drag_ = {true, false, selected && gtk_tree_selection_count_selected_rows(sel_) > 1,
-                 e->x, e->y,  size_t(gtk_tree_path_get_indices(path)[0])};
+        const bool selected = gtk_tree_selection_path_is_selected(sel_, path);
+        const size_t row = size_t(gtk_tree_path_get_indices(path)[0]);
         gtk_tree_path_free(path);
-        // Keep a multi-selection so it can be dragged; a plain click inside
-        // it selects just that row on release instead.
-        if (drag_.defer_select)
+        auto plan =
+            list_press::plan_press(e->state & GDK_SHIFT_MASK, e->state & GDK_CONTROL_MASK, selected,
+                                   size_t(gtk_tree_selection_count_selected_rows(sel_)));
+        if (!plan) return false;  // Shift: a range, GTK's
+        drag_ = {true, false, *plan, e->x, e->y, row};
+        // Held back (a multi-selection kept so it can be dragged, or a Ctrl
+        // press that may be a copy-drag), the click happens at the release.
+        if (plan->defer)
         {
             gtk_widget_grab_focus(w_);
             return true;
+        }
+        return false;
+    }
+    // Whether (x, y), bin window coordinates, is on a row's checkbox: its
+    // own click, not a drag.
+    bool on_check_box(double x, double y) const
+    {
+        if (!box_cell_ || cols_.empty()) return false;
+        auto at = cell_at(x, y);
+        if (!at || at->column != 0) return false;
+        int from = 0, width = 0;
+        if (!gtk_tree_view_column_cell_get_position(cols_[0], box_cell_, &from, &width))
+            return false;
+        return at->in_cell.x >= from && at->in_cell.x < from + width;
+    }
+    // A press dragged: the selection the rows go as.
+    void drag_selects(const drag& d)
+    {
+        const auto before = selection();
+        const auto after = list_press::after_drag(before, d.row, d.plan.on_drag);
+        if (after != before) select(after);
+    }
+    // A press let go without moving: its click, if held back.
+    bool click_released(const drag& d)
+    {
+        switch (d.plan.on_click)
+        {
+        case list_press::click::native: return false;
+        case list_press::click::select_only:
+            select({d.row});
+            set_current(d.row);
+            return true;
+        case list_press::click::toggle:
+        {
+            // The cursor (and Shift's anchor) moves with the selection held
+            // still, which set_cursor would make the row's alone; then the
+            // row flips, as GTK's own Ctrl+click.
+            GtkTreePath* path = gtk_tree_path_new_from_indices(int(d.row), -1);
+            const bool was = gtk_tree_selection_path_is_selected(sel_, path);
+            gtk_tree_selection_set_select_function(
+                sel_,
+                +[](GtkTreeSelection*, GtkTreeModel*, GtkTreePath*, gboolean, gpointer) -> gboolean
+                { return false; }, nullptr, nullptr);
+            gtk_tree_view_set_cursor(GTK_TREE_VIEW(w_), path, nullptr, false);
+            gtk_tree_selection_set_select_function(sel_, nullptr, nullptr, nullptr);
+            if (was)
+                gtk_tree_selection_unselect_path(sel_, path);
+            else
+                gtk_tree_selection_select_path(sel_, path);
+            gtk_tree_path_free(path);
+            return true;
+        }
         }
         return false;
     }
@@ -3099,8 +3157,9 @@ private:
             int threshold = 8;
             g_object_get(gtk_widget_get_settings(w_), "gtk-dnd-drag-threshold", &threshold,
                          nullptr);
-            if (std::abs(e->x - drag_.x0) < threshold && std::abs(e->y - drag_.y0) < threshold)
+            if (!list_press::past_threshold(e->x - drag_.x0, e->y - drag_.y0, threshold))
                 return true;
+            drag_selects(drag_);
             // Nothing to reorder: rows can only be dragged out.
             if (!reorders())
             {
@@ -3150,15 +3209,11 @@ private:
             gtk_tree_view_set_drag_dest_row(GTK_TREE_VIEW(w_), nullptr, GTK_TREE_VIEW_DROP_BEFORE);
             set_drag_cursor(nullptr);
             if (reorder_ && !is_noop_drop(dest)) reorder_(selection(), dest, action_of(e->state));
-            return true;
+            // A press GTK saw needs its release too, or the tree view's
+            // click gesture stays pressed and takes no more clicks.
+            return d.plan.defer;
         }
-        if (d.defer_select)
-        {
-            select({d.row});
-            set_current(d.row);
-            return true;
-        }
-        return false;
+        return click_released(d);
     }
 
     // The cell at a point of the rows' (bin) window, and the point in it.
@@ -3252,7 +3307,7 @@ private:
         set_drag_cursor(nullptr);
         gtk_widget_queue_draw(w_);
         if (d.target && cell_drag_.drop) cell_drag_.drop(d.from, *d.target, d.start.data);
-        return true;
+        return false;  // GTK saw the press: its click gesture needs the release
     }
 
     void draw_cell_drag(GtkWidget* w, cairo_t* cr)
@@ -3365,6 +3420,7 @@ private:
     bool fitted_ = false;  // stretch columns have had their share of the width
     bool compact_ = false;
     bool checks_ = false;                          // a toggle cell at the start of column 0
+    GtkCellRenderer* box_cell_ = nullptr;          // that cell (owned by the column)
     bool soft_ = false;  // soft selection: a tint of the accent, normal text
     float compact_scale_ = 1;
 

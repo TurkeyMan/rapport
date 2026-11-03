@@ -45,6 +45,21 @@ jobs:
       - name: Theme palette
         run: build/bin/rapport-theme-palette-test
 
+      - name: List press rule
+        run: build/bin/rapport-list-press-test
+
+      # Synthesized input through the real backends, off any desktop: GTK 3
+      # on a Broadway server, Qt on its offscreen platform. (Plugins only:
+      # the tests load the backends.)
+      - name: List input
+        if: matrix.link == 'plugins'
+        run: |
+          apt-get install -y --no-install-recommends libgtk-3-bin
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          broadwayd :5 & sleep 1
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-list-input-test-gtk3
+          QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-list-input-test-qt6
+
   # MSVC with the static runtime, as the apps ship: as plugins and statically
   # linked. The examples must run, and the shell extension must load into
   # Explorer's way of calling it and need nothing but Windows.
@@ -83,6 +98,11 @@ jobs:
         run: |
           build/bin/Release/rapport-theme-palette-test.exe
           if ($LASTEXITCODE) { throw 'rapport-theme-palette-test failed' }
+
+      - name: List press rule
+        run: |
+          build/bin/Release/rapport-list-press-test.exe
+          if ($LASTEXITCODE) { throw 'rapport-list-press-test failed' }
 
       - name: Shell extension
         working-directory: build/bin/Release

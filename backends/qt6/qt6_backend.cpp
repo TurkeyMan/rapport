@@ -11,6 +11,7 @@
 #include "builtin_icons.h"
 #include "frame_layer.h"
 #include "gpu_readback.h"
+#include "list_press.h"
 
 #include <QAbstractTableModel>
 #include <QAction>
@@ -2953,13 +2954,16 @@ public:
                     reorder_(selection(), dest, action_of(e->modifiers()));
                 return;
             }
-            if (d.defer_select)
+            if (d.plan.on_click == list_press::click::select_only)
             {
                 select({d.row});
                 view_->selectionModel()->setCurrentIndex(rows_->index(int(d.row), first_text_column_),
                                                          QItemSelectionModel::NoUpdate);
                 return;
             }
+            // Ctrl let go: Qt's own Ctrl+click (the toggle, the current row,
+            // Shift's anchor), the press given to it now.
+            if (d.held) view_->base_mouse_press(d.held.get());
         }
         view_->base_mouse_release(e);
     }
@@ -3285,7 +3289,8 @@ private:
     {
         bool pressed = false;
         bool dragging = false;
-        bool defer_select = false;  // pressed inside a multi-selection
+        list_press::plan plan;              // what the press does, let go or dragged
+        std::shared_ptr<QMouseEvent> held;  // a Ctrl press, for Qt at the release
         QPoint start;
         size_t row = 0;
         bool asked_out = false;  // drag_out's begin had its say
@@ -3305,19 +3310,21 @@ private:
     bool drag_pressed(QMouseEvent* e)
     {
         drag_ = {};
-        if ((!reorders() && !drag_out_.begin) || e->button() != Qt::LeftButton ||
-            (e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier)))
-            return false;
+        if ((!reorders() && !drag_out_.begin) || e->button() != Qt::LeftButton) return false;
         const QPoint pos = e->position().toPoint();
         auto row = row_at(pos.y());
         if (!row) return false;
         const bool selected = view_->selectionModel()->isRowSelected(int(*row), QModelIndex());
-        drag_ = {true, false, selected && view_->selectionModel()->selectedRows().size() > 1, pos,
-                 *row};
-        // Keep a multi-selection so it can be dragged; a plain click inside
-        // it selects just that row on release instead.
-        if (drag_.defer_select)
+        auto plan = list_press::plan_press(e->modifiers() & Qt::ShiftModifier,
+                                           e->modifiers() & Qt::ControlModifier, selected,
+                                           size_t(view_->selectionModel()->selectedRows().size()));
+        if (!plan) return false;  // Shift: a range, Qt's
+        drag_ = {true, false, *plan, nullptr, pos, *row};
+        // Held back (a multi-selection kept so it can be dragged, or a Ctrl
+        // press that may be a copy-drag), the click happens at the release.
+        if (plan->defer)
         {
+            if (plan->on_click == list_press::click::toggle) drag_.held.reset(e->clone());
             view_->setFocus(Qt::MouseFocusReason);
             return true;
         }
@@ -3395,6 +3402,10 @@ private:
         if (!drag_.dragging)
         {
             if ((pos - drag_.start).manhattanLength() < QApplication::startDragDistance()) return;
+            // The rows that drag: a plain press's row alone, Ctrl's added.
+            const auto before = selection();
+            const auto after = list_press::after_drag(before, drag_.row, drag_.plan.on_drag);
+            if (after != before) select(after);
             // Without on_reorder there's nothing to do inside the list:
             // the system drag starts at the threshold.
             if (!reorders())
