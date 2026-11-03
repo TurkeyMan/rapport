@@ -1257,99 +1257,341 @@ private:
     bool updating_ = false;
 };
 
-// An entry's end icon as a button (spec::entry_action). GTK has no held
-// down look for entry icons: a checked one gets a tint of the text colour
-// behind it (entry.rapport-action-checked), as a pressed flat button.
-class entry_icon_action : public rap::entry_action
+// Frameless keeps the frame, made invisible, rather than
+// gtk_entry_set_has_frame(false): that entry is shorter, so giving it its
+// frame back (TortoiseGit's "new branch") would move the layout. Either
+// kind of entry: both are CSS "entry" nodes.
+void set_entry_frame(GtkWidget* entry, bool v)
+{
+    static bool installed = false;
+    if (!installed)
+    {
+        GtkCssProvider* css = gtk_css_provider_new();
+        gtk_css_provider_load_from_string(
+            css, "entry.rapport-frameless { background: none; border-color: transparent; "
+                 "box-shadow: none; outline-color: transparent; }");
+        gtk_style_context_add_provider_for_display(gtk_widget_get_display(entry),
+                                                   GTK_STYLE_PROVIDER(css),
+                                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(css);
+        installed = true;
+    }
+    if (v)
+        gtk_widget_remove_css_class(entry, "rapport-frameless");
+    else
+        gtk_widget_add_css_class(entry, "rapport-frameless");
+}
+
+// An entry with buttons in it (spec::entry::actions): GtkEntry has one icon
+// at each end, so a composite as GtkSearchEntry is made: a widget whose CSS
+// name is "entry" (the theme's frame, focus ring and padding) holding the
+// leading icons, a GtkText (the editing, selection, placeholder and context
+// menu of an entry's own) and the clear and trailing icons. The icons are
+// images, as an entry's are (entry > image.left / .right), clicked through
+// a gesture.
+G_DECLARE_FINAL_TYPE(RapportEntryBox, rapport_entry_box, RAPPORT, ENTRY_BOX, GtkWidget)
+struct _RapportEntryBox
+{
+    GtkWidget parent_instance;
+};
+G_DEFINE_TYPE(RapportEntryBox, rapport_entry_box, GTK_TYPE_WIDGET)
+
+static GtkWidget* rapport_entry_box_text(GtkWidget* box)
+{
+    for (GtkWidget* c = gtk_widget_get_first_child(box); c; c = gtk_widget_get_next_sibling(c))
+        if (GTK_IS_TEXT(c)) return c;
+    return nullptr;
+}
+static void rapport_entry_box_dispose(GObject* o)
+{
+    while (GtkWidget* c = gtk_widget_get_first_child(GTK_WIDGET(o))) gtk_widget_unparent(c);
+    G_OBJECT_CLASS(rapport_entry_box_parent_class)->dispose(o);
+}
+// Focus given to the box goes to its text, as an entry's does.
+static gboolean rapport_entry_box_grab_focus(GtkWidget* w)
+{
+    GtkWidget* text = rapport_entry_box_text(w);
+    return text ? gtk_text_grab_focus_without_selecting(GTK_TEXT(text)) : false;
+}
+static void rapport_entry_box_class_init(RapportEntryBoxClass* c)
+{
+    G_OBJECT_CLASS(c)->dispose = rapport_entry_box_dispose;
+    GTK_WIDGET_CLASS(c)->grab_focus = rapport_entry_box_grab_focus;
+    gtk_widget_class_set_css_name(GTK_WIDGET_CLASS(c), "entry");
+    gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(c), GTK_TYPE_BOX_LAYOUT);
+    gtk_widget_class_set_accessible_role(GTK_WIDGET_CLASS(c), GTK_ACCESSIBLE_ROLE_GROUP);
+}
+static void rapport_entry_box_init(RapportEntryBox* self)
+{
+    // A click on the frame or padding puts the caret in the text.
+    GtkGesture* click = gtk_gesture_click_new();
+    g_signal_connect(click, "pressed",
+                     G_CALLBACK(+[](GtkGestureClick* g, int, double, double, gpointer)
+                                {
+                                    GtkWidget* box =
+                                        gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+                                    GtkWidget* text = rapport_entry_box_text(box);
+                                    if (text && !gtk_widget_has_focus(text))
+                                        gtk_widget_grab_focus(text);
+                                }),
+                     nullptr);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_BUBBLE);
+    gtk_widget_add_controller(GTK_WIDGET(self), GTK_EVENT_CONTROLLER(click));
+}
+
+// An icon on a GtkImage: the theme's by name, else drawn (rendered at one
+// pixel a point: a texture's size is its pixels, which GTK would show twice
+// as large at a scale of 2).
+void set_image_icon(GtkImage* image, const icon& icon)
+{
+    GtkIconTheme* theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
+    if (!icon.name.empty() && gtk_icon_theme_has_icon(theme, icon.name.c_str()))
+        return gtk_image_set_from_icon_name(image, icon.name.c_str());
+    auto draw = icon.draw;
+    if (!icon.name.empty() && builtin::has_builtin_icon(icon.name))
+        draw = [name = icon.name](rap::painter& p, rap::size_f s)
+        { builtin::draw_builtin_icon(name, p, s); };
+    if (!draw) return gtk_image_set_from_icon_name(image, "image-missing");
+    const int size = 16;
+    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, size, size);
+    cairo_t* cr = cairo_create(surface);
+    {
+        cairo_painter painter(cr, GTK_WIDGET(image));
+        draw(painter, {float(size), float(size)});
+    }
+    cairo_destroy(cr);
+    cairo_surface_flush(surface);
+    const gsize stride = gsize(cairo_image_surface_get_stride(surface));
+    GBytes* bytes = g_bytes_new(cairo_image_surface_get_data(surface), stride * size);
+    GdkTexture* texture = gdk_memory_texture_new(size, size, GDK_MEMORY_DEFAULT, bytes, stride);
+    g_bytes_unref(bytes);
+    cairo_surface_destroy(surface);
+    gtk_image_set_from_paintable(image, GDK_PAINTABLE(texture));
+    g_object_unref(texture);
+}
+
+// The theme's look for a held-down icon in an entry, and for a menu's
+// drop arrow: installed once per display.
+void install_entry_icon_css(GtkWidget* w)
+{
+    static bool installed = false;
+    if (installed) return;
+    GtkCssProvider* css = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(
+        css, "entry > image.rapport-checked { background-color: alpha(currentColor, 0.18); "
+             "box-shadow: 0 0 0 3px alpha(currentColor, 0.18); border-radius: 2px; }\n"
+             "entry > image.rapport-drop { margin-left: 0; margin-right: 0; -gtk-icon-size: 8px; "
+             "min-width: 8px; }");
+    gtk_style_context_add_provider_for_display(gtk_widget_get_display(w), GTK_STYLE_PROVIDER(css),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
+    installed = true;
+}
+
+// One of the composite's buttons: its image (and, with a menu, the drop
+// arrow after it), a click on either acting.
+class entry_box_action : public rap::entry_action
 {
 public:
-    entry_icon_action(GtkEntry* entry, const spec::entry_action& s)
-        : entry_(entry)
-        , icon_(s.icon)
+    entry_box_action(GtkWidget* box, menu_actions& menus, const spec::entry_action& s)
+        : menus_(menus)
         , click_(s.on_click)
+        , menu_(s.on_menu)
     {
-        show_icon();
+        image_ = gtk_image_new();
+        gtk_widget_add_css_class(image_, s.leading ? "left" : "right");
+        gtk_widget_set_valign(image_, GTK_ALIGN_CENTER);  // a held-down tint round the icon alone
+        gtk_widget_set_parent(image_, box);
+        icon_ = s.icon;
+        set_image_icon(GTK_IMAGE(image_), icon_);
+        clickable(image_);
+        // Always made, shown for a menu: the menu may be set later.
+        arrow_ = gtk_image_new_from_icon_name("pan-down-symbolic");
+        gtk_widget_add_css_class(arrow_, "rapport-drop");
+        gtk_widget_set_parent(arrow_, box);
+        gtk_widget_set_visible(arrow_, bool(menu_));
+        clickable(arrow_);
         set_tooltip(s.tooltip);
+        install_entry_icon_css(box);
         if (s.bind) *s.bind = this;
     }
     void set_icon(const icon& i) override
     {
         icon_ = i;
-        show_icon();
+        set_image_icon(GTK_IMAGE(image_), icon_);
     }
     void set_tooltip(const std::string& t) override
     {
-        gtk_entry_set_icon_tooltip_text(entry_, at, t.c_str());
+        gtk_widget_set_tooltip_text(image_, t.c_str());
+        gtk_widget_set_tooltip_text(arrow_, t.c_str());
+        gtk_accessible_update_property(GTK_ACCESSIBLE(image_), GTK_ACCESSIBLE_PROPERTY_LABEL,
+                                       t.c_str(), -1);
     }
     void set_checked(bool c) override
     {
-        static bool installed = false;
-        if (!installed)
-        {
-            GtkCssProvider* css = gtk_css_provider_new();
-            gtk_css_provider_load_from_string(
-                css, "entry.rapport-action-checked > image.right { background-color: "
-                     "alpha(currentColor, 0.18); border-radius: 4px; }");
-            gtk_style_context_add_provider_for_display(gtk_widget_get_display(GTK_WIDGET(entry_)),
-                                                       GTK_STYLE_PROVIDER(css),
-                                                       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-            g_object_unref(css);
-            installed = true;
-        }
         checked_ = c;
         if (c)
-            gtk_widget_add_css_class(GTK_WIDGET(entry_), "rapport-action-checked");
+            gtk_widget_add_css_class(image_, "rapport-checked");
         else
-            gtk_widget_remove_css_class(GTK_WIDGET(entry_), "rapport-action-checked");
+            gtk_widget_remove_css_class(image_, "rapport-checked");
     }
     bool checked() const override { return checked_; }
-    void set_enabled(bool e) override { gtk_entry_set_icon_sensitive(entry_, at, e); }
-    void click()
+    void set_enabled(bool e) override
     {
-        if (click_) click_();
+        gtk_widget_set_sensitive(image_, e);
+        gtk_widget_set_sensitive(arrow_, e);
     }
+    void on_menu(std::function<menu()> f) override
+    {
+        menu_ = std::move(f);
+        gtk_widget_set_visible(arrow_, bool(menu_));
+    }
+    GtkWidget* image() const { return image_; }
+    GtkWidget* arrow() const { return arrow_; }
 
 private:
-    static constexpr GtkEntryIconPosition at = GTK_ENTRY_ICON_SECONDARY;
-    // A theme icon by name; a drawn one rendered (where there's no theme
-    // icon by that name).
-    void show_icon()
+    void clickable(GtkWidget* w)
     {
-        GtkIconTheme* theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
-        if (!icon_.name.empty() && gtk_icon_theme_has_icon(theme, icon_.name.c_str()))
-            return gtk_entry_set_icon_from_icon_name(entry_, at, icon_.name.c_str());
-        auto draw = icon_.draw;
-        if (!icon_.name.empty() && builtin::has_builtin_icon(icon_.name))
-            draw = [name = icon_.name](rap::painter& p, rap::size_f s)
-            { builtin::draw_builtin_icon(name, p, s); };
-        if (!draw) return gtk_entry_set_icon_from_icon_name(entry_, at, "image-missing");
-        // At one pixel a point: a texture's size is its pixels, which GTK
-        // would show twice as large at a scale of 2.
-        const int scale = 1;
-        const int size = 16, px = size * scale;
-        cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, px, px);
-        cairo_surface_set_device_scale(surface, scale, scale);
-        cairo_t* cr = cairo_create(surface);
+        GtkGesture* click = gtk_gesture_click_new();
+        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
+        g_signal_connect(click, "pressed",
+                         G_CALLBACK(+[](GtkGestureClick* g, int, double, double, gpointer p)
+                                    {
+                                        // Not the box's: the caret stays where it was.
+                                        gtk_gesture_set_state(GTK_GESTURE(g),
+                                                              GTK_EVENT_SEQUENCE_CLAIMED);
+                                        static_cast<entry_box_action*>(p)->act();
+                                    }),
+                         this);
+        gtk_widget_add_controller(w, GTK_EVENT_CONTROLLER(click));
+    }
+    void act()
+    {
+        if (!menu_)
         {
-            cairo_painter painter(cr, GTK_WIDGET(entry_));
-            draw(painter, {float(size), float(size)});
+            if (click_) click_();
+            return;
         }
-        cairo_destroy(cr);
-        cairo_surface_flush(surface);
-        GBytes* bytes = g_bytes_new(cairo_image_surface_get_data(surface),
-                                    gsize(cairo_image_surface_get_stride(surface)) * px);
-        GdkTexture* texture = gdk_memory_texture_new(
-            px, px, GDK_MEMORY_DEFAULT, bytes, gsize(cairo_image_surface_get_stride(surface)));
-        g_bytes_unref(bytes);
-        cairo_surface_destroy(surface);
-        gtk_entry_set_icon_from_paintable(entry_, at, GDK_PAINTABLE(texture));
-        g_object_unref(texture);
+        menu m = menu_();
+        if (m.empty()) return;
+        GMenu* model = menus_.build(std::move(m));
+        if (popover_) gtk_widget_unparent(popover_);
+        popover_ = gtk_popover_menu_new_from_model(G_MENU_MODEL(model));
+        g_object_unref(model);
+        // The box's child (its dispose takes it away), pointing at the icon.
+        GtkWidget* box = gtk_widget_get_parent(image_);
+        gtk_widget_set_parent(popover_, box);
+        graphene_rect_t r;
+        if (gtk_widget_compute_bounds(image_, box, &r))
+        {
+            const GdkRectangle at{int(r.origin.x), int(r.origin.y), int(r.size.width),
+                                  int(r.size.height)};
+            gtk_popover_set_pointing_to(GTK_POPOVER(popover_), &at);
+        }
+        gtk_popover_set_has_arrow(GTK_POPOVER(popover_), false);
+        gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_BOTTOM);
+        gtk_widget_set_halign(popover_, GTK_ALIGN_START);
+        popup_when_built(popover_);
     }
 
-    GtkEntry* entry_;
+    menu_actions& menus_;
+    GtkWidget* image_ = nullptr;
+    GtkWidget* arrow_ = nullptr;
+    GtkWidget* popover_ = nullptr;
     icon icon_;
     std::function<void()> click_;
+    std::function<menu()> menu_;
     bool checked_ = false;
+};
+
+// The composite entry: [leading icons] text [clear] [trailing icons].
+class entry_box_impl : public widget_base<rap::entry>
+{
+public:
+    explicit entry_box_impl(const spec::entry& s)
+        : widget_base(gtk_text_new(),
+                      GTK_WIDGET(g_object_new(rapport_entry_box_get_type(), nullptr)))
+        , menus_(outer_, "ea")
+    {
+        for (const spec::entry_action& a : s.actions)
+            if (a.leading)
+                actions_.push_back(std::make_unique<entry_box_action>(outer_, menus_, a));
+        gtk_widget_set_hexpand(w_, true);
+        gtk_widget_set_parent(w_, outer_);
+        if (s.password)
+        {
+            gtk_text_set_visibility(GTK_TEXT(w_), false);
+            gtk_text_set_input_purpose(GTK_TEXT(w_), GTK_INPUT_PURPOSE_PASSWORD);
+        }
+        gtk_editable_set_text(GTK_EDITABLE(w_), s.text.c_str());
+        if (!s.placeholder.empty()) set_placeholder(s.placeholder);
+        if (s.clearable)
+        {
+            clear_ = gtk_image_new_from_icon_name("edit-clear-symbolic");
+            gtk_widget_add_css_class(clear_, "right");
+            gtk_widget_set_tooltip_text(clear_, rap::i18n::tr("rapport", "Clear"));
+            gtk_widget_set_parent(clear_, outer_);
+            GtkGesture* click = gtk_gesture_click_new();
+            g_signal_connect(click, "pressed",
+                             G_CALLBACK(+[](GtkGestureClick* g, int, double, double, gpointer p)
+                                        {
+                                            gtk_gesture_set_state(GTK_GESTURE(g),
+                                                                  GTK_EVENT_SEQUENCE_CLAIMED);
+                                            auto* self = static_cast<entry_box_impl*>(p);
+                                            gtk_editable_set_text(GTK_EDITABLE(self->w_), "");
+                                            gtk_widget_grab_focus(self->w_);
+                                        }),
+                             this);
+            gtk_widget_add_controller(clear_, GTK_EVENT_CONTROLLER(click));
+        }
+        for (const spec::entry_action& a : s.actions)
+            if (!a.leading)
+                actions_.push_back(std::make_unique<entry_box_action>(outer_, menus_, a));
+        update_clear();
+        connect(
+            w_, "changed",
+            +[](GtkEditable* e, gpointer p)
+            {
+                auto* self = static_cast<entry_box_impl*>(p);
+                self->update_clear();
+                if (self->changed_) self->changed_(gtk_editable_get_text(e));
+            },
+            this);
+        connect(
+            w_, "activate",
+            +[](GtkText*, gpointer p)
+            {
+                auto* self = static_cast<entry_box_impl*>(p);
+                if (self->activate_) self->activate_();
+            },
+            this);
+    }
+
+    std::string text() const override { return gtk_editable_get_text(GTK_EDITABLE(w_)); }
+    void set_text(const std::string& t) override
+    {
+        gtk_editable_set_text(GTK_EDITABLE(w_), t.c_str());
+    }
+    void set_read_only(bool v) override { gtk_editable_set_editable(GTK_EDITABLE(w_), !v); }
+    void set_frame(bool v) override { set_entry_frame(outer_, v); }
+    void set_placeholder(const std::string& t) override
+    {
+        gtk_text_set_placeholder_text(GTK_TEXT(w_), t.c_str());
+    }
+    void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
+    void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
+
+private:
+    void update_clear()
+    {
+        if (clear_) gtk_widget_set_visible(clear_, *gtk_editable_get_text(GTK_EDITABLE(w_)) != 0);
+    }
+
+    menu_actions menus_;
+    std::vector<std::unique_ptr<entry_box_action>> actions_;
+    GtkWidget* clear_ = nullptr;
+    std::function<void(const std::string&)> changed_;
+    std::function<void()> activate_;
 };
 
 class entry_impl : public widget_base<rap::entry>
@@ -1366,13 +1608,6 @@ public:
         gtk_editable_set_text(GTK_EDITABLE(w_), s.text.c_str());
         if (!s.placeholder.empty()) set_placeholder(s.placeholder);
         clearable_ = s.clearable;
-        // One icon at each end: the first action at the end, and the clear
-        // icon there too unless an action has it, then at the start.
-        if (!s.actions.empty())
-        {
-            action_ = std::make_unique<entry_icon_action>(GTK_ENTRY(w_), s.actions.front());
-            clear_at_ = GTK_ENTRY_ICON_PRIMARY;
-        }
         update_clear();
         connect(
             w_, "changed",
@@ -1383,17 +1618,12 @@ public:
                 if (self->changed_) self->changed_(gtk_editable_get_text(e));
             },
             this);
-        if (clearable_ || action_)
+        if (clearable_)
             connect(
                 w_, "icon-press",
-                +[](GtkEntry* e, GtkEntryIconPosition at, gpointer p)
+                +[](GtkEntry* e, GtkEntryIconPosition at, gpointer)
                 {
-                    auto* self = static_cast<entry_impl*>(p);
-                    if (self->clearable_ && at == self->clear_at_ &&
-                        *gtk_editable_get_text(GTK_EDITABLE(e)))
-                        gtk_editable_set_text(GTK_EDITABLE(e), "");
-                    else if (self->action_ && at == GTK_ENTRY_ICON_SECONDARY)
-                        self->action_->click();
+                    if (at == GTK_ENTRY_ICON_SECONDARY) gtk_editable_set_text(GTK_EDITABLE(e), "");
                 },
                 this);
         connect(
@@ -1412,29 +1642,7 @@ public:
         gtk_editable_set_text(GTK_EDITABLE(w_), t.c_str());
     }
     void set_read_only(bool v) override { gtk_editable_set_editable(GTK_EDITABLE(w_), !v); }
-    // Frameless keeps the frame, made invisible, rather than
-    // gtk_entry_set_has_frame(false): that entry is shorter, so giving it
-    // its frame back (TortoiseGit's "new branch") would move the layout.
-    void set_frame(bool v) override
-    {
-        static bool installed = false;
-        if (!installed)
-        {
-            GtkCssProvider* css = gtk_css_provider_new();
-            gtk_css_provider_load_from_string(
-                css, "entry.rapport-frameless { background: none; border-color: transparent; "
-                     "box-shadow: none; outline-color: transparent; }");
-            gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
-                                                       GTK_STYLE_PROVIDER(css),
-                                                       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-            g_object_unref(css);
-            installed = true;
-        }
-        if (v)
-            gtk_widget_remove_css_class(w_, "rapport-frameless");
-        else
-            gtk_widget_add_css_class(w_, "rapport-frameless");
-    }
+    void set_frame(bool v) override { set_entry_frame(w_, v); }
     void set_placeholder(const std::string& t) override
     {
         gtk_entry_set_placeholder_text(GTK_ENTRY(w_), t.c_str());
@@ -1448,15 +1656,13 @@ private:
     {
         if (!clearable_) return;
         const bool any = *gtk_editable_get_text(GTK_EDITABLE(w_)) != 0;
-        gtk_entry_set_icon_from_icon_name(GTK_ENTRY(w_), clear_at_,
+        gtk_entry_set_icon_from_icon_name(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
                                           any ? "edit-clear-symbolic" : nullptr);
         if (any)
-            gtk_entry_set_icon_tooltip_text(GTK_ENTRY(w_), clear_at_,
+            gtk_entry_set_icon_tooltip_text(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
                                             rap::i18n::tr("rapport", "Clear"));
     }
     bool clearable_ = false;
-    GtkEntryIconPosition clear_at_ = GTK_ENTRY_ICON_SECONDARY;
-    std::unique_ptr<entry_icon_action> action_;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
@@ -4485,6 +4691,8 @@ private:
 
     GtkWidget* make(const node& n, const spec::entry& s, orientation)
     {
+        // Plain entries are GtkEntry; with buttons, the composite.
+        if (!s.actions.empty()) return add<entry_box_impl>(n, s).outer();
         return add<entry_impl>(n, s).outer();
     }
 

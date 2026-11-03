@@ -215,6 +215,10 @@ struct entry_action
     std::string tooltip;  // also its accessible name
     std::function<void()> on_click;
     rap::entry_action** bind = nullptr;
+    bool leading = false;  // at the box's start, before the text
+    // Set: clicking drops this menu down under the icon (built as it
+    // opens), and the icon has a small drop arrow beside it.
+    std::function<rap::menu()> on_menu;
 };
 struct entry
 {
@@ -225,10 +229,11 @@ struct entry
     // A clear button at the end while there's text (a filter, a search):
     // clicking it empties the box, which on_changed hears.
     bool clearable = false;
-    // Buttons inside the box at its end, after the clear button: an icon
-    // each (a calendar for a date range, say). GTK's entry has one icon
-    // at each end: the first action takes the end, and the clear button,
-    // with one, the start; later actions aren't shown there.
+    // Buttons inside the box: at its start (leading: a search's options
+    // menu, say) or at its end after the clear button (a calendar for a
+    // date range), an icon each. GTK 3's entry has one icon at each end:
+    // the first leading action has the start, and the end shows the clear
+    // button while there's text, else the first trailing action.
     std::vector<entry_action> actions;
     std::function<void(const std::string&)> on_changed;
     std::function<void()> on_activate;
@@ -784,6 +789,33 @@ public:
                            rap::entry_action*& bind)
     {
         s().actions.push_back({std::move(i), std::move(tooltip), std::move(on_click), &bind});
+        return *this;
+    }
+    // The same at the box's start, before the text.
+    entry& leading_action(icon i, std::string tooltip, std::function<void()> on_click)
+    {
+        s().actions.push_back(
+            {std::move(i), std::move(tooltip), std::move(on_click), nullptr, true});
+        return *this;
+    }
+    entry& leading_action(icon i, std::string tooltip, std::function<void()> on_click,
+                          rap::entry_action*& bind)
+    {
+        s().actions.push_back({std::move(i), std::move(tooltip), std::move(on_click), &bind, true});
+        return *this;
+    }
+    // A menu at the box's start (a search's options, as TortoiseGit's
+    // magnifier): the icon with a drop arrow, the menu built as it opens.
+    entry& leading_menu(icon i, std::string tooltip, std::function<rap::menu()> menu)
+    {
+        s().actions.push_back(
+            {std::move(i), std::move(tooltip), {}, nullptr, true, std::move(menu)});
+        return *this;
+    }
+    entry& leading_menu(icon i, std::string tooltip, std::function<rap::menu()> menu,
+                        rap::entry_action*& bind)
+    {
+        s().actions.push_back({std::move(i), std::move(tooltip), {}, &bind, true, std::move(menu)});
         return *this;
     }
     entry& placeholder(std::string p)

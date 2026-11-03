@@ -1271,93 +1271,133 @@ private:
     bool updating_ = false;
 };
 
-// An entry's end icon as a button (spec::entry_action). GTK has no held
-// down look for entry icons: a checked one gets a tint of the text colour
-// behind it (entry.rapport-action-checked), as a pressed flat button.
+// An entry's icon as a button (spec::entry_action): the start's for a
+// leading action, the end's for a trailing one. GTK 3 draws no background
+// behind an entry's icon, so the icon is composed when it needs more than
+// the theme's: a checked one on a rounded tint of the text colour (a
+// pressed flat button's look), a menu's with a small drop arrow after it.
 class entry_icon_action : public rap::entry_action
 {
 public:
     entry_icon_action(GtkEntry* entry, const spec::entry_action& s)
         : entry_(entry)
+        , at_(s.leading ? GTK_ENTRY_ICON_PRIMARY : GTK_ENTRY_ICON_SECONDARY)
         , icon_(s.icon)
+        , tooltip_(s.tooltip)
         , click_(s.on_click)
+        , menu_(s.on_menu)
     {
-        show_icon();
-        set_tooltip(s.tooltip);
+        show();
         if (s.bind) *s.bind = this;
     }
+    ~entry_icon_action() { popup_.destroy(); }
     void set_icon(const icon& i) override
     {
         icon_ = i;
-        show_icon();
+        if (shown_) show_icon();
     }
     void set_tooltip(const std::string& t) override
     {
-        gtk_entry_set_icon_tooltip_text(entry_, at, t.c_str());
+        tooltip_ = t;
+        if (shown_) gtk_entry_set_icon_tooltip_text(entry_, at_, t.c_str());
     }
     void set_checked(bool c) override
     {
-        static bool installed = false;
-        if (!installed)
-        {
-            GtkCssProvider* css = gtk_css_provider_new();
-            gtk_css_provider_load_from_data(
-                css,
-                "entry.rapport-action-checked image.right { background-color: "
-                "alpha(currentColor, 0.18); border-radius: 4px; }",
-                -1, nullptr);
-            gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(GTK_WIDGET(entry_)),
-                                                      GTK_STYLE_PROVIDER(css),
-                                                      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-            g_object_unref(css);
-            installed = true;
-        }
         checked_ = c;
-        GtkStyleContext* style = gtk_widget_get_style_context(GTK_WIDGET(entry_));
-        if (c)
-            gtk_style_context_add_class(style, "rapport-action-checked");
-        else
-            gtk_style_context_remove_class(style, "rapport-action-checked");
+        if (shown_) show_icon();
     }
     bool checked() const override { return checked_; }
-    void set_enabled(bool e) override { gtk_entry_set_icon_sensitive(entry_, at, e); }
-    void click()
+    void set_enabled(bool e) override
     {
-        if (click_) click_();
+        enabled_ = e;
+        if (shown_) gtk_entry_set_icon_sensitive(entry_, at_, e);
     }
+    void on_menu(std::function<menu()> f) override
+    {
+        menu_ = std::move(f);
+        if (shown_) show_icon();
+    }
+    void press()
+    {
+        if (!menu_)
+        {
+            if (click_) click_();
+            return;
+        }
+        menu m = menu_();
+        if (!m.empty()) popup_.show(std::move(m), GTK_WIDGET(entry_), nullptr, true);
+    }
+    // Its icon in its place, or (the end's clear icon there) not.
+    void show()
+    {
+        shown_ = true;
+        show_icon();
+        gtk_entry_set_icon_tooltip_text(entry_, at_, tooltip_.c_str());
+        gtk_entry_set_icon_sensitive(entry_, at_, enabled_);
+    }
+    void hide() { shown_ = false; }
 
 private:
-    static constexpr GtkEntryIconPosition at = GTK_ENTRY_ICON_SECONDARY;
-    // A theme icon by name; a drawn one rendered (where there's no theme
-    // icon by that name).
     void show_icon()
     {
-        if (!icon_.name.empty() &&
-            gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), icon_.name.c_str()))
-            return gtk_entry_set_icon_from_icon_name(entry_, at, icon_.name.c_str());
+        const bool named =
+            !icon_.name.empty() &&
+            gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), icon_.name.c_str());
+        if (named && !menu_ && !checked_)
+            return gtk_entry_set_icon_from_icon_name(entry_, at_, icon_.name.c_str());
+        GdkPixbuf* themed = nullptr;
+        if (named)
+            if (GtkIconInfo* info =
+                    gtk_icon_theme_lookup_icon(gtk_icon_theme_get_default(), icon_.name.c_str(), 16,
+                                               GTK_ICON_LOOKUP_FORCE_SIZE))
+            {
+                themed = gtk_icon_info_load_symbolic_for_context(
+                    info, gtk_widget_get_style_context(GTK_WIDGET(entry_)), nullptr, nullptr);
+                g_object_unref(info);
+            }
         auto draw = icon_.draw;
         if (!icon_.name.empty() && builtin::has_builtin_icon(icon_.name))
             draw = [name = icon_.name](rap::painter& p, rap::size_f s)
             { builtin::draw_builtin_icon(name, p, s); };
-        if (!draw) return gtk_entry_set_icon_from_icon_name(entry_, at, "image-missing");
-        const int size = 16;
-        cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, size, size);
+        if (!themed && !draw)
+            return gtk_entry_set_icon_from_icon_name(entry_, at_, "image-missing");
+        // A menu's is wider: the arrow after the icon.
+        const int size = 16, width = menu_ ? size + 7 : size;
+        cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, size);
         cairo_t* cr = cairo_create(surface);
         {
             cairo_painter painter(cr, GTK_WIDGET(entry_));
-            draw(painter, {float(size), float(size)});
+            const color ink = painter.resolve(paint{theme_color::text});
+            if (checked_)
+                painter.rect({0, 0, float(width), float(size)}, 3,
+                             paint{color{ink.r, ink.g, ink.b, 64}}, std::nullopt);
+            if (themed)
+            {
+                gdk_cairo_set_source_pixbuf(cr, themed, 0, 0);
+                cairo_paint(cr);
+            }
+            else
+                draw(painter, {float(size), float(size)});
+            if (menu_)
+                painter.polygon(std::vector<point_f>{{17.5f, 7.f}, {22.5f, 7.f}, {20.f, 10.f}},
+                                paint{ink}, std::nullopt, 1.f);
         }
         cairo_destroy(cr);
-        GdkPixbuf* pixbuf = gdk_pixbuf_get_from_surface(surface, 0, 0, size, size);
+        if (themed) g_object_unref(themed);
+        GdkPixbuf* pixbuf = gdk_pixbuf_get_from_surface(surface, 0, 0, width, size);
         cairo_surface_destroy(surface);
-        gtk_entry_set_icon_from_pixbuf(entry_, at, pixbuf);
+        gtk_entry_set_icon_from_pixbuf(entry_, at_, pixbuf);
         if (pixbuf) g_object_unref(pixbuf);
     }
 
     GtkEntry* entry_;
+    GtkEntryIconPosition at_;
     icon icon_;
+    std::string tooltip_;
     std::function<void()> click_;
-    bool checked_ = false;
+    std::function<menu()> menu_;
+    popup_menu popup_;
+    bool checked_ = false, enabled_ = true, shown_ = false;
 };
 
 class entry_impl : public widget_base<rap::entry>
@@ -1377,12 +1417,13 @@ public:
         gtk_entry_set_activates_default(GTK_ENTRY(w_), true);
         if (!s.placeholder.empty()) set_placeholder(s.placeholder);
         clearable_ = s.clearable;
-        // One icon at each end: the first action at the end, and the clear
-        // icon there too unless an action has it, then at the start.
-        if (!s.actions.empty())
+        // One icon at each end: the first leading action at the start; at
+        // the end the clear icon while there's text, else the first
+        // trailing action.
+        for (const spec::entry_action& a : s.actions)
         {
-            action_ = std::make_unique<entry_icon_action>(GTK_ENTRY(w_), s.actions.front());
-            clear_at_ = GTK_ENTRY_ICON_PRIMARY;
+            auto& slot = a.leading ? leading_ : trailing_;
+            if (!slot) slot = std::make_unique<entry_icon_action>(GTK_ENTRY(w_), a);
         }
         update_clear();
         connect(
@@ -1394,16 +1435,20 @@ public:
                 if (self->changed_) self->changed_(gtk_entry_get_text(GTK_ENTRY(e)));
             },
             this);
-        if (clearable_ || action_)
+        if (clearable_ || leading_ || trailing_)
             connect(
                 w_, "icon-press",
                 +[](GtkEntry* e, GtkEntryIconPosition at, GdkEvent*, gpointer p)
                 {
                     auto* self = static_cast<entry_impl*>(p);
-                    if (self->clearable_ && at == self->clear_at_ && *gtk_entry_get_text(e))
+                    if (at == GTK_ENTRY_ICON_PRIMARY)
+                    {
+                        if (self->leading_) self->leading_->press();
+                    }
+                    else if (self->clearable_ && *gtk_entry_get_text(e))
                         gtk_entry_set_text(e, "");
-                    else if (self->action_ && at == GTK_ENTRY_ICON_SECONDARY)
-                        self->action_->click();
+                    else if (self->trailing_)
+                        self->trailing_->press();
                 },
                 this);
         connect(
@@ -1457,20 +1502,28 @@ public:
     }
 
 private:
-    // Shown while there's text to clear.
+    // The end's icon: the clear one while there's text to clear, else the
+    // trailing action's.
     void update_clear()
     {
         if (!clearable_) return;
         const bool any = *gtk_entry_get_text(GTK_ENTRY(w_)) != 0;
-        gtk_entry_set_icon_from_icon_name(GTK_ENTRY(w_), clear_at_,
+        if (trailing_)
+        {
+            if (!any) return trailing_->show();
+            trailing_->hide();
+        }
+        gtk_entry_set_icon_from_icon_name(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
                                           any ? "edit-clear-symbolic" : nullptr);
         if (any)
-            gtk_entry_set_icon_tooltip_text(GTK_ENTRY(w_), clear_at_,
+        {
+            gtk_entry_set_icon_tooltip_text(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
                                             rap::i18n::tr("rapport", "Clear"));
+            gtk_entry_set_icon_sensitive(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY, true);
+        }
     }
     bool clearable_ = false;
-    GtkEntryIconPosition clear_at_ = GTK_ENTRY_ICON_SECONDARY;
-    std::unique_ptr<entry_icon_action> action_;
+    std::unique_ptr<entry_icon_action> leading_, trailing_;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
