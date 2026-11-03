@@ -5209,7 +5209,21 @@ private:
         // The last column fitted to the new width before the list_view sees
         // it: after, the list_view had shown a horizontal scroll bar for the
         // old widths, a flash before the column shrank. Again after, for a
-        // vertical scroll bar the new size brought or took away.
+        // vertical scroll bar the new size brought or took away. A list
+        // narrowing (a splitter dragged across it) is fitted before the move
+        // is made at all: the list_view settles its scroll bars as the move
+        // lands, before WM_SIZE, and showed the horizontal one at every step.
+        if (msg == WM_WINDOWPOSCHANGING)
+        {
+            const auto* pos = reinterpret_cast<const WINDOWPOS*>(lp);
+            RECT wr, cr;
+            if (!(pos->flags & SWP_NOSIZE) && GetWindowRect(h, &wr) && GetClientRect(h, &cr))
+            {
+                const long w = pos->cx - ((wr.right - wr.left) - cr.right);
+                const long hgt = pos->cy - ((wr.bottom - wr.top) - cr.bottom);
+                if (w < cr.right) self->fill_last(self->width_after(w, hgt));
+            }
+        }
         if (msg == WM_SIZE) self->fill_last(self->width_after(LOWORD(lp), HIWORD(lp)));
         const LRESULT r = DefSubclassProc(h, msg, wp, lp);
         if (msg == WM_SIZE || msg == wm_rapport_fill_last) self->fill_last();
