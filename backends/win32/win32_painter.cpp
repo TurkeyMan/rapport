@@ -175,12 +175,14 @@ float scale_of(HWND h)
 namespace
 {
 
-// Windows 11's UI font, Segoe UI Variable (its text optical size), where
-// it's installed: GDI and DirectWrite both know it as a family of its own.
+// Windows 11's UI font, Segoe UI Variable (its text optical size), on
+// Windows 11 where it's installed: GDI and DirectWrite both know it as a
+// family of its own. Windows 10 keeps Segoe UI, even with it installed.
 bool has_variable_font()
 {
     static const bool found = []
     {
+        if (windows_build() < 22000) return false;
         LOGFONTW lf{};
         lf.lfCharSet = DEFAULT_CHARSET;
         wcscpy(lf.lfFaceName, L"Segoe UI Variable Text");
