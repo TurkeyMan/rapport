@@ -112,6 +112,14 @@ public:
     {
         return backend_->timer(ms, repeat, std::move(fn));
     }
+    // While true, the pointer over the app's windows says it's working on
+    // something but still usable: an arrow with a spinner (Windows'
+    // app-starting pointer, IDC_APPSTARTING; Qt's BusyCursor; GTK's
+    // "progress"), as while a program it started comes up. Widgets with a
+    // pointer of their own (a text field's I-beam) keep it, but under Qt,
+    // whose override cursor covers them too. Not counted:
+    // the last call wins.
+    void set_busy(bool on) { backend_->set_busy(on); }
 
 private:
     explicit ui(std::unique_ptr<rap::backend> b)

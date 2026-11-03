@@ -4805,6 +4805,17 @@ public:
                 p->deleteLater();
             });
     }
+    // An override, over every window of the app, so pushed once and popped
+    // once.
+    void set_busy(bool on) override
+    {
+        if (on == busy_) return;
+        busy_ = on;
+        if (on)
+            QGuiApplication::setOverrideCursor(Qt::BusyCursor);
+        else
+            QGuiApplication::restoreOverrideCursor();
+    }
 
     void message(rap::window* parent, const message_spec& m,
                  std::function<void(dialog_role)> done) override
@@ -5070,6 +5081,8 @@ public:
     }
 
 private:
+    bool busy_ = false;  // set_busy's override pushed
+
     static QWidget* parent_widget(rap::window* w)
     {
         return w ? static_cast<window_impl*>(w)->frame() : nullptr;

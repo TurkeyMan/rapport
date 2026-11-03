@@ -5014,6 +5014,22 @@ public:
             });
     }
 
+    // On each window's GdkWindow, which child windows without a pointer of
+    // their own take.
+    void set_busy(bool on) override
+    {
+        GList* windows = gtk_window_list_toplevels();
+        for (GList* l = windows; l; l = l->next)
+            if (GdkWindow* g = gtk_widget_get_window(GTK_WIDGET(l->data)))
+            {
+                GdkCursor* c =
+                    on ? gdk_cursor_new_from_name(gdk_window_get_display(g), "progress") : nullptr;
+                gdk_window_set_cursor(g, c);
+                if (c) g_object_unref(c);
+            }
+        g_list_free(windows);
+    }
+
     void message(rap::window* parent, const message_spec& m,
                  std::function<void(dialog_role)> done) override
     {

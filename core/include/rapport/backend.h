@@ -19,7 +19,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 61;
+inline constexpr int abi_version = 62;
 
 // Light or dark: as the desktop has it (system), or the app's own choice
 // (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for
@@ -169,6 +169,9 @@ public:
     // Calls `fn` after `ms` milliseconds, then every `ms` if `repeat`, on
     // the UI thread, until the subscription is dropped.
     [[nodiscard]] virtual subscription timer(int ms, bool repeat, std::function<void()> fn) = 0;
+    // The pointer over the app's windows: the platform's working-in-the-
+    // background shape (an arrow with a spinner), or as it was.
+    virtual void set_busy(bool) = 0;
 };
 
 // How far an app takes on its desktop's own look beyond the toolkit's

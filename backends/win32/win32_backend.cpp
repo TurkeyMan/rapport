@@ -230,6 +230,9 @@ handler* handler_of(HWND h)
 
 class window_impl;  // forward
 
+// ui::set_busy's state, which every window's WM_SETCURSOR reads.
+bool app_busy = false;
+
 // Messages the containers forward to their children's handlers.
 // Paints the frames of the group boxes in window `h` (after its background);
 // false if it has none.
@@ -7715,6 +7718,15 @@ private:
                 return 0;
             }
             case WM_CLOSE: self->close_requested(); return 0;
+            // ui::set_busy: the app-starting pointer over the window and
+            // its controls, which ask their parent first.
+            case WM_SETCURSOR:
+                if (app_busy && LOWORD(lp) == HTCLIENT)
+                {
+                    SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
+                    return TRUE;
+                }
+                break;
             // The desktop's colours (accent, high contrast, the system
             // colours) may have changed: read them again and repaint all.
             // Dark mode ("ImmersiveColorSet") too: every control and the
@@ -8875,6 +8887,23 @@ public:
                 if (!*alive) return;
                 if (timers_.erase(id)) KillTimer(messages_, id);
             });
+    }
+    // Windows' app-starting pointer, which each window gives in
+    // WM_SETCURSOR (its children ask it first); the one under the pointer
+    // asked again now, so it changes without waiting for a move.
+    void set_busy(bool on) override
+    {
+        if (app_busy == on) return;
+        app_busy = on;
+        POINT p;
+        if (!GetCursorPos(&p)) return;
+        HWND under = WindowFromPoint(p);
+        DWORD pid = 0;
+        if (!under || !GetWindowThreadProcessId(under, &pid) || pid != GetCurrentProcessId())
+            return;
+        const LRESULT hit =
+            SendMessageW(under, WM_NCHITTEST, 0, MAKELPARAM(short(p.x), short(p.y)));
+        SendMessageW(under, WM_SETCURSOR, WPARAM(under), MAKELPARAM(LOWORD(hit), WM_MOUSEMOVE));
     }
 
 private:

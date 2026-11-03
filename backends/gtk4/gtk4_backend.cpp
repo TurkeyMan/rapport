@@ -5323,6 +5323,18 @@ public:
             });
     }
 
+    // On each window, which children without a pointer of their own take.
+    void set_busy(bool on) override
+    {
+        GListModel* windows = gtk_window_get_toplevels();
+        for (guint i = 0, n = g_list_model_get_n_items(windows); i < n; ++i)
+        {
+            auto* w = static_cast<GtkWidget*>(g_list_model_get_item(windows, i));
+            gtk_widget_set_cursor_from_name(w, on ? "progress" : nullptr);
+            g_object_unref(w);
+        }
+    }
+
 private:
     // libadwaita's alert dialog: the text as its heading, the detail as
     // its body, the responses in GNOME's order with the affirmative

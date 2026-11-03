@@ -726,6 +726,7 @@ public:
             });
         return subscription([alive] { *alive = false; });
     }
+    void set_busy(bool) override {}
 
 private:
     std::mutex mutex_;
