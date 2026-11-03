@@ -1063,6 +1063,215 @@ inline void forget_theme_listener(const void* owner)
     theme_states().listeners.erase(owner);
 }
 
+// -- text view: the buffer side, the same in both GTKs -----------------------
+
+// Text and spans in the buffer, UTF-8 byte offsets over GTK's characters.
+// Each backend makes the scrolled window around it (and its compact font),
+// then calls setup.
+class text_view_common : public widget_base<rap::text_view>
+{
+public:
+    ~text_view_common() override { forget_theme_listener(this); }
+
+    std::string text() const override
+    {
+        GtkTextIter a, b;
+        gtk_text_buffer_get_bounds(buffer_, &a, &b);
+        char* s = gtk_text_buffer_get_text(buffer_, &a, &b, false);
+        std::string out = s;
+        g_free(s);
+        return out;
+    }
+
+    void set_text(const std::string& t, std::vector<span> spans = {}) override
+    {
+        gtk_text_buffer_set_text(buffer_, t.c_str(), int(t.size()));
+        tags_.apply(buffer_, w_, t, std::move(spans));
+    }
+
+    void append(const std::string& t, const text_style& style) override
+    {
+        GtkTextIter end;
+        gtk_text_buffer_get_end_iter(buffer_, &end);
+        gtk_text_buffer_insert_with_tags(buffer_, &end, t.c_str(), int(t.size()),
+                                         tags_.get(buffer_, w_, style), nullptr);
+    }
+
+    void set_read_only(bool ro) override
+    {
+        gtk_text_view_set_editable(GTK_TEXT_VIEW(w_), !ro);
+        gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(w_), !ro);
+    }
+
+    void on_changed(std::function<void()> f) override { changed_ = std::move(f); }
+
+    // GTK counts characters; the API counts UTF-8 bytes.
+    std::pair<size_t, size_t> selection() const override
+    {
+        GtkTextIter a, b;
+        gtk_text_buffer_get_selection_bounds(buffer_, &a, &b);
+        const std::string t = text();
+        auto bytes = [&](const GtkTextIter& it)
+        {
+            const char* at = g_utf8_offset_to_pointer(t.c_str(), gtk_text_iter_get_offset(&it));
+            return size_t(std::min<ptrdiff_t>(at - t.c_str(), ptrdiff_t(t.size())));
+        };
+        return {bytes(a), bytes(b)};
+    }
+
+    void select(size_t begin, size_t end) override
+    {
+        const std::string t = text();
+        auto iter = [&](size_t byte)
+        {
+            GtkTextIter it;
+            gtk_text_buffer_get_iter_at_offset(
+                buffer_, &it,
+                int(g_utf8_pointer_to_offset(t.c_str(), t.c_str() + std::min(byte, t.size()))));
+            return it;
+        };
+        GtkTextIter a = iter(begin), b = iter(end);
+        gtk_text_buffer_select_range(buffer_, &b, &a);  // the caret at the end
+        // A mark, not an iter: scrolling to an iter needs line heights GTK
+        // may not have computed yet; a mark scroll waits for them.
+        gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(w_), gtk_text_buffer_get_insert(buffer_), 0.1,
+                                     false, 0, 0);
+    }
+
+protected:
+    explicit text_view_common(GtkWidget* scrolled)
+        : widget_base(gtk_text_view_new(), scrolled)
+    {
+    }
+    void setup(const spec::text_view& s)
+    {
+        auto* tv = GTK_TEXT_VIEW(w_);
+        gtk_text_view_set_monospace(tv, s.monospace);
+        gtk_text_view_set_wrap_mode(tv, s.wrap ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
+        gtk_text_view_set_left_margin(tv, 4);
+        gtk_text_view_set_right_margin(tv, 4);
+        set_read_only(s.read_only);
+        buffer_ = gtk_text_view_get_buffer(tv);
+        // Spans in theme roles take the new colours.
+        on_theme_changed(this, [this] { tags_.recolour(w_); });
+        set_text(s.text);
+        connect(
+            buffer_, "changed",
+            +[](GtkTextBuffer*, gpointer p)
+            {
+                auto* self = static_cast<text_view_common*>(p);
+                if (self->changed_) self->changed_();
+            },
+            this);
+    }
+
+private:
+    GtkTextBuffer* buffer_ = nullptr;
+    tag_cache tags_;
+    std::function<void()> changed_;
+};
+
+// -- splitter: a chain of nested GtkPaneds -----------------------------------
+
+// A splitter of n panes is a chain of n-1 nested GtkPaneds (each marked
+// "rapport-split-chain"); sizes are one per pane, along the split. The
+// paned after `paned` in its chain, if any.
+inline GtkWidget* next_in_split(GtkWidget* paned)
+{
+#if GTK_MAJOR_VERSION >= 4
+    GtkWidget* next = gtk_paned_get_end_child(GTK_PANED(paned));
+#else
+    GtkWidget* next = gtk_paned_get_child2(GTK_PANED(paned));
+#endif
+    return next && g_object_get_data(G_OBJECT(next), "rapport-split-chain") ? next : nullptr;
+}
+
+// Each pane's length along the split, from the chain's first paned.
+inline std::vector<float> split_sizes(GtkWidget* first)
+{
+    const bool vertical =
+        gtk_orientable_get_orientation(GTK_ORIENTABLE(first)) == GTK_ORIENTATION_VERTICAL;
+    auto length = [&](GtkWidget* w)
+    {
+#if GTK_MAJOR_VERSION >= 4
+        return float(vertical ? gtk_widget_get_height(w) : gtk_widget_get_width(w));
+#else
+        return float(vertical ? gtk_widget_get_allocated_height(w)
+                              : gtk_widget_get_allocated_width(w));
+#endif
+    };
+    std::vector<float> out;
+    for (GtkWidget* w = first;;)
+    {
+        auto* p = GTK_PANED(w);
+        out.push_back(float(gtk_paned_get_position(p)));
+        GtkWidget* next = next_in_split(w);
+        if (!next)
+        {
+#if GTK_MAJOR_VERSION >= 4
+            GtkWidget* last = gtk_paned_get_end_child(p);
+#else
+            GtkWidget* last = gtk_paned_get_child2(p);
+#endif
+            out.push_back(last ? length(last) : 0);
+            return out;
+        }
+        w = next;
+    }
+}
+
+// A divider at `position`. GtkPaned clamps a position to its current
+// length, so one asked for before the window has grown to fit (a pane
+// opening and the window widening for it, a layout restored before the
+// window reaches its saved size) would come out short; it's set again as
+// the paned grows, until it fits.
+inline void place_divider(GtkPaned* p, int position)
+{
+    gtk_paned_set_position(p, position);
+    int max_pos = 0;
+    g_object_get(p, "max-position", &max_pos, nullptr);
+    // G_MAXINT: not laid out with both panes yet (one was hidden), so not
+    // known to fit either.
+    if (max_pos >= position && max_pos != G_MAXINT) return;
+    // Too long for now: again when the splitter grows (once it fits).
+    auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(p), "rapport-want-position"));
+    if (!want)
+    {
+        want = new int(position);
+        g_object_set_data_full(
+            G_OBJECT(p), "rapport-want-position", want,
+            +[](gpointer d) { delete static_cast<int*>(d); });
+        g_signal_connect(
+            p, "notify::max-position",
+            G_CALLBACK(+[](GObject* obj, GParamSpec*, gpointer)
+                       {
+                           auto* want =
+                               static_cast<int*>(g_object_get_data(obj, "rapport-want-position"));
+                           if (!want || *want < 0) return;
+                           int max_pos = 0;
+                           g_object_get(obj, "max-position", &max_pos, nullptr);
+                           if (max_pos == G_MAXINT) return;
+                           gtk_paned_set_position(GTK_PANED(obj), std::min(*want, max_pos));
+                           if (max_pos >= *want) *want = -1;  // there: the user's from here on
+                       }),
+            nullptr);
+    }
+    *want = position;
+}
+
+// Overrides the first layout from stretch factors: each divider placed
+// (place_divider), from the chain's first paned.
+inline void set_split_sizes(GtkWidget* first, const std::vector<float>& s)
+{
+    g_object_set_data(G_OBJECT(first), "rapport-user-sized", GINT_TO_POINTER(1));
+    GtkWidget* w = first;
+    for (size_t i = 0; i + 1 < s.size() && w; ++i)
+    {
+        if (s[i] > 0) place_divider(GTK_PANED(w), int(s[i]));
+        w = next_in_split(w);
+    }
+}
+
 inline void queue_draw_tree(GtkWidget* w)
 {
     gtk_widget_queue_draw(w);
