@@ -306,6 +306,7 @@ public:
     void on_resize(std::function<void(size_f)>) override {}
     void on_resize_settled(std::function<void(size_f)>) override {}
     void stretch_while_resizing(resize_stretch, paint) override {}
+    void stretch_to(rect_f, rect_f) override {}
     void on_pointer(std::function<bool(const pointer_event&)>) override {}
     void on_scroll(std::function<bool(const scroll_event&)>) override {}
     void on_key(std::function<bool(const key_event&)>) override {}

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <optional>
 
 namespace rap::frames
 {
@@ -29,6 +30,22 @@ struct resize_burst
     std::function<void(size_f)> settled;  // canvas::on_resize_settled
     bool stretching = false;              // showing the last frame scaled
     bool pending = false;                 // a change came, not yet settled
+    // canvas::stretch_to: a rect of the kept frame, and where it goes now.
+    std::optional<std::pair<rect_f, rect_f>> mapping;
+
+    // Where the kept frame (`kept` across) goes on the canvas (`now`
+    // across): placed so the app's rect of it lands where the app said, or
+    // else scaled whole as `how` says.
+    rect_f where(size_f kept, size_f now) const
+    {
+        if (mapping && mapping->first.w > 0 && mapping->first.h > 0)
+        {
+            const auto& [from, to] = *mapping;
+            const float sx = to.w / from.w, sy = to.h / from.h;
+            return {to.x - from.x * sx, to.y - from.y * sy, kept.w * sx, kept.h * sy};
+        }
+        return stretched(kept, now, how);
+    }
 
     // Whether the backend keeps each frame it shows, to stretch.
     bool keeps() const { return how != resize_stretch::none; }
@@ -47,6 +64,7 @@ struct resize_burst
     std::function<void(size_f)> settle()
     {
         stretching = pending = false;
+        mapping.reset();
         return settled;
     }
 };

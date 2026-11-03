@@ -1155,6 +1155,15 @@ public:
     // moment's preview, filtered as the display's values (sRGB), not in
     // linear light. `background`: around a uniform frame.
     virtual void stretch_while_resizing(resize_stretch, paint background = theme_color::window) = 0;
+    // While a run of sizes is stretched: the rect `from` of the last frame
+    // shown (logical px, as it was drawn) goes to `to` on the canvas now, the
+    // rest scaled with it, around it the background. For an app that knows
+    // where its content lands at the new size (an image fitted, capped, or
+    // panned), so the stretched frame has the geometry of the frame that
+    // follows: called from on_resize, at each size. Until it's called, the
+    // whole frame is scaled as stretch_while_resizing says; it lapses as the
+    // sizes settle.
+    virtual void stretch_to(rect_f from, rect_f to) = 0;
     // Input handlers return true when they used the event.
     virtual void on_pointer(std::function<bool(const pointer_event&)>) = 0;
     virtual void on_scroll(std::function<bool(const scroll_event&)>) = 0;

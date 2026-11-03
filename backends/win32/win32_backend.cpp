@@ -6632,6 +6632,11 @@ public:
     void on_paint(std::function<void(rap::painter&, rap::size_f)> f) override { paint_ = std::move(f); }
     void on_resize(std::function<void(size_f)> f) override { resize_ = std::move(f); }
     void on_resize_settled(std::function<void(size_f)> f) override { burst_.settled = std::move(f); }
+    void stretch_to(rect_f from, rect_f to) override
+    {
+        burst_.mapping = {{from, to}};
+        if (burst_.stretching) invalidate();
+    }
     void stretch_while_resizing(resize_stretch how, paint background) override
     {
         burst_.how = how;
@@ -7101,7 +7106,7 @@ private:
             p.rect({0, 0, size().w, size().h}, 0, burst_.background, std::nullopt);
         }
         const float s = win_.scale();
-        const rect_f to = frames::stretched(kept_size_, size(), burst_.how);
+        const rect_f to = burst_.where(kept_size_, size());
         rt->SetDpi(96, 96);
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->DrawBitmap(kept, D2D1::RectF(to.x * s, to.y * s, (to.x + to.w) * s, (to.y + to.h) * s), 1,

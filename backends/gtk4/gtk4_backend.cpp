@@ -3736,6 +3736,11 @@ public:
     void on_paint(std::function<void(rap::painter&, rap::size_f)> f) override { paint_ = std::move(f); }
     void on_resize(std::function<void(size_f)> f) override { resize_ = std::move(f); }
     void on_resize_settled(std::function<void(size_f)> f) override { burst_.settled = std::move(f); }
+    void stretch_to(rect_f from, rect_f to) override
+    {
+        burst_.mapping = {{from, to}};
+        if (burst_.stretching) invalidate();
+    }
     void stretch_while_resizing(resize_stretch how, paint background) override
     {
         burst_.how = how;
@@ -4000,7 +4005,7 @@ private:
         if (burst_.stretching && kept_)
         {
             painter.rect({0, 0, size.w, size.h}, 0, burst_.background, std::nullopt);
-            kept_.show(cr, frames::stretched(kept_.size(), size, burst_.how));
+            kept_.show(cr, burst_.where(kept_.size(), size));
             return;
         }
         const auto paint = [&](rap::painter& p)

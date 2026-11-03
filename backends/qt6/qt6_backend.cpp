@@ -2136,6 +2136,11 @@ public:
     void on_paint(std::function<void(rap::painter&, rap::size_f)> f) override { paint_ = std::move(f); }
     void on_resize(std::function<void(size_f)> f) override { resize_ = std::move(f); }
     void on_resize_settled(std::function<void(size_f)> f) override { burst_.settled = std::move(f); }
+    void stretch_to(rect_f from, rect_f to) override
+    {
+        burst_.mapping = {{from, to}};
+        if (burst_.stretching) invalidate();
+    }
     void stretch_while_resizing(resize_stretch how, paint background) override
     {
         burst_.how = how;
@@ -2236,7 +2241,7 @@ public:
         {
             const size_f was{float(kept_.width()) / float(kept_.devicePixelRatio()),
                              float(kept_.height()) / float(kept_.devicePixelRatio())};
-            const rect_f to = frames::stretched(was, size(), burst_.how);
+            const rect_f to = burst_.where(was, size());
             p.rect({0, 0, size().w, size().h}, 0, burst_.background, std::nullopt);
             qp.setRenderHint(QPainter::SmoothPixmapTransform);
             qp.drawImage(QRectF(to.x, to.y, to.w, to.h), kept_);
