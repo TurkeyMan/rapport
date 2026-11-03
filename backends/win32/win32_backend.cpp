@@ -233,6 +233,16 @@ class window_impl;  // forward
 // ui::set_busy's state, which every window's WM_SETCURSOR reads.
 bool app_busy = false;
 
+// WM_SETCURSOR while the app is busy, over a client area: the app-starting
+// pointer, true if it's set. Windows that give their own pointer (a canvas,
+// a splitter bar) ask this first, as they don't ask their parent.
+bool busy_cursor_here(LPARAM lp)
+{
+    if (!app_busy || LOWORD(lp) != HTCLIENT) return false;
+    SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
+    return true;
+}
+
 // Messages the containers forward to their children's handlers.
 // Paints the frames of the group boxes in window `h` (after its background);
 // false if it has none.
@@ -1234,7 +1244,7 @@ LRESULT CALLBACK link_icon_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
 {
     if (msg == WM_SETCURSOR)
     {
-        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        if (!busy_cursor_here(lp)) SetCursor(LoadCursorW(nullptr, IDC_HAND));
         return TRUE;
     }
     return DefSubclassProc(h, msg, wp, lp);
@@ -1849,7 +1859,7 @@ private:
             // Over a button the arrow, not the edit's I-beam.
             if (reinterpret_cast<HWND>(wp) != h)
             {
-                SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+                if (!busy_cursor_here(lp)) SetCursor(LoadCursorW(nullptr, IDC_ARROW));
                 return TRUE;
             }
             break;
@@ -5934,7 +5944,9 @@ private:
         switch (msg)
         {
         case WM_SETCURSOR:
-            SetCursor(LoadCursorW(nullptr, dir_ == orientation::horizontal ? IDC_SIZEWE : IDC_SIZENS));
+            if (!busy_cursor_here(lp))
+                SetCursor(LoadCursorW(nullptr,
+                                      dir_ == orientation::horizontal ? IDC_SIZEWE : IDC_SIZENS));
             return TRUE;
         case WM_LBUTTONDOWN:
             SetCapture(h);
@@ -6815,6 +6827,7 @@ private:
             return 0;
         }
         case WM_SETCURSOR:
+            if (busy_cursor_here(lp)) return TRUE;
             if (LOWORD(lp) == HTCLIENT)
             {
                 apply_cursor();
@@ -7721,11 +7734,7 @@ private:
             // ui::set_busy: the app-starting pointer over the window and
             // its controls, which ask their parent first.
             case WM_SETCURSOR:
-                if (app_busy && LOWORD(lp) == HTCLIENT)
-                {
-                    SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
-                    return TRUE;
-                }
+                if (busy_cursor_here(lp)) return TRUE;
                 break;
             // The desktop's colours (accent, high contrast, the system
             // colours) may have changed: read them again and repaint all.
