@@ -1558,6 +1558,105 @@ LRESULT CALLBACK frameless_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT
     return 0;
 }
 
+// A button inside an edit control at its end (spec::entry_action, and the
+// clear button): a child of the edit, owner drawn as the flat tool buttons
+// are, with the edit's right margin kept clear of text for it. The edit
+// passes its WM_COMMAND and WM_DRAWITEM on (edit_buttons_subclass).
+class edit_button : public rap::entry_action, public handler
+{
+public:
+    edit_button(win_context& win, HWND edit, icon i, const std::string& tip,
+                std::function<void()> click)
+        : win_(win)
+        , icon_(std::move(i))
+        , click_(std::move(click))
+    {
+        h_ = CreateWindowExW(0, L"BUTTON", wide(tip).c_str(), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                             0, 0, 0, 0, edit, nullptr, instance(), nullptr);
+        handlers()[h_] = this;
+        set_tooltip_text(h_, tip);
+        SetWindowSubclass(h_, hover_proc, 1, reinterpret_cast<DWORD_PTR>(this));
+    }
+    ~edit_button() override
+    {
+        handlers().erase(h_);
+        if (IsWindow(h_)) DestroyWindow(h_);
+    }
+    void set_icon(const icon& i) override
+    {
+        icon_ = i;
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+    void set_tooltip(const std::string& t) override { set_tooltip_text(h_, t); }
+    void set_checked(bool c) override
+    {
+        checked_ = c;
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+    bool checked() const override { return checked_; }
+    void set_enabled(bool e) override { EnableWindow(h_, e); }
+    void command(WORD code) override
+    {
+        if (code == BN_CLICKED && click_) click_();
+    }
+    bool draw_item(DRAWITEMSTRUCT* d) override
+    {
+        RECT r = d->rcItem;
+        FillRect(d->hDC, &r, theme_brush(theme_color::base));
+        const bool pressed = d->itemState & ODS_SELECTED;
+        const bool disabled = d->itemState & ODS_DISABLED;
+        if (pressed || checked_ || hot_)
+        {
+            const color tint = theme_color_of(theme_color::highlight);
+            const float a = pressed ? 0.35f : checked_ ? 0.25f : 0.12f;
+            const color face = theme_color_of(theme_color::base);
+            auto mix = [a](uint8_t x, uint8_t y) { return uint8_t(x * (1 - a) + y * a); };
+            HBRUSH b = CreateSolidBrush(
+                RGB(mix(face.r, tint.r), mix(face.g, tint.g), mix(face.b, tint.b)));
+            RECT in = r;
+            InflateRect(&in, -win_.px(1), -win_.px(1));
+            FillRect(d->hDC, &in, b);
+            DeleteObject(b);
+        }
+        const int size = win_.px(16);
+        RECT ir{r.left + (r.right - r.left - size) / 2, r.top + (r.bottom - r.top - size) / 2, 0,
+                0};
+        ir.right = ir.left + size;
+        ir.bottom = ir.top + size;
+        draw_icon_on_dc(d->hDC, ir, icon_, win_.scale(),
+                        disabled ? theme_color_of(theme_color::placeholder_text)
+                                 : theme_color_of(theme_color::text));
+        return true;
+    }
+    HWND hwnd() const { return h_; }
+
+private:
+    static LRESULT CALLBACK hover_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                       DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<edit_button*>(data);
+        if (msg == WM_MOUSEMOVE && !self->hot_)
+        {
+            self->hot_ = true;
+            TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0};
+            TrackMouseEvent(&t);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        else if (msg == WM_MOUSELEAVE)
+        {
+            self->hot_ = false;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return DefSubclassProc(h, msg, wp, lp);
+    }
+
+    win_context& win_;
+    HWND h_ = nullptr;
+    icon icon_;
+    std::function<void()> click_;
+    bool checked_ = false, hot_ = false;
+};
+
 class entry_impl : public leaf<rap::entry>
 {
 public:
@@ -1565,9 +1664,31 @@ public:
         : leaf(win)
     {
         adopt(create_control(win, parent, L"EDIT", wide(s.text),
-                             ES_AUTOHSCROLL | WS_TABSTOP | (s.password ? ES_PASSWORD : 0), WS_EX_CLIENTEDGE));
+                             ES_AUTOHSCROLL | WS_TABSTOP | WS_CLIPCHILDREN |
+                                 (s.password ? ES_PASSWORD : 0),
+                             WS_EX_CLIENTEDGE));
         set_placeholder(s.placeholder);
         SetWindowSubclass(h_, enter_subclass, 1, reinterpret_cast<DWORD_PTR>(&activate_));
+        // The clear button nearest the text, the actions after it.
+        if (s.clearable)
+            clear_ = std::make_unique<edit_button>(win, h_, icon::named("window-close"),
+                                                   rap::i18n::tr("rapport", "Clear"),
+                                                   [this]
+                                                   {
+                                                       SetWindowTextW(h_, L"");
+                                                       SetFocus(h_);
+                                                   });
+        for (const spec::entry_action& a : s.actions)
+        {
+            actions_.push_back(
+                std::make_unique<edit_button>(win, h_, a.icon, a.tooltip, a.on_click));
+            if (a.bind) *a.bind = actions_.back().get();
+        }
+        if (clear_ || !actions_.empty())
+        {
+            SetWindowSubclass(h_, edit_buttons_subclass, 3, reinterpret_cast<DWORD_PTR>(this));
+            place_buttons();
+        }
     }
     std::string text() const override { return narrow(window_text(h_)); }
     void set_text(const std::string& t) override
@@ -1575,6 +1696,7 @@ public:
         quiet_ = true;
         SetWindowTextW(h_, wide(t).c_str());
         quiet_ = false;
+        place_buttons();
     }
     void set_read_only(bool v) override { SendMessageW(h_, EM_SETREADONLY, v, 0); }
     // Frameless: the edge stays, painted as background (frameless_subclass).
@@ -1596,6 +1718,7 @@ public:
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
     void command(WORD code) override
     {
+        if (code == EN_CHANGE) place_buttons();  // the clear button comes and goes
         if (code == EN_CHANGE && !quiet_ && changed_) changed_(text());
     }
     bool expands_in_form() const override { return true; }
@@ -1606,6 +1729,68 @@ public:
     }
 
 private:
+    // Square buttons the client area's height at its right end, the
+    // actions outermost, the clear button (while there's text) inside them;
+    // the text kept clear of them.
+    void place_buttons()
+    {
+        if (!clear_ && actions_.empty()) return;
+        RECT c{};
+        GetClientRect(h_, &c);
+        const int size = c.bottom - c.top;
+        int x = c.right;
+        for (auto it = actions_.rbegin(); it != actions_.rend(); ++it)
+        {
+            x -= size;
+            MoveWindow((*it)->hwnd(), x, 0, size, size, TRUE);
+        }
+        if (clear_)
+        {
+            const bool any = GetWindowTextLengthW(h_) > 0;
+            if (any)
+            {
+                x -= size;
+                MoveWindow(clear_->hwnd(), x, 0, size, size, TRUE);
+            }
+            ShowWindow(clear_->hwnd(), any ? SW_SHOWNA : SW_HIDE);
+        }
+        SendMessageW(h_, EM_SETMARGINS, EC_RIGHTMARGIN, MAKELPARAM(0, c.right - x));
+    }
+    static LRESULT CALLBACK edit_buttons_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                                  DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<entry_impl*>(data);
+        switch (msg)
+        {
+        case WM_COMMAND:
+        case WM_DRAWITEM:
+        {
+            LRESULT result = 0;
+            if (forward_child_message(h, msg, wp, lp, result)) return result;
+            break;
+        }
+        case WM_SETCURSOR:
+            // Over a button the arrow, not the edit's I-beam.
+            if (reinterpret_cast<HWND>(wp) != h)
+            {
+                SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+                return TRUE;
+            }
+            break;
+        case WM_SIZE:
+        case WM_SETFONT:
+        {
+            const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+            self->place_buttons();
+            return r;
+        }
+        default: break;
+        }
+        return DefSubclassProc(h, msg, wp, lp);
+    }
+
+    std::unique_ptr<edit_button> clear_;
+    std::vector<std::unique_ptr<edit_button>> actions_;
     bool quiet_ = false;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;

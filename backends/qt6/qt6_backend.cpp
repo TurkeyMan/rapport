@@ -35,6 +35,8 @@
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QStyle>
+#include <QStyleOption>
 #if RAPPORT_QT_PRINT
 #include <QPrintDialog>
 #include <QPrinter>
@@ -1162,6 +1164,61 @@ void handle_enter(QLineEdit* edit, const std::function<void()>* activate)
          });
 }
 
+// A button inside a line edit at its end (spec::entry_action): a trailing
+// QAction. The line edit draws no checked state, so a checked one shows
+// its icon as the style draws a selected one.
+class entry_icon_action : public rap::entry_action
+{
+public:
+    entry_icon_action(QLineEdit* edit, const spec::entry_action& s)
+        : edit_(edit)
+        , icon_(s.icon)
+    {
+        action_ = edit->addAction(QIcon(), QLineEdit::TrailingPosition);
+        action_->setToolTip(qs(s.tooltip));
+        action_->setText(qs(s.tooltip));
+        QObject::connect(action_, &QAction::triggered, action_,
+                         [click = s.on_click]
+                         {
+                             if (click) click();
+                         });
+        refresh();
+        if (s.bind) *s.bind = this;
+    }
+    void set_icon(const icon& i) override
+    {
+        icon_ = i;
+        refresh();
+    }
+    void set_tooltip(const std::string& t) override { action_->setToolTip(qs(t)); }
+    void set_checked(bool c) override
+    {
+        checked_ = c;
+        refresh();
+    }
+    bool checked() const override { return checked_; }
+    void set_enabled(bool e) override { action_->setEnabled(e); }
+
+private:
+    void refresh()
+    {
+        QIcon shown = to_q_icon(icon_, 16, edit_);
+        if (checked_ && !shown.isNull())
+        {
+            QStyleOption opt;
+            opt.initFrom(edit_);
+            const QPixmap normal = shown.pixmap(QSize(16, 16), edit_->devicePixelRatioF());
+            shown = QIcon(edit_->style()->generatedIconPixmap(QIcon::Selected, normal, &opt));
+        }
+        action_->setIcon(shown);
+    }
+
+    QLineEdit* edit_;
+    QAction* action_ = nullptr;
+    icon icon_;
+    bool checked_ = false;
+};
+
 class entry_impl : public widget_base<rap::entry>
 {
 public:
@@ -1172,6 +1229,8 @@ public:
         edit()->setPlaceholderText(qs(s.placeholder));
         // Qt's own clear button: clicking it clears the text (textChanged).
         if (s.clearable) edit()->setClearButtonEnabled(true);
+        for (const spec::entry_action& a : s.actions)
+            actions_.push_back(std::make_unique<entry_icon_action>(edit(), a));
         QObject::connect(edit(), &QLineEdit::textChanged, edit(),
                          [this](const QString& t)
                          {
@@ -1200,6 +1259,7 @@ public:
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
 
 private:
+    std::vector<std::unique_ptr<entry_icon_action>> actions_;
     QLineEdit* edit() const { return static_cast<QLineEdit*>(w_); }
     // Read-only and frameless, it reads as text on the window: its Base is
     // the palette's Window; otherwise the palette it inherits.

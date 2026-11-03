@@ -209,6 +209,13 @@ struct check
     std::function<void(bool)> on_toggled;
     rap::check** bind = nullptr;
 };
+struct entry_action
+{
+    rap::icon icon;
+    std::string tooltip;  // also its accessible name
+    std::function<void()> on_click;
+    rap::entry_action** bind = nullptr;
+};
 struct entry
 {
     std::string text, placeholder;
@@ -216,9 +223,13 @@ struct entry
     bool password = false;  // shows dots for the characters typed
     bool frame = true;
     // A clear button at the end while there's text (a filter, a search):
-    // clicking it empties the box, which on_changed hears. GTK's entry
-    // icon, Qt's clear button; Win32's edit control has none.
+    // clicking it empties the box, which on_changed hears.
     bool clearable = false;
+    // Buttons inside the box at its end, after the clear button: an icon
+    // each (a calendar for a date range, say). GTK's entry has one icon
+    // at each end: the first action takes the end, and the clear button,
+    // with one, the start; later actions aren't shown there.
+    std::vector<entry_action> actions;
     std::function<void(const std::string&)> on_changed;
     std::function<void()> on_activate;
     rap::entry** bind = nullptr;
@@ -754,6 +765,19 @@ public:
     entry& clearable(bool v = true)
     {
         s().clearable = v;
+        return *this;
+    }
+    // A button inside the box at its end (spec::entry::actions), bound to
+    // change its icon, tooltip or held-down state later.
+    entry& trailing_action(icon i, std::string tooltip, std::function<void()> on_click)
+    {
+        s().actions.push_back({std::move(i), std::move(tooltip), std::move(on_click), nullptr});
+        return *this;
+    }
+    entry& trailing_action(icon i, std::string tooltip, std::function<void()> on_click,
+                           rap::entry_action*& bind)
+    {
+        s().actions.push_back({std::move(i), std::move(tooltip), std::move(on_click), &bind});
         return *this;
     }
     entry& placeholder(std::string p)

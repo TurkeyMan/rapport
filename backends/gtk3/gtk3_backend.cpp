@@ -1270,6 +1270,95 @@ private:
     bool updating_ = false;
 };
 
+// An entry's end icon as a button (spec::entry_action). GTK has no held
+// down look for entry icons: a checked one gets a tint of the text colour
+// behind it (entry.rapport-action-checked), as a pressed flat button.
+class entry_icon_action : public rap::entry_action
+{
+public:
+    entry_icon_action(GtkEntry* entry, const spec::entry_action& s)
+        : entry_(entry)
+        , icon_(s.icon)
+        , click_(s.on_click)
+    {
+        show_icon();
+        set_tooltip(s.tooltip);
+        if (s.bind) *s.bind = this;
+    }
+    void set_icon(const icon& i) override
+    {
+        icon_ = i;
+        show_icon();
+    }
+    void set_tooltip(const std::string& t) override
+    {
+        gtk_entry_set_icon_tooltip_text(entry_, at, t.c_str());
+    }
+    void set_checked(bool c) override
+    {
+        static bool installed = false;
+        if (!installed)
+        {
+            GtkCssProvider* css = gtk_css_provider_new();
+            gtk_css_provider_load_from_data(
+                css,
+                "entry.rapport-action-checked image.right { background-color: "
+                "alpha(currentColor, 0.18); border-radius: 4px; }",
+                -1, nullptr);
+            gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(GTK_WIDGET(entry_)),
+                                                      GTK_STYLE_PROVIDER(css),
+                                                      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+            g_object_unref(css);
+            installed = true;
+        }
+        checked_ = c;
+        GtkStyleContext* style = gtk_widget_get_style_context(GTK_WIDGET(entry_));
+        if (c)
+            gtk_style_context_add_class(style, "rapport-action-checked");
+        else
+            gtk_style_context_remove_class(style, "rapport-action-checked");
+    }
+    bool checked() const override { return checked_; }
+    void set_enabled(bool e) override { gtk_entry_set_icon_sensitive(entry_, at, e); }
+    void click()
+    {
+        if (click_) click_();
+    }
+
+private:
+    static constexpr GtkEntryIconPosition at = GTK_ENTRY_ICON_SECONDARY;
+    // A theme icon by name; a drawn one rendered (where there's no theme
+    // icon by that name).
+    void show_icon()
+    {
+        if (!icon_.name.empty() &&
+            gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), icon_.name.c_str()))
+            return gtk_entry_set_icon_from_icon_name(entry_, at, icon_.name.c_str());
+        auto draw = icon_.draw;
+        if (!icon_.name.empty() && builtin::has_builtin_icon(icon_.name))
+            draw = [name = icon_.name](rap::painter& p, rap::size_f s)
+            { builtin::draw_builtin_icon(name, p, s); };
+        if (!draw) return gtk_entry_set_icon_from_icon_name(entry_, at, "image-missing");
+        const int size = 16;
+        cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, size, size);
+        cairo_t* cr = cairo_create(surface);
+        {
+            cairo_painter painter(cr, GTK_WIDGET(entry_));
+            draw(painter, {float(size), float(size)});
+        }
+        cairo_destroy(cr);
+        GdkPixbuf* pixbuf = gdk_pixbuf_get_from_surface(surface, 0, 0, size, size);
+        cairo_surface_destroy(surface);
+        gtk_entry_set_icon_from_pixbuf(entry_, at, pixbuf);
+        if (pixbuf) g_object_unref(pixbuf);
+    }
+
+    GtkEntry* entry_;
+    icon icon_;
+    std::function<void()> click_;
+    bool checked_ = false;
+};
+
 class entry_impl : public widget_base<rap::entry>
 {
 public:
@@ -1287,6 +1376,13 @@ public:
         gtk_entry_set_activates_default(GTK_ENTRY(w_), true);
         if (!s.placeholder.empty()) set_placeholder(s.placeholder);
         clearable_ = s.clearable;
+        // One icon at each end: the first action at the end, and the clear
+        // icon there too unless an action has it, then at the start.
+        if (!s.actions.empty())
+        {
+            action_ = std::make_unique<entry_icon_action>(GTK_ENTRY(w_), s.actions.front());
+            clear_at_ = GTK_ENTRY_ICON_PRIMARY;
+        }
         update_clear();
         connect(
             w_, "changed",
@@ -1297,13 +1393,16 @@ public:
                 if (self->changed_) self->changed_(gtk_entry_get_text(GTK_ENTRY(e)));
             },
             this);
-        // The clear icon, as GtkSearchEntry has it.
-        if (clearable_)
+        if (clearable_ || action_)
             connect(
                 w_, "icon-press",
-                +[](GtkEntry* e, GtkEntryIconPosition at, GdkEvent*, gpointer)
+                +[](GtkEntry* e, GtkEntryIconPosition at, GdkEvent*, gpointer p)
                 {
-                    if (at == GTK_ENTRY_ICON_SECONDARY) gtk_entry_set_text(e, "");
+                    auto* self = static_cast<entry_impl*>(p);
+                    if (self->clearable_ && at == self->clear_at_ && *gtk_entry_get_text(e))
+                        gtk_entry_set_text(e, "");
+                    else if (self->action_ && at == GTK_ENTRY_ICON_SECONDARY)
+                        self->action_->click();
                 },
                 this);
         connect(
@@ -1362,13 +1461,15 @@ private:
     {
         if (!clearable_) return;
         const bool any = *gtk_entry_get_text(GTK_ENTRY(w_)) != 0;
-        gtk_entry_set_icon_from_icon_name(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
+        gtk_entry_set_icon_from_icon_name(GTK_ENTRY(w_), clear_at_,
                                           any ? "edit-clear-symbolic" : nullptr);
         if (any)
-            gtk_entry_set_icon_tooltip_text(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
+            gtk_entry_set_icon_tooltip_text(GTK_ENTRY(w_), clear_at_,
                                             rap::i18n::tr("rapport", "Clear"));
     }
     bool clearable_ = false;
+    GtkEntryIconPosition clear_at_ = GTK_ENTRY_ICON_SECONDARY;
+    std::unique_ptr<entry_icon_action> action_;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
