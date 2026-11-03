@@ -29,7 +29,8 @@ target_link_libraries(rapport-list-press-test PRIVATE rapport::rapport)
 
 # Lists driven by synthesized input through the real backends, loaded as
 # plugins, off the desktop: GTK 3 on Broadway, Qt offscreen. (GTK 4 can't
-# synthesize input; win32's lists are native.)
+# synthesize input; win32's lists are native.) GTK 4's entry buttons are
+# driven through their focus and activate signals instead.
 if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
     if(TARGET rapport_gtk3)
         find_package(PkgConfig QUIET)
@@ -38,6 +39,14 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         target_compile_definitions(rapport-list-input-test-gtk3 PRIVATE RAPPORT_TEST_GTK3)
         target_link_libraries(rapport-list-input-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
         add_dependencies(rapport-list-input-test-gtk3 rapport_gtk3)
+    endif()
+    # An entry's buttons on GTK 4: named, focusable, Tab order, menus.
+    if(TARGET rapport_gtk4)
+        find_package(PkgConfig QUIET)
+        pkg_check_modules(RAPPORT_TEST_GTK4 QUIET IMPORTED_TARGET gtk4)
+        add_executable(rapport-entry-buttons-test-gtk4 entry_buttons_test.cpp)
+        target_link_libraries(rapport-entry-buttons-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4)
+        add_dependencies(rapport-entry-buttons-test-gtk4 rapport_gtk4)
     endif()
     if(TARGET rapport_qt6)
         find_package(Qt6 QUIET COMPONENTS Widgets)
