@@ -396,6 +396,19 @@ struct pixel_grid
     float stroke_width(float width) const { return std::max(1.f, std::round(width * k)) / k; }
 };
 
+// Where a picture `w` by `h` goes in `box` keeping its shape: as large as
+// fits, placed by `align_x` and `align_y` (0 left or top, 0.5 centred, 1
+// right or bottom). For painter::image, so a picture in a box laid out
+// smaller than asked shrinks whole rather than squashed:
+//     p.image(img, {0, 0, iw, ih}, rap::fit_inside({0, 0, size.w, size.h}, iw, ih));
+inline rect_f fit_inside(rect_f box, float w, float h, float align_x = 0.5f, float align_y = 0.5f)
+{
+    if (w <= 0 || h <= 0 || box.w <= 0 || box.h <= 0) return {box.x, box.y, 0, 0};
+    const float k = std::min(box.w / w, box.h / h);
+    const float fw = w * k, fh = h * k;
+    return {box.x + (box.w - fw) * align_x, box.y + (box.h - fh) * align_y, fw, fh};
+}
+
 struct cell_info
 {
     size_f size;

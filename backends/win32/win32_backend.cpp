@@ -636,7 +636,11 @@ bool placed_at(HWND h, int x, int y, int w, int hgt)
 void move_now(HWND h, int x, int y, int w, int hgt)
 {
     if (g_moves && g_moves->ahead) return;
-    if (!placed_at(h, x, y, w, hgt)) SetWindowPos(h, nullptr, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
+    // A host that changes size repaints whole: carrying its old pixels
+    // along, it kept what lay over it (a splitter's bar, a neighbour's
+    // edge) in strips its children never repaint.
+    if (!placed_at(h, x, y, w, hgt))
+        SetWindowPos(h, nullptr, x, y, w, hgt, move_flags_for(h, w, hgt));
 }
 
 void move_control(HWND h, int x, int y, int w, int hgt)
@@ -1009,14 +1013,24 @@ private:
         }
         if (used > total)
         {
-            // Too small: shrink the last item first (what overflows gets clipped).
+            // Too small: what overflows gets clipped, the last item first, but
+            // what stretches goes before what doesn't, and a size given
+            // (width, height) goes last, as GTK and Qt keep it as a minimum:
+            // a picture's box squeezed to a sliver, or a link at a row's end
+            // cut off while the label beside it could have given way.
             long over = used - total;
-            for (size_t i = shown.size(); i-- > 0 && over > 0;)
-            {
-                const long cut = std::min(over, sizes[i]);
-                sizes[i] -= cut;
-                over -= cut;
-            }
+            const bool across = dir_ == orientation::horizontal;
+            for (int pass = 0; pass < 3 && over > 0; ++pass)
+                for (size_t i = shown.size(); i-- > 0 && over > 0;)
+                {
+                    const item* c = shown[i];
+                    const bool given = across ? c->fixed_w > 0 : c->fixed_h > 0;
+                    const int rank = given ? 2 : c->stretch > 0 ? 0 : 1;
+                    if (rank != pass) continue;
+                    const long cut = std::min(over, sizes[i]);
+                    sizes[i] -= cut;
+                    over -= cut;
+                }
         }
         return sizes;
     }
@@ -5900,12 +5914,30 @@ private:
             }
         sizes_.assign(panes.size(), 0);
         for (size_t k = 0; k < shown.size(); ++k) sizes_[shown[k]] = sz[k];
-        win_.relayout();
-        // Lay out and paint now: a posted relayout, and WM_PAINT after it,
-        // wait behind the stream of mouse moves, leaving stale pixels where
-        // the bar has passed.
-        SendMessageW(win_.hwnd(), wm_rapport_relayout, 0, 0);
-        RedrawWindow(win_.hwnd(), nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+        relayout_dragged();
+    }
+
+    // Lays out the panes for the bar's new place and paints them, now and
+    // in one go: a posted relayout, and WM_PAINT after it, waited behind
+    // the stream of mouse moves, leaving stale pixels where the bar had
+    // passed. Only the splitter is laid out again (nothing else changes
+    // size, and its measurements hold), with drawing off in the window it
+    // lies in, so no control shows half moved or erased and not yet
+    // painted; then all of it, the bars' old places and new, paints in one
+    // pass before the next mouse move is read.
+    void relayout_dragged()
+    {
+        // (WM_SETREDRAW TRUE shows a hidden window: only on a shown one.)
+        const bool hold = IsWindowVisible(parent_);
+        if (hold) SendMessageW(parent_, WM_SETREDRAW, FALSE, 0);
+        {
+            moves_in_one_pass batch;
+            place(rect_);
+        }
+        if (!hold) return;
+        SendMessageW(parent_, WM_SETREDRAW, TRUE, 0);
+        RedrawWindow(parent_, &rect_, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
 
     win_context& win_;
@@ -5969,9 +6001,33 @@ public:
     }
 
 private:
+    // Setting the scroll range shows or hides a scroll bar, which narrows or
+    // widens the client area (and sends WM_SIZE, back in here): laid out at
+    // the width it had before, content that had just grown taller than the
+    // view ran a scroll bar's width past its right edge until the next
+    // layout. So it's laid out again until the client area holds still.
     void layout_content()
     {
         if (!content) return;
+        if (laying_out_)
+        {
+            again_ = true;
+            return;
+        }
+        laying_out_ = true;
+        // (A bar that shows only while the other is hidden could flip for
+        // ever: three goes, and the last one stands.)
+        for (int tries = 0; tries < 3; ++tries)
+        {
+            again_ = false;
+            if (lay_out_once(tries == 2) && !again_) break;
+        }
+        laying_out_ = false;
+    }
+    // False if setting the scroll bars changed the client area, unless it's
+    // the last go.
+    bool lay_out_once(bool last)
+    {
         RECT client;
         GetClientRect(host_, &client);
         const SIZE n = content->natural();
@@ -5990,9 +6046,13 @@ private:
             sh.nPos = int(x_);
             SetScrollInfo(host_, SB_HORZ, &sh, TRUE);
         }
+        RECT now;
+        GetClientRect(host_, &now);
+        if (!last && (now.right != client.right || now.bottom != client.bottom)) return false;
         move_now(panel_, -x_, -y_, w, h);
         content->place({0, 0, w, h});
         content_w_ = w, content_h_ = h;
+        return true;
     }
     // Scrolling moves what's already drawn: Windows shifts the pixels and the
     // panel together, and only the strip that comes into view paints.
@@ -6056,6 +6116,7 @@ private:
     std::unique_ptr<std::function<LRESULT(HWND, UINT, WPARAM, LPARAM, bool&)>> fn_;
     long x_ = 0, y_ = 0;
     long content_w_ = 0, content_h_ = 0;
+    bool laying_out_ = false, again_ = false;
 };
 
 // -- frames -------------------------------------------------------------------
