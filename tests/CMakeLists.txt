@@ -27,6 +27,14 @@ add_executable(rapport-list-press-test list_press_test.cpp)
 target_include_directories(rapport-list-press-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
 target_link_libraries(rapport-list-press-test PRIVATE rapport::rapport)
 
+# Explorer's view, carried from Windows 11's entry's first GetState to its
+# second: no COM in it, so it runs everywhere.
+if(TARGET rapport_shell)
+    add_executable(rapport-explorer-view-test explorer_view_test.cpp)
+    target_include_directories(rapport-explorer-view-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../shell/src/win32)
+    target_link_libraries(rapport-explorer-view-test PRIVATE rapport::shell)
+endif()
+
 # Lists driven by synthesized input through the real backends, loaded as
 # plugins, off the desktop: GTK 3 on Broadway, Qt offscreen. (GTK 4 can't
 # synthesize input; win32's lists are native.) GTK 4's entry buttons are

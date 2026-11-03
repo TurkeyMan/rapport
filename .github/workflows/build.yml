@@ -48,6 +48,9 @@ jobs:
       - name: List press rule
         run: build/bin/rapport-list-press-test
 
+      - name: Explorer view snapshots
+        run: build/bin/rapport-explorer-view-test
+
       # Synthesized input through the real backends, off any desktop: GTK 3
       # on a Broadway server, Qt on its offscreen platform; GTK 4's entry
       # buttons through focus and activate, on its own Broadway server.
@@ -105,6 +108,11 @@ jobs:
         run: |
           build/bin/Release/rapport-list-press-test.exe
           if ($LASTEXITCODE) { throw 'rapport-list-press-test failed' }
+
+      - name: Explorer view snapshots
+        run: |
+          build/bin/Release/rapport-explorer-view-test.exe
+          if ($LASTEXITCODE) { throw 'rapport-explorer-view-test failed' }
 
       - name: Shell extension
         working-directory: build/bin/Release

@@ -13,6 +13,7 @@
 // runs inside Explorer's process (or its COM surrogate): every entry point
 // catches everything.
 #include "explorer_badges.h"
+#include "explorer_view.h"
 
 #include <rapport/shell.h>
 
@@ -22,8 +23,10 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -113,41 +116,38 @@ std::wstring file_path(IShellItem* item)
     return s;
 }
 
-// The folder a background click was in: the site is Explorer's view, whose
-// objects belong to its UI thread, so this is asked there.
-std::wstring site_folder(IUnknown* site, bool& has_selection)
+// The folder the view shows and whether anything in it is selected: the
+// site is Explorer's view, whose objects belong to its UI thread, so this is
+// asked there.
+rap::shell::detail::view_info ask_site(IUnknown* site)
 {
-    has_selection = false;
-    if (!site) return {};
+    rap::shell::detail::view_info info;
+    if (!site) return info;
     IServiceProvider* sp = nullptr;
     IShellBrowser* browser = nullptr;
     IShellView* view = nullptr;
     IFolderView* fv = nullptr;
     IShellItem* folder = nullptr;
-    std::wstring path;
     if (SUCCEEDED(site->QueryInterface(IID_PPV_ARGS(&sp))) &&
         SUCCEEDED(sp->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser))) &&
         SUCCEEDED(browser->QueryActiveShellView(&view)) &&
         SUCCEEDED(view->QueryInterface(IID_PPV_ARGS(&fv))))
     {
         int n = 0;
-        has_selection = SUCCEEDED(fv->ItemCount(SVGIO_SELECTION, &n)) && n > 0;
-        if (SUCCEEDED(fv->GetFolder(IID_PPV_ARGS(&folder)))) path = file_path(folder);
+        info.has_selection = SUCCEEDED(fv->ItemCount(SVGIO_SELECTION, &n)) && n > 0;
+        if (SUCCEEDED(fv->GetFolder(IID_PPV_ARGS(&folder)))) info.folder = file_path(folder);
     }
     for (IUnknown* p :
          {static_cast<IUnknown*>(folder), static_cast<IUnknown*>(fv), static_cast<IUnknown*>(view),
           static_cast<IUnknown*>(browser), static_cast<IUnknown*>(sp)})
         if (p) p->Release();
-    return path;
+    return info;
 }
 
-// What was right-clicked. Explorer gives a background click its folder as
-// the one item, so that's told apart by the view (in `folder`) having nothing
-// selected.
-rap::shell::selection selection_of(IShellItemArray* items, const std::wstring& folder,
-                                   bool has_selection)
+// The right-clicked items' paths, those that have one.
+rap::shell::detail::paths item_paths(IShellItemArray* items)
 {
-    rap::shell::selection sel;
+    rap::shell::detail::paths out;
     DWORD n = 0;
     if (items) items->GetCount(&n);
     for (DWORD i = 0; i < n; ++i)
@@ -156,18 +156,9 @@ rap::shell::selection selection_of(IShellItemArray* items, const std::wstring& f
         if (FAILED(items->GetItemAt(i, &item))) continue;
         std::wstring p = file_path(item);
         item->Release();
-        if (!p.empty()) sel.paths.emplace_back(std::move(p));
+        if (!p.empty()) out.emplace_back(std::move(p));
     }
-    if (!has_selection && !folder.empty() &&
-        (sel.paths.empty() || (sel.paths.size() == 1 && sel.paths.front() == folder)))
-    {
-        sel.paths.clear();
-        sel.folder = folder;
-        sel.background = true;
-    }
-    else if (!sel.paths.empty())
-        sel.folder = sel.paths.front().parent_path();
-    return sel;
+    return out;
 }
 
 class command_list;
@@ -229,6 +220,7 @@ public:
             old = site_;
             site_ = site;
         }
+        snapshots_.site_changed();
         if (old) old->Release();
         return S_OK;
     }
@@ -295,7 +287,7 @@ public:
         }
         if (!ok_to_be_slow)
         {
-            ask_view();
+            ask_view(items);
             return E_PENDING;
         }
         if (!build(items)->items.empty()) *out = ECS_ENABLED;
@@ -342,42 +334,35 @@ private:
         return state_;
     }
 
-    // On the UI thread: the view's folder and whether it has a selection.
-    // Explorer's first GetState (not ok to be slow) comes on its UI thread,
-    // after SetSite, and the second on a background thread. That order is
-    // relied on, not documented: without it a background click is taken
-    // for its folder, which is wrong but harmless.
-    void ask_view()
+    // On the UI thread: what the view says about these items, kept for the
+    // slow call about them. Explorer's first GetState (not ok to be slow)
+    // comes on its UI thread, after SetSite, and the second on a background
+    // thread. That order is relied on, not documented: without it a
+    // background click is taken for its folder, which is wrong but harmless.
+    void ask_view(IShellItemArray* items)
     {
+        // Before the site is read: SetSite changes the site, then this.
+        const std::uint64_t asked = snapshots_.begin();
         IUnknown* site = nullptr;
         {
             std::lock_guard<std::mutex> lock(state_lock_);
             site = site_;
             if (site) site->AddRef();
         }
-        bool has_selection = false;
-        std::wstring folder = site_folder(site, has_selection);
+        rap::shell::detail::view_info view = ask_site(site);
         if (site) site->Release();
-        std::lock_guard<std::mutex> lock(state_lock_);
-        view_folder_ = std::move(folder);
-        view_has_selection_ = has_selection;
+        snapshots_.publish(asked, item_paths(items), std::move(view));
     }
 
-    // Off the UI thread: uses what ask_view found, never the site. That's
-    // used once, so a right-click Explorer didn't first ask about on its UI
-    // thread (the entry kept from an earlier one) gets no view, not the last.
+    // Off the UI thread: uses what ask_view kept about these items, never
+    // the site.
     std::shared_ptr<menu_state> build(IShellItemArray* items)
     {
-        std::wstring folder;
-        bool has_selection = false;
-        {
-            std::lock_guard<std::mutex> lock(state_lock_);
-            folder = std::exchange(view_folder_, {});
-            has_selection = std::exchange(view_has_selection_, false);
-        }
+        rap::shell::detail::paths paths = item_paths(items);
+        const std::optional<rap::shell::detail::view_info> view = snapshots_.take(paths);
         auto state = std::make_shared<menu_state>();
         state->provider = rap::shell::make_provider();
-        state->sel = selection_of(items, folder, has_selection);
+        state->sel = rap::shell::detail::selection_of(std::move(paths), view);
         if (state->provider && (!state->sel.paths.empty() || state->sel.background))
             state->items = flatten(state->provider->menu(state->sel), state->icon);
         state->built = true;
@@ -387,12 +372,11 @@ private:
     }
 
     std::atomic<ULONG> refs_{1};
-    mutable std::mutex state_lock_;  // over state_, site_ and the view's
+    mutable std::mutex state_lock_;  // over state_ and site_
     std::shared_ptr<menu_state> state_;
     const menu_item* item_ = nullptr;  // in state_->items; null for the entry
     IUnknown* site_ = nullptr;
-    std::wstring view_folder_;
-    bool view_has_selection_ = false;
+    rap::shell::detail::view_snapshots snapshots_;
 };
 
 // The items under the entry, or under one of its submenus.
