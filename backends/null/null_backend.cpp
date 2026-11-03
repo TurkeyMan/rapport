@@ -113,9 +113,21 @@ private:
     }
 };
 
+class null_entry_action : public rap::entry_action
+{
+public:
+    void set_icon(const icon&) override {}
+    void set_tooltip(const std::string&) override {}
+    void set_checked(bool c) override { on = c; }
+    bool checked() const override { return on; }
+    void set_enabled(bool) override {}
+    bool on = false;
+};
+
 class null_entry : public stub<rap::entry>
 {
 public:
+    std::vector<std::unique_ptr<null_entry_action>> actions;
     std::string text() const override { return value; }
     void set_text(const std::string& t) override { value = t; }
     void set_placeholder(const std::string&) override {}
@@ -495,7 +507,12 @@ private:
     {
         std::printf("entry \"%s\"%s", s.text.c_str(), s.frame ? "" : " frameless");
         suffix(n);
-        make<null_entry>(n);
+        null_entry* e = make<null_entry>(n);
+        for (const spec::entry_action& a : s.actions)
+        {
+            e->actions.push_back(std::make_unique<null_entry_action>());
+            if (a.bind) *a.bind = e->actions.back().get();
+        }
     }
     void visit(const node& n, const spec::drop_down& s, int)
     {

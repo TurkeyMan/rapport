@@ -655,6 +655,19 @@ public:
     virtual void on_changed(std::function<void(rap::date)>) = 0;  // user changes only
 };
 
+// A button inside an entry, at its end (layout's entry::trailing_action).
+class entry_action
+{
+public:
+    virtual ~entry_action() = default;
+    virtual void set_icon(const icon&) = 0;
+    virtual void set_tooltip(const std::string&) = 0;
+    // Drawn held down while checked: an option in effect (a date range set).
+    virtual void set_checked(bool) = 0;
+    virtual bool checked() const = 0;
+    virtual void set_enabled(bool) = 0;
+};
+
 // Single-line text entry.
 class entry : public widget
 {
