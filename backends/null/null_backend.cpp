@@ -170,7 +170,9 @@ public:
     std::optional<size_t> current() const override { return {}; }
     void select(const std::vector<size_t>&) override {}
     void set_current(size_t) override {}
-    void scroll_to(size_t) override {}
+    void scroll_to(size_t, scroll_align) override {}
+    std::optional<float> row_offset(size_t) const override { return std::nullopt; }
+    void set_row_offset(size_t, float) override {}
     void on_cell_drag(cell_drag) override {}
     void on_cell_context_menu(std::function<menu(size_t, size_t, point_f)>) override {}
     void set_sort_indicator(std::optional<size_t>, sort_order) override {}

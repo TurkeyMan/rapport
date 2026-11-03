@@ -215,6 +215,10 @@ struct entry
     bool read_only = false;
     bool password = false;  // shows dots for the characters typed
     bool frame = true;
+    // A clear button at the end while there's text (a filter, a search):
+    // clicking it empties the box, which on_changed hears. GTK's entry
+    // icon, Qt's clear button; Win32's edit control has none.
+    bool clearable = false;
     std::function<void(const std::string&)> on_changed;
     std::function<void()> on_activate;
     rap::entry** bind = nullptr;
@@ -741,6 +745,12 @@ public:
     entry& password(bool v = true)
     {
         s().password = v;
+        return *this;
+    }
+    // The toolkit's clear button at the box's end, shown while there's text.
+    entry& clearable(bool v = true)
+    {
+        s().clearable = v;
         return *this;
     }
     entry& placeholder(std::string p)

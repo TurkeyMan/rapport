@@ -721,6 +721,16 @@ struct data_offer
     std::vector<std::pair<std::string, std::string>> formats;
 };
 
+// Where scroll_to puts a row in the view: as little scrolling as brings it
+// into view, or at the view's top, middle or bottom.
+enum class scroll_align
+{
+    nearest,
+    start,
+    center,
+    end,
+};
+
 class list : public widget
 {
 public:
@@ -729,7 +739,15 @@ public:
     virtual std::optional<size_t> current() const = 0;
     virtual void select(const std::vector<size_t>& rows) = 0;
     virtual void set_current(size_t row) = 0;
-    virtual void scroll_to(size_t row) = 0;
+    virtual void scroll_to(size_t row, scroll_align = scroll_align::nearest) = 0;
+    // Where a row sits in the view: its top in logical px below the top of
+    // the rows area (under any header); nullopt while it isn't in view, or
+    // the rows aren't laid out. With set_row_offset, a view repopulated (a
+    // filter, a reload) keeps the row where the user saw it.
+    virtual std::optional<float> row_offset(size_t row) const = 0;
+    // Scrolls so the row's top sits `offset` below the top of the rows area,
+    // as near as the view's ends allow; a row already there moves nothing.
+    virtual void set_row_offset(size_t row, float offset) = 0;
 
     // The model is virtual, so sorting is the app's job: the list reports
     // header clicks and shows the indicator it is told to.

@@ -1130,6 +1130,8 @@ public:
     {
         if (s.password) edit()->setEchoMode(QLineEdit::Password);
         edit()->setPlaceholderText(qs(s.placeholder));
+        // Qt's own clear button: clicking it clears the text (textChanged).
+        if (s.clearable) edit()->setClearButtonEnabled(true);
         QObject::connect(edit(), &QLineEdit::textChanged, edit(),
                          [this](const QString& t)
                          {
@@ -2461,10 +2463,39 @@ public:
                                                      QItemSelectionModel::Rows);
     }
 
-    void scroll_to(size_t row) override
+    void scroll_to(size_t row, scroll_align align) override
     {
-        if (row < size_t(rows_->count))
-            view_->scrollTo(rows_->index(int(row), 0), QAbstractItemView::EnsureVisible);
+        if (row >= size_t(rows_->count)) return;
+        QAbstractItemView::ScrollHint hint = QAbstractItemView::EnsureVisible;
+        switch (align)
+        {
+        case scroll_align::nearest: break;
+        case scroll_align::start: hint = QAbstractItemView::PositionAtTop; break;
+        case scroll_align::center: hint = QAbstractItemView::PositionAtCenter; break;
+        case scroll_align::end: hint = QAbstractItemView::PositionAtBottom; break;
+        }
+        view_->scrollTo(rows_->index(int(row), 0), hint);
+    }
+    // The viewport is the rows area (the header sits above it), scrolled a
+    // pixel at a time.
+    std::optional<float> row_offset(size_t row) const override
+    {
+        if (row >= size_t(rows_->count)) return std::nullopt;
+        const QRect r = view_->visualRect(rows_->index(int(row), 0));
+        if (!r.isValid() || r.bottom() < 0 || r.top() >= view_->viewport()->height())
+            return std::nullopt;
+        return float(r.top());
+    }
+    void set_row_offset(size_t row, float offset) override
+    {
+        if (row >= size_t(rows_->count)) return;
+        // Into view first: that lays out rows a model reset left pending.
+        const QModelIndex index = rows_->index(int(row), 0);
+        view_->scrollTo(index, QAbstractItemView::EnsureVisible);
+        const int by = view_->visualRect(index).top() - int(std::lround(offset));
+        if (by == 0) return;
+        QScrollBar* bar = view_->verticalScrollBar();
+        bar->setValue(std::clamp(bar->value() + by, bar->minimum(), bar->maximum()));
     }
 
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override

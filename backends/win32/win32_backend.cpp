@@ -3580,7 +3580,60 @@ public:
         quiet_ = false;
     }
     void set_current(size_t row) override { ListView_SetItemState(h_, int(row), LVIS_FOCUSED, LVIS_FOCUSED); }
-    void scroll_to(size_t row) override { ListView_EnsureVisible(h_, int(row), FALSE); }
+    void scroll_to(size_t row, scroll_align align) override
+    {
+        if (int(row) >= ListView_GetItemCount(h_)) return;
+        ListView_EnsureVisible(h_, int(row), FALSE);
+        if (align == scroll_align::nearest) return;
+        const int h = row_px(), shown = rows_area_px();
+        if (h <= 0) return;
+        const int at = align == scroll_align::start ? 0
+                       : align == scroll_align::end ? shown - h
+                                                    : (shown - h) / 2;
+        set_row_offset(row, float(at) / win_.scale());
+    }
+    // In logical px below the header: the rows area.
+    std::optional<float> row_offset(size_t row) const override
+    {
+        if (int(row) >= ListView_GetItemCount(h_)) return std::nullopt;
+        RECT r{};
+        if (!ListView_GetItemRect(h_, int(row), &r, LVIR_BOUNDS)) return std::nullopt;
+        const int y = r.top - header_px();
+        if (r.bottom <= header_px() || y >= rows_area_px()) return std::nullopt;
+        return float(y) / win_.scale();
+    }
+    // ListView_Scroll scrolls report views by whole rows: the nearest.
+    void set_row_offset(size_t row, float offset) override
+    {
+        if (int(row) >= ListView_GetItemCount(h_)) return;
+        ListView_EnsureVisible(h_, int(row), FALSE);
+        RECT r{};
+        if (!ListView_GetItemRect(h_, int(row), &r, LVIR_BOUNDS)) return;
+        const int by = r.top - header_px() - int(std::lround(offset * win_.scale()));
+        const int h = std::max(row_px(), 1);
+        const int rows = by >= 0 ? (by + h / 2) / h : -((-by + h / 2) / h);
+        if (rows) ListView_Scroll(h_, 0, rows * h);
+    }
+    int header_px() const
+    {
+        RECT hr{};
+        HWND header = ListView_GetHeader(h_);
+        return header && IsWindowVisible(header) && GetWindowRect(header, &hr) ? hr.bottom - hr.top
+                                                                               : 0;
+    }
+    int rows_area_px() const
+    {
+        RECT c{};
+        GetClientRect(h_, &c);
+        return c.bottom - header_px();
+    }
+    int row_px() const
+    {
+        RECT r{};
+        return ListView_GetItemCount(h_) && ListView_GetItemRect(h_, 0, &r, LVIR_BOUNDS)
+                   ? r.bottom - r.top
+                   : 0;
+    }
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
         HWND header = ListView_GetHeader(h_);
