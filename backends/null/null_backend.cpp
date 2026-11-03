@@ -8,6 +8,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 
 namespace rap::null
 {
@@ -83,6 +84,7 @@ public:
     void set_items(std::vector<tree_item> items) override
     {
         ids.clear();
+        checks.clear();
         add(items);
         if (current && std::ranges::find(ids, *current) == ids.end()) current.reset();
     }
@@ -98,9 +100,15 @@ public:
     void on_selection_changed(std::function<void()>) override {}
     void on_activate(std::function<void(const std::string&)>) override {}
     void on_context_menu(std::function<menu(std::optional<std::string>)>) override {}
+    void set_check(const std::string& id, check_state s) override
+    {
+        if (auto it = checks.find(id); it != checks.end()) it->second = s;
+    }
+    void on_toggled(std::function<void(const std::string&)>) override {}
 
     std::vector<std::string> ids;
     std::optional<std::string> current;
+    std::unordered_map<std::string, check_state> checks;  // the items with boxes
 
 private:
     void add(const std::vector<tree_item>& items)
@@ -108,6 +116,7 @@ private:
         for (const tree_item& i : items)
         {
             ids.push_back(i.id);
+            if (i.check) checks[i.id] = *i.check;
             add(i.children);
         }
     }

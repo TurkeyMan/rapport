@@ -286,6 +286,7 @@ struct tree
     std::function<void()> on_selection_changed;
     std::function<void(const std::string&)> on_activate;
     std::function<menu(std::optional<std::string>)> on_context_menu;
+    std::function<void(const std::string&)> on_toggled;  // a box clicked
     rap::tree** bind = nullptr;
 };
 struct menu_button
@@ -966,6 +967,11 @@ public:
     tree& on_context_menu(std::function<menu(std::optional<std::string>)> f)
     {
         s().on_context_menu = std::move(f);
+        return *this;
+    }
+    tree& on_toggled(std::function<void(const std::string&)> f)
+    {
+        s().on_toggled = std::move(f);
         return *this;
     }
     tree& bind(rap::tree*& h)

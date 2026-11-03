@@ -622,6 +622,9 @@ struct tree_item
     std::string id;  // unique in the tree: what selection and the handlers name it by
     std::vector<tree_item> children;
     bool expanded = false;  // shown open at first
+    // A box before the label (a folder that stands for everything in it,
+    // checked, unchecked or mixed); none when unset.
+    std::optional<check_state> check;
 };
 
 // A hierarchy of labelled items, one selected at a time (folders, say): the
@@ -645,6 +648,14 @@ public:
     // Right-click / menu key. A right-click selects its item first, as file
     // managers do; nullopt for blank space. Return an empty menu for none.
     virtual void on_context_menu(std::function<menu(std::optional<std::string> id)>) = 0;
+
+    // Items' boxes (tree_item::check). As a list's model does, the app owns
+    // their states: a click on a box (or Space on its item) only reports it
+    // through on_toggled, and the app sets what that means with set_check,
+    // the item's and others' (a folder's box sets what's in it, whose own
+    // make the folder's mixed). An item made without a box gets none.
+    virtual void set_check(const std::string& id, check_state) = 0;
+    virtual void on_toggled(std::function<void(const std::string& id)>) = 0;
 };
 
 class date_picker : public widget

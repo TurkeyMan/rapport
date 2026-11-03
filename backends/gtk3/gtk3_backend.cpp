@@ -896,14 +896,15 @@ public:
 // a popover. on_changed fires when the popover closes on a new date.
 // -- tree ---------------------------------------------------------------------
 
-// A GtkTreeView over a GtkTreeStore: column 0 the label, column 1 the id.
+// A GtkTreeView over a GtkTreeStore: column 0 the label, column 1 the id,
+// column 2 the box (a check_state, or -1 for none).
 class tree_impl : public widget_base<rap::tree>
 {
 public:
     explicit tree_impl(const spec::tree& s)
         : widget_base(gtk_tree_view_new(), gtk_scrolled_window_new(nullptr, nullptr))
     {
-        store_ = gtk_tree_store_new(2, G_TYPE_STRING, G_TYPE_STRING);
+        store_ = gtk_tree_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT);
         auto* view = GTK_TREE_VIEW(w_);
         gtk_tree_view_set_model(view, GTK_TREE_MODEL(store_));
         gtk_container_add(GTK_CONTAINER(outer_), w_);
@@ -911,8 +912,39 @@ public:
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(outer_), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
         gtk_tree_view_set_headers_visible(view, false);
         gtk_tree_view_set_enable_tree_lines(view, true);
-        gtk_tree_view_append_column(
-            view, gtk_tree_view_column_new_with_attributes("", gtk_cell_renderer_text_new(), "text", 0, nullptr));
+        // A box before the label, shown only for the items that have one.
+        // The renderer doesn't change the store: a click is reported, and
+        // the app sets the state.
+        GtkTreeViewColumn* column = gtk_tree_view_column_new();
+        GtkCellRenderer* box = gtk_cell_renderer_toggle_new();
+        gtk_tree_view_column_pack_start(column, box, false);
+        gtk_tree_view_column_set_cell_data_func(
+            column, box,
+            +[](GtkTreeViewColumn*, GtkCellRenderer* cell, GtkTreeModel* model, GtkTreeIter* it,
+                gpointer)
+            {
+                gint state = -1;
+                gtk_tree_model_get(model, it, 2, &state, -1);
+                g_object_set(cell, "visible", state >= 0, "active",
+                             state == int(check_state::checked), "inconsistent",
+                             state == int(check_state::indeterminate), nullptr);
+            },
+            nullptr, nullptr);
+        connect(
+            box, "toggled",
+            +[](GtkCellRendererToggle*, gchar* path, gpointer p)
+            {
+                auto* self = static_cast<tree_impl*>(p);
+                GtkTreePath* tp = gtk_tree_path_new_from_string(path);
+                const std::string id = self->id_at(tp);
+                gtk_tree_path_free(tp);
+                if (!id.empty() && self->toggled_) self->toggled_(id);
+            },
+            this);
+        GtkCellRenderer* text = gtk_cell_renderer_text_new();
+        gtk_tree_view_column_pack_start(column, text, true);
+        gtk_tree_view_column_add_attribute(column, text, "text", 0);
+        gtk_tree_view_append_column(view, column);
         sel_ = gtk_tree_view_get_selection(view);
         gtk_tree_selection_set_mode(sel_, GTK_SELECTION_SINGLE);
         // Taking focus with no cursor, GTK puts it on the first row and
@@ -1037,6 +1069,20 @@ public:
     void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
     void on_context_menu(std::function<menu(std::optional<std::string>)> f) override { context_ = std::move(f); }
+    void set_check(const std::string& id, check_state st) override
+    {
+        GtkTreePath* path = path_of(id);
+        if (!path) return;
+        GtkTreeIter it;
+        if (gtk_tree_model_get_iter(GTK_TREE_MODEL(store_), &it, path))
+        {
+            gint was = -1;
+            gtk_tree_model_get(GTK_TREE_MODEL(store_), &it, 2, &was, -1);
+            if (was >= 0) gtk_tree_store_set(store_, &it, 2, int(st), -1);
+        }
+        gtk_tree_path_free(path);
+    }
+    void on_toggled(std::function<void(const std::string&)> f) override { toggled_ = std::move(f); }
 
 protected:
     void on_disconnect() override
@@ -1065,7 +1111,8 @@ private:
         for (const tree_item& t : items)
         {
             GtkTreeIter it;
-            gtk_tree_store_insert_with_values(store_, &it, parent, -1, 0, t.label.c_str(), 1, t.id.c_str(), -1);
+            gtk_tree_store_insert_with_values(store_, &it, parent, -1, 0, t.label.c_str(), 1,
+                                              t.id.c_str(), 2, t.check ? int(*t.check) : -1, -1);
             GtkTreePath* path = gtk_tree_model_get_path(GTK_TREE_MODEL(store_), &it);
             by_id_[t.id] = gtk_tree_row_reference_new(GTK_TREE_MODEL(store_), path);
             gtk_tree_path_free(path);
@@ -1129,6 +1176,7 @@ private:
     std::function<void()> changed_;
     std::function<void(const std::string&)> activate_;
     std::function<menu(std::optional<std::string>)> context_;
+    std::function<void(const std::string&)> toggled_;
     popup_menu menu_;
     bool quiet_ = false;
     bool focusing_ = false;  // in focus-in: GTK's own cursor placement
