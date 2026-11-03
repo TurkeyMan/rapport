@@ -8,8 +8,10 @@
 #include <string>
 
 #ifdef _WIN32
-#include <shellapi.h>
+// clang-format off
 #include <windows.h>
+#include <shellapi.h>  // after windows.h, whose types it uses
+// clang-format on
 #else
 #include <unistd.h>
 #endif
