@@ -321,6 +321,25 @@ bool reveal(const std::filesystem::path&);
 
 using http_headers = std::vector<std::pair<std::string, std::string>>;
 
+// Where an http(s) URL goes: what credentials are tied to. The scheme and
+// host in lower case, the host's one trailing dot dropped, an IPv6 literal
+// in its brackets, and the port spelt out (80, 443 when none is given).
+struct origin
+{
+    std::string scheme;  // "http" or "https"
+    std::string host;    // "example.com", "[::1]"
+    std::uint16_t port = 0;
+
+    std::string str() const;  // "https://example.com:443"
+    bool operator==(const origin&) const = default;
+};
+// The origin of an absolute http: or https: URL, user:pass@ skipped; none
+// for any other scheme, a relative or malformed URL, an empty or odd host
+// (only letters, digits, "-._~" and UTF-8, or an IPv6 literal) or a port
+// that isn't 1-65535. http_request refuses a URL without one, first or
+// redirected to.
+std::optional<origin> url_origin(std::string_view url);
+
 struct http_response
 {
     int status = 0;        // 0: no response (no connection, TLS failure, cancelled)

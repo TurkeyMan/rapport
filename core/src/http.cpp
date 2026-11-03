@@ -55,26 +55,6 @@ void add_header_line(std::string_view line, http_headers& out)
 
 // -- redirects ------------------------------------------------------------
 
-// "scheme://host:port" of an absolute URL, lower case, the port spelt out:
-// what credentials are tied to.
-std::string origin(std::string_view url)
-{
-    const size_t colon = url.find("://");
-    if (colon == std::string_view::npos) return {};
-    std::string scheme(url.substr(0, colon));
-    std::string_view authority = url.substr(colon + 3);
-    authority = authority.substr(0, authority.find_first_of("/?#"));
-    if (const size_t at = authority.rfind('@'); at != std::string_view::npos) authority.remove_prefix(at + 1);
-    std::string host(authority), port;
-    const size_t close = host.find(']');  // [IPv6]
-    if (const size_t c = host.rfind(':'); c != std::string::npos && (close == std::string::npos || c > close))
-        port = host.substr(c + 1), host.resize(c);
-    std::ranges::transform(scheme, scheme.begin(), [](char ch) { return char(std::tolower(uint8_t(ch))); });
-    std::ranges::transform(host, host.begin(), [](char ch) { return char(std::tolower(uint8_t(ch))); });
-    if (port.empty()) port = scheme == "https" ? "443" : "80";
-    return scheme + "://" + host + ":" + port;
-}
-
 // A Location against the URL it came from.
 std::string resolve(const std::string& base, const std::string& location)
 {
@@ -107,13 +87,14 @@ bool is_redirect(int status)
 // Where a redirect leads: 307 and 308 as they were, 303 (and 301 or 302
 // after a POST) as a GET without the body; credentials only while still at
 // the first request's origin.
-hop redirected(const hop& from, int status, const std::string& to, const std::string& first_origin)
+hop redirected(const hop& from, int status, const std::string& to,
+               const std::optional<origin>& first_origin)
 {
     hop next = from;
     next.url = to;
     if ((status == 303 && from.method != "HEAD") || ((status == 301 || status == 302) && from.method == "POST"))
         next.method = "GET", next.with_body = false;
-    next.credentials = from.credentials && origin(to) == first_origin;
+    next.credentials = from.credentials && first_origin && url_origin(to) == first_origin;
     return next;
 }
 
@@ -183,6 +164,77 @@ struct receiver
 };
 
 }  // namespace
+
+std::string origin::str() const
+{
+    return scheme + "://" + host + ":" + std::to_string(port);
+}
+
+std::optional<origin> url_origin(std::string_view url)
+{
+    const auto lower = [](std::string_view s)
+    {
+        std::string out(s);
+        std::ranges::transform(out, out.begin(),
+                               [](char c) { return char(std::tolower(uint8_t(c))); });
+        return out;
+    };
+    const size_t colon = url.find(':');
+    if (colon == std::string_view::npos || url.substr(colon + 1, 2) != "//") return std::nullopt;
+    origin o{.scheme = lower(url.substr(0, colon))};
+    if (o.scheme != "http" && o.scheme != "https") return std::nullopt;
+    std::string_view authority = url.substr(colon + 3);
+    authority = authority.substr(0, authority.find_first_of("/?#"));
+    if (const size_t at = authority.rfind('@'); at != std::string_view::npos)
+        authority.remove_prefix(at + 1);
+
+    // The host: [an IPv6 literal], or names of letters, digits and -._~ (or
+    // UTF-8) a dot apart, maybe with a dot after the last.
+    std::string_view host = authority, port;
+    if (host.starts_with('['))
+    {
+        const size_t close = host.find(']');
+        if (close == std::string_view::npos) return std::nullopt;
+        port = host.substr(close + 1);
+        host = host.substr(0, close + 1);
+        const std::string_view inside = host.substr(1, host.size() - 2);
+        const auto v6 = [](char c) { return std::isxdigit(uint8_t(c)) || c == ':' || c == '.'; };
+        if (inside.find(':') == std::string_view::npos || !std::ranges::all_of(inside, v6))
+            return std::nullopt;
+    }
+    else
+    {
+        const size_t c = host.find(':');
+        port = c == std::string_view::npos ? std::string_view() : host.substr(c);
+        host = host.substr(0, c);
+        if (host.ends_with('.')) host.remove_suffix(1);
+        const auto named = [](char ch)
+        { return std::isalnum(uint8_t(ch)) || uint8_t(ch) >= 0x80 || std::strchr("-._~", ch); };
+        if (host.empty() || host.starts_with('.') || host.ends_with('.') ||
+            host.find("..") != std::string_view::npos || !std::ranges::all_of(host, named))
+            return std::nullopt;
+    }
+    o.host = lower(host);
+
+    // The port: the scheme's when there's none, or nothing after the colon.
+    if (!port.empty())
+    {
+        if (port.front() != ':') return std::nullopt;
+        port.remove_prefix(1);
+    }
+    if (port.empty())
+    {
+        o.port = o.scheme == "https" ? 443 : 80;
+        return o;
+    }
+    unsigned n = 0;
+    for (char c : port)
+        if (!std::isdigit(uint8_t(c)) || (n = n * 10 + unsigned(c - '0')) > 65535)
+            return std::nullopt;
+    if (n == 0) return std::nullopt;
+    o.port = std::uint16_t(n);
+    return o;
+}
 
 #if defined(_WIN32)
 
@@ -261,7 +313,7 @@ http_response http_request(std::string_view method, const std::string& url, std:
     WinHttpSetOption(session.h, WINHTTP_OPTION_DECOMPRESSION, &decompress, sizeof decompress);
 
     hop h{std::string(method), url};
-    const std::string first_origin = origin(url);
+    const std::optional<origin> first_origin = url_origin(url);
     handle connection, request;
     DWORD status = 0;
     for (int redirects = 0;; ++redirects)
@@ -514,7 +566,7 @@ http_response http_request(std::string_view method, const std::string& url, std:
     c.easy_setopt(e, opt_xferinfofunction, &on_progress);
 
     hop h{std::string(method), url};
-    const std::string first_origin = origin(url);
+    const std::optional<origin> first_origin = url_origin(url);
     int rc = 0;
     bool stalled = false;
     for (int redirects = 0;; ++redirects)
