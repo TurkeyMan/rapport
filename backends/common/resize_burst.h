@@ -28,21 +28,25 @@ struct resize_burst
     paint background = theme_color::window;
     std::function<void(size_f)> settled;  // canvas::on_resize_settled
     bool stretching = false;              // showing the last frame scaled
+    bool pending = false;                 // a change came, not yet settled
 
     // Whether the backend keeps each frame it shows, to stretch.
     bool keeps() const { return how != resize_stretch::none; }
-    // A size change; the backend (re)starts its settle timer. Stretched when
-    // asked for and there's a frame to stretch.
+    // A size change; the backend (re)starts its settle timer. A lone change
+    // (an app fitting its window to what it shows) is painted at once; the
+    // second within the settle time makes it a burst, stretched when asked
+    // for and there's a frame to stretch.
     void resized(bool have_last)
     {
-        if (keeps() && have_last) stretching = true;
+        if (pending && keeps() && have_last) stretching = true;
+        pending = true;
     }
     // The settle timer: the burst is over. The backend asks for its new
     // frame, then calls what this returns last of all: the app may close
     // the window from it, the canvas going with it.
     std::function<void(size_f)> settle()
     {
-        stretching = false;
+        stretching = pending = false;
         return settled;
     }
 };

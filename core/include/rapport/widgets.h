@@ -1146,7 +1146,9 @@ public:
     virtual void on_resize_settled(std::function<void(size_f)>) = 0;
     // While its size changes in a burst, the canvas shows the last frame it
     // showed, as shown (the presented frame and on_paint's drawing), scaled
-    // to each new size, rather than painting at each: on_paint isn't called
+    // to each new size, rather than painting at each. A lone change (the app
+    // fitting its window to a new image) is painted at once: the burst
+    // begins with the second inside the settle time. In a burst on_paint isn't called
     // and no presented frame is drawn until the burst settles, then it
     // paints as ever (on_resize is called all along). An invalidate() or a
     // present() during the burst shows once it settles. The scaling is a
