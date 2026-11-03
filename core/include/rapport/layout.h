@@ -515,9 +515,22 @@ struct form_row
 class form : public builder<form, spec::form>
 {
 public:
-    form(std::initializer_list<form_row> rows)
+    form(std::initializer_list<form_row> rows) { add(rows); }
+    // Rows made at run time (one per setting, say).
+    explicit form(const std::vector<form_row>& rows) { add(rows); }
+    // Lines its label column up with every other form of the window given
+    // the same key (sections of a settings page, say).
+    form& align_group(std::string key)
     {
-        for (auto& r : rows)
+        s().align_group = std::move(key);
+        return *this;
+    }
+
+private:
+    template <class Rows>
+    void add(const Rows& rows)
+    {
+        for (const form_row& r : rows)
         {
             s().labels.push_back(r.label);
             s().fields.push_back(r.field);
@@ -525,13 +538,6 @@ public:
         }
         if (std::ranges::none_of(s().label_widgets, [](auto& w) { return bool(w); }))
             s().label_widgets.clear();
-    }
-    // Lines its label column up with every other form of the window given
-    // the same key (sections of a settings page, say).
-    form& align_group(std::string key)
-    {
-        s().align_group = std::move(key);
-        return *this;
     }
 };
 
