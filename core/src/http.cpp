@@ -108,6 +108,61 @@ http_headers headers_for(const hop& h, const http_headers& all)
     return out;
 }
 
+// A request's hops, the same for both transports, which do only the I/O:
+// each hop's URL http: or https: (a redirect to file: would read a local
+// file), at most max_redirects of them, and all of them within the
+// request's time limit.
+class chain
+{
+public:
+    chain(std::string_view method, const std::string& url, const http_options& o)
+        : o_(o)
+        , hop_{std::string(method), url}
+        , first_(url_origin(url))
+        , deadline_(std::chrono::steady_clock::now() + o.timeout)
+    {
+    }
+    const hop& current() const { return hop_; }
+
+    // Why the current hop mustn't be sent; "" when it may.
+    std::string refused() const
+    {
+        if (!url_origin(hop_.url))
+            return redirects_ ? "redirected to an unsupported URL" : "unsupported URL";
+        if (redirects_ > max_redirects) return "too many redirects";
+        if (late()) return "timed out";
+        return {};
+    }
+    // The time the next wait may take: what's left of the whole request's
+    // limit (at least 1 ms, as 0 is no limit to both libraries); with
+    // `stall` set, the limit for connecting, each hop afresh.
+    std::chrono::milliseconds left() const
+    {
+        if (o_.stall.count()) return o_.timeout;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline_ - std::chrono::steady_clock::now());
+        return std::max(ms, std::chrono::milliseconds(1));
+    }
+    bool late() const { return !o_.stall.count() && std::chrono::steady_clock::now() >= deadline_; }
+
+    // A response came: true, and the next hop current, if it's a redirect
+    // to follow (`location` as sent, or absolute).
+    bool follow(int status, const std::string* location)
+    {
+        if (!is_redirect(status) || !location) return false;
+        ++redirects_;
+        hop_ = redirected(hop_, status, resolve(hop_.url, *location), first_);
+        return true;
+    }
+
+private:
+    const http_options& o_;
+    hop hop_;
+    std::optional<origin> first_;
+    std::chrono::steady_clock::time_point deadline_;
+    int redirects_ = 0;
+};
+
 // -- the body -------------------------------------------------------------
 
 // Where the final response's body goes, and how much of it has come.
@@ -303,21 +358,20 @@ http_response http_request(std::string_view method, const std::string& url, std:
         r.error = failure("WinHTTP unavailable");
         return r;
     }
-    // Connecting within the timeout; then each wait for data within it too,
-    // or within the stall time (the whole request's limit is checked below).
-    const int ms = int(o.timeout.count()), wait = int((o.stall.count() ? o.stall : o.timeout).count());
-    WinHttpSetTimeouts(session.h, ms, ms, wait, wait);
-    const auto deadline = std::chrono::steady_clock::now() + o.timeout;
-    const auto late = [&] { return !o.stall.count() && std::chrono::steady_clock::now() > deadline; };
     DWORD decompress = WINHTTP_DECOMPRESSION_FLAG_ALL;  // Windows 8.1 on; ignored before
     WinHttpSetOption(session.h, WINHTTP_OPTION_DECOMPRESSION, &decompress, sizeof decompress);
 
-    hop h{std::string(method), url};
-    const std::optional<origin> first_origin = url_origin(url);
+    chain hops(method, url, o);
     handle connection, request;
     DWORD status = 0;
-    for (int redirects = 0;; ++redirects)
+    for (;;)
     {
+        if (std::string why = hops.refused(); !why.empty())
+        {
+            r.error = std::move(why);
+            return r;
+        }
+        const hop& h = hops.current();
         const std::wstring wurl = wide(h.url);
         URL_COMPONENTS parts{};
         parts.dwStructSize = sizeof parts;
@@ -325,7 +379,7 @@ http_response http_request(std::string_view method, const std::string& url, std:
         if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &parts) ||
             (parts.nScheme != INTERNET_SCHEME_HTTPS && parts.nScheme != INTERNET_SCHEME_HTTP))
         {
-            r.error = redirects ? "redirected to an unsupported URL" : "unsupported URL";
+            r.error = "unsupported URL";
             return r;
         }
         const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
@@ -342,6 +396,11 @@ http_response http_request(std::string_view method, const std::string& url, std:
             r.error = failure("could not connect");
             return r;
         }
+        // Each wait within what's left of the whole request's limit, or,
+        // once connected, within the stall time.
+        const int left = int(hops.left().count()),
+                  wait = o.stall.count() ? int(o.stall.count()) : left;
+        WinHttpSetTimeouts(request.h, left, left, wait, wait);
         // Redirects are ours (above): WinHTTP's would send the headers on.
         DWORD never = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         WinHttpSetOption(request.h, WINHTTP_OPTION_REDIRECT_POLICY, &never, sizeof never);
@@ -382,14 +441,7 @@ http_response http_request(std::string_view method, const std::string& url, std:
             }
         }
         r.url = h.url;
-        const std::string* location = header(r.headers, "Location");
-        if (!is_redirect(int(status)) || !location) break;
-        if (redirects == max_redirects)
-        {
-            r.error = "too many redirects";
-            return r;
-        }
-        h = redirected(h, int(status), resolve(h.url, *location), first_origin);
+        if (!hops.follow(int(status), header(r.headers, "Location"))) break;
     }
 
     // Undone chunking and decompression are WinHTTP's.
@@ -399,10 +451,15 @@ http_response http_request(std::string_view method, const std::string& url, std:
     for (;;)
     {
         if (o.cancelled && *o.cancelled) return {.error = "cancelled"};
-        if (late())
+        if (hops.late())
         {
             r.error = "timed out";
             break;
+        }
+        if (!o.stall.count())
+        {
+            DWORD left = DWORD(hops.left().count());  // each read within what's left
+            WinHttpSetOption(request.h, WINHTTP_OPTION_RECEIVE_TIMEOUT, &left, sizeof left);
         }
         DWORD got = 0;
         if (!WinHttpReadData(request.h, buf, sizeof buf, &got))
@@ -433,6 +490,11 @@ constexpr int opt_writedata = 10001, opt_url = 10002, opt_postfields = 10015, op
               opt_nosignal = 99, opt_timeout_ms = 155, opt_connecttimeout_ms = 156, opt_accept_encoding = 10102,
               opt_xferinfodata = 10057, opt_writefunction = 20011, opt_headerfunction = 20079,
               opt_xferinfofunction = 20219;
+// The protocols it may speak: by name from 7.85; as a mask before (since
+// deprecated, still heeded).
+constexpr int opt_protocols_str = 10318, opt_redir_protocols_str = 10319, opt_protocols = 181,
+              opt_redir_protocols = 182;
+constexpr long proto_http = 1 << 0, proto_https = 1 << 1;
 constexpr int info_response_code = 0x200002, info_redirect_url = 0x10001F;
 constexpr long global_default = 3;
 constexpr int curle_write_error = 23;
@@ -535,9 +597,10 @@ http_response http_request(std::string_view method, const std::string& url, std:
                            const http_options& o)
 {
     http_response r;
-    if (!url.starts_with("https://") && !url.starts_with("http://"))
+    chain hops(method, url, o);
+    if (std::string why = hops.refused(); !why.empty())
     {
-        r.error = "unsupported URL";
+        r.error = std::move(why);
         return r;
     }
     const curl_api& c = curl();
@@ -553,24 +616,37 @@ http_response http_request(std::string_view method, const std::string& url, std:
         return r;
     }
     receiver in{r, o};
-    const long ms = long(o.timeout.count());
     c.easy_setopt(e, opt_useragent, "rapport");
     c.easy_setopt(e, opt_followlocation, 0L);   // ours (above), the same as WinHTTP's
     c.easy_setopt(e, opt_accept_encoding, "");  // whatever it can decompress
     c.easy_setopt(e, opt_nosignal, 1L);         // safe on worker threads
-    c.easy_setopt(e, opt_connecttimeout_ms, ms);
-    if (!o.stall.count()) c.easy_setopt(e, opt_timeout_ms, ms);  // else on_progress watches
+    // Only http(s), as the chain checks too: no file: or the like, whatever
+    // the URL turns out to be to libcurl.
+    if (c.easy_setopt(e, opt_protocols_str, "http,https") != 0)
+        c.easy_setopt(e, opt_protocols, proto_http | proto_https);
+    if (c.easy_setopt(e, opt_redir_protocols_str, "http,https") != 0)
+        c.easy_setopt(e, opt_redir_protocols, proto_http | proto_https);
     c.easy_setopt(e, opt_writefunction, &on_body);
     c.easy_setopt(e, opt_headerfunction, &on_header);
     c.easy_setopt(e, opt_noprogress, 0L);
     c.easy_setopt(e, opt_xferinfofunction, &on_progress);
 
-    hop h{std::string(method), url};
-    const std::optional<origin> first_origin = url_origin(url);
     int rc = 0;
     bool stalled = false;
-    for (int redirects = 0;; ++redirects)
+    for (;;)
     {
+        if (std::string why = hops.refused(); !why.empty())
+        {
+            c.easy_cleanup(e);
+            r.error = std::move(why);
+            return r;
+        }
+        const hop& h = hops.current();
+        // Connecting, and with no stall time the whole hop, within what's
+        // left of the request's limit (else on_progress watches).
+        const long left = long(hops.left().count());
+        c.easy_setopt(e, opt_connecttimeout_ms, left);
+        if (!o.stall.count()) c.easy_setopt(e, opt_timeout_ms, left);
         transfer t{in, o};
         c.easy_setopt(e, opt_writedata, &t);
         c.easy_setopt(e, opt_headerdata, &t);
@@ -603,14 +679,9 @@ http_response http_request(std::string_view method, const std::string& url, std:
         c.slist_free_all(list);
         r.url = h.url;
         const char* next = nullptr;
-        if (rc != 0 || !is_redirect(t.status) || c.easy_getinfo(e, info_redirect_url, &next) != 0 || !next) break;
-        if (redirects == max_redirects)
-        {
-            c.easy_cleanup(e);
-            r.error = "too many redirects";
-            return r;
-        }
-        h = redirected(h, t.status, next, first_origin);
+        if (rc != 0 || c.easy_getinfo(e, info_redirect_url, &next) != 0 || !next) break;
+        const std::string to = next;  // resolved by libcurl
+        if (!hops.follow(t.status, &to)) break;
     }
     long status = 0;
     c.easy_getinfo(e, info_response_code, &status);
