@@ -164,7 +164,8 @@ public:
     // Blocks for output; 0 once the child closed it (normally on exit).
     std::size_t read(char* buf, std::size_t size);
     // Waits for the exit and returns its code; a POSIX signal death is
-    // 128 + signal. Read the output to the end first, or a child blocked on a
+    // 128 + signal; -1 when the exit can't be known (the child reaped by
+    // someone else, as with SIGCHLD ignored). Read the output to the end first, or a child blocked on a
     // full pipe never exits. Repeated calls return the same code.
     int wait();
     void kill();

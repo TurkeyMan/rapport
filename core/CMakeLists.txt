@@ -35,6 +35,9 @@ else()
 endif()
 add_library(rapport::rapport ALIAS rapport)
 target_link_libraries(rapport PUBLIC rapport_headers PRIVATE ${CMAKE_DL_LIBS})
+# Starting programs, as the shell extensions do too (common/launch.h).
+target_sources(rapport PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common/launch.cpp)
+target_include_directories(rapport PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 if(WIN32)
     # rap::gpu on Direct3D 11 (d3dcompiler is loaded at run time, for HLSL source).
     target_sources(rapport PRIVATE src/gpu_d3d11.cpp)
