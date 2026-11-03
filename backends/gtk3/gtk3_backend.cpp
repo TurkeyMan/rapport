@@ -1286,14 +1286,26 @@ public:
         // unless the app handles Enter itself (a find box).
         gtk_entry_set_activates_default(GTK_ENTRY(w_), true);
         if (!s.placeholder.empty()) set_placeholder(s.placeholder);
+        clearable_ = s.clearable;
+        update_clear();
         connect(
             w_, "changed",
             +[](GtkEditable* e, gpointer p)
             {
                 auto* self = static_cast<entry_impl*>(p);
+                self->update_clear();
                 if (self->changed_) self->changed_(gtk_entry_get_text(GTK_ENTRY(e)));
             },
             this);
+        // The clear icon, as GtkSearchEntry has it.
+        if (clearable_)
+            connect(
+                w_, "icon-press",
+                +[](GtkEntry* e, GtkEntryIconPosition at, GdkEvent*, gpointer)
+                {
+                    if (at == GTK_ENTRY_ICON_SECONDARY) gtk_entry_set_text(e, "");
+                },
+                this);
         connect(
             w_, "activate",
             +[](GtkEntry*, gpointer p)
@@ -1345,6 +1357,18 @@ public:
     }
 
 private:
+    // Shown while there's text to clear.
+    void update_clear()
+    {
+        if (!clearable_) return;
+        const bool any = *gtk_entry_get_text(GTK_ENTRY(w_)) != 0;
+        gtk_entry_set_icon_from_icon_name(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
+                                          any ? "edit-clear-symbolic" : nullptr);
+        if (any)
+            gtk_entry_set_icon_tooltip_text(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
+                                            rap::i18n::tr("rapport", "Clear"));
+    }
+    bool clearable_ = false;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
@@ -1979,11 +2003,45 @@ public:
         gtk_tree_path_free(path);
     }
 
-    void scroll_to(size_t row) override
+    void scroll_to(size_t row, scroll_align align) override
     {
         if (row >= rows_->count) return;
         GtkTreePath* path = gtk_tree_path_new_from_indices(int(row), -1);
-        gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(w_), path, nullptr, false, 0, 0);
+        const float at = align == scroll_align::start ? 0.f
+                         : align == scroll_align::end ? 1.f
+                                                      : 0.5f;
+        gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(w_), path, nullptr,
+                                     align != scroll_align::nearest, at, 0);
+        gtk_tree_path_free(path);
+    }
+    // Bin window coordinates are the rows area's, as shown (the header
+    // above it).
+    std::optional<float> row_offset(size_t row) const override
+    {
+        if (row >= rows_->count || !gtk_widget_get_realized(w_)) return std::nullopt;
+        GtkTreePath* path = gtk_tree_path_new_from_indices(int(row), -1);
+        GdkRectangle cell{}, shown{};
+        gtk_tree_view_get_background_area(GTK_TREE_VIEW(w_), path, nullptr, &cell);
+        gtk_tree_path_free(path);
+        gtk_tree_view_get_visible_rect(GTK_TREE_VIEW(w_), &shown);
+        if (cell.height <= 0 || cell.y + cell.height <= 0 || cell.y >= shown.height)
+            return std::nullopt;
+        return float(cell.y);
+    }
+    // scroll_to_cell's alignment puts the row's top at align * (shown height
+    // - row height), and waits for the rows' layout itself.
+    void set_row_offset(size_t row, float offset) override
+    {
+        if (row >= rows_->count) return;
+        if (const auto now = row_offset(row); now && std::lround(*now) == std::lround(offset))
+            return;
+        GtkTreePath* path = gtk_tree_path_new_from_indices(int(row), -1);
+        GdkRectangle cell{}, shown{};
+        gtk_tree_view_get_background_area(GTK_TREE_VIEW(w_), path, nullptr, &cell);
+        gtk_tree_view_get_visible_rect(GTK_TREE_VIEW(w_), &shown);
+        const float room = float(shown.height - cell.height);
+        const float at = room > 0 ? std::clamp(offset / room, 0.f, 1.f) : 0.5f;
+        gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(w_), path, nullptr, true, at, 0);
         gtk_tree_path_free(path);
     }
 

@@ -1253,14 +1253,26 @@ public:
         }
         gtk_editable_set_text(GTK_EDITABLE(w_), s.text.c_str());
         if (!s.placeholder.empty()) set_placeholder(s.placeholder);
+        clearable_ = s.clearable;
+        update_clear();
         connect(
             w_, "changed",
             +[](GtkEditable* e, gpointer p)
             {
                 auto* self = static_cast<entry_impl*>(p);
+                self->update_clear();
                 if (self->changed_) self->changed_(gtk_editable_get_text(e));
             },
             this);
+        // The clear icon, as GtkSearchEntry has it.
+        if (clearable_)
+            connect(
+                w_, "icon-press",
+                +[](GtkEntry* e, GtkEntryIconPosition at, gpointer)
+                {
+                    if (at == GTK_ENTRY_ICON_SECONDARY) gtk_editable_set_text(GTK_EDITABLE(e), "");
+                },
+                this);
         connect(
             w_, "activate",
             +[](GtkEntry*, gpointer p)
@@ -1308,6 +1320,18 @@ public:
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
 
 private:
+    // Shown while there's text to clear.
+    void update_clear()
+    {
+        if (!clearable_) return;
+        const bool any = *gtk_editable_get_text(GTK_EDITABLE(w_)) != 0;
+        gtk_entry_set_icon_from_icon_name(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
+                                          any ? "edit-clear-symbolic" : nullptr);
+        if (any)
+            gtk_entry_set_icon_tooltip_text(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY,
+                                            rap::i18n::tr("rapport", "Clear"));
+    }
+    bool clearable_ = false;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
@@ -1998,6 +2022,8 @@ public:
     ~list_impl() override
     {
         forget_theme_listener(this);
+        if (anchor_tick_) gtk_widget_remove_tick_callback(w_, anchor_tick_);
+        if (anchor_changed_) g_signal_handler_disconnect(vadjustment(), anchor_changed_);
         if (resnap_) g_source_remove(resnap_);
         if (model_) model_->remove_observer(this);
         g_object_unref(sel_);
@@ -2044,10 +2070,58 @@ public:
             GtkListScrollFlags(GTK_LIST_SCROLL_FOCUS | GTK_LIST_SCROLL_SELECT), nullptr);
     }
 
-    void scroll_to(size_t row) override
+    void scroll_to(size_t row, scroll_align align) override
     {
+        if (row >= g_list_model_get_n_items(G_LIST_MODEL(rows_))) return;
+        if (align != scroll_align::nearest)
+        {
+            GtkAdjustment* adj = vadjustment();
+            const double page = gtk_adjustment_get_page_size(adj), h = row_height();
+            if (h > 0 && page > 0)
+                return set_row_offset(row, float(align == scroll_align::start ? 0
+                                                 : align == scroll_align::end ? page - h
+                                                                              : (page - h) / 2));
+        }
         gtk_column_view_scroll_to(GTK_COLUMN_VIEW(w_), guint(row), nullptr, GTK_LIST_SCROLL_NONE,
                                   nullptr);
+    }
+    // GTK 4 says nothing of where a row is: the rows are one height, so the
+    // vertical adjustment (the rows area's, the header kept above it) says.
+    std::optional<float> row_offset(size_t row) const override
+    {
+        if (row >= g_list_model_get_n_items(G_LIST_MODEL(rows_))) return std::nullopt;
+        const double h = row_height(), page = gtk_adjustment_get_page_size(vadjustment());
+        if (h <= 0 || page <= 0) return std::nullopt;
+        const double y = row * h - gtk_adjustment_get_value(vadjustment());
+        if (y + h <= 0 || y >= page) return std::nullopt;
+        return float(y);
+    }
+    // Set now, and again as the rows are laid out (a repopulated model
+    // changes the adjustment's range only then) until the next frame.
+    void set_row_offset(size_t row, float offset) override
+    {
+        if (row >= g_list_model_get_n_items(G_LIST_MODEL(rows_))) return;
+        if (!anchor_changed_)
+            anchor_changed_ =
+                g_signal_connect(vadjustment(), "changed",
+                                 G_CALLBACK(+[](GtkAdjustment*, gpointer p)
+                                            { static_cast<list_impl*>(p)->apply_anchor(); }),
+                                 this);
+        anchor_ = {row, offset};
+        anchor_frames_ = 0;
+        if (!anchor_tick_)
+            anchor_tick_ = gtk_widget_add_tick_callback(
+                w_,
+                +[](GtkWidget*, GdkFrameClock*, gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<list_impl*>(p);
+                    if (++self->anchor_frames_ < 2) return G_SOURCE_CONTINUE;
+                    self->anchor_.reset();
+                    self->anchor_tick_ = 0;
+                    return G_SOURCE_REMOVE;
+                },
+                this, nullptr);
+        apply_anchor();
     }
 
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
@@ -3161,6 +3235,32 @@ private:
     }
 
     guint resnap_ = 0;
+    // set_row_offset's row and offset, kept a frame for the rows' layout.
+    std::optional<std::pair<size_t, float>> anchor_;
+    guint anchor_tick_ = 0;
+    int anchor_frames_ = 0;
+    gulong anchor_changed_ = 0;
+    GtkAdjustment* vadjustment() const
+    {
+        return gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(outer_));
+    }
+    // The rows' height, from the adjustment's range: they're one height.
+    double row_height() const
+    {
+        const guint n = g_list_model_get_n_items(G_LIST_MODEL(rows_));
+        return n ? gtk_adjustment_get_upper(vadjustment()) / n : 0;
+    }
+    void apply_anchor()
+    {
+        if (!anchor_) return;
+        GtkAdjustment* adj = vadjustment();
+        const double h = row_height();
+        if (h <= 0) return;
+        const double top = gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj);
+        const double v = std::clamp(anchor_->first * h - anchor_->second,
+                                    gtk_adjustment_get_lower(adj), std::max(top, 0.0));
+        if (std::abs(v - gtk_adjustment_get_value(adj)) >= 0.5) gtk_adjustment_set_value(adj, v);
+    }
     void resnap_later()
     {
         if (!alive_ || device_scale_of(w_) == std::floor(device_scale_of(w_))) return;
