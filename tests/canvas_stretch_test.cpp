@@ -298,7 +298,7 @@ int main(int argc, char** argv)
                                "on_resize_settled is called once after the burst (" +
                                    std::to_string(st.settles - settles_before) + ")");
                         const long long late = ms_between(last_step, st.settled_at);
-                        expect(late >= 100 && late < 500,
+                        expect(late >= 50 && late < 400,
                                "it's called once no change has come for a while (" +
                                    std::to_string(late) + " ms after the last)");
                         expect(st.settled.w == canvas->size().w && st.settled.h == canvas->size().h,

@@ -12,7 +12,7 @@
 namespace rap::frames
 {
 
-inline constexpr int settle_ms = 150;
+inline constexpr int settle_ms = 75;
 
 // Where a frame `from` across goes on a canvas `to` across (logical pixels).
 inline rect_f stretched(size_f from, size_f to, resize_stretch how)
