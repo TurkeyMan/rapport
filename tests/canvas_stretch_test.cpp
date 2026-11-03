@@ -46,6 +46,9 @@ int main(int argc, char** argv)
 {
     rap::load_options opts;
     if (argc > 1) opts.backend = argv[1];
+    // Which one, for the skips GTK 4 off screen needs, and only it.
+    const char* env = std::getenv("RAPPORT_BACKEND");
+    const std::string backend = !opts.backend.empty() ? opts.backend : env ? env : "";
     auto ui = rap::ui::load(argc, argv, opts);
     if (!ui)
     {
@@ -58,33 +61,34 @@ int main(int argc, char** argv)
     using namespace rap::layout;
     auto win = (*ui)->create(window{
         "Canvas stretch",
-        {splitter{horizontal,
-                  rap::layout::canvas{}
-             .on_paint(
-                 [&](rap::painter& p, rap::size_f size)
-                 {
-                     ++st.paints;
-                     st.painted = size;
-                     p.rect({0, 0, size.w, size.h}, 0, rap::color{50, 100, 200, 255}, std::nullopt);
-                 })
-             .on_resize(
-                 [&](rap::size_f size)
-                 {
-                     ++st.resizes;
-                     st.resized = size;
-                 })
-             .on_resize_settled(
-                 [&](rap::size_f size)
-                 {
-                     ++st.settles;
-                     st.settled = size;
-                     st.settled_at = clock_type::now();
-                 })
-             .stretch_while_resizing(rap::resize_stretch::uniform, rap::color{0, 0, 0, 255})
-             .bind(canvas),
-                  label{"Info"}}
-             .bind(split)}}
-                                 .margins(false));
+        {splitter{
+            horizontal,
+            rap::layout::canvas{}
+                .on_paint(
+                    [&](rap::painter& p, rap::size_f size)
+                    {
+                        ++st.paints;
+                        st.painted = size;
+                        p.rect({0, 0, size.w, size.h}, 0, rap::color{50, 100, 200, 255},
+                               std::nullopt);
+                    })
+                .on_resize(
+                    [&](rap::size_f size)
+                    {
+                        ++st.resizes;
+                        st.resized = size;
+                    })
+                .on_resize_settled(
+                    [&](rap::size_f size)
+                    {
+                        ++st.settles;
+                        st.settled = size;
+                        st.settled_at = clock_type::now();
+                    })
+                .stretch_while_resizing(rap::resize_stretch::uniform, rap::color{0, 0, 0, 255})
+                .bind(canvas),
+            label{"Info"}}
+             .bind(split)}}.margins(false));
     win->resize({480, 240});
     split->set_sizes({240, 240});
     win->show();
@@ -126,7 +130,8 @@ int main(int argc, char** argv)
                                       off_in_paint = false;
                                       canvas2->stretch_while_resizing(rap::resize_stretch::none);
                                   }
-                                  p.rect({0, 0, size.w, size.h}, 0, rap::color{200, 100, 50, 255}, std::nullopt);
+                                  p.rect({0, 0, size.w, size.h}, 0, rap::color{200, 100, 50, 255},
+                                         std::nullopt);
                               })
                           .on_resize_settled(
                               [&](rap::size_f)
@@ -140,8 +145,7 @@ int main(int argc, char** argv)
                           .stretch_while_resizing(rap::resize_stretch::fill)
                           .bind(canvas2),
                       label{"Info"}}
-                 .bind(split2)}}
-                                  .margins(false));
+                 .bind(split2)}}.margins(false));
         win2->resize({480, 240});
         split2->set_sizes({240, 240});
         win2->show();
@@ -162,32 +166,34 @@ int main(int argc, char** argv)
                         // after its first frame.
                         if (paints2 == before2)
                         {
-                            std::printf("skip: nothing drawn after the first frame (GTK 4 off screen)\n");
+                            expect(backend == "gtk4",
+                                   "the second canvas repaints when asked (" + backend + ")");
                             return finish();
                         }
                         expect(!off_in_paint, "stretching turned off from on_paint, as it paints");
                         canvas2->stretch_while_resizing(rap::resize_stretch::fill);
                         canvas2->invalidate();
                         close_on_settle = true;
-                        steps2 = (*ui)->timer(
-                            30, true,
-                            [&]
-                            {
-                                if (closed || ++step2 > 4)
-                                {
-                                    steps2 = {};
-                                    return;
-                                }
-                                std::vector<float> sizes = split2->sizes();
-                                const float total = sizes.size() == 2 ? sizes[0] + sizes[1] : 400;
-                                const float left = 200.f + 20.f * float(step2);
-                                split2->set_sizes({left, total - left});
-                            });
+                        steps2 = (*ui)->timer(30, true,
+                                              [&]
+                                              {
+                                                  if (closed || ++step2 > 4)
+                                                  {
+                                                      steps2 = {};
+                                                      return;
+                                                  }
+                                                  std::vector<float> sizes = split2->sizes();
+                                                  const float total =
+                                                      sizes.size() == 2 ? sizes[0] + sizes[1] : 400;
+                                                  const float left = 200.f + 20.f * float(step2);
+                                                  split2->set_sizes({left, total - left});
+                                              });
                         end2 = (*ui)->timer(
                             800, false,
                             [&]
                             {
-                                expect(closed && !win2, "the window closed from on_resize_settled, in a burst");
+                                expect(closed && !win2,
+                                       "the window closed from on_resize_settled, in a burst");
                                 finish();
                             });
                     });
@@ -199,7 +205,8 @@ int main(int argc, char** argv)
         {
             if (++waited < 40 && (st.paints == 0 || st.settles == 0)) return;
             waiting = {};
-            expect(st.paints > 0, "the canvas painted before the resize (" + std::to_string(canvas->size().w) + " x " +
+            expect(st.paints > 0, "the canvas painted before the resize (" +
+                                      std::to_string(canvas->size().w) + " x " +
                                       std::to_string(canvas->size().h) + ")");
             if (st.paints == 0) return finish();
             expect(st.settles >= 1, "a canvas's first size settles");
@@ -213,7 +220,12 @@ int main(int argc, char** argv)
                 {
                     if (st.paints == asked)
                     {
-                        std::printf("skip: nothing drawn after the first frame (GTK 4 off screen)\n");
+                        // Allowed only where it's known to happen.
+                        expect(backend == "gtk4",
+                               "the canvas repaints when asked (" + backend + ")");
+                        if (backend == "gtk4")
+                            std::printf(
+                                "skip: nothing drawn after the first frame (GTK 4 off screen)\n");
                         return finish();
                     }
                     lone_stage();
@@ -221,81 +233,85 @@ int main(int argc, char** argv)
         });
     lone_stage = [&]
     {
-            // A lone change, as an app fitting its window to a new image
-            // makes: painted at once, well before it settles.
-            const int lone_before = st.paints, lone_resizes = st.resizes;
-            split->set_sizes({230, split->sizes().size() == 2 ? split->sizes()[0] + split->sizes()[1] - 230 : 250});
-            lone = (*ui)->timer(
-                90, false,
-                [&, lone_before, lone_resizes]
-                {
-                    if (st.resizes > lone_resizes)
-                        expect(st.paints > lone_before, "a lone size change is painted at once, not stretched");
-                    rest = (*ui)->timer(300, false, [&] { drag(); });
-                });
+        // A lone change, as an app fitting its window to a new image
+        // makes: painted at once, well before it settles.
+        const int lone_before = st.paints, lone_resizes = st.resizes;
+        split->set_sizes(
+            {230, split->sizes().size() == 2 ? split->sizes()[0] + split->sizes()[1] - 230 : 250});
+        lone = (*ui)->timer(90, false,
+                            [&, lone_before, lone_resizes]
+                            {
+                                expect(st.resizes > lone_resizes,
+                                       "the lone change reached the canvas");
+                                expect(st.paints > lone_before,
+                                       "a lone size change is painted at once, not stretched");
+                                rest = (*ui)->timer(300, false, [&] { drag(); });
+                            });
     };
     drag = [&]
     {
-            paints_before = st.paints, resizes_before = st.resizes, settles_before = st.settles;
-            if (std::getenv("RAPPORT_TEST_VERBOSE"))
+        paints_before = st.paints, resizes_before = st.resizes, settles_before = st.settles;
+        if (std::getenv("RAPPORT_TEST_VERBOSE"))
+        {
+            const auto sz = split->sizes();
+            std::printf("     window %.0f x %.0f, panes %.0f + %.0f, canvas %.0f x %.0f\n",
+                        win->size().w, win->size().h, sz.size() > 0 ? sz[0] : -1.f,
+                        sz.size() > 1 ? sz[1] : -1.f, canvas->size().w, canvas->size().h);
+        }
+        // The divider at eight places 30 ms apart, as a drag gives them.
+        steps = (*ui)->timer(
+            30, true,
+            [&]
             {
-                const auto sz = split->sizes();
-                std::printf("     window %.0f x %.0f, panes %.0f + %.0f, canvas %.0f x %.0f\n", win->size().w,
-                            win->size().h, sz.size() > 0 ? sz[0] : -1.f, sz.size() > 1 ? sz[1] : -1.f,
-                            canvas->size().w, canvas->size().h);
-            }
-            // The divider at eight places 30 ms apart, as a drag gives them.
-            steps = (*ui)->timer(
-                30, true,
-                [&]
-                {
-                    ++step;
-                    std::vector<float> sizes = split->sizes();
-                    const float total = sizes.size() == 2 ? sizes[0] + sizes[1] : 400;
-                    const float left = 200.f + 15.f * float(step);
-                    split->set_sizes({left, total - left});
-                    last_step = clock_type::now();
-                    if (step < 8) return;
-                    steps = {};
-                    after = (*ui)->timer(
-                        600, false,
-                        [&]
+                ++step;
+                std::vector<float> sizes = split->sizes();
+                const float total = sizes.size() == 2 ? sizes[0] + sizes[1] : 400;
+                const float left = 200.f + 15.f * float(step);
+                split->set_sizes({left, total - left});
+                last_step = clock_type::now();
+                if (step < 8) return;
+                steps = {};
+                after = (*ui)->timer(
+                    600, false,
+                    [&]
+                    {
+                        if (std::getenv("RAPPORT_TEST_VERBOSE"))
                         {
-                            if (std::getenv("RAPPORT_TEST_VERBOSE"))
-                            {
-                                const auto sz = split->sizes();
-                                std::printf("     after: panes %.0f + %.0f, canvas %.0f x %.0f, %d resizes\n",
-                                            sz.size() > 0 ? sz[0] : -1.f, sz.size() > 1 ? sz[1] : -1.f,
-                                            canvas->size().w, canvas->size().h, st.resizes - resizes_before);
-                            }
-                            // GTK 4 on Broadway with no viewer lays nothing
-                            // out after its first frame: there's no burst
-                            // to see.
-                            if (st.resizes == resizes_before && split->sizes()[0] != canvas->size().w)
-                            {
-                                std::printf("skip: the splitter moved but nothing was laid out (GTK 4 off "
-                                            "screen)\n");
-                                return finish();
-                            }
-                            expect(st.resizes > resizes_before, "on_resize is called as the size changes");
-                            expect(st.settles == settles_before + 1,
-                                   "on_resize_settled is called once after the burst (" +
-                                       std::to_string(st.settles - settles_before) + ")");
-                            const long long late = ms_between(last_step, st.settled_at);
-                            expect(late >= 100 && late < 500,
-                                   "it's called once no change has come for a while (" + std::to_string(late) +
-                                       " ms after the last)");
-                            expect(st.settled.w == canvas->size().w && st.settled.h == canvas->size().h,
-                                   "it's told the size the canvas has");
-                            const int painted = st.paints - paints_before;
-                            expect(painted >= 1 && painted <= 2,
-                                   "the burst is shown stretched, painted anew only once it settles (" +
-                                       std::to_string(painted) + " paints)");
-                            expect(st.painted.w == canvas->size().w && st.painted.h == canvas->size().h,
-                                   "the last paint is at the settled size");
-                            second();
-                        });
-                });
+                            const auto sz = split->sizes();
+                            std::printf(
+                                "     after: panes %.0f + %.0f, canvas %.0f x %.0f, %d resizes\n",
+                                sz.size() > 0 ? sz[0] : -1.f, sz.size() > 1 ? sz[1] : -1.f,
+                                canvas->size().w, canvas->size().h, st.resizes - resizes_before);
+                        }
+                        // GTK 4 on Broadway with no viewer lays nothing
+                        // out after its first frame: there's no burst
+                        // to see.
+                        if (st.resizes == resizes_before && split->sizes()[0] != canvas->size().w)
+                        {
+                            expect(backend == "gtk4",
+                                   "the splitter's move is laid out (" + backend + ")");
+                            return finish();
+                        }
+                        expect(st.resizes > resizes_before,
+                               "on_resize is called as the size changes");
+                        expect(st.settles == settles_before + 1,
+                               "on_resize_settled is called once after the burst (" +
+                                   std::to_string(st.settles - settles_before) + ")");
+                        const long long late = ms_between(last_step, st.settled_at);
+                        expect(late >= 100 && late < 500,
+                               "it's called once no change has come for a while (" +
+                                   std::to_string(late) + " ms after the last)");
+                        expect(st.settled.w == canvas->size().w && st.settled.h == canvas->size().h,
+                               "it's told the size the canvas has");
+                        const int painted = st.paints - paints_before;
+                        expect(painted >= 1 && painted <= 2,
+                               "the burst is shown stretched, painted anew only once it settles (" +
+                                   std::to_string(painted) + " paints)");
+                        expect(st.painted.w == canvas->size().w && st.painted.h == canvas->size().h,
+                               "the last paint is at the settled size");
+                        second();
+                    });
+            });
     };
     return (*ui)->run();
 }
