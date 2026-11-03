@@ -355,7 +355,8 @@ struct http_options
     // to the scheme, host and port asked for: a redirect elsewhere (a signed
     // download on a storage host) goes on without them.
     http_headers headers;
-    // The whole request's limit; or, with `stall` set, only connecting's.
+    // The whole request's limit, redirects and all; or, with `stall` set,
+    // only connecting's (each hop's).
     std::chrono::milliseconds timeout{15000};
     // Set: no limit on the whole, but fails when no data comes for this long
     // (a large download on a slow line).
@@ -376,7 +377,9 @@ struct http_options
 // when first used (without it, the response says so). The body is sent as it
 // is, its Content-Type among the options' headers. A response is a response
 // whatever its status: a 400 comes with its body. Redirects (up to 10): a 307
-// or 308 sends the body again, a 301, 302 or 303 goes on as a GET.
+// or 308 sends the body again, a 301, 302 or 303 goes on as a GET. Only
+// http: and https: URLs, first or redirected to (see url_origin): a redirect
+// elsewhere (file:, ftp:) fails, with no body.
 http_response http_request(std::string_view method, const std::string& url,
                            std::string_view body = {}, const http_options& = {});
 http_response http_get(const std::string& url, const http_options& = {});
