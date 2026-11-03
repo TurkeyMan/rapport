@@ -268,6 +268,8 @@ void requests()
             // libcurl resolves a redirect itself, a query's space as '+'.
             if (path == "/a%20b?q=c%20d" || path == "/a%20b?q=c+d") return response("200 OK", {}, "spaced");
             // /quiet: some of a long body, then nothing (held open above).
+            // /stream: a body of 8 MB, all there to read at once.
+            if (path == "/stream") return response("200 OK", {}, std::string(8 << 20, 'x'));
             if (path == "/quiet")
                 return "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1000000\r\n\r\n" +
                        std::string(65536, 'x');
@@ -360,6 +362,37 @@ void requests()
     quiet({.timeout = 10000ms, .cancelled = &cancel}, "http: cancelling ends a quiet transfer at once",
           [](const auto& r) { return r.error == "cancelled"; });
     canceller.join();
+
+    // A body whose every read ends at once still stops when cancelled, and
+    // at the limit: taken slowly, 20 ms a piece, it would take seconds.
+    const auto streaming = [&](rap::sys::http_options o, const char* what, std::string_view error)
+    {
+        std::uint64_t taken = 0;
+        o.max_bytes = 0;
+        o.sink = [&](std::string_view piece)
+        {
+            taken += piece.size();
+            std::this_thread::sleep_for(20ms);
+            return true;
+        };
+        const auto from = std::chrono::steady_clock::now();
+        auto r = rap::sys::http_get(s.url("/stream"), o);
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - from);
+        const bool good = r.error == error && taken < (8u << 20) && ms < 2000ms;
+        if (!good)
+            std::printf("     error [%s], %llu bytes, took %lld ms\n", r.error.c_str(), (unsigned long long)taken,
+                        (long long)ms.count());
+        check(good, what);
+    };
+    std::atomic<bool> stop = false;
+    rap::sys::http_options cancelling{.timeout = 10000ms, .cancelled = &stop};
+    cancelling.progress = [&](std::uint64_t got, std::optional<std::uint64_t>)
+    {
+        if (got >= (1u << 20)) stop = true;
+    };
+    streaming(cancelling, "http: cancelling ends a body that keeps coming", "cancelled");
+    streaming({.timeout = 500ms}, "http: the time limit ends a body that keeps coming", "timed out");
 
     std::filesystem::remove(secret);
 }

@@ -368,13 +368,17 @@ struct handle
 };
 
 // What WinHTTP's thread says of a request's call: whether it's done, and how.
+// With it, what WinHTTP may write or read until it's done with the request,
+// which, should it never say so, outlives the call to http_request.
 struct completion
 {
     std::mutex m;
     std::condition_variable cv;
     bool ready = false, closed = false;
     DWORD error = 0;  // the call's, if it failed
-    DWORD bytes = 0;  // a read's
+    DWORD bytes = 0;  // a read's, into `buf`
+    std::string body;  // sent
+    char buf[65536];
 };
 
 void CALLBACK on_status(HINTERNET, DWORD_PTR context, DWORD status, void* info, DWORD length)
@@ -440,10 +444,12 @@ public:
     // The last call's error, when it failed.
     DWORD error() const { return c_ ? c_->error : 0; }
 
+    // The body copied (WinHTTP reads it till it's done with the request).
     end send(const std::wstring& headers, std::string_view body, time until, const std::atomic<bool>* cancelled)
     {
         if (!arm()) return end::failed;
-        void* data = body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data());
+        c_->body = body;
+        void* data = body.empty() ? WINHTTP_NO_REQUEST_DATA : c_->body.data();
         return wait(WinHttpSendRequest(h_, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
                                        DWORD(-1L), data, DWORD(body.size()), DWORD(body.size()), DWORD_PTR(c_)),
                     until, cancelled);
@@ -453,14 +459,13 @@ public:
         if (!arm()) return end::failed;
         return wait(WinHttpReceiveResponse(h_, nullptr), until, cancelled);
     }
-    // Into `buf`, which WinHTTP writes to until the call ends; `got` 0 at
-    // the body's end.
-    end read(char* buf, DWORD size, DWORD& got, time until, const std::atomic<bool>* cancelled)
+    // A piece of the body, valid till the next read; empty at its end.
+    end read(std::string_view& got, time until, const std::atomic<bool>* cancelled)
     {
-        got = 0;
+        got = {};
         if (!arm()) return end::failed;
-        const end e = wait(WinHttpReadData(h_, buf, size, nullptr), until, cancelled);
-        if (e == end::done) got = c_->bytes;
+        const end e = wait(WinHttpReadData(h_, c_->buf, sizeof c_->buf, nullptr), until, cancelled);
+        if (e == end::done) got = std::string_view(c_->buf, c_->bytes);
         return e;
     }
 
@@ -561,6 +566,7 @@ http_response http_request(std::string_view method, const std::string& url, std:
     DWORD status = 0;
     for (;;)
     {
+        if (o.cancelled && *o.cancelled) return {.error = "cancelled"};
         if (std::string why = hops.refused(); !why.empty())
         {
             r.error = std::move(why);
@@ -612,6 +618,8 @@ http_response http_request(std::string_view method, const std::string& url, std:
         std::string why = outcome(request->send(extra, h.with_body ? body : std::string_view(),
                                                 clock::now() + left, o.cancelled),
                                   "request failed", false);
+        if (why.empty() && o.cancelled && *o.cancelled) why = "cancelled";
+        if (why.empty() && hops.late()) why = "timed out";
         if (why.empty()) why = outcome(request->receive(data_by(), o.cancelled), "request failed", true);
         if (why == "cancelled") return {.error = "cancelled"};
         if (!why.empty())
@@ -647,21 +655,28 @@ http_response http_request(std::string_view method, const std::string& url, std:
         if (!hops.follow(int(status), header(r.headers, "Location"))) break;
     }
 
-    // Undone chunking and decompression are WinHTTP's.
+    // Undone chunking and decompression are WinHTTP's. A read that's done is
+    // taken, however late; cancelling and the limit are looked at before the
+    // next, as reads of a body that's there already end at once.
     receiver in{r, o};
     in.start();
-    char buf[65536];
     for (;;)
     {
-        DWORD got = 0;
-        std::string why = outcome(request->read(buf, sizeof buf, got, data_by(), o.cancelled), "read failed", true);
+        if (o.cancelled && *o.cancelled) return {.error = "cancelled"};
+        if (hops.late())
+        {
+            r.error = "timed out";
+            break;
+        }
+        std::string_view got;
+        std::string why = outcome(request->read(got, data_by(), o.cancelled), "read failed", true);
         if (why == "cancelled") return {.error = "cancelled"};
         if (!why.empty())
         {
             r.error = std::move(why);
             break;
         }
-        if (got == 0 || !in.take(buf, got)) break;
+        if (got.empty() || !in.take(got.data(), got.size())) break;
     }
     in.ended_early();
     r.status = int(status);
