@@ -21,9 +21,9 @@
 #include <shobjidl.h>
 #include <windows.h>
 
-#include <algorithm>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -63,7 +63,9 @@ std::wstring plain(std::string_view label)
 }
 
 // The menu for one right-click: the provider, the selection, and the items
-// it gave, shared by the entry and every item under it.
+// it gave, shared by the entry and every item under it. It isn't changed once
+// built: a new right-click builds a new one, so the items of the last stay put
+// for as long as anything under them is held.
 struct menu_state
 {
     std::unique_ptr<rap::shell::provider> provider;
@@ -248,7 +250,8 @@ public:
     {
         if (!out) return E_POINTER;
         *out = nullptr;
-        const std::string& icon = item_ ? item_->icon : state_->icon;
+        const std::shared_ptr<menu_state> state = current();
+        const std::string& icon = item_ ? item_->icon : state->icon;
         if (icon.empty()) return E_NOTIMPL;
         return dup((rap::shell::resource_dir() / std::filesystem::path(wide(icon))).wstring(), out);
     }
@@ -282,8 +285,7 @@ public:
             return S_OK;
         }
         if (!ok_to_be_slow) return E_PENDING;
-        build(items);
-        if (!state_->items.empty()) *out = ECS_ENABLED;
+        if (!build(items)->items.empty()) *out = ECS_ENABLED;
         return S_OK;
     }
     catch (...)
@@ -294,8 +296,9 @@ public:
     STDMETHODIMP Invoke(IShellItemArray*, IBindCtx*) override
     try
     {
-        if (!item_ || item_->id.empty() || !state_->provider) return E_FAIL;
-        state_->provider->invoke(item_->id, state_->sel);
+        const std::shared_ptr<menu_state> state = current();
+        if (!item_ || item_->id.empty() || !state->provider) return E_FAIL;
+        state->provider->invoke(item_->id, state->sel);
         return S_OK;
     }
     catch (...)
@@ -318,18 +321,29 @@ public:
     STDMETHODIMP EnumSubCommands(IEnumExplorerCommand** out) override;
 
 private:
-    void build(IShellItemArray* items)
+    // The entry's state is replaced on Explorer's background thread while its
+    // UI thread reads it; an item's is fixed.
+    std::shared_ptr<menu_state> current() const
     {
-        state_->provider = rap::shell::make_provider();
-        state_->sel = selection_of(items, site_);
-        state_->items.clear();
-        state_->icon.clear();
-        if (state_->provider && (!state_->sel.paths.empty() || state_->sel.background))
-            state_->items = flatten(state_->provider->menu(state_->sel), state_->icon);
-        state_->built = true;
+        std::lock_guard<std::mutex> lock(state_lock_);
+        return state_;
+    }
+
+    std::shared_ptr<menu_state> build(IShellItemArray* items)
+    {
+        auto state = std::make_shared<menu_state>();
+        state->provider = rap::shell::make_provider();
+        state->sel = selection_of(items, site_);
+        if (state->provider && (!state->sel.paths.empty() || state->sel.background))
+            state->items = flatten(state->provider->menu(state->sel), state->icon);
+        state->built = true;
+        std::lock_guard<std::mutex> lock(state_lock_);
+        state_ = state;
+        return state;
     }
 
     std::atomic<ULONG> refs_{1};
+    mutable std::mutex state_lock_;
     std::shared_ptr<menu_state> state_;
     const menu_item* item_ = nullptr;  // in state_->items; null for the entry
     IUnknown* site_ = nullptr;
@@ -385,7 +399,7 @@ public:
     }
     STDMETHODIMP Skip(ULONG n) override
     {
-        at_ = std::min(items_->size(), at_ + n);
+        at_ = n < items_->size() - at_ ? at_ + n : items_->size();
         return at_ < items_->size() ? S_OK : S_FALSE;
     }
     STDMETHODIMP Reset() override
@@ -417,9 +431,10 @@ try
 {
     if (!out) return E_POINTER;
     *out = nullptr;
-    const std::vector<menu_item>* items = item_ ? &item_->submenu : &state_->items;
-    if (!item_ && !state_->built) return E_FAIL;
-    *out = new command_list(state_, items);
+    const std::shared_ptr<menu_state> state = current();
+    const std::vector<menu_item>* items = item_ ? &item_->submenu : &state->items;
+    if (!item_ && !state->built) return E_FAIL;
+    *out = new command_list(state, items);
     return S_OK;
 }
 catch (...)
