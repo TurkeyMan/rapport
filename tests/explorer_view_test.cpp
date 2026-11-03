@@ -114,10 +114,41 @@ int main()
         s.publish(s.begin(), {file}, in(dir, true));
         check(!s.take({other}) && same(s.take({file}), dir, true),
               "a slow call about other items doesn't take one that isn't its own");
-        for (size_t i = 0; i <= d::view_snapshots::most; ++i)
+    }
+
+    // A slow call from before a new site, about the same items as one of the
+    // new site's: it can't be told apart, so neither gets a view.
+    {
+        d::view_snapshots s;
+        s.publish(s.begin(), {}, in(dir, false));
+        s.change_site([] {});
+        check(s.publish(s.begin(), {}, in(other, false)), "the new site's right-click lands");
+        check(!s.take({}), "the last site's slow call, first: no view, never the new site's");
+        check(!s.take({}), "the new site's own: no view either, it can't be told apart");
+        check(s.publish(s.begin(), {}, in(other, false)) && same(s.take({}), other, false),
+              "once both have come, a right-click gets its own again");
+
+        s.publish(s.begin(), {file}, in(dir, true));
+        s.change_site([] {});
+        s.publish(s.begin(), {dir}, in(dir, false));
+        check(same(s.take({dir}), dir, false) && !s.take({file}),
+              "the new site's right-click about other items keeps its view");
+    }
+
+    // Past the most tracked: none is dropped (its slow call could take a
+    // later snapshot about the same items); tracking is given up instead.
+    {
+        d::view_snapshots s;
+        s.publish(s.begin(), {}, in(dir, false));
+        for (size_t i = 1; i < d::view_snapshots::most; ++i)
             s.publish(s.begin(), {std::filesystem::path("C:/f") / std::to_string(i)},
                       in(dir, true));
-        check(!s.take({"C:/f/0"}) && s.take({"C:/f/1"}), "past the most kept, the oldest goes");
+        check(!s.publish(s.begin(), {"C:/f/new"}, in(dir, true)),
+              "one more than the most tracked doesn't land");
+        check(!s.publish(s.begin(), {}, in(other, false)),
+              "nor, after, a background click about the items of one that was waiting");
+        check(!s.take({}), "whose older slow call, first, gets no view, not the later folder's");
+        check(!s.take({}) && !s.take({"C:/f/1"}), "and nothing gets one from then on");
     }
 
     // What was right-clicked, with the view.
