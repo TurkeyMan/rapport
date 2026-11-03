@@ -5,8 +5,11 @@
 //   rapport-explorer-view-test
 #include "explorer_view.h"
 
+#include <chrono>
 #include <cstdio>
+#include <optional>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -48,38 +51,69 @@ int main()
         check(!s.take({file}), "and only once: a reused entry gets no view, not the last");
     }
 
-    // A change of site between the calls.
+    // A change of site between the calls: the site, the generation and the
+    // snapshots change together.
     {
+        int site = 1;  // stands in for the entry's site_
         d::view_snapshots s;
         s.publish(s.begin(), {dir}, in(dir, false));
-        s.site_changed();
+        s.change_site([&] { site = 2; });
         check(!s.take({dir}), "a new site drops what the last one said");
 
-        const auto asked = s.begin();
-        s.site_changed();
-        check(!s.publish(asked, {dir}, in(other, false)) && !s.take({dir}),
-              "an ask under way when the site changed doesn't land");
-        check(s.publish(s.begin(), {dir}, in(dir, false)) && same(s.take({dir}), dir, false),
-              "an ask of the new site does");
+        int read = 0;
+        const auto asked = s.begin([&] { read = site; });
+        s.change_site([&] { site = 3; });
+        check(read == 2 && !s.publish(asked, {dir}, in(other, false)) && !s.take({dir}),
+              "an ask of the last site under way when it changed doesn't land");
+
+        // The swap and the drop are one step: a slow call that comes while
+        // the site is being swapped waits, then finds nothing of the last.
+        s.publish(s.begin([&] { read = site; }), {file}, in(dir, true));
+        std::optional<d::view_info> mid;
+        std::thread slow;
+        s.change_site(
+            [&]
+            {
+                slow = std::thread([&] { mid = s.take({file}); });
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                site = 4;
+            });
+        slow.join();
+        check(read == 3 && !mid, "a slow call during the swap gets nothing of the last site");
+
+        s.begin([&] { read = site; });
+        check(read == 4 && s.publish(s.begin(), {dir}, in(dir, false)) &&
+                  same(s.take({dir}), dir, false),
+              "an ask of the new site lands");
     }
 
     // Overlapping right-clicks: two fast calls before either slow one.
     {
         d::view_snapshots s;
         s.publish(s.begin(), {file}, in(dir, true));
-        s.publish(s.begin(), {}, in(other, false));
+        s.publish(s.begin(), {other}, in(other, false));
         check(same(s.take({file}), dir, true), "the first slow call gets its own snapshot");
-        check(same(s.take({}), other, false), "and the second its own");
+        check(same(s.take({other}), other, false), "and the second its own");
 
-        s.publish(s.begin(), {file}, in(dir, true));
-        s.publish(s.begin(), {file}, in(other, true));
-        check(same(s.take({file}), other, true) && !s.take({file}),
-              "a second right-click about the same items replaces the first");
+        // Two background clicks with no items, A's then B's, before A's slow
+        // call: neither can be told which it is.
+        s.publish(s.begin(), {}, in(dir, false));
+        s.publish(s.begin(), {}, in(other, false));
+        check(!s.take({}) && !s.take({}),
+              "two right-clicks about the same items: no view for either");
+        check(!s.take({}), "and nothing left after both slow calls");
+
+        // A folder item and a background, both {dir}.
+        s.publish(s.begin(), {dir}, in(dir, true));
+        s.publish(s.begin(), {dir}, in(dir, false));
+        check(!s.take({dir}) && !s.take({dir}),
+              "a folder and its background, both {dir}: no view for either");
+        check(s.publish(s.begin(), {dir}, in(dir, false)) && same(s.take({dir}), dir, false),
+              "a right-click about them after both slow calls gets its own again");
 
         s.publish(s.begin(), {file}, in(dir, true));
         check(!s.take({other}) && same(s.take({file}), dir, true),
               "a slow call about other items doesn't take one that isn't its own");
-
         for (size_t i = 0; i <= d::view_snapshots::most; ++i)
             s.publish(s.begin(), {std::filesystem::path("C:/f") / std::to_string(i)},
                       in(dir, true));
@@ -113,7 +147,7 @@ int main()
     {
         d::view_snapshots s;
         s.publish(s.begin(), {}, in(other, false));
-        s.site_changed();
+        s.change_site([] {});
         const auto sel = d::selection_of({}, s.take({}));
         check(!sel.background && sel.paths.empty() && sel.folder.empty(),
               "no items and no view: nothing, never a stale folder");

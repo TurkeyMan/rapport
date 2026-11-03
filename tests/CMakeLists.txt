@@ -32,7 +32,8 @@ target_link_libraries(rapport-list-press-test PRIVATE rapport::rapport)
 if(TARGET rapport_shell)
     add_executable(rapport-explorer-view-test explorer_view_test.cpp)
     target_include_directories(rapport-explorer-view-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../shell/src/win32)
-    target_link_libraries(rapport-explorer-view-test PRIVATE rapport::shell)
+    find_package(Threads REQUIRED)
+    target_link_libraries(rapport-explorer-view-test PRIVATE rapport::shell Threads::Threads)
 endif()
 
 # Lists driven by synthesized input through the real backends, loaded as

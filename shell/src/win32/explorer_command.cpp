@@ -215,12 +215,12 @@ public:
     {
         if (site) site->AddRef();
         IUnknown* old = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(state_lock_);
-            old = site_;
-            site_ = site;
-        }
-        snapshots_.site_changed();
+        snapshots_.change_site(
+            [&]
+            {
+                old = site_;
+                site_ = site;
+            });
         if (old) old->Release();
         return S_OK;
     }
@@ -228,8 +228,17 @@ public:
     {
         if (!out) return E_POINTER;
         *out = nullptr;
-        std::lock_guard<std::mutex> lock(state_lock_);
-        return site_ ? site_->QueryInterface(riid, out) : E_FAIL;
+        IUnknown* site = nullptr;
+        snapshots_.begin(
+            [&]
+            {
+                site = site_;
+                if (site) site->AddRef();
+            });
+        if (!site) return E_FAIL;
+        const HRESULT hr = site->QueryInterface(riid, out);
+        site->Release();
+        return hr;
     }
 
     // -- IExplorerCommand -------------------------------------------------------
@@ -341,14 +350,13 @@ private:
     // background click is taken for its folder, which is wrong but harmless.
     void ask_view(IShellItemArray* items)
     {
-        // Before the site is read: SetSite changes the site, then this.
-        const std::uint64_t asked = snapshots_.begin();
         IUnknown* site = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(state_lock_);
-            site = site_;
-            if (site) site->AddRef();
-        }
+        const std::uint64_t asked = snapshots_.begin(
+            [&]
+            {
+                site = site_;
+                if (site) site->AddRef();
+            });
         rap::shell::detail::view_info view = ask_site(site);
         if (site) site->Release();
         snapshots_.publish(asked, item_paths(items), std::move(view));
@@ -372,11 +380,11 @@ private:
     }
 
     std::atomic<ULONG> refs_{1};
-    mutable std::mutex state_lock_;  // over state_ and site_
+    mutable std::mutex state_lock_;  // over state_
     std::shared_ptr<menu_state> state_;
-    const menu_item* item_ = nullptr;  // in state_->items; null for the entry
+    const menu_item* item_ = nullptr;               // in state_->items; null for the entry
+    rap::shell::detail::view_snapshots snapshots_;  // and site_, under its lock
     IUnknown* site_ = nullptr;
-    rap::shell::detail::view_snapshots snapshots_;
 };
 
 // The items under the entry, or under one of its submenus.

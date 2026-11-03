@@ -4,8 +4,11 @@
 // was right-clicked, worked out from it.
 //
 // A snapshot is kept for the items it was taken with, and taken once by the
-// slow call for the same items. A new site drops them all, and an ask that
-// was under way when the site changed doesn't land. With no snapshot to
+// slow call for the same items. Two right-clicks about the same items (two
+// background clicks with none, or a folder and its background) can't be told
+// apart, so neither gets a view. The site, its generation and the snapshots
+// share one lock: a new site drops them all at the moment it's set, and an
+// ask of the last one that's under way doesn't land. With no snapshot to
 // match, the click is taken as its items, with no view: a background click
 // then counts as its folder, which is wrong but harmless.
 //
@@ -36,44 +39,61 @@ struct view_info
 class view_snapshots
 {
 public:
-    // SetSite: what the last site said is gone, and an ask of it under way
-    // won't land.
-    void site_changed()
+    // SetSite: `swap` changes the site, under the same lock as what the
+    // last site said is dropped, so no slow call can take any of it after.
+    template <class F>
+    void change_site(F&& swap)
     {
         std::lock_guard<std::mutex> lock(lock_);
+        swap();
         ++site_;
         pending_.clear();
     }
 
-    // Before asking the view: handed back to publish.
-    std::uint64_t begin() const
+    // Before asking the view: `read` reads the site, under the same lock,
+    // and what's returned, handed back to publish, says which site it was.
+    template <class F>
+    std::uint64_t begin(F&& read) const
     {
         std::lock_guard<std::mutex> lock(lock_);
+        read();
         return site_;
+    }
+    std::uint64_t begin() const
+    {
+        return begin([] {});
     }
 
     // After: kept for the slow call about the same items, unless the site
-    // changed meanwhile. A right-click about the same items replaces its
-    // last; past `most` the oldest go.
+    // changed meanwhile. A second about the same items makes them
+    // ambiguous: no view for any of their slow calls. Past `most` the
+    // oldest go.
     bool publish(std::uint64_t site, paths items, view_info view)
     {
         std::lock_guard<std::mutex> lock(lock_);
         if (site != site_) return false;
-        std::erase_if(pending_, [&](const snapshot& s) { return s.items == items; });
-        pending_.push_back({std::move(items), std::move(view)});
+        for (snapshot& s : pending_)
+            if (s.items == items)
+            {
+                s.view.reset();
+                ++s.calls;
+                return true;
+            }
+        pending_.push_back({std::move(items), std::move(view), 1});
         if (pending_.size() > most) pending_.erase(pending_.begin());
         return true;
     }
 
-    // The slow call: what the view said about these items, once.
+    // The slow call: what the view said about these items, once, or
+    // nothing when there's none or they were ambiguous.
     std::optional<view_info> take(const paths& items)
     {
         std::lock_guard<std::mutex> lock(lock_);
         for (auto it = pending_.begin(); it != pending_.end(); ++it)
             if (it->items == items)
             {
-                view_info view = std::move(it->view);
-                pending_.erase(it);
+                std::optional<view_info> view = std::move(it->view);
+                if (--it->calls == 0) pending_.erase(it);
                 return view;
             }
         return std::nullopt;
@@ -85,7 +105,8 @@ private:
     struct snapshot
     {
         paths items;
-        view_info view;
+        std::optional<view_info> view;  // none once ambiguous
+        std::size_t calls;              // slow calls still to come about these items
     };
 
     mutable std::mutex lock_;
