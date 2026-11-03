@@ -27,7 +27,7 @@ target_link_libraries(rapport_shell_probe PUBLIC rapport_shell)
 
 if(WIN32)
     add_library(rapport_shell_explorer STATIC src/win32/explorer_menu.cpp
-        src/win32/explorer_badges.cpp)
+        src/win32/explorer_badges.cpp src/win32/explorer_command.cpp)
     add_library(rapport::shell_explorer ALIAS rapport_shell_explorer)
     target_link_libraries(rapport_shell_explorer PUBLIC rapport_shell ole32 shell32 shlwapi uuid
                                                         windowscodecs advapi32)

@@ -1,7 +1,11 @@
 // rapport-explorer-probe: drives an extension DLL's context menu the way
 // Explorer does (IShellExtInit with a shell data object, then IContextMenu),
-// without registering it.
-//   rapport-explorer-probe DLL {CLSID} [--background] [--extended] [--invoke VERB] PATH...
+// without registering it. With --command, Windows 11's entry instead
+// (IExplorerCommand: its state, then its items), with no view as its site,
+// so a background can't be told from its folder; --invoke then takes an
+// item's title.
+//   rapport-explorer-probe DLL {CLSID} [--command] [--background] [--extended]
+//                          [--invoke VERB] PATH...
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <windows.h>
@@ -51,18 +55,97 @@ void dump(IContextMenu* cm, HMENU menu, UINT first, int depth)
     }
 }
 
+std::string title(IExplorerCommand* c, IShellItemArray* items)
+{
+    PWSTR t = nullptr;
+    if (FAILED(c->GetTitle(items, &t))) return {};
+    std::string s = narrow(t);
+    CoTaskMemFree(t);
+    return s;
+}
+
+// Prints the items under `c`, and invokes the one titled `invoke`.
+void dump_command(IExplorerCommand* c, IShellItemArray* items, const std::string& invoke, int depth)
+{
+    IEnumExplorerCommand* list = nullptr;
+    if (FAILED(c->EnumSubCommands(&list))) return;
+    IExplorerCommand* sub = nullptr;
+    while (list->Next(1, &sub, nullptr) == S_OK)
+    {
+        EXPCMDFLAGS flags = 0;
+        EXPCMDSTATE state = ECS_ENABLED;
+        sub->GetFlags(&flags);
+        sub->GetState(items, TRUE, &state);
+        PWSTR icon = nullptr;
+        const bool has_icon = SUCCEEDED(sub->GetIcon(items, &icon));
+        if (flags & 0x8)  // ECF_ISSEPARATOR
+            std::printf("%*s----\n", depth * 2, "");
+        else
+        {
+            const std::string t = title(sub, items);
+            std::printf("%*s%s%s%s%s\n", depth * 2, "", t.c_str(),
+                        state & ECS_DISABLED ? "  (disabled)" : "", has_icon ? "  icon: " : "",
+                        has_icon ? narrow(icon).c_str() : "");
+            if (flags & ECF_HASSUBCOMMANDS)
+                dump_command(sub, items, invoke, depth + 1);
+            else if (t == invoke)
+                std::printf("Invoke(%s): 0x%08lx\n", t.c_str(), sub->Invoke(items, nullptr));
+        }
+        CoTaskMemFree(icon);
+        sub->Release();
+    }
+    list->Release();
+}
+
+int probe_command(IClassFactory* factory, const std::vector<PIDLIST_ABSOLUTE>& pidls,
+                  const std::string& invoke)
+{
+    IExplorerCommand* c = nullptr;
+    IShellItemArray* items = nullptr;
+    if (FAILED(
+            factory->CreateInstance(nullptr, IID_IExplorerCommand, reinterpret_cast<void**>(&c))))
+    {
+        std::fprintf(stderr, "no IExplorerCommand for that CLSID\n");
+        return 1;
+    }
+    if (FAILED(SHCreateShellItemArrayFromIDLists(
+            UINT(pidls.size()), const_cast<PCIDLIST_ABSOLUTE_ARRAY>(pidls.data()), &items)))
+        return 1;
+    EXPCMDSTATE state = ECS_HIDDEN;
+    std::printf("GetState (UI thread): 0x%08lx\n", c->GetState(items, FALSE, &state));
+    const DWORD start = GetTickCount();
+    const HRESULT hr = c->GetState(items, TRUE, &state);
+    std::printf("GetState: 0x%08lx, %s, %lu ms\n", hr,
+                state == ECS_HIDDEN    ? "hidden"
+                : state & ECS_DISABLED ? "disabled"
+                                       : "enabled",
+                GetTickCount() - start);
+    PWSTR icon = nullptr;
+    if (SUCCEEDED(c->GetIcon(items, &icon)))
+    {
+        std::printf("icon: %s\n", narrow(icon).c_str());
+        CoTaskMemFree(icon);
+    }
+    std::printf("%s\n", title(c, items).c_str());
+    if (state != ECS_HIDDEN) dump_command(c, items, invoke, 1);
+    items->Release();
+    c->Release();
+    return 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv)
 {
     if (argc < 4)
     {
-        std::fprintf(stderr,
-                     "usage: rapport-explorer-probe DLL {CLSID} [--background] [--extended] "
-                     "[--invoke VERB] PATH...\n");
+        std::fprintf(
+            stderr,
+            "usage: rapport-explorer-probe DLL {CLSID} [--command] [--background] [--extended] "
+            "[--invoke VERB] PATH...\n");
         return 2;
     }
-    bool background = false, extended = false;
+    bool background = false, extended = false, command = false;
     std::wstring invoke;
     std::vector<std::wstring> paths;
     for (int i = 3; i < argc; ++i)
@@ -70,6 +153,8 @@ int wmain(int argc, wchar_t** argv)
         const std::wstring a = argv[i];
         if (a == L"--background")
             background = true;
+        else if (a == L"--command")
+            command = true;
         else if (a == L"--extended")
             extended = true;
         else if (a == L"--invoke" && i + 1 < argc)
@@ -93,8 +178,30 @@ int wmain(int argc, wchar_t** argv)
     IShellExtInit* init = nullptr;
     IContextMenu* cm = nullptr;
     if (!get || FAILED(CLSIDFromString(argv[2], &clsid)) ||
-        FAILED(get(clsid, IID_IClassFactory, reinterpret_cast<void**>(&factory))) ||
-        FAILED(
+        FAILED(get(clsid, IID_IClassFactory, reinterpret_cast<void**>(&factory))))
+    {
+        std::fprintf(stderr, "no class object for that CLSID\n");
+        return 1;
+    }
+    if (command)
+    {
+        std::vector<PIDLIST_ABSOLUTE> pidls;
+        for (const std::wstring& p : paths)
+        {
+            PIDLIST_ABSOLUTE pidl = nullptr;
+            if (FAILED(SHParseDisplayName(p.c_str(), nullptr, &pidl, 0, nullptr)))
+            {
+                std::fprintf(stderr, "no such item: %s\n", narrow(p).c_str());
+                return 1;
+            }
+            pidls.push_back(pidl);
+        }
+        const int r = probe_command(factory, pidls, narrow(invoke));
+        for (auto p : pidls) CoTaskMemFree(p);
+        factory->Release();
+        return r;
+    }
+    if (FAILED(
             factory->CreateInstance(nullptr, IID_IShellExtInit, reinterpret_cast<void**>(&init))) ||
         FAILED(init->QueryInterface(IID_IContextMenu, reinterpret_cast<void**>(&cm))))
     {
