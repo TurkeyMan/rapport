@@ -123,6 +123,11 @@ DWORD windows_build();
 // dark_mode() when called; call again after it changes.
 void apply_app_mode();
 void theme_top_window(HWND h);
+// Windows 11's frame for a top-level window: rounded corners (square in
+// fullscreen) and Mica behind the title bar, a dialog's the transient kind;
+// a popup's (a tooltip's) small rounded corners. Nothing before Windows 11.
+void frame_top_window(HWND h, bool dialog, bool fullscreen = false);
+void frame_popup(HWND h);
 void theme_control(HWND h);
 // Paints a dark menu bar (WM_UAHDRAWMENU, WM_UAHDRAWMENUITEM, and the
 // line under it after WM_NCPAINT and WM_NCACTIVATE); false to leave the

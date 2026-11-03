@@ -534,6 +534,7 @@ void set_tooltip_text(HWND control, const std::string& text)
                               nullptr);
         SendMessageW(tip, TTM_SETMAXTIPWIDTH, 0, 480);
         if (dark_mode()) theme_control(tip);
+        frame_popup(tip);
     }
     std::wstring w = wide(text);
     TOOLINFOW ti{};
@@ -5003,6 +5004,7 @@ private:
                                    instance(), nullptr);
             SendMessageW(tip_, TTM_SETMAXTIPWIDTH, 0, 480);
             if (dark_mode()) theme_control(tip_);
+            frame_popup(tip_);
         }
         std::wstring w = wide(text);
         TOOLINFOW ti{};
@@ -7160,6 +7162,7 @@ public:
                                 parent ? parent->hwnd_ : nullptr, nullptr, instance(), this);
         // Before it's first shown, or the title bar flashes light.
         theme_top_window(hwnd_);
+        frame_top_window(hwnd_, dialog_);
         dark_ = dark_mode();
         palette_ = palette_now();
         initial_w_ = spec.width;
@@ -7505,12 +7508,14 @@ public:
             MONITORINFO mi{sizeof mi};
             GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi);
             SetWindowLongPtrW(hwnd_, GWL_STYLE, (style_ & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+            frame_top_window(hwnd_, dialog_, true);
             SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
                          mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
         }
         else
         {
             SetWindowLongPtrW(hwnd_, GWL_STYLE, style_);
+            frame_top_window(hwnd_, dialog_);
             if (menu_bar_ && menu_bar_wanted_) SetMenu(hwnd_, menu_bar_);
             SetWindowPlacement(hwnd_, &placement_);
             SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,

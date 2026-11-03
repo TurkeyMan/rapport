@@ -4,6 +4,8 @@
 // is what Explorer, Notepad and the Windows Terminal use: uxtheme's exports
 // by ordinal, and the DarkMode_* visual style classes. Each is looked for
 // before use and left alone where missing, which leaves light chrome.
+// Windows 11's frame too: rounded corners and Mica behind the title bar,
+// left square and plain before it.
 #include "win32_common.h"
 
 #include <commctrl.h>
@@ -74,6 +76,13 @@ bool class_is(HWND h, const wchar_t* name)
     return !_wcsicmp(cls, name);
 }
 
+// Windows 11's frame attributes (build 22000 on), by number: older SDKs and
+// MinGW's headers don't name them, and they're enumerators, not macros.
+constexpr DWORD dwmwa_window_corner_preference = 33;
+constexpr DWORD dwmwa_systembackdrop_type = 38;
+constexpr DWORD dwmwcp_default = 0, dwmwcp_round = 2, dwmwcp_roundsmall = 3;
+constexpr DWORD dwmsbt_mainwindow = 2, dwmsbt_transientwindow = 3;
+
 }  // namespace
 
 void apply_app_mode()
@@ -104,6 +113,30 @@ void theme_top_window(HWND h)
         const DWORD attribute = windows_build() >= 18985 ? 20 : 19;
         DwmSetWindowAttribute(h, attribute, &dark, sizeof dark);
     }
+}
+
+void frame_top_window(HWND h, bool dialog, bool fullscreen)
+{
+    // Older builds don't know the attributes and refuse them: square, plain.
+    if (windows_build() < 22000) return;
+    // Square in fullscreen, where the window is the whole monitor.
+    const DWORD corners = fullscreen ? dwmwcp_default : dwmwcp_round;
+    DwmSetWindowAttribute(h, dwmwa_window_corner_preference, &corners, sizeof corners);
+    // Mica behind the title bar only (22621 on): the frame isn't extended
+    // into the client area, which the controls paint opaque. It takes the
+    // title bar's dark mode, and high contrast turns it off.
+    if (windows_build() >= 22621)
+    {
+        const DWORD backdrop = dialog ? dwmsbt_transientwindow : dwmsbt_mainwindow;
+        DwmSetWindowAttribute(h, dwmwa_systembackdrop_type, &backdrop, sizeof backdrop);
+    }
+}
+
+void frame_popup(HWND h)
+{
+    if (windows_build() < 22000) return;
+    const DWORD corners = dwmwcp_roundsmall;
+    DwmSetWindowAttribute(h, dwmwa_window_corner_preference, &corners, sizeof corners);
 }
 
 namespace
