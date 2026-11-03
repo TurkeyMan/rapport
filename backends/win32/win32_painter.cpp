@@ -175,6 +175,33 @@ float scale_of(HWND h)
 namespace
 {
 
+// Windows 11's UI font, Segoe UI Variable (its text optical size), where
+// it's installed: GDI and DirectWrite both know it as a family of its own.
+bool has_variable_font()
+{
+    static const bool found = []
+    {
+        LOGFONTW lf{};
+        lf.lfCharSet = DEFAULT_CHARSET;
+        wcscpy(lf.lfFaceName, L"Segoe UI Variable Text");
+        bool any = false;
+        HDC dc = GetDC(nullptr);
+        EnumFontFamiliesExW(
+            dc, &lf,
+            [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM p) -> int
+            {
+                *reinterpret_cast<bool*>(p) = true;
+                return 0;
+            },
+            reinterpret_cast<LPARAM>(&any), 0);
+        ReleaseDC(nullptr, dc);
+        return any;
+    }();
+    return found;
+}
+
+// The message font, in Segoe UI Variable where it's Segoe UI (Windows 10's
+// and 11's own); another, a locale's or the user's, is kept as it is.
 NONCLIENTMETRICSW metrics_for(UINT dpi)
 {
     NONCLIENTMETRICSW ncm{};
@@ -189,6 +216,8 @@ NONCLIENTMETRICSW metrics_for(UINT dpi)
         SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0);
         ncm.lfMessageFont.lfHeight = MulDiv(ncm.lfMessageFont.lfHeight, int(dpi), 96);
     }
+    if (!_wcsicmp(ncm.lfMessageFont.lfFaceName, L"Segoe UI") && has_variable_font())
+        wcscpy(ncm.lfMessageFont.lfFaceName, L"Segoe UI Variable Text");
     return ncm;
 }
 

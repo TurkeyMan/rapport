@@ -91,7 +91,8 @@ IWICImagingFactory* wic_factory();
 // Device pixels per logical pixel for a window (1 at 96 dpi).
 float scale_of(HWND h);
 UINT dpi_of(HWND h);
-// The system message font at `dpi` (cached; owned by the cache).
+// The system message font at `dpi` (cached; owned by the cache), in
+// Segoe UI Variable where it's Segoe UI and that's installed.
 HFONT ui_font(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f);
 // Average character width and line height of the UI font at `dpi`, in device px.
 SIZE font_metrics(UINT dpi);
