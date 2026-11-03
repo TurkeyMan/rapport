@@ -73,5 +73,6 @@ if(TARGET rapport::shell)
     rapport_add_shell_extension(rapport-shell-example
         NAME "rapport example" ID org.rapport.Example
         WINDOWS_CLSID {6B1D3F0E-8C2A-4E57-9A41-2F5C7D90B3E8}
+        WINDOWS_COMMAND_CLSID {0057E5E9-128B-4A7F-9168-36128B7DB478}
         SOURCES shell_example.cpp)
 endif()

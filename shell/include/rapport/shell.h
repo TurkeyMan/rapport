@@ -114,6 +114,9 @@ struct extension_info
     const char* id;             // reverse-DNS, e.g. org.example.App
     const char* windows_clsid;  // "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}"
     const char* resource_dir;   // absolute; empty for module_dir()
+    // Windows 11's top-level menu entry (an IExplorerCommand), named in the
+    // app's package manifest; empty for none.
+    const char* windows_command_clsid;
 };
 extern const extension_info this_extension;
 

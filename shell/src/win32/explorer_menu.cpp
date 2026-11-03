@@ -1,6 +1,6 @@
 // Explorer's context menu: a classic IShellExtInit + IContextMenu COM server,
 // registered per user. On Windows 11 its entries sit under "Show more
-// options"; the top-level menu needs IExplorerCommand and a signed package.
+// options"; the top-level menu is explorer_command.cpp's.
 //
 // This runs inside explorer.exe: every entry point catches everything, and
 // the module links its C++ runtime statically (see rapport_add_shell_extension).
@@ -440,8 +440,10 @@ try
 {
     if (!out) return E_POINTER;
     *out = nullptr;
-    if (clsid != our_clsid()) return rap::shell::detail::badge_class_object(clsid, riid, out);
-    return g_factory.QueryInterface(riid, out);
+    if (clsid == our_clsid()) return g_factory.QueryInterface(riid, out);
+    const HRESULT hr = rap::shell::detail::command_class_object(clsid, riid, out);
+    if (hr != CLASS_E_CLASSNOTAVAILABLE) return hr;
+    return rap::shell::detail::badge_class_object(clsid, riid, out);
 }
 catch (...)
 {

@@ -1,10 +1,14 @@
 # rapport_add_shell_extension(<target>
 #     NAME <shown name> ID <reverse-dns id> [WINDOWS_CLSID {GUID}]
-#     [RESOURCE_DIR <absolute dir>] SOURCES <provider sources...>)
+#     [WINDOWS_COMMAND_CLSID {GUID}] [RESOURCE_DIR <absolute dir>]
+#     SOURCES <provider sources...>)
 #
 # Builds the app's provider (defined with RAPPORT_SHELL_PROVIDER) into:
 #   <target>        on Windows, a COM DLL for Explorer's context menu
-#                   (register it with rap::shell::install)
+#                   (register it with rap::shell::install); with
+#                   WINDOWS_COMMAND_CLSID it also serves Windows 11's
+#                   top-level entry, which the app's package manifest
+#                   declares (a sparse package will do)
 #   <target>-<fm>   on Linux, an extension for each file manager whose SDK
 #                   is installed (nautilus, nemo, caja, thunar, dolphin),
 #                   installed into its extension directory as the install
@@ -15,17 +19,20 @@
 #   <target>-probe  prints the provider's menu for some paths, for testing
 # Link the provider's own dependencies to <target>_provider.
 function(rapport_add_shell_extension target)
-    cmake_parse_arguments(ARG "" "NAME;ID;WINDOWS_CLSID;RESOURCE_DIR" "SOURCES" ${ARGN})
+    cmake_parse_arguments(ARG "" "NAME;ID;WINDOWS_CLSID;WINDOWS_COMMAND_CLSID;RESOURCE_DIR" "SOURCES" ${ARGN})
     if(NOT ARG_NAME OR NOT ARG_ID OR NOT ARG_SOURCES)
         message(FATAL_ERROR "rapport_add_shell_extension(${target}): NAME, ID and SOURCES are required")
     endif()
     if(WIN32 AND NOT ARG_WINDOWS_CLSID MATCHES "^{[0-9A-Fa-f-]+}$")
         message(FATAL_ERROR "rapport_add_shell_extension(${target}): WINDOWS_CLSID {GUID} is required on Windows")
     endif()
+    if(ARG_WINDOWS_COMMAND_CLSID AND NOT ARG_WINDOWS_COMMAND_CLSID MATCHES "^{[0-9A-Fa-f-]+}$")
+        message(FATAL_ERROR "rapport_add_shell_extension(${target}): WINDOWS_COMMAND_CLSID must be a {GUID}")
+    endif()
 
     set(info ${CMAKE_CURRENT_BINARY_DIR}/${target}_info.cpp)
     file(CONFIGURE OUTPUT ${info} @ONLY CONTENT
-        "#include <rapport/shell.h>\nconst rap::shell::extension_info rap::shell::this_extension{\"@ARG_NAME@\", \"@ARG_ID@\", \"@ARG_WINDOWS_CLSID@\", \"@ARG_RESOURCE_DIR@\"};\n")
+        "#include <rapport/shell.h>\nconst rap::shell::extension_info rap::shell::this_extension{\"@ARG_NAME@\", \"@ARG_ID@\", \"@ARG_WINDOWS_CLSID@\", \"@ARG_RESOURCE_DIR@\", \"@ARG_WINDOWS_COMMAND_CLSID@\"};\n")
 
     add_library(${target}_provider STATIC ${ARG_SOURCES})
     target_link_libraries(${target}_provider PUBLIC rapport::shell)
