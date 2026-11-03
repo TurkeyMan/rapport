@@ -155,8 +155,7 @@ inline color theme_color_of(const QWidget* w, theme_color role)
 
 inline color resolve(const QWidget* w, const paint& p)
 {
-    if (auto* c = std::get_if<color>(&p)) return *c;
-    return theme_color_of(w, std::get<theme_color>(p));
+    return palette::resolve(p, [w](theme_color r) { return theme_color_of(w, r); });
 }
 
 // Pixels uploaded once and drawn many times. Premultiplied ARGB32 is
@@ -220,10 +219,14 @@ public:
 
     color resolve(const paint& p) const override
     {
-        if (auto* role = std::get_if<theme_color>(&p))
-            for (auto& [r, c] : overrides_)
-                if (r == *role) return c;
-        return qt6::resolve(w_, p);
+        // Through the overrides, so on paper a scheme colour takes its light shade.
+        return palette::resolve(p,
+                                [this](theme_color role)
+                                {
+                                    for (auto& [r, c] : overrides_)
+                                        if (r == role) return c;
+                                    return theme_color_of(w_, role);
+                                });
     }
 
     // Replaces a theme colour for this painter (a list's soft selection).

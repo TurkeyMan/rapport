@@ -101,8 +101,7 @@ inline color theme_color_of(GtkWidget*, theme_color);
 
 inline color resolve(GtkWidget* w, const paint& p)
 {
-    if (auto* c = std::get_if<color>(&p)) return *c;
-    return theme_color_of(w, std::get<theme_color>(p));
+    return palette::resolve(p, [w](theme_color r) { return theme_color_of(w, r); });
 }
 
 // List autoscroll: px/s for the pointer `offset` px above (negative) or
@@ -390,10 +389,14 @@ public:
 
     color resolve(const paint& p) const override
     {
-        if (auto* role = std::get_if<theme_color>(&p))
-            for (auto& [r, c] : overrides_)
-                if (r == *role) return c;
-        return gtkcommon::resolve(w_, p);
+        // Through the overrides, so on paper a scheme colour takes its light shade.
+        return palette::resolve(p,
+                                [this](theme_color role)
+                                {
+                                    for (auto& [r, c] : overrides_)
+                                        if (r == role) return c;
+                                    return theme_color_of(w_, role);
+                                });
     }
 
     // Replaces a theme colour for this painter (a list's soft selection).
@@ -890,9 +893,14 @@ public:
         {
             if (!p) return std::string();
             if (auto* r = std::get_if<theme_color>(&*p)) return "r" + std::to_string(int(*r));
-            const color c = std::get<color>(*p);
-            return std::to_string(c.r) + "," + std::to_string(c.g) + "," + std::to_string(c.b) +
-                   "," + std::to_string(c.a);
+            auto rgba = [](color c)
+            {
+                return std::to_string(c.r) + "," + std::to_string(c.g) + "," + std::to_string(c.b) +
+                       "," + std::to_string(c.a);
+            };
+            if (auto* s = std::get_if<scheme_color>(&*p))
+                return "s" + rgba(s->light) + "/" + rgba(s->dark);
+            return rgba(std::get<color>(*p));
         };
         std::string key = std::to_string(s.bold) + std::to_string(s.italic) +
                           std::to_string(s.monospace) + '|' + part(s.fg) + '|' + part(s.bg);
@@ -908,7 +916,8 @@ public:
         return t;
     }
 
-    // The theme changed: tags of theme roles take the roles' new colours.
+    // The theme changed: tags of theme roles take the roles' new colours,
+    // and scheme colours the shade for the new scheme.
     void recolour(GtkWidget* w)
     {
         for (entry& e : tags_) colour(w, e);

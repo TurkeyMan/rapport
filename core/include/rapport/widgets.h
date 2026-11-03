@@ -103,8 +103,18 @@ enum class theme_color
 };
 inline constexpr int theme_color_count = int(theme_color::disabled_text) + 1;
 
-// Either a fixed colour or a theme role resolved at paint time.
-using paint = std::variant<theme_color, color>;
+// A fixed colour in two shades, for an app's own meanings (a file's status,
+// a kind of row) that mustn't follow the theme's roles, as an accent would
+// take them, yet must still read: `light` where the background it's drawn on
+// is light, `dark` where it's dark (a list's base, a canvas's window), so it
+// follows the desktop's scheme and an app's own override alike.
+struct scheme_color
+{
+    color light, dark;
+};
+
+// A fixed colour, a theme role or a scheme colour, resolved at paint time.
+using paint = std::variant<theme_color, color, scheme_color>;
 
 // The theme roles on paper: a light palette whatever the screen's theme, so
 // a dark-mode window doesn't print white text on white. Every backend's
