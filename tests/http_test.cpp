@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #ifdef _WIN32
@@ -84,6 +85,16 @@ void origins()
           "origin: equal origins compare equal");
     check(rap::sys::url_origin("https://a.example") != rap::sys::url_origin("http://a.example"),
           "origin: http and https differ");
+
+    // Explicit-length URLs with a NUL or other control character: the
+    // transports stop at the NUL, so the part after it must never decide
+    // the origin (http://other.example\0@trusted.example/ connects to other).
+    using namespace std::string_view_literals;
+    for (std::string_view bad :
+         {"http://other.example\0@trusted.example/"sv, "https://trusted.example\0.other.example/"sv,
+          "https://trusted.example/\0"sv, "https://a.example\r\nHost: b/"sv,
+          "https://a.example\t/"sv, "https://a .example/"sv, "https://a.example\x7f/"sv})
+        check(!rap::sys::url_origin(bad), "origin: none for a URL with a NUL, control or space");
 
     const char* malformed[] = {
         "",

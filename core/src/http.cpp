@@ -234,6 +234,12 @@ std::optional<origin> url_origin(std::string_view url)
                                [](char c) { return char(std::tolower(uint8_t(c))); });
         return out;
     };
+    // A NUL, any other control character, a space or DEL: libcurl and
+    // WinHTTP read a URL only up to its NUL and treat the rest their own
+    // way, so "http://other\0@trusted/" would be parsed here as trusted
+    // but connect to other. No valid URL has them unescaped.
+    if (std::ranges::any_of(url, [](char c) { return uint8_t(c) <= 0x20 || uint8_t(c) == 0x7f; }))
+        return std::nullopt;
     const size_t colon = url.find(':');
     if (colon == std::string_view::npos || url.substr(colon + 1, 2) != "//") return std::nullopt;
     origin o{.scheme = lower(url.substr(0, colon))};
