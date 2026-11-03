@@ -1286,9 +1286,9 @@ void set_entry_frame(GtkWidget* entry, bool v)
 // at each end, so a composite as GtkSearchEntry is made: a widget whose CSS
 // name is "entry" (the theme's frame, focus ring and padding) holding the
 // leading icons, a GtkText (the editing, selection, placeholder and context
-// menu of an entry's own) and the clear and trailing icons. The icons are
-// images, as an entry's are (entry > image.left / .right), clicked through
-// a gesture.
+// menu of an entry's own) and the clear and trailing buttons. The buttons
+// are flat GtkButtons (the theme's hover, checked look and focus ring; a
+// name, Space and Enter), each holding its image.
 G_DECLARE_FINAL_TYPE(RapportEntryBox, rapport_entry_box, RAPPORT, ENTRY_BOX, GtkWidget)
 struct _RapportEntryBox
 {
@@ -1313,10 +1313,34 @@ static gboolean rapport_entry_box_grab_focus(GtkWidget* w)
     GtkWidget* text = rapport_entry_box_text(w);
     return text ? gtk_text_grab_focus_without_selecting(GTK_TEXT(text)) : false;
 }
+// Tab comes to the text first, as to an entry's, then the buttons in
+// order, leading then trailing; Shift+Tab the other way. Arrows as GTK's.
+static gboolean rapport_entry_box_focus(GtkWidget* w, GtkDirectionType dir)
+{
+    if (dir != GTK_DIR_TAB_FORWARD && dir != GTK_DIR_TAB_BACKWARD)
+        return GTK_WIDGET_CLASS(rapport_entry_box_parent_class)->focus(w, dir);
+    std::vector<GtkWidget*> order;
+    if (GtkWidget* text = rapport_entry_box_text(w)) order.push_back(text);
+    for (GtkWidget* c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c))
+        if (!GTK_IS_TEXT(c) && !GTK_IS_NATIVE(c)) order.push_back(c);
+    GtkWidget* at = gtk_widget_get_focus_child(w);
+    const auto n = std::ptrdiff_t(order.size());
+    std::ptrdiff_t i = std::ranges::find(order, at) - order.begin();
+    const bool forward = dir == GTK_DIR_TAB_FORWARD;
+    if (at && i < n && gtk_widget_child_focus(at, dir)) return true;  // within it
+    if (!at || i == n)
+        i = forward ? 0 : n - 1;
+    else
+        i += forward ? 1 : -1;
+    for (; i >= 0 && i < n; i += forward ? 1 : -1)
+        if (gtk_widget_child_focus(order[size_t(i)], dir)) return true;
+    return false;
+}
 static void rapport_entry_box_class_init(RapportEntryBoxClass* c)
 {
     G_OBJECT_CLASS(c)->dispose = rapport_entry_box_dispose;
     GTK_WIDGET_CLASS(c)->grab_focus = rapport_entry_box_grab_focus;
+    GTK_WIDGET_CLASS(c)->focus = rapport_entry_box_focus;
     gtk_widget_class_set_css_name(GTK_WIDGET_CLASS(c), "entry");
     gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(c), GTK_TYPE_BOX_LAYOUT);
     gtk_widget_class_set_accessible_role(GTK_WIDGET_CLASS(c), GTK_ACCESSIBLE_ROLE_GROUP);
@@ -1370,17 +1394,17 @@ void set_image_icon(GtkImage* image, const icon& icon)
     g_object_unref(texture);
 }
 
-// The theme's look for a held-down icon in an entry, and for a menu's
-// drop arrow: installed once per display.
+// The look of an entry's buttons, installed once per display: a flat
+// button as small as an entry's icon allows, and a menu's drop arrow.
 void install_entry_icon_css(GtkWidget* w)
 {
     static bool installed = false;
     if (installed) return;
     GtkCssProvider* css = gtk_css_provider_new();
     gtk_css_provider_load_from_string(
-        css, "entry > image.rapport-checked { background-color: alpha(currentColor, 0.18); "
-             "box-shadow: 0 0 0 3px alpha(currentColor, 0.18); border-radius: 2px; }\n"
-             "entry > image.rapport-drop { margin-left: 0; margin-right: 0; -gtk-icon-size: 8px; "
+        css, "entry > button.rapport-entry-button { min-height: 0; min-width: 0; padding: 2px; "
+             "margin: 0; }\n"
+             "entry > button.rapport-entry-button image.rapport-drop { -gtk-icon-size: 8px; "
              "min-width: 8px; }");
     gtk_style_context_add_provider_for_display(gtk_widget_get_display(w), GTK_STYLE_PROVIDER(css),
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -1388,8 +1412,40 @@ void install_entry_icon_css(GtkWidget* w)
     installed = true;
 }
 
-// One of the composite's buttons: its image (and, with a menu, the drop
-// arrow after it), a click on either acting.
+// A button of the composite's: flat, named by its tooltip, reached by Tab
+// but not taking the focus from the text when clicked.
+GtkWidget* new_entry_button(GtkWidget* box, GtkWidget* child)
+{
+    GtkWidget* b = gtk_button_new();
+    gtk_button_set_has_frame(GTK_BUTTON(b), false);
+    gtk_button_set_child(GTK_BUTTON(b), child);
+    gtk_widget_add_css_class(b, "rapport-entry-button");
+    gtk_widget_set_focus_on_click(b, false);
+    gtk_widget_set_valign(b, GTK_ALIGN_CENTER);
+    gtk_widget_set_parent(b, box);
+    install_entry_icon_css(box);
+    return b;
+}
+void set_entry_button_tooltip(GtkWidget* b, const char* t)
+{
+    gtk_widget_set_tooltip_text(b, t);
+    gtk_accessible_update_property(GTK_ACCESSIBLE(b), GTK_ACCESSIBLE_PROPERTY_LABEL, t, -1);
+}
+
+// After a menu from an entry's button closes: `w` (the button or the text)
+// takes the focus back, unless it went outside the box or the window.
+void refocus_in_entry_box(GtkWidget* w)
+{
+    GtkWidget* box = gtk_widget_get_parent(w);
+    GtkRoot* root = gtk_widget_get_root(w);
+    if (!box || !root || !gtk_widget_get_mapped(w)) return;
+    GtkWidget* f = gtk_root_get_focus(root);
+    if (f == w || (f && !gtk_widget_is_ancestor(f, box))) return;
+    gtk_widget_grab_focus(w);
+}
+
+// One of the composite's buttons: its image, and with a menu the drop
+// arrow after it.
 class entry_box_action : public rap::entry_action
 {
 public:
@@ -1399,20 +1455,22 @@ public:
         , menu_(s.on_menu)
     {
         image_ = gtk_image_new();
-        gtk_widget_add_css_class(image_, s.leading ? "left" : "right");
-        gtk_widget_set_valign(image_, GTK_ALIGN_CENTER);  // a held-down tint round the icon alone
-        gtk_widget_set_parent(image_, box);
         icon_ = s.icon;
         set_image_icon(GTK_IMAGE(image_), icon_);
-        clickable(image_);
         // Always made, shown for a menu: the menu may be set later.
         arrow_ = gtk_image_new_from_icon_name("pan-down-symbolic");
         gtk_widget_add_css_class(arrow_, "rapport-drop");
-        gtk_widget_set_parent(arrow_, box);
         gtk_widget_set_visible(arrow_, bool(menu_));
-        clickable(arrow_);
+        GtkWidget* content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_box_append(GTK_BOX(content), image_);
+        gtk_box_append(GTK_BOX(content), arrow_);
+        button_ = new_entry_button(box, content);
+        gtk_widget_add_css_class(button_, s.leading ? "left" : "right");
+        g_signal_connect(
+            button_, "clicked",
+            G_CALLBACK(+[](GtkButton*, gpointer p) { static_cast<entry_box_action*>(p)->act(); }),
+            this);
         set_tooltip(s.tooltip);
-        install_entry_icon_css(box);
         if (s.bind) *s.bind = this;
     }
     void set_icon(const icon& i) override
@@ -1422,49 +1480,29 @@ public:
     }
     void set_tooltip(const std::string& t) override
     {
-        gtk_widget_set_tooltip_text(image_, t.c_str());
-        gtk_widget_set_tooltip_text(arrow_, t.c_str());
-        gtk_accessible_update_property(GTK_ACCESSIBLE(image_), GTK_ACCESSIBLE_PROPERTY_LABEL,
-                                       t.c_str(), -1);
+        set_entry_button_tooltip(button_, t.c_str());
     }
+    // The theme's checked button; a toggle button to a screen reader.
     void set_checked(bool c) override
     {
         checked_ = c;
         if (c)
-            gtk_widget_add_css_class(image_, "rapport-checked");
+            gtk_widget_set_state_flags(button_, GTK_STATE_FLAG_CHECKED, false);
         else
-            gtk_widget_remove_css_class(image_, "rapport-checked");
+            gtk_widget_unset_state_flags(button_, GTK_STATE_FLAG_CHECKED);
+        gtk_accessible_update_state(
+            GTK_ACCESSIBLE(button_), GTK_ACCESSIBLE_STATE_PRESSED,
+            c ? GTK_ACCESSIBLE_TRISTATE_TRUE : GTK_ACCESSIBLE_TRISTATE_FALSE, -1);
     }
     bool checked() const override { return checked_; }
-    void set_enabled(bool e) override
-    {
-        gtk_widget_set_sensitive(image_, e);
-        gtk_widget_set_sensitive(arrow_, e);
-    }
+    void set_enabled(bool e) override { gtk_widget_set_sensitive(button_, e); }
     void on_menu(std::function<menu()> f) override
     {
         menu_ = std::move(f);
         gtk_widget_set_visible(arrow_, bool(menu_));
     }
-    GtkWidget* image() const { return image_; }
-    GtkWidget* arrow() const { return arrow_; }
 
 private:
-    void clickable(GtkWidget* w)
-    {
-        GtkGesture* click = gtk_gesture_click_new();
-        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
-        g_signal_connect(click, "pressed",
-                         G_CALLBACK(+[](GtkGestureClick* g, int, double, double, gpointer p)
-                                    {
-                                        // Not the box's: the caret stays where it was.
-                                        gtk_gesture_set_state(GTK_GESTURE(g),
-                                                              GTK_EVENT_SEQUENCE_CLAIMED);
-                                        static_cast<entry_box_action*>(p)->act();
-                                    }),
-                         this);
-        gtk_widget_add_controller(w, GTK_EVENT_CONTROLLER(click));
-    }
     void act()
     {
         if (!menu_)
@@ -1478,11 +1516,11 @@ private:
         if (popover_) gtk_widget_unparent(popover_);
         popover_ = gtk_popover_menu_new_from_model(G_MENU_MODEL(model));
         g_object_unref(model);
-        // The box's child (its dispose takes it away), pointing at the icon.
-        GtkWidget* box = gtk_widget_get_parent(image_);
+        // The box's child (its dispose takes it away), pointing at the button.
+        GtkWidget* box = gtk_widget_get_parent(button_);
         gtk_widget_set_parent(popover_, box);
         graphene_rect_t r;
-        if (gtk_widget_compute_bounds(image_, box, &r))
+        if (gtk_widget_compute_bounds(button_, box, &r))
         {
             const GdkRectangle at{int(r.origin.x), int(r.origin.y), int(r.size.width),
                                   int(r.size.height)};
@@ -1491,20 +1529,45 @@ private:
         gtk_popover_set_has_arrow(GTK_POPOVER(popover_), false);
         gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_BOTTOM);
         gtk_widget_set_halign(popover_, GTK_ALIGN_START);
+        // Closed, the focus goes back where it was: the button if opened
+        // from the keyboard, else the text (GTK leaves it on the text,
+        // through the popover's parent, the box). An item that put it
+        // elsewhere keeps it there. The window's focus is asked:
+        // has_focus is false while the window isn't active.
+        GtkRoot* root = gtk_widget_get_root(button_);
+        return_to_ =
+            root && gtk_root_get_focus(root) == button_ ? button_ : rapport_entry_box_text(box);
+        g_signal_connect(popover_, "closed",
+                         G_CALLBACK(+[](GtkPopover*, gpointer p)
+                                    {
+                                        GtkWidget* back =
+                                            static_cast<entry_box_action*>(p)->return_to_;
+                                        g_idle_add_full(
+                                            G_PRIORITY_DEFAULT_IDLE,
+                                            +[](gpointer p) -> gboolean
+                                            {
+                                                refocus_in_entry_box(static_cast<GtkWidget*>(p));
+                                                return G_SOURCE_REMOVE;
+                                            },
+                                            g_object_ref(back), g_object_unref);
+                                    }),
+                         this);
         popup_when_built(popover_);
     }
 
     menu_actions& menus_;
+    GtkWidget* button_ = nullptr;
     GtkWidget* image_ = nullptr;
     GtkWidget* arrow_ = nullptr;
     GtkWidget* popover_ = nullptr;
+    GtkWidget* return_to_ = nullptr;
     icon icon_;
     std::function<void()> click_;
     std::function<menu()> menu_;
     bool checked_ = false;
 };
 
-// The composite entry: [leading icons] text [clear] [trailing icons].
+// The composite entry: [leading buttons] text [clear] [trailing buttons].
 class entry_box_impl : public widget_base<rap::entry>
 {
 public:
@@ -1527,22 +1590,17 @@ public:
         if (!s.placeholder.empty()) set_placeholder(s.placeholder);
         if (s.clearable)
         {
-            clear_ = gtk_image_new_from_icon_name("edit-clear-symbolic");
+            clear_ = new_entry_button(outer_, gtk_image_new_from_icon_name("edit-clear-symbolic"));
             gtk_widget_add_css_class(clear_, "right");
-            gtk_widget_set_tooltip_text(clear_, rap::i18n::tr("rapport", "Clear"));
-            gtk_widget_set_parent(clear_, outer_);
-            GtkGesture* click = gtk_gesture_click_new();
-            g_signal_connect(click, "pressed",
-                             G_CALLBACK(+[](GtkGestureClick* g, int, double, double, gpointer p)
+            set_entry_button_tooltip(clear_, rap::i18n::tr("rapport", "Clear"));
+            g_signal_connect(clear_, "clicked",
+                             G_CALLBACK(+[](GtkButton*, gpointer p)
                                         {
-                                            gtk_gesture_set_state(GTK_GESTURE(g),
-                                                                  GTK_EVENT_SEQUENCE_CLAIMED);
                                             auto* self = static_cast<entry_box_impl*>(p);
                                             gtk_editable_set_text(GTK_EDITABLE(self->w_), "");
                                             gtk_widget_grab_focus(self->w_);
                                         }),
                              this);
-            gtk_widget_add_controller(clear_, GTK_EVENT_CONTROLLER(click));
         }
         for (const spec::entry_action& a : s.actions)
             if (!a.leading)
