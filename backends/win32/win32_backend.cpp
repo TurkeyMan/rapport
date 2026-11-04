@@ -477,6 +477,10 @@ bool paint_pane(HWND panel)
     RECT c;
     GetClientRect(panel, &c);
     if (c.right <= 0 || c.bottom <= 0) return false;
+    // RAPPORT_PANE_FAIL: as if the off-screen copy couldn't be made, to test
+    // the fallback.
+    static const bool fail = std::getenv("RAPPORT_PANE_FAIL") != nullptr;
+    if (fail) return false;
     // The whole panel copied, through a DC not cut to its update region: its
     // controls' paints are then all done here, wherever they were due.
     HDC screen = GetDC(panel);
@@ -510,10 +514,17 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         {
             PAINTSTRUCT ps;
             HDC dc = BeginPaint(h, &ps);
-            // Not drawn off screen: its background as usual, its controls
-            // painting themselves (their paints are still due).
+            // Not drawn off screen: its background as usual, and its controls
+            // paint themselves, each made to (moved without painting by a
+            // layout pass, they may have none due, and the background just
+            // filled over them, the panel not clipping its children). The
+            // panel's own paint is done: no loop if the copy fails each time.
             if (!paint_pane(h))
+            {
                 FillRect(dc, &ps.rcPaint, reinterpret_cast<HBRUSH>(GetClassLongPtrW(h, GCLP_HBRBACKGROUND)));
+                for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
+                    RedrawWindow(c, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+            }
             EndPaint(h, &ps);
             return 0;
         }
