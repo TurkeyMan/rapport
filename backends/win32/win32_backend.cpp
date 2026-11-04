@@ -6494,9 +6494,13 @@ private:
 // through DirectComposition. The window's own kind (CreateSwapChainForHwnd)
 // is scaled to the window by the compositor, and nothing ties a resize to
 // the frame for it: the last frame shows stretched until the next lands.
-// This one is never scaled: as big as the canvas has been, cleared where the
-// canvas doesn't reach, and cut to the window. A frame drawn at a size before
-// the window takes it (window::resize) then shows whole as the window does.
+// This one is never scaled: as big as the canvas has been, and cut to the
+// window. A frame is drawn into a bitmap of that size that's kept from one
+// frame to the next, only where the canvas now reaches: past that is the
+// last frame's, as it was. Drawn at a size before the window takes it
+// (window::resize), it then shows whole as the window does, and in the
+// moment before, the window still the old size, what the new frame doesn't
+// cover is the old one rather than a cleared band.
 class gpu_target
 {
 public:
@@ -6526,30 +6530,47 @@ public:
             FAILED(t->visual_->SetContent(t->swap_.get())) ||
             FAILED(t->target_->SetRoot(t->visual_.get())) ||
             FAILED(t->dev_->d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, t->dc_.put())) ||
-            !t->bind())
+            !t->bind() || !t->keep(w, hgt))
             return nullptr;
         t->w_ = w, t->h_ = hgt;
         return t;
     }
     const std::shared_ptr<gpu_shared>& device() const { return dev_; }
     // Drawing for a canvas of w x h: the buffers grow to hold it, and never
-    // shrink (what's past the canvas is cleared, and cut off by the window).
+    // shrink (what's past the canvas is the last frame's, cut off by the
+    // window). The drawing is cut to w x h.
     ID2D1DeviceContext* begin(UINT w, UINT h)
     {
         if (w > w_ || h > h_)
         {
-            w = std::max(w, w_), h = std::max(h, h_);
+            const UINT bw = std::max(w, w_), bh = std::max(h, h_);
             dc_->SetTarget(nullptr);
-            if (FAILED(swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)) || !bind()) return nullptr;
-            w_ = w, h_ = h;
+            back_.reset();
+            if (FAILED(swap_->ResizeBuffers(0, bw, bh, DXGI_FORMAT_UNKNOWN, 0)) || !bind() || !keep(bw, bh))
+                return nullptr;
+            w_ = bw, h_ = bh;
         }
+        dc_->SetTarget(kept_.get());
         dc_->BeginDraw();
+        dc_->SetDpi(96, 96);
+        dc_->SetTransform(D2D1::Matrix3x2F::Identity());
+        dc_->PushAxisAlignedClip(D2D1::RectF(0, 0, float(w), float(h)), D2D1_ANTIALIAS_MODE_ALIASED);
         return dc_.get();
     }
     // False when the device is lost.
     bool end()
     {
+        dc_->PopAxisAlignedClip();
         if (dc_->EndDraw() == D2DERR_RECREATE_TARGET) return false;
+        // The kept frame, whole, into the buffer that's shown.
+        dc_->SetTarget(back_.get());
+        dc_->BeginDraw();
+        dc_->SetDpi(96, 96);
+        dc_->SetTransform(D2D1::Matrix3x2F::Identity());
+        dc_->DrawBitmap(kept_.get(), D2D1::RectF(0, 0, float(w_), float(h_)), 1, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                        nullptr, nullptr);
+        if (dc_->EndDraw() == D2DERR_RECREATE_TARGET) return false;
+        dc_->SetTarget(nullptr);
         const HRESULT hr = swap_->Present(0, 0);
         // Into the window with its first frame, not blank before it.
         if (!committed_) committed_ = SUCCEEDED(dev_->dcomp->Commit());
@@ -6571,7 +6592,23 @@ private:
         if (FAILED(swap_->GetBuffer(0, __uuidof(IDXGISurface), reinterpret_cast<void**>(surface.put()))) ||
             FAILED(dc_->CreateBitmapFromDxgiSurface(surface.get(), &props, bitmap.put())))
             return false;
-        dc_->SetTarget(bitmap.get());
+        back_ = std::move(bitmap);
+        return true;
+    }
+    // The kept frame at w x h: what the last held, as it was, at its top left.
+    bool keep(UINT w, UINT h)
+    {
+        com<ID2D1Bitmap1> next;
+        const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_TARGET, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+        if (FAILED(dc_->CreateBitmap(D2D1::SizeU(w, h), nullptr, 0, &props, next.put()))) return false;
+        if (kept_)
+        {
+            const D2D1_POINT_2U at{0, 0};
+            const D2D1_RECT_U from{0, 0, std::min(w, w_), std::min(h, h_)};
+            next->CopyFromBitmap(&at, kept_.get(), &from);
+        }
+        kept_ = std::move(next);
         return true;
     }
 
@@ -6580,6 +6617,8 @@ private:
     com<IDCompositionTarget> target_;
     com<IDCompositionVisual> visual_;
     com<ID2D1DeviceContext> dc_;
+    com<ID2D1Bitmap1> back_;  // the swap chain's buffer, drawn to at present
+    com<ID2D1Bitmap1> kept_;  // the frame, kept between frames
     UINT w_ = 0, h_ = 0;
     bool committed_ = false;
 };
@@ -7310,7 +7349,7 @@ public:
         RECT r = client();
         const int m = margin();
         InflateRect(&r, -m, -m);
-        moves_in_one_pass batch(ahead_.has_value());
+        moves_in_one_pass batch(ahead_.has_value() && !grow_ahead_);
         root->show_all(true);
         root->place(r);
     }
@@ -7438,10 +7477,28 @@ public:
         GetClientRect(hwnd_, &r);
         return r;
     }
+    // The least client area the window takes: never smaller than the content
+    // (as GTK and Qt windows), nor than an explicit minimum (WM_GETMINMAXINFO).
+    SIZE least_client() const
+    {
+        SIZE least{px(min_size_.w), px(min_size_.h)};
+        if (root)
+        {
+            const SIZE n = root->natural();
+            const int m = margin();
+            least.cx = std::max<LONG>(least.cx, n.cx + 2 * m);
+            least.cy = std::max<LONG>(least.cy, n.cy + 2 * m);
+        }
+        return least;
+    }
     void resize(size_f sz) override
     {
         if (fullscreen_ || IsZoomed(hwnd_)) return;
-        RECT r{0, 0, px(sz.w), px(sz.h)};
+        // The size it will have: the canvases draw ahead for that, so held to
+        // the least the window takes (else drawn for one it never gets, then
+        // again, the image placed anew, once Windows has held it there).
+        const SIZE least = least_client();
+        RECT r{0, 0, std::max<LONG>(px(sz.w), least.cx), std::max<LONG>(px(sz.h), least.cy)};
         if (!shown_once_) requested_ = SIZE{r.right, r.bottom};
         // Canvases draw for the new size before the window takes it (cut to
         // the window meanwhile, not scaled: see gpu_target), so its first
@@ -7451,10 +7508,20 @@ public:
         const bool ahead = root && IsWindowVisible(hwnd_);
         if (ahead)
         {
+            // Growing, its controls are moved for the new size too, first
+            // (cut to the window, as it still is): when it grows, all's in
+            // place. Else they're moved once it's resized (then they're cut
+            // to it instead), or growth's band would show the window's own
+            // background for a frame, and shrinkage the controls of its far
+            // edge (a status row) inside it.
+            RECT now;
+            GetClientRect(hwnd_, &now);
+            grow_ahead_ = r.right >= now.right && r.bottom >= now.bottom;
             ahead_ = r;
             layout_now();
             RedrawWindow(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
             ahead_.reset();
+            grow_ahead_ = false;
         }
         adjust(r);
         RECT now;
@@ -7784,16 +7851,8 @@ private:
             case WM_GETMINMAXINFO:
             {
                 auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
-                // Never smaller than the content (as GTK and Qt windows),
-                // nor than an explicit minimum.
-                RECT rc{0, 0, self->px(self->min_size_.w), self->px(self->min_size_.h)};
-                if (self->root)
-                {
-                    const SIZE n = self->root->natural();
-                    const int m = self->margin();
-                    rc.right = std::max<LONG>(rc.right, n.cx + 2 * m);
-                    rc.bottom = std::max<LONG>(rc.bottom, n.cy + 2 * m);
-                }
+                const SIZE least = self->least_client();
+                RECT rc{0, 0, least.cx, least.cy};
                 if (rc.right > 0 || rc.bottom > 0)
                 {
                     self->adjust(rc);
@@ -7923,6 +7982,7 @@ private:
     bool modal_ = false, finished_ = false, shown_once_ = false, fullscreen_ = false, relayout_pending_ = false;
     bool painted_once_ = false;  // painted as it was first shown (see show)
     std::optional<RECT> ahead_;  // the client area being laid out for, before the window has it (see resize)
+    bool grow_ahead_ = false;    // and its controls moved for it then too (see resize)
     static constexpr UINT_PTR deferred_timer = 0xDEF;
     std::optional<SIZE> requested_;  // client size from resize() before the first show
     bool placed_ = false;            // move()d by the app: left where it put it
