@@ -722,6 +722,11 @@ void move_now(HWND h, int x, int y, int w, int hgt)
 // its controls, and dragging a splitter moved them all at every step.
 std::unordered_map<HWND, RECT> g_parked;
 
+// Set while a window's controls are moved to where they'll lie across a
+// resize (window::resize): a canvas taking its size then neither tells the
+// app nor draws, keeping the frame it drew for the size it's about to have.
+bool g_canvases_quiet = false;
+
 void move_control(HWND h, int x, int y, int w, int hgt)
 {
     if (!(GetWindowLongPtrW(h, GWL_STYLE) & WS_VISIBLE))
@@ -6422,6 +6427,54 @@ struct gpu_shared
     std::shared_ptr<rap::gpu::device> api;
 };
 
+// Until the GPU has done what's queued on `dev` (canvases' frames drawn for
+// a size their window's about to take), or `max_ms` has passed: a fence and
+// its event where there are (Windows 10 1703 on), else an event query.
+void wait_for_gpu(const std::shared_ptr<gpu_shared>& dev, DWORD max_ms)
+{
+    if (!dev) return;
+    com<ID3D11DeviceContext> context;
+    dev->d3d->GetImmediateContext(context.put());
+    // Apps' passes run on their workers through Direct2D's lock: the context
+    // is used under it.
+    const auto locked = [&](auto&& f)
+    {
+        if (dev->lock) dev->lock->Enter();
+        f();
+        if (dev->lock) dev->lock->Leave();
+    };
+    com<ID3D11Device5> d3d5;
+    com<ID3D11DeviceContext4> context4;
+    com<ID3D11Fence> fence;
+    if (SUCCEEDED(dev->d3d->QueryInterface(__uuidof(ID3D11Device5), reinterpret_cast<void**>(d3d5.put()))) &&
+        SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext4), reinterpret_cast<void**>(context4.put()))) &&
+        SUCCEEDED(d3d5->CreateFence(0, D3D11_FENCE_FLAG_NONE, __uuidof(ID3D11Fence), reinterpret_cast<void**>(fence.put()))))
+    {
+        HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (done)
+        {
+            bool armed = false;
+            locked([&] { armed = SUCCEEDED(context4->Signal(fence.get(), 1)) && SUCCEEDED(fence->SetEventOnCompletion(1, done)); context->Flush(); });
+            if (armed) WaitForSingleObject(done, max_ms);
+            CloseHandle(done);
+            if (armed) return;
+        }
+    }
+    D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT, 0};
+    com<ID3D11Query> query;
+    if (FAILED(dev->d3d->CreateQuery(&desc, query.put()))) return;
+    locked([&] { context->End(query.get()); context->Flush(); });
+    const ULONGLONG until = GetTickCount64() + max_ms;
+    for (;;)
+    {
+        BOOL finished = FALSE;
+        HRESULT hr = S_OK;
+        locked([&] { hr = context->GetData(query.get(), &finished, sizeof finished, 0); });
+        if (FAILED(hr) || (hr == S_OK && finished) || GetTickCount64() >= until) return;
+        Sleep(0);
+    }
+}
+
 class gpu
 {
 public:
@@ -6871,7 +6924,7 @@ private:
         {
             PAINTSTRUCT ps;
             BeginPaint(h_, &ps);
-            render();
+            if (!g_canvases_quiet) render();
             EndPaint(h_, &ps);
             // On the GPU or off it: frames come as textures or as pixels.
             if (bool(gpu_) != gpu_reported_)
@@ -6896,6 +6949,7 @@ private:
             finish_reads(false);
             return 0;
         case WM_SIZE:
+            if (g_canvases_quiet) return 0;
             if (cpu_) cpu_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));  // the GPU's resizes as it draws
             sized();
             return 0;
@@ -7508,20 +7562,34 @@ public:
         const bool ahead = root && IsWindowVisible(hwnd_);
         if (ahead)
         {
-            // Growing, its controls are moved for the new size too, first
-            // (cut to the window, as it still is): when it grows, all's in
-            // place. Else they're moved once it's resized (then they're cut
-            // to it instead), or growth's band would show the window's own
-            // background for a frame, and shrinkage the controls of its far
-            // edge (a status row) inside it.
-            RECT now;
-            GetClientRect(hwnd_, &now);
-            grow_ahead_ = r.right >= now.right && r.bottom >= now.bottom;
+            // First for the new size, nothing moved: canvases draw for it.
             ahead_ = r;
             layout_now();
             RedrawWindow(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+            // Then its controls are moved, cut to the window as it still is,
+            // for the larger of its old size and its new one each way, the
+            // canvases quiet (their frames drawn for the new size kept):
+            // where it grows, all's in place as it does (moved after, they
+            // showed a frame at their old places, a canvas at its old size);
+            // where it shrinks, a canvas still reaches the old edge, its last
+            // frame showing past the new one until the window cuts it there
+            // (moved to the new size, the window's own background flashed
+            // white in that margin). Laid out for the new size once it's
+            // taken it.
+            RECT now;
+            GetClientRect(hwnd_, &now);
+            grow_ahead_ = true;
+            g_canvases_quiet = true;
+            ahead_ = RECT{0, 0, std::max(r.right, now.right), std::max(r.bottom, now.bottom)};
+            layout_now();
+            RedrawWindow(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+            g_canvases_quiet = false;
             ahead_.reset();
             grow_ahead_ = false;
+            // And the window takes the size once the canvases' frames for it
+            // are done, not as they're queued: a slow one (a raw developed
+            // anew) showed the window at its new size before its content.
+            wait_for_gpu(gpu::device(false), 1000);
         }
         adjust(r);
         RECT now;
