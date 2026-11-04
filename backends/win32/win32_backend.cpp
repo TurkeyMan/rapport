@@ -6101,22 +6101,19 @@ private:
     // in one go: a posted relayout, and WM_PAINT after it, waited behind
     // the stream of mouse moves, leaving stale pixels where the bar had
     // passed. Only the splitter is laid out again (nothing else changes
-    // size, and its measurements hold), its moves in one batch, and then
-    // the window paints whole, the bars' old places and new, in one pass
-    // before the next mouse move is read. Drawing isn't turned off around
-    // it (WM_SETREDRAW): that hides the window from DWM's point of view, and
-    // while it was off DWM composed the window without its canvases' GPU
-    // layers, showing the GDI surface under them (never painted there, so
-    // whatever was once drawn where they lie) for frames at a time.
+    // size, and its measurements hold), its moves in one batch, which
+    // paints what they made dirty (and only that: what moved without
+    // changing size carried its pixels, and the rest of the window is as
+    // it was) before the next mouse move is read. Drawing isn't turned off
+    // around it (WM_SETREDRAW): that hides the window from DWM's point of
+    // view, and while it was off DWM composed the window without its
+    // canvases' GPU layers, showing the GDI surface under them (never
+    // painted there, so whatever was once drawn where they lie) for frames
+    // at a time.
     void relayout_dragged()
     {
-        {
-            moves_in_one_pass batch;
-            place(rect_);
-        }
-        if (!IsWindowVisible(parent_)) return;
-        RedrawWindow(parent_, nullptr, nullptr,
-                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        moves_in_one_pass batch;
+        place(rect_);
     }
 
     win_context& win_;
