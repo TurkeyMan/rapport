@@ -408,11 +408,11 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
             }
         }
         // (Themed check boxes ignore the text colour: theirs is drawn by
-        // check_impl in dark mode. A link takes it in dark mode, where
-        // theme_control asks it to: the link colour.)
+        // check_impl in dark mode. A link takes it, as theme_control asks
+        // it to: the link colour, the accent's.)
         wchar_t cls[16] = {};
         GetClassNameW(c, cls, 16);
-        const bool link = dark_mode() && !_wcsicmp(cls, WC_LINK);
+        const bool link = !_wcsicmp(cls, WC_LINK);
         SetTextColor(reinterpret_cast<HDC>(wp),
                      color_ref(theme_color_of(!IsWindowEnabled(c) ? theme_color::disabled_text
                                               : link              ? theme_color::link
@@ -817,7 +817,9 @@ HWND create_control(win_context& win, HWND parent, const wchar_t* cls, const std
     HWND h = CreateWindowExW(ex_style, cls, text.c_str(), WS_CHILD | style, 0, 0, 0, 0, parent, nullptr,
                              instance(), nullptr);
     SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font(win.dpi())), FALSE);
-    if (dark_mode()) theme_control(h);
+    // Light is each control's own default, but a link's colour is ours (the
+    // accent's) in either.
+    if (dark_mode() || !_wcsicmp(cls, WC_LINK)) theme_control(h);
     return h;
 }
 
@@ -1316,6 +1318,9 @@ public:
         SetWindowTextW(h_, link_         ? link_markup(t).c_str()
                            : selectable_ ? to_crlf(wide(t)).c_str()
                                          : wide(t).c_str());
+        // New markup, new link items: the colour they're to take (the
+        // accent's) set on them again.
+        if (link_) theme_control(h_);
         if (!ellipsize_) win_.relayout();
     }
     ~label_impl() override

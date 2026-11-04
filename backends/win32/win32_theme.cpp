@@ -303,13 +303,17 @@ void theme_control(HWND h)
     }
     else if (class_is(h, WC_LINK))
     {
-        // The system's link blue is unreadable on dark: in dark mode the
-        // link takes its text colour from WM_CTLCOLORSTATIC (the link
-        // role), as LIS_DEFAULTCOLORS asks.
+        // The link role (the accent's text step, as Windows' own links),
+        // not the system's fixed link blue, unreadable on dark besides: the
+        // link takes its text colour from WM_CTLCOLORSTATIC, as
+        // LIS_DEFAULTCOLORS asks.
+        // Themed (light), it takes the visual style's link blue whatever it's
+        // told: unthemed, it draws as themed but in the colour it's given.
+        if (!dark) SetWindowTheme(h, L"", L"");
         LITEM item{};
         item.mask = LIF_ITEMINDEX | LIF_STATE;
         item.iLink = 0;
-        item.state = dark ? LIS_DEFAULTCOLORS : 0;
+        item.state = LIS_DEFAULTCOLORS;
         item.stateMask = LIS_DEFAULTCOLORS;
         SendMessageW(h, LM_SETITEM, 0, reinterpret_cast<LPARAM>(&item));
         InvalidateRect(h, nullptr, TRUE);
