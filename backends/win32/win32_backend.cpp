@@ -6949,9 +6949,10 @@ private:
             finish_reads(false);
             return 0;
         case WM_SIZE:
-            if (g_canvases_quiet) return 0;
+            // (Quiet, it's still sized: the window's last layout may find it
+            // at its size already, and send nothing more.)
             if (cpu_) cpu_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));  // the GPU's resizes as it draws
-            sized();
+            if (!g_canvases_quiet) sized();
             return 0;
         case WM_LBUTTONDOWN:
         case WM_LBUTTONDBLCLK: press(lp, 1); return 0;
