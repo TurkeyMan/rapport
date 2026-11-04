@@ -1116,15 +1116,6 @@ struct gpu_frame
     std::function<void()> release;
 };
 
-// How a canvas shows its last frame while its size changes in a burst
-// (canvas::stretch_while_resizing).
-enum class resize_stretch
-{
-    none,     // painted at each size, as ever
-    uniform,  // scaled to fit, its shape kept, centred on a background
-    fill,     // stretched to the new size, its shape not kept
-};
-
 // A surface the app draws itself (an image view, a chart). Everything else
 // in a window should stay a native widget.
 class canvas : public widget
@@ -1140,30 +1131,6 @@ public:
     virtual void on_paint(std::function<void(rap::painter&, rap::size_f)>) = 0;
     // Size changed, or the device scale did (moved to another monitor).
     virtual void on_resize(std::function<void(size_f)>) = 0;
-    // A burst of size changes (a window or a splitter dragged) is over: none
-    // has come for about 75 ms. The time for what's too slow to do at each.
-    // Its first size settles too, once it's shown.
-    virtual void on_resize_settled(std::function<void(size_f)>) = 0;
-    // While its size changes in a burst, the canvas shows the last frame it
-    // showed, as shown (the presented frame and on_paint's drawing), scaled
-    // to each new size, rather than painting at each. A lone change (the app
-    // fitting its window to a new image) is painted at once: the burst
-    // begins with the second inside the settle time. In a burst on_paint isn't called
-    // and no presented frame is drawn until the burst settles, then it
-    // paints as ever (on_resize is called all along). An invalidate() or a
-    // present() during the burst shows once it settles. The scaling is a
-    // moment's preview, filtered as the display's values (sRGB), not in
-    // linear light. `background`: around a uniform frame.
-    virtual void stretch_while_resizing(resize_stretch, paint background = theme_color::window) = 0;
-    // While a run of sizes is stretched: the rect `from` of the last frame
-    // shown (logical px, as it was drawn) goes to `to` on the canvas now, the
-    // rest scaled with it, around it the background. For an app that knows
-    // where its content lands at the new size (an image fitted, capped, or
-    // panned), so the stretched frame has the geometry of the frame that
-    // follows: called from on_resize, at each size. Until it's called, the
-    // whole frame is scaled as stretch_while_resizing says; it lapses as the
-    // sizes settle.
-    virtual void stretch_to(rect_f from, rect_f to) = 0;
     // Input handlers return true when they used the event.
     virtual void on_pointer(std::function<bool(const pointer_event&)>) = 0;
     virtual void on_scroll(std::function<bool(const scroll_event&)>) = 0;

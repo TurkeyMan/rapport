@@ -36,12 +36,6 @@ if(TARGET rapport_shell)
     target_link_libraries(rapport-explorer-view-test PRIVATE rapport::shell Threads::Threads)
 endif()
 
-# A canvas resized in a burst through a real backend (the one loaded, or
-# argv[1]): stretched, then settled. Shows a window: run off the desktop
-# (offscreen.sh), or with RAPPORT_NO_ACTIVATE=1 on Windows.
-add_executable(rapport-canvas-stretch-test canvas_stretch_test.cpp)
-target_link_libraries(rapport-canvas-stretch-test PRIVATE rapport::rapport)
-
 # Lists driven by synthesized input through the real backends, loaded as
 # plugins, off the desktop: GTK 3 on Broadway, Qt offscreen. (GTK 4 can't
 # synthesize input; win32's lists are native.) GTK 4's entry buttons are

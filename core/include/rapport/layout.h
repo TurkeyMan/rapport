@@ -334,14 +334,10 @@ struct canvas
     bool focusable = true;  // takes keyboard focus on click (needed for on_key)
     std::function<void(rap::painter&, rap::size_f)> on_paint;
     std::function<void(size_f)> on_resize;
-    std::function<void(size_f)> on_resize_settled;
     std::function<bool(const pointer_event&)> on_pointer;
     std::function<bool(const scroll_event&)> on_scroll;
     std::function<bool(const key_event&)> on_key;
     rap::canvas** bind = nullptr;
-    // canvas::stretch_while_resizing
-    resize_stretch stretch = resize_stretch::none;
-    paint stretch_background = theme_color::window;
 };
 
 // Without on_click, a dialog button ends the dialog with its role.
@@ -1130,17 +1126,6 @@ public:
     canvas& on_resize(std::function<void(size_f)> f)
     {
         s().on_resize = std::move(f);
-        return *this;
-    }
-    canvas& on_resize_settled(std::function<void(size_f)> f)
-    {
-        s().on_resize_settled = std::move(f);
-        return *this;
-    }
-    canvas& stretch_while_resizing(resize_stretch how, paint background = theme_color::window)
-    {
-        s().stretch = how;
-        s().stretch_background = background;
         return *this;
     }
     canvas& on_pointer(std::function<bool(const pointer_event&)> f)

@@ -9,9 +9,7 @@
 #include "builtin_icons.h"
 #include "frame_layer.h"
 #include "gpu_readback.h"
-#include "resize_burst.h"
 #include "gtk_common.h"
-#include "kept_frame.h"
 #include "list_press.h"
 
 #include <cmath>
@@ -3551,7 +3549,9 @@ public:
                     self->target_changed();
                 }
                 if (!self->paint_ && !self->frame_) return false;
-                self->draw(cr, w, scale);
+                cairo_painter painter(cr, w);
+                self->frame_.paint(painter, self->size());
+                if (self->paint_) self->paint_(painter, self->size());
                 return true;
             },
             this);
@@ -3564,7 +3564,6 @@ public:
                 self->scale_ = device_scale_of(self->w_);
                 if (self->resize_) self->resize_({float(a->width), float(a->height)});
                 self->target_changed();
-                self->resized();
             },
             this);
         connect(
@@ -3635,11 +3634,7 @@ public:
         connect(w_, "key-release-event", &canvas_impl::make_key_event, this);
     }
 
-    ~canvas_impl() override
-    {
-        if (settle_) g_source_remove(settle_);
-        on_disconnect();
-    }
+    ~canvas_impl() override { on_disconnect(); }
 
     void invalidate() override { gtk_widget_queue_draw(w_); }
     // Nothing until it has been allocated, as on GTK 4: before that GTK 3
@@ -3660,23 +3655,6 @@ public:
 
     void on_paint(std::function<void(rap::painter&, rap::size_f)> f) override { paint_ = std::move(f); }
     void on_resize(std::function<void(size_f)> f) override { resize_ = std::move(f); }
-    void on_resize_settled(std::function<void(size_f)> f) override { burst_.settled = std::move(f); }
-    void stretch_to(rect_f from, rect_f to) override
-    {
-        burst_.mapping = {{from, to}};
-        if (burst_.stretching) gtk_widget_queue_draw(w_);
-    }
-    void stretch_while_resizing(resize_stretch how, paint background) override
-    {
-        burst_.how = how;
-        burst_.background = background;
-        if (how == resize_stretch::none)
-        {
-            burst_.stretching = false;
-            kept_.reset();
-        }
-        gtk_widget_queue_draw(w_);
-    }
     void on_pointer(std::function<bool(const pointer_event&)> f) override { pointer_ = std::move(f); }
     void on_scroll(std::function<bool(const scroll_event&)> f) override { scroll_ = std::move(f); }
     void on_key(std::function<bool(const key_event&)> f) override { key_ = std::move(f); }
@@ -3849,59 +3827,10 @@ private:
         if (c) g_object_unref(c);
     }
 
-    // The frame and the painting; while a resize burst lasts, the last of
-    // them kept and scaled instead (canvas::stretch_while_resizing).
-    void draw(cairo_t* cr, GtkWidget* w, float scale)
-    {
-        cairo_painter painter(cr, w);
-        if (burst_.stretching && kept_)
-        {
-            painter.rect({0, 0, size().w, size().h}, 0, burst_.background, std::nullopt);
-            kept_.show(cr, burst_.where(kept_.size(), size()));
-            return;
-        }
-        const auto paint = [&](rap::painter& p)
-        {
-            frame_.paint(p, size());
-            if (paint_) paint_(p, size());
-        };
-        if (!burst_.keeps()) return paint(painter);
-        kept_.draw(cr, size(), scale,
-                   [&](cairo_t* off)
-                   {
-                       cairo_painter kept(off, w);
-                       paint(kept);
-                   },
-                   [&] { return burst_.keeps(); });
-    }
-    // A size change: a burst begins or goes on, over once none has come
-    // for a while.
-    void resized()
-    {
-        if (!burst_.keeps() && !burst_.settled) return;
-        burst_.resized(bool(kept_));
-        if (settle_) g_source_remove(settle_);
-        settle_ = g_timeout_add(
-            frames::settle_ms,
-            +[](gpointer p) -> gboolean
-            {
-                auto* self = static_cast<canvas_impl*>(p);
-                self->settle_ = 0;
-                const size_f size = self->size();
-                if (self->burst_.stretching) gtk_widget_queue_draw(self->w_);
-                if (const auto tell = self->burst_.settle()) tell(size);  // last: it may end the canvas
-                return G_SOURCE_REMOVE;
-            },
-            this);
-    }
-
     std::function<void(rap::painter&, rap::size_f)> paint_;
     std::function<void(size_f)> resize_;
     frames::frame_layer frame_;
     frames::gpu_readback readback_;  // GPU textures shown as pixels
-    frames::resize_burst burst_;
-    kept_frame kept_;
-    guint settle_ = 0;
     std::function<void(const rap::frame_target&)> frame_target_;
     void target_changed()
     {
