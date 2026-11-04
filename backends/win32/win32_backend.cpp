@@ -79,7 +79,8 @@ std::wstring mnemonic(const std::string& s)
 constexpr UINT wm_rapport_frame = WM_APP + 2;
 constexpr UINT wm_rapport_relayout = WM_APP + 3;
 constexpr UINT wm_rapport_selection = WM_APP + 4;  // a list's coalesced selection change
-constexpr UINT wm_rapport_fill_last = WM_APP + 5;  // a list's last column refits, once a header drag lands
+constexpr UINT wm_rapport_fill_last = WM_APP + 5;
+constexpr UINT wm_rapport_read_back = WM_APP + 6;  // a pane's canvas's frame, read back  // a list's last column refits, once a header drag lands
 
 HINSTANCE instance()
 {
@@ -258,10 +259,12 @@ std::map<HWND, HBRUSH>& tab_bodies()
     static std::map<HWND, HBRUSH> m;
     return m;
 }
+unsigned g_tab_bodies_gen = 0;  // bumped as they're forgotten
 void forget_tab_bodies()
 {
     for (auto& [tab, brush] : tab_bodies()) DeleteObject(brush);
     tab_bodies().clear();
+    ++g_tab_bodies_gen;
 }
 HBRUSH tab_body_brush(HWND tab)
 {
@@ -286,7 +289,25 @@ HBRUSH tab_body_brush(HWND tab)
 }
 // The body brush of a visible tab control `control` lies wholly over (a
 // sibling, as its pages' controls are), if any.
+HBRUSH tab_body_under_scan(HWND control);
+// Asked by each label as it paints (WM_CTLCOLORSTATIC): found once per
+// control and layout pass, not by a walk over its siblings at every paint.
 HBRUSH tab_body_under(HWND control)
+{
+    struct known
+    {
+        unsigned pass, gen;
+        HBRUSH brush;
+    };
+    static std::unordered_map<HWND, known> cache;
+    if (auto it = cache.find(control);
+        it != cache.end() && it->second.pass == g_layout_pass && it->second.gen == g_tab_bodies_gen)
+        return it->second.brush;
+    const HBRUSH b = tab_body_under_scan(control);
+    cache[control] = {g_layout_pass, g_tab_bodies_gen, b};
+    return b;
+}
+HBRUSH tab_body_under_scan(HWND control)
 {
     RECT at;
     GetWindowRect(control, &at);
@@ -439,9 +460,49 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
 
 // A plain child window that hosts other controls (scroll viewports), passing
 // their notifications on.
+HWND g_printing_pane = nullptr;  // a pane's panel being drawn off screen (paint_pane)
+
+// A scroll pane's panel and everything on it drawn off screen (WM_PRINT: its
+// background, then its controls in turn, into the one bitmap), then put on
+// screen in one go: its controls, moved and sized by a layout pass without
+// painting (see moves_in_one_pass), otherwise showed landing one at a time.
+// It's its WM_PAINT, which comes when nothing else is waiting: dragging a
+// splitter, the pane's last pixels (moved along with it) show until it's
+// drawn, and the panes beside it keep up with the pointer meanwhile.
+void paint_pane(HWND panel, HDC dc)
+{
+    RECT c;
+    GetClientRect(panel, &c);
+    if (c.right <= 0 || c.bottom <= 0) return;
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, c.right, c.bottom);
+    HGDIOBJ old = SelectObject(mem, bitmap);
+    g_printing_pane = panel;
+    SendMessageW(panel, WM_PRINT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN);
+    g_printing_pane = nullptr;
+    BitBlt(dc, 0, 0, c.right, c.bottom, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteObject(bitmap);
+    DeleteDC(mem);
+    // Its controls are on screen as drawn here: their own paints aren't due.
+    RedrawWindow(panel, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_ALLCHILDREN);
+}
+
 LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     LRESULT r = 0;
+    if ((msg == WM_PAINT || msg == WM_ERASEBKGND) && GetPropW(h, L"rapport-pane"))
+    {
+        if (msg == WM_ERASEBKGND && g_printing_pane != h) return 1;  // drawn whole in WM_PAINT
+        if (msg == WM_PAINT)
+        {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            paint_pane(h, dc);
+            EndPaint(h, &ps);
+            return 0;
+        }
+    }
     if (forward_child_message(h, msg, wp, lp, r)) return r;
     if (auto* fn = reinterpret_cast<std::function<LRESULT(HWND, UINT, WPARAM, LPARAM, bool&)>*>(
             GetWindowLongPtrW(h, GWLP_USERDATA)))
@@ -679,6 +740,7 @@ struct move_batch
 {
     std::map<HWND, std::vector<std::pair<HWND, RECT>>> moves;  // parent -> its children's moves
     std::vector<std::pair<HWND, bool>> shown;                  // controls shown or hidden, once moved
+    std::set<HWND> panes;  // scroll panes' panels resized in the pass: drawn off screen when they paint (paint_pane)
     // For a size the window doesn't have yet (see window::resize): nothing
     // moves or shows, and canvases draw for where they'll be.
     bool ahead = false;
@@ -744,6 +806,15 @@ void move_control(HWND h, int x, int y, int w, int hgt)
 
 void show_now(HWND h, bool shown);
 
+// The scroll pane's panel `h` lies on (or is), if any: what's drawn off
+// screen and shown in one go (see paint_pane).
+HWND pane_of(HWND h)
+{
+    for (; h; h = GetParent(h))
+        if (GetPropW(h, L"rapport-pane")) return h;
+    return nullptr;
+}
+
 // Batches the moves of a layout pass (nested passes join the outer one),
 // and the shows and hides, made once the moves are.
 class moves_in_one_pass
@@ -758,16 +829,34 @@ public:
         if (!owner_) return;
         g_moves = nullptr;
         if (batch_.ahead) return;
+        // On a scroll pane's panel, controls move without painting, and the
+        // panel's drawn off screen when it next paints, then shown in one go
+        // (paint_pane).
+        std::set<HWND> buffered;
         for (auto& [parent, list] : batch_.moves)
         {
-            HDWP dwp = BeginDeferWindowPos(int(list.size()));
-            for (auto& [h, r] : list)
-                if (dwp)
-                    dwp = DeferWindowPos(dwp, h, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
-                                         move_flags_for(h, r.right - r.left, r.bottom - r.top));
+            const HWND whole = pane_of(parent);
+            if (whole) buffered.insert(whole);
+            // Once each: a control placed twice in a pass (a scroll pane's
+            // content laid out as its host took its size, then again) moved
+            // twice, and every move of a shown window costs (its clip and
+            // visible regions, its neighbours', the compositor's), more than
+            // what the control itself does with its new size.
+            std::unordered_map<HWND, size_t> last;
+            for (size_t i = 0; i < list.size(); ++i) last[list[i].first] = i;
+            HDWP dwp = BeginDeferWindowPos(int(last.size()));
+            for (size_t i = 0; i < list.size(); ++i)
+            {
+                const auto& [h, r] = list[i];
+                if (last[h] != i || !dwp) continue;
+                dwp = DeferWindowPos(dwp, h, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                                     move_flags_for(h, r.right - r.left, r.bottom - r.top) | (whole ? SWP_NOREDRAW : 0));
+            }
             if (dwp) EndDeferWindowPos(dwp);
         }
         for (auto [h, shown] : batch_.shown) show_now(h, shown);
+        buffered.insert(batch_.panes.begin(), batch_.panes.end());
+        for (HWND whole : buffered) InvalidateRect(whole, nullptr, FALSE);
         // Then painted, all of them, before anything else runs: left to their
         // WM_PAINTs, which come only once the queue is idle, they landed a
         // band at a time over several frames (a pane's controls, top to
@@ -3116,6 +3205,7 @@ public:
         , digits_(s.digits)
     {
         adopt(create_control(win, parent, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP));
+        SetWindowSubclass(h_, size_without_painting, 5, 0);
         marks_ = s.marks;
         apply_range();
         SendMessageW(h_, TBM_SETLINESIZE, 0, 1);
@@ -3166,6 +3256,46 @@ public:
         if (snap_ && (code == TB_THUMBTRACK || code == TB_THUMBPOSITION)) snap_to_mark();
         update_label();
         if (changed_) changed_(value());
+    }
+    // A trackbar paints itself there and then as it takes a new size (its
+    // WM_SIZE forces its WM_NCPAINT, WM_ERASEBKGND and WM_PAINT): resized in
+    // a layout pass's batch, each slider repainted in turn as its move was
+    // made, ahead of the rest, and again with them in the pass's one update
+    // after. That paint is let go, and it's left to paint with the rest.
+    static LRESULT CALLBACK size_without_painting(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR)
+    {
+        static HWND sizing = nullptr;
+        switch (msg)
+        {
+        case WM_SIZE:
+        {
+            const HWND outer = sizing;
+            sizing = h;
+            const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+            sizing = outer;
+            // On a pane, it's drawn with the pane (paint_pane).
+            if (!pane_of(GetParent(h))) RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+            return r;
+        }
+        case WM_PAINT:
+            if (sizing != h) break;
+            {
+                PAINTSTRUCT ps;
+                BeginPaint(h, &ps);
+                EndPaint(h, &ps);
+            }
+            return 0;
+        case WM_ERASEBKGND:
+            if (sizing == h) return 1;
+            break;
+        case WM_NCPAINT:
+            if (sizing == h) return 0;
+            break;
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(h, size_without_painting, id);
+            break;
+        }
+        return DefSubclassProc(h, msg, wp, lp);
     }
     void place(RECT r) override
     {
@@ -6154,6 +6284,8 @@ public:
         // The panel erases under its children: group boxes are transparent
         // and never erase their insides.
         panel_ = make_host(host_);
+        // A canvas in it paints with its controls (see canvas_impl::with_pane).
+        SetPropW(panel_, L"rapport-pane", reinterpret_cast<HANDLE>(1));
         SetWindowLongPtrW(panel_, GWL_STYLE, GetWindowLongPtrW(panel_, GWL_STYLE) & ~WS_CLIPCHILDREN);
         show_control(panel_, true);
     }
@@ -6172,8 +6304,24 @@ public:
     }
     void place(RECT r) override
     {
-        move_now(host_, r.left, r.top, r.right - r.left, r.bottom - r.top);
-        layout_content();
+        // Resizing the host lays the content out (WM_SIZE, below): not again.
+        laid_out_ = false;
+        move_pane_window(host_, r.left, r.top, r.right - r.left, r.bottom - r.top);
+        if (!laid_out_) layout_content();
+    }
+    // In a layout pass the host and its panel move with their pixels (not
+    // erased: the pane showed blank until it was drawn again), and the panel
+    // is drawn off screen when it next paints (paint_pane). Elsewhere, as
+    // move_now.
+    void move_pane_window(HWND h, int x, int y, int w, int hgt)
+    {
+        if (!g_moves || g_moves->ahead)
+        {
+            move_now(h, x, y, w, hgt);
+            return;
+        }
+        g_moves->panes.insert(panel_);
+        if (!placed_at(h, x, y, w, hgt)) SetWindowPos(h, nullptr, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     void show_all(bool shown) override
     {
@@ -6196,6 +6344,7 @@ private:
             return;
         }
         laying_out_ = true;
+        laid_out_ = true;
         // (A bar that shows only while the other is hidden could flip for
         // ever: three goes, and the last one stands.)
         for (int tries = 0; tries < 3; ++tries)
@@ -6230,7 +6379,7 @@ private:
         RECT now;
         GetClientRect(host_, &now);
         if (!last && (now.right != client.right || now.bottom != client.bottom)) return false;
-        move_now(panel_, -x_, -y_, w, h);
+        move_pane_window(panel_, -x_, -y_, w, h);
         content->place({0, 0, w, h});
         content_w_ = w, content_h_ = h;
         return true;
@@ -6298,6 +6447,7 @@ private:
     long x_ = 0, y_ = 0;
     long content_w_ = 0, content_h_ = 0;
     bool laying_out_ = false, again_ = false;
+    bool laid_out_ = false;  // by the host's WM_SIZE, in place()
 };
 
 // -- frames -------------------------------------------------------------------
@@ -6701,6 +6851,12 @@ public:
     ~canvas_impl() override
     {
         *alive_ = false;
+        if (slot_)
+        {
+            std::lock_guard<std::mutex> lock(slot_->m);
+            slot_->to = nullptr;  // a read back that lands now goes nowhere
+        }
+        if (dc_key_) retire_resource_key(dc_key_);
         if (cpu_key_) retire_resource_key(cpu_key_);
         retire_gpu_frame();
         finish_reads(true);
@@ -6772,6 +6928,11 @@ public:
     }
     void present(rap::gpu::texture_ptr texture, rap::gpu::ticket, frame_color) override
     {
+        if (with_pane())
+        {
+            read_back(std::move(texture));
+            return;
+        }
         // Drawn on the device that made it, after it in the context's order:
         // `ready` needs no wait. That's the one gpu_device hands out, which
         // the canvas may not have taken yet (it does at its next paint).
@@ -6923,8 +7084,13 @@ private:
         case WM_PAINT:
         {
             PAINTSTRUCT ps;
-            BeginPaint(h_, &ps);
-            if (!g_canvases_quiet) render();
+            HDC dc = BeginPaint(h_, &ps);
+            if (g_canvases_quiet)
+                ;
+            else if (with_pane())
+                render_into(dc);
+            else
+                render();
             EndPaint(h_, &ps);
             // On the GPU or off it: frames come as textures or as pixels.
             if (bool(gpu_) != gpu_reported_)
@@ -6947,6 +7113,12 @@ private:
             }
             if (wp != k_reads_timer) return DefWindowProcW(h_, msg, wp, lp);
             finish_reads(false);
+            return 0;
+        case wm_rapport_read_back:
+            take_read_back();
+            return 0;
+        case WM_PRINTCLIENT:
+            if (with_pane()) render_into(reinterpret_cast<HDC>(wp));
             return 0;
         case WM_SIZE:
             // (Quiet, it's still sized: the window's last layout may find it
@@ -7099,6 +7271,115 @@ private:
         // device is up (canvases otherwise take it at their next paint).
         if (frame_target_) SetTimer(h_, k_device_timer, 50, nullptr);
     }
+    // In a scroll pane, among its controls (a histogram above its readings
+    // and sliders), a canvas paints in WM_PAINT into the DC it's given, as
+    // they do: on a swap chain of its own it showed on its own schedule,
+    // ahead of or behind them as the pane was resized. The app's textures
+    // are read back to pixels for it.
+    bool with_pane() const
+    {
+        for (HWND p = GetParent(h_); p; p = GetParent(p))
+            if (GetPropW(p, L"rapport-pane")) return true;
+        return false;
+    }
+    struct read_back_slot
+    {
+        std::mutex m;
+        HWND to = nullptr;  // null once the canvas has gone
+        std::vector<uint8_t> pixels;  // rgba8, rows of w * 4
+        int w = 0, h = 0;
+        bool ready = false;
+    };
+    void read_back(rap::gpu::texture_ptr texture)
+    {
+        const std::shared_ptr<rap::gpu::device> dev = gpu_device();
+        if (!dev || !texture || texture->format() != rap::gpu::format::rgba8) return;
+        if (!slot_)
+        {
+            slot_ = std::make_shared<read_back_slot>();
+            slot_->to = h_;
+        }
+        const int w = texture->width(), h = texture->height();
+        auto pixels = std::make_shared<std::vector<std::byte>>(size_t(w) * size_t(h) * 4);
+        std::weak_ptr<read_back_slot> slot = slot_;
+        dev->readback(texture, *pixels, size_t(w) * 4, 0,
+                      [slot, pixels, texture, w, h]
+                      {
+                          const auto s = slot.lock();
+                          if (!s) return;
+                          std::lock_guard<std::mutex> lock(s->m);
+                          s->pixels.assign(reinterpret_cast<const uint8_t*>(pixels->data()),
+                                           reinterpret_cast<const uint8_t*>(pixels->data()) + pixels->size());
+                          s->w = w, s->h = h, s->ready = true;
+                          if (s->to) PostMessageW(s->to, wm_rapport_read_back, 0, 0);
+                      });
+    }
+    // On the UI thread: the pixels read back, shown.
+    void take_read_back()
+    {
+        if (!slot_) return;
+        {
+            std::lock_guard<std::mutex> lock(slot_->m);
+            if (!slot_->ready) return;
+            slot_->ready = false;
+            shown_pixels_.swap(slot_->pixels);
+            shown_w_ = slot_->w, shown_h_ = slot_->h;
+        }
+        // Direct2D's bitmaps are BGRA.
+        for (size_t i = 0; i + 3 < shown_pixels_.size(); i += 4) std::swap(shown_pixels_[i], shown_pixels_[i + 2]);
+        shown_bitmap_.reset();
+        InvalidateRect(h_, nullptr, FALSE);
+    }
+    void render_into(HDC dc)
+    {
+        RECT c;
+        GetClientRect(h_, &c);
+        if (!dc_rt_)
+        {
+            const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+            if (FAILED(d2d_factory()->CreateDCRenderTarget(&props, dc_rt_.put()))) return;
+            dc_key_ = new_resource_key();
+        }
+        if (FAILED(dc_rt_->BindDC(dc, &c))) return;
+        dc_rt_->BeginDraw();
+        dc_rt_->Clear(d2d_color(theme_color_of(theme_color::window)));
+        if (!shown_pixels_.empty() && shown_w_ > 0 && shown_h_ > 0)
+        {
+            if (!shown_bitmap_)
+                dc_rt_->CreateBitmap(D2D1::SizeU(UINT(shown_w_), UINT(shown_h_)), shown_pixels_.data(), UINT(shown_w_) * 4,
+                                     D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)),
+                                     shown_bitmap_.put());
+            if (shown_bitmap_)
+            {
+                dc_rt_->SetDpi(96, 96);
+                dc_rt_->SetTransform(D2D1::Matrix3x2F::Identity());
+                dc_rt_->DrawBitmap(shown_bitmap_.get(), D2D1::RectF(0, 0, float(shown_w_), float(shown_h_)), 1,
+                                   D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+            }
+        }
+        if (paint_ || frame_)
+        {
+            d2d_painter p(dc_rt_.get(), win_.scale(), dc_key_);
+            frame_.paint(p, size());
+            if (paint_) paint_(p, size());
+        }
+        if (dc_rt_->EndDraw() == D2DERR_RECREATE_TARGET)
+        {
+            dc_rt_.reset();
+            shown_bitmap_.reset();
+            retire_resource_key(dc_key_);
+            dc_key_ = 0;
+        }
+        painted_ = true;
+    }
+    std::shared_ptr<read_back_slot> slot_;
+    std::vector<uint8_t> shown_pixels_;
+    int shown_w_ = 0, shown_h_ = 0;
+    com<ID2D1Bitmap> shown_bitmap_;
+    com<ID2D1DCRenderTarget> dc_rt_;
+    uint64_t dc_key_ = 0;
+
     void draw(ID2D1RenderTarget* rt, uint64_t key, ID2D1DeviceContext* gpu = nullptr)
     {
         rt->Clear(d2d_color(theme_color_of(theme_color::window)));
