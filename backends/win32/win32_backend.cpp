@@ -469,23 +469,35 @@ HWND g_printing_pane = nullptr;  // a pane's panel being drawn off screen (paint
 // It's its WM_PAINT, which comes when nothing else is waiting: dragging a
 // splitter, the pane's last pixels (moved along with it) show until it's
 // drawn, and the panes beside it keep up with the pointer meanwhile.
-void paint_pane(HWND panel, HDC dc)
+// True if it drew the panel and its controls are on screen as drawn here;
+// false (nothing done: their own paints still due) if the off-screen copy
+// couldn't be made.
+bool paint_pane(HWND panel)
 {
     RECT c;
     GetClientRect(panel, &c);
-    if (c.right <= 0 || c.bottom <= 0) return;
-    HDC mem = CreateCompatibleDC(dc);
-    HBITMAP bitmap = CreateCompatibleBitmap(dc, c.right, c.bottom);
-    HGDIOBJ old = SelectObject(mem, bitmap);
-    g_printing_pane = panel;
-    SendMessageW(panel, WM_PRINT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN);
-    g_printing_pane = nullptr;
-    BitBlt(dc, 0, 0, c.right, c.bottom, mem, 0, 0, SRCCOPY);
-    SelectObject(mem, old);
-    DeleteObject(bitmap);
-    DeleteDC(mem);
-    // Its controls are on screen as drawn here: their own paints aren't due.
-    RedrawWindow(panel, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_ALLCHILDREN);
+    if (c.right <= 0 || c.bottom <= 0) return false;
+    // The whole panel copied, through a DC not cut to its update region: its
+    // controls' paints are then all done here, wherever they were due.
+    HDC screen = GetDC(panel);
+    if (!screen) return false;
+    HDC mem = CreateCompatibleDC(screen);
+    HBITMAP bitmap = mem ? CreateCompatibleBitmap(screen, c.right, c.bottom) : nullptr;
+    HGDIOBJ old = bitmap ? SelectObject(mem, bitmap) : nullptr;
+    bool drawn = false;
+    if (old && old != HGDI_ERROR)
+    {
+        g_printing_pane = panel;
+        SendMessageW(panel, WM_PRINT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN);
+        g_printing_pane = nullptr;
+        drawn = BitBlt(screen, 0, 0, c.right, c.bottom, mem, 0, 0, SRCCOPY) != FALSE;
+        SelectObject(mem, old);
+    }
+    if (bitmap) DeleteObject(bitmap);
+    if (mem) DeleteDC(mem);
+    ReleaseDC(panel, screen);
+    if (drawn) RedrawWindow(panel, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_ALLCHILDREN);
+    return drawn;
 }
 
 LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -498,7 +510,10 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         {
             PAINTSTRUCT ps;
             HDC dc = BeginPaint(h, &ps);
-            paint_pane(h, dc);
+            // Not drawn off screen: its background as usual, its controls
+            // painting themselves (their paints are still due).
+            if (!paint_pane(h))
+                FillRect(dc, &ps.rcPaint, reinterpret_cast<HBRUSH>(GetClassLongPtrW(h, GCLP_HBRBACKGROUND)));
             EndPaint(h, &ps);
             return 0;
         }
