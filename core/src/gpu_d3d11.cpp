@@ -332,6 +332,7 @@ public:
         if (region.empty()) region = {0, 0, lw, lh};
         region.w = std::min(region.w, lw - region.x), region.h = std::min(region.h, lh - region.y);
         if (region.x < 0 || region.y < 0 || region.empty()) return {};
+        if (!upload_fits(pixels.size(), layout, region.w, region.h)) return {};
         const size_t stride = bytes_per_pixel(t->f) * size_t(region.w);
         std::vector<std::byte> staging(stride * size_t(region.h));
         convert(pixels, layout, region.w, region.h, t->f, staging.data(), stride);
@@ -348,7 +349,7 @@ public:
         if (!t || level < 0 || level >= t->levels) return {};
         const int lw = std::max(1, t->w >> level), lh = std::max(1, t->h >> level);
         const size_t row = bytes_per_pixel(t->f) * size_t(lw);
-        if (stride < row || out.size() < stride * size_t(lh - 1) + row) return {};
+        if (!rows_fit(out.size(), row, stride, lh)) return {};
         D3D11_TEXTURE2D_DESC td{};
         td.Width = UINT(lw);
         td.Height = UINT(lh);

@@ -175,6 +175,14 @@ void from_float(float v, format_info::kind k, std::byte* out)
 
 }  // namespace
 
+bool upload_fits(size_t bytes, const source_layout& layout, int width, int height)
+{
+    const size_t pixel = sample_bytes(layout.type) * size_t(std::clamp(layout.channels, 1, 4));
+    if (width <= 0 || size_t(width) > bytes / pixel) return false;
+    const size_t row = size_t(width) * pixel;
+    return rows_fit(bytes, row, layout.stride ? layout.stride : row, height);
+}
+
 void convert(std::span<const std::byte> pixels, const source_layout& layout, int w, int h, format target,
              std::byte* out, size_t out_stride)
 {
