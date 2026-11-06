@@ -47,13 +47,15 @@ const std::vector<std::string>& languages();
 // Loads `domain`'s translation from `folder`: the file for the first of
 // languages() there is one for, trying a tag then its language alone
 // (de-AT, then de). None when English comes first. Returns the tag loaded,
-// or "" for none (the strings stay as written).
+// or "" when no file was loaded. Reaching English in the preference list selects
+// the source strings. Exhausting the list keeps the previous catalog active.
+// Load and reload during setup, before concurrent lookups.
 std::string load(std::string_view domain, const std::filesystem::path& folder);
 // The tag `domain` is in, "" for English.
 std::string loaded(std::string_view domain);
 
 // Lookups: the translation, else `text` itself. The result lives as long
-// as the process (or as `text`).
+// as the process, including across a reload (or as `text` for a fallback).
 const char* tr(std::string_view domain, const char* text);
 // For a text that means different things in different places ("Open" a
 // file, "Open" as a state).

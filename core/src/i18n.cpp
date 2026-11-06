@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -368,7 +369,8 @@ std::optional<catalog> read_po(const std::filesystem::path& path)
 struct state
 {
     std::vector<std::string> languages;
-    std::map<std::string, catalog, std::less<>> domains;
+    std::list<catalog> catalogs;  // lookup pointers survive domain replacement
+    std::map<std::string, const catalog*, std::less<>> domains;
 };
 
 state& global()
@@ -381,7 +383,7 @@ const catalog* find(std::string_view domain)
 {
     auto& d = global().domains;
     auto it = d.find(domain);
-    return it == d.end() ? nullptr : &it->second;
+    return it == d.end() ? nullptr : it->second;
 }
 
 std::string base_language(std::string_view tag)
@@ -449,15 +451,18 @@ const std::vector<std::string>& languages()
 std::string load(std::string_view domain, const std::filesystem::path& folder)
 {
     auto& d = global().domains;
-    d.erase(std::string(domain));
     for (const std::string& tag : global().languages)
     {
-        if (base_language(tag) == "en") return {};  // English first: as written
+        if (base_language(tag) == "en")
+        {
+            d.erase(std::string(domain));
+            return {};
+        }
         for (const std::string& name : candidates(tag))
             if (auto cat = read_po(po_path(folder, domain, name)))
             {
                 cat->tag = name;
-                d.emplace(std::string(domain), std::move(*cat));
+                d[std::string(domain)] = &global().catalogs.emplace_back(std::move(*cat));
                 return name;
             }
     }

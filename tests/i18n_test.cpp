@@ -55,8 +55,19 @@ int main(int argc, char** argv)
     eq(i::stock_label(rap::dialog_role::ok), "_OK", "stock label untranslated");
     eq(i::shortcut_label("Ctrl+Shift+S"), "Strg+Umschalt+S", "shortcut");
     eq(i::shortcut_label("Ctrl++"), "Strg++", "shortcut plus key");
+    const char* german = i::tr("app", "Open");
+    i::set_languages({"fr"});
+    eq(i::load("app", dir / "missing"), "", "missing replacement");
+    eq(i::loaded("app"), "de", "missing replacement keeps the active catalog");
+    eq(i::tr("app", "Open"), german, "lookups still use the old catalog");
+    i::set_languages({"fr", "en"});
+    eq(i::load("app", dir), "", "missing French falls through to English");
+    eq(i::loaded("app"), "", "English clears the active domain mapping");
+    eq(i::tr("app", "Open"), "Open", "English fallback uses source strings");
+    eq(german, "Öffnen", "previous lookup survives English fallback");
     i::set_languages({"pl"});
     eq(i::load("app", dir), "pl", "polish");
+    eq(german, "Öffnen", "translated pointer survives replacement");
     const char* want[] = {"0 plików", "1 plik", "2 pliki", "5 plików", "12 plików", "22 pliki", "25 plików", "112 plików"};
     int ns[] = {0, 1, 2, 5, 12, 22, 25, 112};
     for (int k = 0; k < 8; ++k)
