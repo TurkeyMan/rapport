@@ -7311,6 +7311,7 @@ private:
     struct read_back_slot
     {
         std::mutex m;
+        std::shared_ptr<rap::gpu::device> device;
         HWND to = nullptr;  // null once the canvas has gone
         std::vector<uint8_t> pixels;  // rgba8, rows of w * 4
         int w = 0, h = 0;
@@ -7329,11 +7330,12 @@ private:
         auto pixels = std::make_shared<std::vector<std::byte>>(size_t(w) * size_t(h) * 4);
         std::weak_ptr<read_back_slot> slot = slot_;
         dev->readback(texture, *pixels, size_t(w) * 4, 0,
-                      [slot, pixels, texture, w, h]
+                      [dev, slot, pixels, texture, w, h]
                       {
                           const auto s = slot.lock();
-                          if (!s) return;
+                          if (!s || dev->lost()) return;
                           std::lock_guard<std::mutex> lock(s->m);
+                          s->device = dev;
                           s->pixels.assign(reinterpret_cast<const uint8_t*>(pixels->data()),
                                            reinterpret_cast<const uint8_t*>(pixels->data()) + pixels->size());
                           s->w = w, s->h = h, s->ready = true;
@@ -7348,6 +7350,7 @@ private:
             std::lock_guard<std::mutex> lock(slot_->m);
             if (!slot_->ready) return;
             slot_->ready = false;
+            if (std::exchange(slot_->device, nullptr)->lost()) return;
             shown_pixels_.swap(slot_->pixels);
             shown_w_ = slot_->w, shown_h_ = slot_->h;
         }

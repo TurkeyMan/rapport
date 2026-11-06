@@ -261,7 +261,9 @@ public:
                           int level = 0, rect region = {}) = 0;
     // Fills `out` (the texture's format, rows of `stride` bytes) by the time
     // the ticket is done; `out` must outlive that. `done`, if given, runs
-    // then on a rapport thread.
+    // then on a rapport thread. If the device is lost during readback, the
+    // ticket still completes and done still runs. Check lost() before using out;
+    // a failed readback leaves it untouched.
     virtual ticket readback(const texture_ptr&, std::span<std::byte> out, size_t stride, int level = 0,
                             std::function<void()> done = {}) = 0;
 

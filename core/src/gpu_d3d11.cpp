@@ -295,7 +295,7 @@ public:
         return {};
     }
     int max_texture_size() const override { return max_size_; }
-    bool lost() const override { return d3d_->GetDeviceRemovedReason() != S_OK; }
+    bool lost() const override { return readback_failed_ || d3d_->GetDeviceRemovedReason() != S_OK; }
 
     texture_ptr create(const texture_desc& desc) override
     {
@@ -374,7 +374,7 @@ public:
                   D3D11_MAPPED_SUBRESOURCE m{};
                   {
                       lock_t l(*this);
-                      if (SUCCEEDED(ctx_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
+                      if (map_readback(staging.Get(), m))
                       {
                           for (int y = 0; y < lh; ++y)
                               std::memcpy(out.data() + size_t(y) * stride,
@@ -507,7 +507,7 @@ public:
                   D3D11_MAPPED_SUBRESOURCE m{};
                   {
                       lock_t l(*this);
-                      if (SUCCEEDED(ctx_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
+                      if (map_readback(staging.Get(), m))
                       {
                           std::memcpy(out.data(), m.pData, bytes);
                           ctx_->Unmap(staging.Get(), 0);
@@ -724,6 +724,15 @@ private:
         }
         return done_;
     }
+    bool map_readback(ID3D11Resource* staging, D3D11_MAPPED_SUBRESOURCE& mapped)
+    {
+        if (lost()) return false;
+        if (!readback_map_failure_requested() && SUCCEEDED(ctx_->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)))
+            return true;
+        readback_failed_ = true;
+        return false;
+    }
+
     void wait_for(uint64_t v) const
     {
         if (fence_)
@@ -731,11 +740,11 @@ private:
             if (fence_->GetCompletedValue() >= v) return;
             HANDLE e = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             if (e && SUCCEEDED(fence_->SetEventOnCompletion(v, e)))
-                WaitForSingleObject(e, lost() ? 0 : INFINITE);
+                WaitForSingleObject(e, d3d_->GetDeviceRemovedReason() == S_OK ? INFINITE : 0);
             if (e) CloseHandle(e);
             return;
         }
-        while (completed() < v && !lost()) Sleep(1);
+        while (completed() < v && d3d_->GetDeviceRemovedReason() == S_OK) Sleep(1);
     }
 
     // Work for the device's thread once the GPU reaches `value`, in order.
@@ -781,6 +790,7 @@ private:
     mutable std::mutex queries_m_;
     mutable std::deque<std::pair<uint64_t, ComPtr<ID3D11Query>>> queries_;
     mutable uint64_t done_ = 0;
+    std::atomic<bool> readback_failed_ = false;
     bool software_ = false;
     int max_size_ = 16384;
 

@@ -6,11 +6,18 @@
 #include "rapport/widgets.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
 namespace rap::gpu
 {
+
+#ifdef RAPPORT_TEST_READBACK
+static std::atomic<bool> fail_map = false;
+void fail_next_readback_map() { fail_map = true; }
+bool readback_map_failure_requested() { return fail_map.exchange(false); }
+#endif
 
 format_info info(format f)
 {

@@ -44,6 +44,9 @@ add_library(rapport ${rapport_library_type}
     src/i18n.cpp
     src/gpu.cpp)
 add_library(rapport::rapport ALIAS rapport)
+if(RAPPORT_TESTS)
+    target_compile_definitions(rapport PRIVATE RAPPORT_TEST_READBACK)
+endif()
 target_link_libraries(rapport PUBLIC rapport_headers PRIVATE ${CMAKE_DL_LIBS})
 # Starting programs, as the shell extensions do too (common/launch.h).
 target_sources(rapport PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common/launch.cpp)
