@@ -84,8 +84,7 @@ namespace rap
 {
 class splitter;
 }
-// Harness-only: returns a borrowed bar HWND only in a trace-enabled session.
-// Returns nullptr for a disabled session, wrong backend, index or UI thread.
+// Returns the bar HWND as void*, or nullptr for a wrong backend, index or UI thread.
 // The caller must keep the splitter alive. The returned HWND is borrowed.
 #ifdef RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
 extern "C" __declspec(dllexport) void* rapport_win32_trace_splitter_bar(rap::splitter*, unsigned index);
