@@ -79,3 +79,15 @@ extern "C" __declspec(dllexport) bool rapport_win32_trace_dump();
 #else
 extern "C" bool rapport_win32_trace_dump();
 #endif
+
+namespace rap
+{
+class splitter;
+}
+// Returns the bar HWND as void*, or nullptr for a wrong backend, index or UI thread.
+// The caller must keep the splitter alive. The returned HWND is borrowed.
+#ifdef RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
+extern "C" __declspec(dllexport) void* rapport_win32_trace_splitter_bar(rap::splitter*, unsigned index);
+#else
+extern "C" void* rapport_win32_trace_splitter_bar(rap::splitter*, unsigned index);
+#endif

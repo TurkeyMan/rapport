@@ -3,6 +3,7 @@
 // has none), per-monitor DPI awareness.
 #include "container_state.h"
 #include "win32_common.h"
+#define RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
 #include "win32_trace.h"
 
 #include "frame_layer.h"
@@ -6289,6 +6290,13 @@ public:
     }
     std::vector<item*> panes;
 
+    HWND trace_bar(unsigned index) const
+    {
+        if (index >= bars_.size()) return nullptr;
+        HWND bar = bars_[index];
+        return GetWindowThreadProcessId(bar, nullptr) == GetCurrentThreadId() ? bar : nullptr;
+    }
+
     void add_bar()
     {
         register_classes();
@@ -9904,3 +9912,11 @@ private:
 }  // namespace rap::win32
 
 RAPPORT_BACKEND_ENTRY(win32, rap::win32::win32_backend)
+
+// Private harness lookup: the caller keeps the splitter alive and drives input on its UI thread.
+extern "C" __declspec(dllexport) void* rapport_win32_trace_splitter_bar(rap::splitter* splitter,
+                                                                      unsigned index)
+{
+    auto* native = dynamic_cast<rap::win32::splitter_impl*>(splitter);
+    return native ? native->trace_bar(index) : nullptr;
+}
