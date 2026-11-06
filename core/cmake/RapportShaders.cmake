@@ -35,6 +35,16 @@ function(rapport_add_shader target)
     if(NOT S_NAME OR NOT S_SOURCE)
         message(FATAL_ERROR "rapport_add_shader: NAME and SOURCE are needed")
     endif()
+    # Generated filenames belong to this binary directory, across all targets.
+    set(owner_property "RAPPORT_SHADER_OWNER_${S_NAME}")
+    get_property(has_owner DIRECTORY PROPERTY "${owner_property}" SET)
+    if(has_owner)
+        get_property(owner DIRECTORY PROPERTY "${owner_property}")
+        message(FATAL_ERROR "rapport_add_shader: shader '${S_NAME}' already declared by target '${owner}' "
+                            "in this directory; target '${target}' would overwrite its output")
+    endif()
+    set_property(DIRECTORY PROPERTY "${owner_property}" "${target}")
+
     if(NOT S_ENTRY)
         set(S_ENTRY main)
     endif()
