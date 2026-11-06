@@ -2,6 +2,7 @@
 // DirectWrite for canvases and drawn icons, our own box/form layout (Win32
 // has none), per-monitor DPI awareness.
 #include "win32_common.h"
+#include "container_state.h"
 
 #include "frame_layer.h"
 
@@ -327,8 +328,15 @@ HBRUSH tab_body_under_scan(HWND control)
     return nullptr;
 }
 
+bool container_tooltip_notify(HWND, LPARAM);
+
 bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result)
 {
+    if (msg == WM_NOTIFY && container_tooltip_notify(wnd, lp))
+    {
+        result = 0;
+        return true;
+    }
     switch (msg)
     {
     case WM_COMMAND:
@@ -555,12 +563,15 @@ void register_classes()
     RegisterClassExW(&wc);
 }
 
+void track_container_control(HWND h);
+
 HWND make_host(HWND parent, DWORD style = 0)
 {
     register_classes();
     HWND h = CreateWindowExW(WS_EX_CONTROLPARENT, L"rapportHost", L"",
                              WS_CHILD | WS_CLIPCHILDREN | style, 0, 0, 0, 0, parent, nullptr,
                              instance(), nullptr);
+    track_container_control(h);
     if (dark_mode()) theme_control(h);  // its scroll bars
     return h;
 }
@@ -609,11 +620,9 @@ void paint_buffered(HWND h, buffer_bg bg)
 
 // -- tooltips -----------------------------------------------------------------
 
-void set_tooltip_text(HWND control, const std::string& text)
+HWND window_tooltip(HWND top)
 {
-    static std::unordered_map<HWND, HWND> tips;  // top-level -> tooltip control
-    HWND top = GetAncestor(control, GA_ROOT);
-    HWND& tip = tips[top];
+    HWND tip = static_cast<HWND>(GetPropW(top, L"rapport-tooltip"));
     if (!tip)
     {
         tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
@@ -622,16 +631,172 @@ void set_tooltip_text(HWND control, const std::string& text)
         SendMessageW(tip, TTM_SETMAXTIPWIDTH, 0, 480);
         if (dark_mode()) theme_control(tip);
         frame_popup(tip);
+        SetPropW(top, L"rapport-tooltip", tip);
     }
+    return tip;
+}
+
+void apply_tooltip(HWND control, const std::string& text)
+{
+    HWND top = GetAncestor(control, GA_ROOT);
+    HWND tip = window_tooltip(top);
     std::wstring w = wide(text);
     TOOLINFOW ti{};
-    ti.cbSize = sizeof ti;
+    ti.cbSize = TTTOOLINFOW_V2_SIZE;  // also accepted by comctl32 v5
     ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     ti.hwnd = top;
     ti.uId = reinterpret_cast<UINT_PTR>(control);
     ti.lpszText = w.data();
     SendMessageW(tip, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     if (!text.empty()) SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+}
+
+// A layout container's children often share an HWND parent with controls
+// outside it. Track logical ancestry independently of native parenting.
+struct container_state
+{
+    HWND parent;
+    container_state* outer;
+    std::vector<container_state*> children;
+    struct control
+    {
+        bool enabled = true;
+        std::string tooltip;
+    };
+    std::map<HWND, control> controls;
+    bool enabled = true, shown = false, registered = false;
+    std::string tooltip;
+    RECT rect{};
+
+    container_state(HWND p, container_state* o) : parent(p), outer(o)
+    {
+        if (outer) outer->children.push_back(this);
+    }
+    bool effective_enabled() const { return enabled && (!outer || outer->effective_enabled()); }
+    const std::string& effective_tip() const
+    {
+        return tooltip.empty() && outer ? outer->effective_tip() : tooltip;
+    }
+    void refresh_enabled()
+    {
+        const bool on = effective_enabled();
+        for (const auto& [h, own] : controls) EnableWindow(h, on && own.enabled);
+        for (auto* child : children) child->refresh_enabled();
+    }
+    TOOLINFOW tool() const
+    {
+        TOOLINFOW ti{};
+        ti.cbSize = TTTOOLINFOW_V2_SIZE;
+        ti.hwnd = parent;
+        ti.uId = reinterpret_cast<UINT_PTR>(this);
+        ti.rect = rect;
+        ti.uFlags = TTF_SUBCLASS;
+        return ti;
+    }
+    void update_gap()
+    {
+        if (!registered && (!shown || effective_tip().empty() || IsRectEmpty(&rect))) return;
+        auto ti = tool();
+        HWND tip = window_tooltip(GetAncestor(parent, GA_ROOT));
+        if (!shown || effective_tip().empty() || IsRectEmpty(&rect))
+        {
+            SendMessageW(tip, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+            registered = false;
+            return;
+        }
+        // Nested rectangular tools can overlap. Whichever tool the tooltip
+        // chooses, ask the logical tree for the nearest container at the point.
+        ti.lpszText = LPSTR_TEXTCALLBACKW;
+        if (registered) SendMessageW(tip, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&ti));
+        else registered = SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti)) != 0;
+    }
+    const std::string* tip_at(HWND host, POINT pt) const
+    {
+        if (!shown || (parent == host && !PtInRect(&rect, pt))) return nullptr;
+        for (auto* child : children)
+            if (auto* hit = child->tip_at(host, pt)) return hit;
+        return parent == host ? &effective_tip() : nullptr;
+    }
+    void refresh_tips()
+    {
+        update_gap();
+        for (const auto& [h, own] : controls)
+            if (own.tooltip.empty()) apply_tooltip(h, effective_tip());
+        for (auto* child : children)
+            if (child->tooltip.empty()) child->refresh_tips();
+    }
+};
+
+bool container_tooltip_notify(HWND wnd, LPARAM lp)
+{
+    auto* info = reinterpret_cast<NMTTDISPINFOW*>(lp);
+    if (info->hdr.code != TTN_GETDISPINFOW ||
+        info->hdr.hwndFrom != GetPropW(GetAncestor(wnd, GA_ROOT), L"rapport-tooltip") ||
+        (info->uFlags & TTF_IDISHWND)) return false;
+    auto* scope = reinterpret_cast<container_state*>(info->hdr.idFrom);
+    while (scope->outer) scope = scope->outer;
+    POINT pt;
+    GetCursorPos(&pt);
+    ScreenToClient(wnd, &pt);
+    static thread_local std::wstring text;
+    const auto* found = scope->tip_at(wnd, pt);
+    text = found ? wide(*found) : L"";
+    info->lpszText = text.data();
+    return true;
+}
+
+thread_local container_state* building_controls = nullptr;
+class control_scope
+{
+public:
+    explicit control_scope(container_state* s) : old_(std::exchange(building_controls, s)) {}
+    ~control_scope() { building_controls = old_; }
+private:
+    container_state* old_;
+};
+
+container_state* control_container(HWND h)
+{
+    return static_cast<container_state*>(GetPropW(h, L"rapport-container"));
+}
+
+void track_container_control(HWND h)
+{
+    if (!h || !building_controls) return;
+    auto& scope = *building_controls;
+    scope.controls[h].enabled = IsWindowEnabled(h) != FALSE;
+    SetWindowSubclass(h, [](HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
+    {
+        if (msg == WM_NCDESTROY)
+        {
+            reinterpret_cast<container_state*>(data)->controls.erase(hwnd);
+            RemovePropW(hwnd, L"rapport-container");
+        }
+        return DefSubclassProc(hwnd, msg, wp, lp);
+    }, 0, reinterpret_cast<DWORD_PTR>(&scope));
+    SetPropW(h, L"rapport-container", &scope);
+    if (!scope.effective_enabled()) EnableWindow(h, FALSE);
+    if (!scope.effective_tip().empty()) apply_tooltip(h, scope.effective_tip());
+}
+
+void set_control_enabled(HWND h, bool enabled)
+{
+    if (auto* scope = control_container(h))
+    {
+        scope->controls.at(h).enabled = enabled;
+        enabled = enabled && scope->effective_enabled();
+    }
+    EnableWindow(h, enabled);
+}
+
+void set_tooltip_text(HWND h, const std::string& text)
+{
+    if (auto* scope = control_container(h))
+    {
+        scope->controls.at(h).tooltip = text;
+        if (text.empty()) return apply_tooltip(h, scope->effective_tip());
+    }
+    apply_tooltip(h, text);
 }
 
 // -- menus --------------------------------------------------------------------
@@ -936,6 +1101,7 @@ HWND create_control(win_context& win, HWND parent, const wchar_t* cls, const std
 {
     HWND h = CreateWindowExW(ex_style, cls, text.c_str(), WS_CHILD | style, 0, 0, 0, 0, parent, nullptr,
                              instance(), nullptr);
+    track_container_control(h);
     SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font(win.dpi())), FALSE);
     // Light is each control's own default, but a link's colour is ours (the
     // accent's) in either.
@@ -961,7 +1127,7 @@ public:
         }
     }
 
-    void set_enabled(bool e) override { EnableWindow(h_, e); }
+    void set_enabled(bool e) override { set_control_enabled(h_, e); }
     void set_visible(bool v) override
     {
         if (visible == v) return;
@@ -1026,18 +1192,46 @@ private:
     std::function<void()> build_;
 };
 
-// A container laid out as an Item but with no interface of its own; a
-// handle on it gets this.
+// The same parent-relative rectangle used to lay out the children covers the
+// gaps between them for tooltip hit testing.
+class container_item : public item
+{
+public:
+    container_state* state = nullptr;
+    void placed(RECT r)
+    {
+        if (state && !(g_moves && g_moves->ahead) && !EqualRect(&r, &state->rect))
+        {
+            state->rect = r;
+            state->update_gap();
+        }
+    }
+    void showing(bool on)
+    {
+        if (state && state->shown != (on && visible))
+        {
+            state->shown = on && visible;
+            state->update_gap();
+        }
+    }
+};
+
 class plain_widget : public widget
 {
 public:
-    plain_widget(item& item, win_context& win, std::shared_ptr<deferred_build> pending = nullptr)
+    plain_widget(item& item, container_state* state, win_context& win, std::shared_ptr<deferred_build> pending = nullptr)
         : item_(item)
+        , state_(state)
         , win_(win)
         , pending_(std::move(pending))
     {
     }
-    void set_enabled(bool) override {}
+    void set_enabled(bool on) override
+    {
+        if (!state_ || state_->enabled == on) return;
+        state_->enabled = on;
+        if (!state_->outer || state_->outer->effective_enabled()) state_->refresh_enabled();
+    }
     void set_visible(bool v) override
     {
         if (v && pending_) pending_->run();
@@ -1045,19 +1239,25 @@ public:
         item_.visible = v;
         win_.relayout();
     }
-    void set_tooltip(const std::string&) override {}
+    void set_tooltip(const std::string& text) override
+    {
+        if (!state_ || state_->tooltip == text) return;
+        state_->tooltip = text;
+        state_->refresh_tips();
+    }
     void focus() override {}
     bool has_focus() const override { return false; }
 
 private:
     item& item_;
+    container_state* state_;
     win_context& win_;
     std::shared_ptr<deferred_build> pending_;
 };
 
 // -- layout containers --------------------------------------------------------
 
-class box_item : public item
+class box_item : public container_item
 {
 public:
     box_item(orientation dir, int spacing, int margin = 0)
@@ -1111,6 +1311,7 @@ public:
 
     void place(RECT r) override
     {
+        placed(r);
         if (dir_ == orientation::horizontal)
             InflateRect(&r, -margin_, -(margin_ / 2));
         else
@@ -1148,6 +1349,7 @@ public:
 
     void show_all(bool shown) override
     {
+        showing(shown);
         for (item* c : children) c->show_all(shown && visible);
     }
 
@@ -1257,7 +1459,7 @@ private:
 // Labels right-aligned in the first column, fields in the second; an empty
 // label lets its field span both. A widget for a label (a check) sits at the
 // column's start.
-class form_item : public item
+class form_item : public container_item
 {
 public:
     form_item(int gap, int row_gap)
@@ -1324,6 +1526,7 @@ public:
 
     void place(RECT r) override
     {
+        placed(r);
         const long label_w = label_width();
         long y = r.top;
         for (row& row : rows)
@@ -1352,6 +1555,7 @@ public:
 
     void show_all(bool shown) override
     {
+        showing(shown);
         for (row& r : rows)
         {
             r.field->show_all(shown && visible);
@@ -1465,8 +1669,8 @@ public:
     }
     void set_enabled(bool e) override
     {
-        EnableWindow(h_, e);
-        if (icon_h_) EnableWindow(icon_h_, e);
+        set_control_enabled(h_, e);
+        if (icon_h_) set_control_enabled(icon_h_, e);
     }
     void show_all(bool shown) override
     {
@@ -1807,6 +2011,7 @@ public:
         h_ = CreateWindowExW(0, L"BUTTON", wide(tip).c_str(), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                              0, 0, 0, 0, edit, nullptr, instance(), nullptr);
         handlers()[h_] = this;
+        track_container_control(h_);
         set_tooltip_text(h_, tip);
         SetWindowSubclass(h_, hover_proc, 1, reinterpret_cast<DWORD_PTR>(this));
     }
@@ -1827,7 +2032,7 @@ public:
         InvalidateRect(h_, nullptr, TRUE);
     }
     bool checked() const override { return checked_; }
-    void set_enabled(bool e) override { EnableWindow(h_, e); }
+    void set_enabled(bool e) override { set_control_enabled(h_, e); }
     void on_menu(std::function<menu()> f) override
     {
         menu_ = std::move(f);
@@ -2570,7 +2775,7 @@ private:
 // them until they repainted, and repainted whole on every layout that
 // resized it (about 1.5 ms apiece); this costs microseconds, and never
 // paints over its contents.
-class group_item : public item
+class group_item : public container_item
 {
 public:
     group_item(win_context& win, HWND parent, const std::string& title)
@@ -2602,6 +2807,7 @@ public:
     }
     void place(RECT r) override
     {
+        placed(r);
         if (!EqualRect(&r, &rect_))
         {
             invalidate();
@@ -2612,6 +2818,7 @@ public:
     }
     void show_all(bool shown) override
     {
+        showing(shown);
         if (shown && visible) shown_ = true, invalidate();
         else invalidate(), shown_ = false;
         if (content) content->show_all(shown && visible);
@@ -3123,6 +3330,7 @@ public:
         adopt(create_control(win, parent, L"EDIT", L"", ES_AUTOHSCROLL | ES_RIGHT | WS_TABSTOP, WS_EX_CLIENTEDGE));
         updown_ = CreateWindowExW(0, UPDOWN_CLASSW, L"", WS_CHILD | UDS_ARROWKEYS | UDS_ALIGNRIGHT, 0, 0, 0, 0, parent,
                                   nullptr, instance(), nullptr);
+        track_container_control(updown_);
         SendMessageW(updown_, UDM_SETBUDDY, reinterpret_cast<WPARAM>(h_), 0);
         SendMessageW(updown_, UDM_SETRANGE32, 0, 100);  // we step ourselves
         SendMessageW(updown_, UDM_SETPOS32, 0, 50);
@@ -3174,7 +3382,7 @@ public:
     void set_enabled(bool e) override
     {
         leaf::set_enabled(e);
-        EnableWindow(updown_, e);
+        set_control_enabled(updown_, e);
     }
     SIZE measure() override
     {
@@ -6293,7 +6501,7 @@ private:
 
 // A child window that clips its content and scrolls it vertically (and
 // horizontally if asked).
-class scroll_item : public item
+class scroll_item : public container_item
 {
 public:
     scroll_item(win_context& win, HWND parent, bool horizontal)
@@ -6330,6 +6538,7 @@ public:
     }
     void place(RECT r) override
     {
+        placed(r);
         // Resizing the host lays the content out (WM_SIZE, below): not again.
         laid_out_ = false;
         move_pane_window(host_, r.left, r.top, r.right - r.left, r.bottom - r.top);
@@ -6351,6 +6560,7 @@ public:
     }
     void show_all(bool shown) override
     {
+        showing(shown);
         show_control(host_, shown && visible);
         if (content) content->show_all(shown && visible);
     }
@@ -6873,6 +7083,7 @@ public:
         }
         adopt(CreateWindowExW(0, L"rapportCanvas", L"", WS_CHILD | (s.focusable ? WS_TABSTOP : 0), 0, 0, 0, 0, parent,
                               nullptr, instance(), this));
+        track_container_control(h_);
     }
     ~canvas_impl() override
     {
@@ -7737,6 +7948,7 @@ public:
     }
 
     // Owned parts of the window.
+    std::vector<std::unique_ptr<container_state>> container_states;
     item* root = nullptr;
     std::vector<item_ptr> items;
     std::vector<std::unique_ptr<widget>> widgets;  // plain handles for containers
@@ -8436,16 +8648,27 @@ int windows_order(dialog_role r)
 class builder
 {
 public:
-    builder(window_impl& win, build_sink& sink)
+    builder(window_impl& win, build_sink& sink, container_state* scope = nullptr)
         : win_(win)
         , sink_(sink)
+        , scope_(scope)
         , metrics_(metrics::for_scale(win.scale()))
     {
     }
 
     item* build(const node& n, HWND parent, orientation parent_dir)
     {
-        item* item = std::visit([&](const auto& s) { return make(n, s, parent, parent_dir); }, n.spec);
+        container_state* scope = scope_;
+        if (rap::detail::needs_container_wrapper(n))
+        {
+            auto state = std::make_unique<container_state>(parent, scope);
+            scope = state.get();
+            win_.container_states.push_back(std::move(state));
+        }
+        builder nested = *this;
+        nested.scope_ = scope;
+        control_scope building(scope);
+        item* item = std::visit([&](const auto& s) { return nested.make(n, s, parent, parent_dir); }, n.spec);
         item->stretch = n.common.stretch;
         item->fixed_w = extent_px(win_.hwnd(), n.common.width, false);
         item->fixed_h = extent_px(win_.hwnd(), n.common.height, true);
@@ -8470,8 +8693,10 @@ private:
     }
     void handle(const node& n, item* item, std::shared_ptr<deferred_build> pending = nullptr)
     {
-        if (!n.common.handle && n.common.visible) return;
-        auto w = std::make_unique<plain_widget>(*item, win_, std::move(pending));
+        if (!rap::detail::needs_container_wrapper(n) && !n.common.handle && n.common.visible) return;
+        auto* container = dynamic_cast<container_item*>(item);
+        if (container) container->state = scope_;
+        auto w = std::make_unique<plain_widget>(*item, container ? scope_ : nullptr, win_, std::move(pending));
         sink_.created(n, *w);
         win_.widgets.push_back(std::move(w));
     }
@@ -8487,9 +8712,9 @@ private:
         }
         // Built later; a first ListView alone costs ~15 ms.
         auto pending = std::make_shared<deferred_build>(
-            [&win = win_, &sink = sink_, box, parent, make = s.deferred, dir = s.dir]
+            [&win = win_, &sink = sink_, scope = scope_, box, parent, make = s.deferred, dir = s.dir]
             {
-                box->children.push_back(builder(win, sink).build(make(), parent, dir));
+                box->children.push_back(builder(win, sink, scope).build(make(), parent, dir));
                 // Showing now, the window grows if the content doesn't fit.
                 if (box->visible)
                     win.relayout_at_once();
@@ -8571,8 +8796,8 @@ private:
     {
         for (const node& p : s.pages) t->pages.push_back(build(p, parent, orientation::vertical));
         t->lazy = s.lazy;
-        t->buildPage = [&win = win_, &sink = sink_, parent](const node& page)
-        { return builder(win, sink).build(page, parent, orientation::vertical); };
+        t->buildPage = [&win = win_, &sink = sink_, scope = scope_, parent](const node& page)
+        { return builder(win, sink, scope).build(page, parent, orientation::vertical); };
         return t;
     }
     item* make(const node&, const spec::spacer&, HWND, orientation)
@@ -8699,6 +8924,7 @@ private:
 
     window_impl& win_;
     build_sink& sink_;
+    container_state* scope_;
     metrics metrics_;
 };
 
