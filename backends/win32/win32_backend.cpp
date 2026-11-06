@@ -6943,6 +6943,12 @@ public:
     void present(std::shared_ptr<const rap::image> pixels, frame_color color) override
     {
         retire_gpu_frame();
+        if (slot_)
+        {
+            slot_->supersede();
+            shown_pixels_.clear();
+            shown_bitmap_.reset();
+        }
         frame_ = {std::move(pixels), color};
         invalidate();
     }
@@ -7023,9 +7029,7 @@ public:
     }
     void clear_frame() override
     {
-        retire_gpu_frame();
-        frame_ = {};
-        invalidate();
+        present(std::shared_ptr<const rap::image>{}, {});
     }
 
     bool fills() const override { return true; }
@@ -7316,6 +7320,15 @@ private:
         std::vector<uint8_t> pixels;  // rgba8, rows of w * 4
         int w = 0, h = 0;
         bool ready = false;
+
+        uint64_t generation = 0;
+        uint64_t supersede()
+        {
+            std::lock_guard<std::mutex> lock(m);
+            ready = false;
+            device.reset();
+            return ++generation;
+        }
     };
     void read_back(rap::gpu::texture_ptr texture)
     {
@@ -7328,13 +7341,15 @@ private:
         }
         const int w = texture->width(), h = texture->height();
         auto pixels = std::make_shared<std::vector<std::byte>>(size_t(w) * size_t(h) * 4);
+        const uint64_t generation = slot_->supersede();
         std::weak_ptr<read_back_slot> slot = slot_;
         dev->readback(texture, *pixels, size_t(w) * 4, 0,
-                      [dev, slot, pixels, texture, w, h]
+                      [dev, slot, pixels, texture, w, h, generation]
                       {
                           const auto s = slot.lock();
                           if (!s || dev->lost()) return;
                           std::lock_guard<std::mutex> lock(s->m);
+                          if (s->generation != generation) return;
                           s->device = dev;
                           s->pixels.assign(reinterpret_cast<const uint8_t*>(pixels->data()),
                                            reinterpret_cast<const uint8_t*>(pixels->data()) + pixels->size());
@@ -7354,6 +7369,8 @@ private:
             shown_pixels_.swap(slot_->pixels);
             shown_w_ = slot_->w, shown_h_ = slot_->h;
         }
+        // The readback is ready to replace the previous CPU or GPU frame.
+        frame_ = {};
         // Direct2D's bitmaps are BGRA.
         for (size_t i = 0; i + 3 < shown_pixels_.size(); i += 4) std::swap(shown_pixels_[i], shown_pixels_[i + 2]);
         shown_bitmap_.reset();
