@@ -1846,6 +1846,24 @@ private:
 
 G_GNUC_END_IGNORE_DEPRECATIONS
 
+// Install the compact font rule on the widget's display at its first use.
+void set_compact_font(GtkWidget* w)
+{
+    GdkDisplay* display = gtk_widget_get_display(w);
+    if (!g_object_get_data(G_OBJECT(display), "rapport-compact-css"))
+    {
+        std::string rule = "columnview.rapport-compact, textview.rapport-compact { font-size: " +
+                           std::to_string(compact_font(w).px) + "px; }";
+        GtkCssProvider* css = gtk_css_provider_new();
+        gtk_css_provider_load_from_string(css, rule.c_str());
+        gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(css),
+                                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_set_data(G_OBJECT(display), "rapport-compact-css", GINT_TO_POINTER(1));
+        g_object_unref(css);
+    }
+    gtk_widget_add_css_class(w, "rapport-compact");
+}
+
 class text_view_impl : public text_view_common
 {
 public:
@@ -1854,9 +1872,7 @@ public:
     {
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
         gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
-        // TODO(tortilla): relies on a compact list having installed the
-        // display-wide rapport-compact rule; untested without GTK 4 headers.
-        if (s.compact) gtk_widget_add_css_class(w_, "rapport-compact");
+        if (s.compact) set_compact_font(w_);
         setup(s);
     }
 };
@@ -2144,26 +2160,7 @@ public:
         }
         if (s.compact)
         {
-            // TODO(tortilla): untested without GTK 4 headers. One display-wide
-            // rule, matching only lists marked compact.
-            static bool installed = false;
-            if (!installed)
-            {
-                std::string px = std::to_string(compact_font(w_).px) + "px";
-                // Only the font: the row padding is the theme's (data-table
-                // below), so rows aren't squeezed past what it allows.
-                std::string rule =
-                    "columnview.rapport-compact, textview.rapport-compact { font-size: " + px +
-                    "; }";
-                GtkCssProvider* css = gtk_css_provider_new();
-                gtk_css_provider_load_from_string(css, rule.c_str());
-                gtk_style_context_add_provider_for_display(gtk_widget_get_display(w_),
-                                                           GTK_STYLE_PROVIDER(css),
-                                                           GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-                g_object_unref(css);
-                installed = true;
-            }
-            gtk_widget_add_css_class(w_, "rapport-compact");
+            set_compact_font(w_);
             // The theme's own dense rows for tables of data: a little
             // padding rather than a rich list's, and none taken away.
             gtk_widget_add_css_class(w_, "data-table");
