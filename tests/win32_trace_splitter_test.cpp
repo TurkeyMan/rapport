@@ -1,5 +1,6 @@
 #include <rapport/rapport.h>
 #include <thread>
+#include <cstdlib>
 #include <windows.h>
 
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
@@ -28,6 +29,8 @@ int main(int argc, char** argv)
         "Trace splitter lookup",
         {splitter{rap::orientation::horizontal, label{"left"}, label{"right"}}.bind(split)}});
     win->show();
+    const char* trace = std::getenv("RAPPORT_TRACE");
+    if (!trace || !*trace) return bar(split, 0) ? 1 : 0;
     HWND h = static_cast<HWND>(bar(split, 0));
     if (!h || !IsWindow(h) || bar(split, 1)) return 1;
     wchar_t cls[64]{};
