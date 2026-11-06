@@ -29,10 +29,20 @@ target_compile_features(rapport_headers INTERFACE cxx_std_23)
 target_compile_options(rapport_headers INTERFACE $<$<CXX_COMPILER_ID:MSVC>:/utf-8 /Zc:__cplusplus>)
 
 if(RAPPORT_STATIC)
-    add_library(rapport STATIC src/rapport.cpp src/sys.cpp src/http.cpp src/secrets.cpp src/network.cpp src/watch.cpp src/image.cpp src/i18n.cpp src/gpu.cpp)
+    set(rapport_library_type STATIC)
 else()
-    add_library(rapport SHARED src/rapport.cpp src/sys.cpp src/http.cpp src/secrets.cpp src/network.cpp src/watch.cpp src/image.cpp src/i18n.cpp src/gpu.cpp)
+    set(rapport_library_type SHARED)
 endif()
+add_library(rapport ${rapport_library_type}
+    src/rapport.cpp
+    src/sys.cpp
+    src/http.cpp
+    src/secrets.cpp
+    src/network.cpp
+    src/watch.cpp
+    src/image.cpp
+    src/i18n.cpp
+    src/gpu.cpp)
 add_library(rapport::rapport ALIAS rapport)
 target_link_libraries(rapport PUBLIC rapport_headers PRIVATE ${CMAKE_DL_LIBS})
 # Starting programs, as the shell extensions do too (common/launch.h).
