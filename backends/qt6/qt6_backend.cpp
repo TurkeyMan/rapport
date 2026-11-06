@@ -5,6 +5,7 @@
 //
 // No moc: signals go to lambdas, and events to overrides and event filters.
 #include "../common/container_state.h"
+#include "../common/line_control.h"
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
 #include "qt_painter.h"
@@ -4242,16 +4243,6 @@ public:
     }
 
 private:
-    static bool is_line_control(const rap::node_spec& s)
-    {
-        return std::holds_alternative<spec::label>(s) || std::holds_alternative<spec::button>(s) ||
-               std::holds_alternative<spec::check>(s) || std::holds_alternative<spec::entry>(s) ||
-               std::holds_alternative<spec::drop_down>(s) || std::holds_alternative<spec::combo>(s) ||
-               std::holds_alternative<spec::menu_button>(s) ||
-               std::holds_alternative<spec::progress_bar>(s) ||
-               std::holds_alternative<spec::date_picker>(s);
-    }
-
     static bool fills_form_row(const rap::node_spec& s)
     {
         return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
@@ -4310,7 +4301,7 @@ private:
             QWidget* w = build(c, s.dir);
             // Single-line controls keep their natural height when a taller
             // sibling sets the row height.
-            const Qt::Alignment align = s.dir == orientation::horizontal && is_line_control(c.spec)
+            const Qt::Alignment align = s.dir == orientation::horizontal && rap::detail::is_line_control(c.spec)
                                             ? Qt::AlignVCenter
                                             : Qt::Alignment();
             l->addWidget(w, c.common.stretch, align);
