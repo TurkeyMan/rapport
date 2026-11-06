@@ -6,6 +6,8 @@
 
 #include <map>
 #include <thread>
+#include <cstdio>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -392,6 +394,14 @@ directory_watch::directory_watch(std::unique_ptr<impl> i)
 {
 }
 
-directory_watch::~directory_watch() = default;
+directory_watch::~directory_watch()
+{
+    if (impl_->thread.get_id() == std::this_thread::get_id())
+    {
+        std::fputs("rapport: directory_watch destroyed from its own callback; destroy it on another thread\n", stderr);
+        std::fflush(stderr);
+        std::abort();
+    }
+}
 
 }  // namespace rap::sys

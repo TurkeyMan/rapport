@@ -213,7 +213,8 @@ struct watch_options
 
 // A folder watched for changes (ReadDirectoryChangesW on Windows, inotify
 // on Linux) until the watch is destroyed. The callback runs on the watch's
-// own thread: post to the UI from it. A move across the folder's edge is
+// own thread. Destruction joins that thread: post destruction to the UI or
+// another owner thread. Destroying the watch from its own callback is fatal. A move across the folder's edge is
 // removed or added.
 class directory_watch
 {
