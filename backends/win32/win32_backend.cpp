@@ -9917,6 +9917,7 @@ RAPPORT_BACKEND_ENTRY(win32, rap::win32::win32_backend)
 extern "C" __declspec(dllexport) void* rapport_win32_trace_splitter_bar(rap::splitter* splitter,
                                                                       unsigned index)
 {
+    if (!rap::win32::trace::enabled.load(std::memory_order_relaxed)) return nullptr;
     auto* native = dynamic_cast<rap::win32::splitter_impl*>(splitter);
     return native ? native->trace_bar(index) : nullptr;
 }
