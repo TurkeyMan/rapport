@@ -34,6 +34,14 @@ struct format_info
 };
 format_info info(format);
 
+// The final row needs no trailing padding. Avoid overflowing on a large stride.
+inline bool rows_fit(size_t bytes, size_t row, size_t stride, int height)
+{
+    return height > 0 && row > 0 && stride >= row && bytes >= row &&
+           size_t(height - 1) <= (bytes - row) / stride;
+}
+bool upload_fits(size_t bytes, const source_layout&, int width, int height);
+
 // The app's pixels (laid out as `layout`, `w` × `h`) in `target`'s format,
 // rows of `out_stride` bytes: same-typed samples copied bit for bit, others
 // through float; channels the source lacks are 0, and alpha 1.

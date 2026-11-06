@@ -1,4 +1,9 @@
 # Headless checks of the core: run by CI on every platform.
+add_executable(rapport-gpu-span-test gpu_span_test.cpp)
+target_include_directories(rapport-gpu-span-test PRIVATE ../core/src)
+target_link_libraries(rapport-gpu-span-test PRIVATE rapport::rapport)
+add_test(NAME gpu-spans COMMAND rapport-gpu-span-test)
+
 add_executable(rapport-i18n-test i18n_test.cpp)
 target_link_libraries(rapport-i18n-test PRIVATE rapport::rapport)
 

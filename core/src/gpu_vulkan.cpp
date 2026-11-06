@@ -509,6 +509,7 @@ public:
         if (region.empty()) region = {0, 0, lw, lh};
         region.w = std::min(region.w, lw - region.x), region.h = std::min(region.h, lh - region.y);
         if (region.x < 0 || region.y < 0 || region.empty()) return {};
+        if (!upload_fits(pixels.size(), layout, region.w, region.h)) return {};
         const size_t stride = bytes_per_pixel(t->f) * size_t(region.w);
         auto staging = host_buffer::make(c_, stride * size_t(region.h), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
         if (!staging) return {};
@@ -538,7 +539,7 @@ public:
         if (!t || level < 0 || level >= t->levels) return {};
         const int lw = std::max(1, t->w >> level), lh = std::max(1, t->h >> level);
         const size_t row = bytes_per_pixel(t->f) * size_t(lw);
-        if (stride < row || out.size() < stride * size_t(lh - 1) + row) return {};
+        if (!rows_fit(out.size(), row, stride, lh)) return {};
         auto staging = host_buffer::make(c_, row * size_t(lh), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         if (!staging) return {};
         const core& c = *c_;
