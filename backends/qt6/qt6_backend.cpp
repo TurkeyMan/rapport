@@ -4,6 +4,7 @@
 // default button, Esc ends a dialog).
 //
 // No moc: signals go to lambdas, and events to overrides and event filters.
+#include "../common/container_state.h"
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
 #include "qt_painter.h"
@@ -4234,13 +4235,7 @@ public:
     {
         QWidget* w = std::visit([&](const auto& s) { return make(n, s, parent_dir); }, n.spec);
         // Containers have no interface; one with a handle gets a plain Widget.
-        const bool container = std::holds_alternative<spec::box>(n.spec) ||
-                               std::holds_alternative<spec::form>(n.spec) ||
-                               std::holds_alternative<spec::group>(n.spec) ||
-                               std::holds_alternative<spec::scroll>(n.spec) ||
-                               std::holds_alternative<spec::toolbar>(n.spec);
-        // A widget for a container with a handle, or one created hidden.
-        if (container && (n.common.handle || !n.common.visible)) add<plain_impl>(n, w);
+        if (rap::detail::needs_container_wrapper(n)) add<plain_impl>(n, w);
         if (int width = px(n.common.width); width > 0) w->setMinimumWidth(width);
         if (int height = px(n.common.height); height > 0) w->setMinimumHeight(height);
         return w;

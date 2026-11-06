@@ -3,6 +3,7 @@
 // Lists use GtkColumnView over a lazy GListModel (RapportRows) whose items
 // are bare GObjects tagged with their row index; cells pull text from the
 // rap::list_model at bind time. Painted columns are GtkDrawingAreas.
+#include "../common/container_state.h"
 #include <gtk/gtk.h>
 
 #include "builtin_icons.h"
@@ -4377,13 +4378,7 @@ public:
     {
         GtkWidget* w = std::visit([&](const auto& s) { return make(n, s, parent_dir); }, n.spec);
         // Containers have no interface; one with a handle gets a plain Widget.
-        const bool container = std::holds_alternative<spec::box>(n.spec) ||
-                               std::holds_alternative<spec::form>(n.spec) ||
-                               std::holds_alternative<spec::group>(n.spec) ||
-                               std::holds_alternative<spec::scroll>(n.spec) ||
-                               std::holds_alternative<spec::toolbar>(n.spec);
-        // A widget for a container with a handle, or one created hidden.
-        if (container && (n.common.handle || !n.common.visible)) add<plain_impl>(n, w);
+        if (rap::detail::needs_container_wrapper(n)) add<plain_impl>(n, w);
         int width = px(n.common.width), height = px(n.common.height);
         if (width > 0 || height > 0) gtk_widget_set_size_request(w, width, height);
         if (n.common.stretch > 0)
