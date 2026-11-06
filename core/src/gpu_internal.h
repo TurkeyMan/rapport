@@ -17,6 +17,14 @@ public:
     virtual ~program() = default;
 };
 
+#ifdef RAPPORT_TEST_READBACK
+// Test seam for a staging map failure on the device worker.
+void fail_next_readback_map();
+bool readback_map_failure_requested();
+#else
+inline bool readback_map_failure_requested() { return false; }
+#endif
+
 struct format_info
 {
     enum class kind

@@ -20,6 +20,7 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -225,9 +226,13 @@ struct host_buffer
                                                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         if (ai.memoryTypeIndex == UINT32_MAX || c->vkAllocateMemory(c->device, &ai, nullptr, &b->memory) != VK_SUCCESS ||
             c->vkBindBufferMemory(c->device, b->buffer, b->memory, 0) != VK_SUCCESS ||
-            c->vkMapMemory(c->device, b->memory, 0, VK_WHOLE_SIZE, 0, &b->mapped) != VK_SUCCESS)
+            (usage != VK_BUFFER_USAGE_TRANSFER_DST_BIT && !b->map()))
             return nullptr;
         return b;
+    }
+    bool map()
+    {
+        return c->vkMapMemory(c->device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS;
     }
     ~host_buffer()
     {
@@ -557,11 +562,14 @@ public:
             },
             {tp});
         auto flag = std::make_shared<flag_line>();
-        queue(value, [staging, out, stride, row, lh, flag, done = std::move(done)]
+        queue(value, [this, staging, out, stride, row, lh, flag, done = std::move(done)]
               {
-                  for (int y = 0; y < lh; ++y)
-                      std::memcpy(out.data() + size_t(y) * stride,
-                                  static_cast<const std::byte*>(staging->mapped) + size_t(y) * row, row);
+                  if (map_readback(*staging))
+                  {
+                      for (int y = 0; y < lh; ++y)
+                          std::memcpy(out.data() + size_t(y) * stride,
+                                      static_cast<const std::byte*>(staging->mapped) + size_t(y) * row, row);
+                  }
                   flag->set();
                   if (done) done();
               });
@@ -795,9 +803,9 @@ public:
             {bp});
         auto flag = std::make_shared<flag_line>();
         const size_t bytes = b->bytes;
-        queue(value, [staging, out, bytes, flag, done = std::move(done)]
+        queue(value, [this, staging, out, bytes, flag, done = std::move(done)]
               {
-                  std::memcpy(out.data(), staging->mapped, bytes);
+                  if (map_readback(*staging)) std::memcpy(out.data(), staging->mapped, bytes);
                   flag->set();
                   if (done) done();
               });
@@ -1068,7 +1076,15 @@ private:
         return d && d->owner == this ? d : nullptr;
     }
 
-    bool check(VkResult r)
+    bool map_readback(host_buffer& staging)
+    {
+        if (lost()) return false;
+        if (!readback_map_failure_requested() && staging.map()) return true;
+        lost_ = true;
+        return false;
+    }
+
+    bool check(VkResult r) const
     {
         if (r == VK_ERROR_DEVICE_LOST) lost_ = true;
         return r != VK_SUCCESS;
@@ -1193,7 +1209,7 @@ private:
         wi.semaphoreCount = 1;
         wi.pSemaphores = &timeline_;
         wi.pValues = &v;
-        c_->vkWaitSemaphores(c_->device, &wi, UINT64_MAX);
+        check(c_->vkWaitSemaphores(c_->device, &wi, UINT64_MAX));
     }
 
     // Work for the device's thread once the GPU reaches `value`, in order.
@@ -1234,7 +1250,7 @@ private:
     std::shared_ptr<line> line_;
     std::mutex m_;  // the queue, the pool, pipelines and views
     uint64_t next_ = 0;
-    bool lost_ = false;
+    mutable std::atomic<bool> lost_ = false;
 
     std::mutex work_m_;
     std::condition_variable work_cv_;

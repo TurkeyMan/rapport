@@ -100,10 +100,10 @@ public:
         const int w = t->width(), h = t->height();
         auto pixels = std::make_shared<std::vector<std::byte>>(size_t(w) * size_t(h) * 4);
         dev->readback(t, *pixels, size_t(w) * 4, 0,
-                      [serial = serial_, mine, pixels, w, h, color, post = std::move(post), make = std::move(make),
+                      [dev, serial = serial_, mine, pixels, w, h, color, post = std::move(post), make = std::move(make),
                        show = std::move(show)]
                       {
-                          if (*serial != mine) return;  // superseded already
+                          if (*serial != mine || dev->lost()) return;  // superseded already
                           // RGBA to the toolkits' BGRA where it's premultiplied.
                           pixel_format format = pixel_format::rgba8;
                           if (color.premultiplied)
@@ -111,9 +111,9 @@ public:
                               format = pixel_format::bgra8_premultiplied;
                               for (size_t i = 0; i < pixels->size(); i += 4) std::swap((*pixels)[i], (*pixels)[i + 2]);
                           }
-                          post([serial, mine, pixels, w, h, format, color, make, show]
+                          post([dev, serial, mine, pixels, w, h, format, color, make, show]
                                {
-                                   if (*serial != mine) return;
+                                   if (*serial != mine || dev->lost()) return;
                                    show(make(w, h, format, reinterpret_cast<const uint8_t*>(pixels->data()), size_t(w) * 4),
                                         color);
                                });
