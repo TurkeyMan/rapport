@@ -345,6 +345,7 @@ HBRUSH tab_body_under_scan(HWND control)
 }
 
 bool container_tooltip_notify(HWND, LPARAM);
+void draw_texts(HWND by, HDC dc);  // a window's windowless labels (drawn_text)
 
 bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result)
 {
@@ -418,6 +419,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         FillRect(dc, &c, theme_brush(theme_color::window));
         paint_group_frames(wnd, dc);
         RestoreDC(dc, saved);
+        draw_texts(wnd, dc);
         result = 1;
         return true;
     }
@@ -1025,6 +1027,187 @@ std::unordered_map<HWND, RECT> g_parked;
 // resize (window::resize): a canvas taking its size then neither tells the
 // app nor draws, keeping the frame it drew for the size it's about to have.
 bool g_canvases_quiet = false;
+
+// -- text drawn by the window it lies on ---------------------------------------
+
+// A label without a window of its own: its text drawn by the window it lies
+// on, with its background (WM_ERASEBKGND, forward_child_message) or, on a
+// tab control, by the tab control after its own drawing (see tab_draws_text).
+// Every shown window moved or resized costs the window manager a millisecond
+// or so; a label moved this way is a rectangle changed. Drawn as a STATIC
+// draws its text: the window font, word-wrapped, tabs expanded, no prefix.
+// RAPPORT_WINDOWED_LABELS keeps labels as STATIC windows (to compare).
+struct drawn_text
+{
+    HWND parent = nullptr;  // its rectangle is in this window's client coordinates
+    HWND by = nullptr;      // the window that draws it: the parent, or a tab control it lies on
+    RECT r{};
+    std::wstring text;
+    UINT dpi = 96;
+    bool shown = false, enabled = true, ellipsize = false, right = false;
+};
+bool windowless_labels()
+{
+    static const bool on = std::getenv("RAPPORT_WINDOWED_LABELS") == nullptr;
+    return on;
+}
+std::unordered_map<HWND, std::vector<drawn_text*>>& texts_drawn_by()
+{
+    static std::unordered_map<HWND, std::vector<drawn_text*>> m;
+    return m;
+}
+// Its rectangle in the coordinates of the window that draws it.
+RECT drawn_rect(const drawn_text& t)
+{
+    RECT r = t.r;
+    if (t.by != t.parent) MapWindowPoints(t.parent, t.by, reinterpret_cast<POINT*>(&r), 2);
+    return r;
+}
+UINT drawn_text_format(const drawn_text& t)
+{
+    return DT_NOPREFIX | DT_EXPANDTABS | (t.right ? DT_RIGHT : DT_LEFT) |
+           (t.ellipsize ? DT_SINGLELINE | DT_END_ELLIPSIS : DT_WORDBREAK);
+}
+// The texts `by` draws, on `dc` (its client coordinates).
+void draw_texts(HWND by, HDC dc)
+{
+    auto it = texts_drawn_by().find(by);
+    if (it == texts_drawn_by().end()) return;
+    const int saved = SaveDC(dc);
+    SetBkMode(dc, TRANSPARENT);
+    for (const drawn_text* t : it->second)
+    {
+        if (!t->shown || t->text.empty()) continue;
+        RECT r = drawn_rect(*t);
+        SelectObject(dc, ui_font(t->dpi));
+        SetTextColor(dc, color_ref(theme_color_of(t->enabled ? theme_color::window_text : theme_color::disabled_text)));
+        DrawTextW(dc, t->text.c_str(), int(t->text.size()), &r, drawn_text_format(*t));
+    }
+    RestoreDC(dc, saved);
+}
+// Whether `by` draws any texts (a tab control's subclass asks).
+bool draws_texts(HWND by) { return texts_drawn_by().count(by) != 0; }
+void stop_drawing(drawn_text& t)
+{
+    if (!t.by) return;
+    auto& m = texts_drawn_by();
+    auto& v = m[t.by];
+    v.erase(std::remove(v.begin(), v.end(), &t), v.end());
+    if (v.empty()) m.erase(t.by);
+    t.by = nullptr;
+}
+HWND pane_of(HWND h);
+// Repainted where it lies: the text's own rectangle in the window that draws
+// it. On a pane in a layout pass, the pane is drawn whole once the pass is
+// done (moves_in_one_pass).
+void redraw_text(const drawn_text& t)
+{
+    if (!t.by || !t.shown) return;
+    if (g_moves && pane_of(t.parent)) return;
+    RECT r = drawn_rect(t);
+    InvalidateRect(t.by, &r, TRUE);
+}
+// The window that draws it: a shown tab control of its parent's whose body
+// holds its rectangle wholly (a page's label lies on it), else the parent.
+HWND drawer_for(const drawn_text& t)
+{
+    for (HWND s = GetWindow(t.parent, GW_CHILD); s; s = GetWindow(s, GW_HWNDNEXT))
+    {
+        if (!(GetWindowLongPtrW(s, GWL_STYLE) & WS_VISIBLE)) continue;
+        wchar_t cls[32] = {};
+        GetClassNameW(s, cls, 32);
+        if (_wcsicmp(cls, WC_TABCONTROLW)) continue;
+        RECT body;
+        GetClientRect(s, &body);
+        TabCtrl_AdjustRect(s, FALSE, &body);
+        MapWindowPoints(s, t.parent, reinterpret_cast<POINT*>(&body), 2);
+        RECT overlap;
+        if (IntersectRect(&overlap, &body, &t.r) && EqualRect(&overlap, &t.r)) return s;
+    }
+    return t.parent;
+}
+void place_text(drawn_text& t, RECT r, UINT dpi)
+{
+    if (g_moves && g_moves->ahead) return;
+    t.dpi = dpi;
+    if (EqualRect(&r, &t.r) && t.by) return;
+    redraw_text(t);
+    stop_drawing(t);
+    t.r = r;
+    t.by = drawer_for(t);
+    texts_drawn_by()[t.by].push_back(&t);
+    redraw_text(t);
+}
+void show_text(drawn_text& t, bool shown)
+{
+    if (t.shown == shown) return;
+    if (!shown) redraw_text(t);
+    t.shown = shown;
+    if (shown) redraw_text(t);
+}
+void set_drawn_text(drawn_text& t, std::wstring text)
+{
+    if (t.text == text) return;
+    t.text = std::move(text);
+    redraw_text(t);
+}
+SIZE drawn_text_extent(UINT dpi, const std::wstring& s, bool multiline = false, int max_width = 0)
+{
+    HDC dc = GetDC(nullptr);
+    HGDIOBJ old = SelectObject(dc, ui_font(dpi));
+    RECT r{0, 0, max_width > 0 ? max_width : 100000, 0};
+    DrawTextW(dc, s.empty() ? L" " : s.c_str(), -1, &r, DT_CALCRECT | DT_NOPREFIX | DT_EXPANDTABS | (multiline ? DT_WORDBREAK : DT_SINGLELINE));
+    SelectObject(dc, old);
+    ReleaseDC(nullptr, dc);
+    return {r.right - r.left, r.bottom - r.top};
+}
+// A tab control draws the texts that lie on it after its own drawing: on
+// screen through a bitmap (so its body and the text show together), and
+// when printed (a pane drawn off screen).
+LRESULT CALLBACK tab_draws_text(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR)
+{
+    switch (msg)
+    {
+    case WM_PAINT:
+    {
+        if (!draws_texts(h)) break;
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT c;
+        GetClientRect(h, &c);
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bitmap = mem ? CreateCompatibleBitmap(dc, c.right, c.bottom) : nullptr;
+        HGDIOBJ old = bitmap ? SelectObject(mem, bitmap) : nullptr;
+        if (old && old != HGDI_ERROR)
+        {
+            SendMessageW(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND);
+            BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top, mem,
+                   ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+            SelectObject(mem, old);
+        }
+        else
+        {
+            DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT | PRF_ERASEBKGND);
+            draw_texts(h, dc);
+        }
+        if (bitmap) DeleteObject(bitmap);
+        if (mem) DeleteDC(mem);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_PRINTCLIENT:
+    {
+        const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+        draw_texts(h, reinterpret_cast<HDC>(wp));
+        return r;
+    }
+    case WM_NCDESTROY:
+        texts_drawn_by().erase(h);
+        RemoveWindowSubclass(h, tab_draws_text, id);
+        break;
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
 
 void move_control(HWND h, int x, int y, int w, int hgt)
 {
@@ -1710,12 +1893,26 @@ public:
             SetPropW(h_, L"rapport-label", h_);  // its colours: a label's (WM_CTLCOLORSTATIC)
             SetWindowSubclass(h_, selectable_proc, 4, 0);
         }
+        else if (!icon_ && windowless_labels())
+        {
+            // Plain text: drawn by the window it lies on (drawn_text).
+            text_.parent = parent;
+            text_.text = wide(s.text);
+            text_.ellipsize = s.ellipsize;
+        }
         else
             adopt(create_control(win, parent, L"STATIC", wide(s.text),
                                 SS_LEFT | SS_NOPREFIX | (s.ellipsize ? SS_ENDELLIPSIS : 0)));
     }
+    bool windowless() const { return !h_ && text_.parent; }
     void set_text(const std::string& t) override
     {
+        if (windowless())
+        {
+            set_drawn_text(text_, wide(t));
+            if (!ellipsize_) win_.relayout();
+            return;
+        }
         SetWindowTextW(h_, link_         ? link_markup(t).c_str()
                            : selectable_ ? to_crlf(wide(t)).c_str()
                                          : wide(t).c_str());
@@ -1726,6 +1923,11 @@ public:
     }
     ~label_impl() override
     {
+        if (windowless())
+        {
+            show_text(text_, false);
+            stop_drawing(text_);
+        }
         if (icon_h_)
         {
             handlers().erase(icon_h_);
@@ -1746,16 +1948,43 @@ public:
     }
     void set_enabled(bool e) override
     {
+        if (windowless())
+        {
+            if (text_.enabled == e) return;
+            text_.enabled = e;
+            redraw_text(text_);
+            return;
+        }
         set_control_enabled(h_, e);
         if (icon_h_) set_control_enabled(icon_h_, e);
     }
+    // (A windowless label has no tooltip or focus yet.)
+    void set_tooltip(const std::string& t) override
+    {
+        if (!windowless()) leaf::set_tooltip(t);
+    }
+    void focus() override
+    {
+        if (!windowless()) leaf::focus();
+    }
+    bool has_focus() const override { return !windowless() && leaf::has_focus(); }
     void show_all(bool shown) override
     {
+        if (windowless())
+        {
+            if (!g_moves || !g_moves->ahead) show_text(text_, shown && visible);
+            return;
+        }
         show_control(h_, shown && visible);
         if (icon_h_) show_control(icon_h_, shown && visible);
     }
     void place(RECT r) override
     {
+        if (windowless())
+        {
+            place_text(text_, r, win_.dpi());
+            return;
+        }
         if (icon_h_)
         {
             const int size = px(16), h = r.bottom - r.top;
@@ -1793,15 +2022,17 @@ public:
         }
         // Line breaks in the text are lines (measured single-line, the
         // label asked for one line's height and showed only the first).
-        const std::wstring text = window_text(h_);
-        SIZE s = text_extent(h_, text, text.find(L'\n') != std::wstring::npos);
+        const std::wstring text = windowless() ? text_.text : window_text(h_);
+        const auto extent = [&](bool multiline, int max_width = 0)
+        { return windowless() ? drawn_text_extent(win_.dpi(), text, multiline, max_width) : text_extent(h_, text, multiline, max_width); };
+        SIZE s = extent(text.find(L'\n') != std::wstring::npos);
         if (wrap_)
         {
             // About 60 characters across, or the text's own width if less; its
             // height is the lines it takes there. Laid out at least that wide
             // (a box is as wide as its widest child), so it never needs more.
             const long across = std::min<long>(s.cx, font_metrics(win_.dpi()).cx * 60);
-            s = text_extent(h_, text, true, int(across));
+            s = extent(true, int(across));
         }
         full_cx_ = s.cx;
         if (ellipsize_) s.cx = std::min<long>(s.cx, px(40));
@@ -1813,8 +2044,9 @@ public:
         const SIZE n = natural();
         if (!wrap_ || width == n.cx) return n.cy;
         const int icon = icon_h_ ? px(16) + px(4) : 0;
-        const long h =
-            text_extent(h_, window_text(h_), true, int(std::max<long>(1, width - icon))).cy;
+        const int at = int(std::max<long>(1, width - icon));
+        const long h = windowless() ? drawn_text_extent(win_.dpi(), text_.text, true, at).cy
+                                    : text_extent(h_, window_text(h_), true, at).cy;
         return icon_h_ ? std::max<long>(h, px(16)) : h;
     }
     // Measured at a token width so it never widens a window, it still shows
@@ -1846,6 +2078,7 @@ private:
         if (msg == WM_NCDESTROY) RemovePropW(h, L"rapport-label");
         return r;
     }
+    drawn_text text_;  // when it has no window (windowless())
     bool ellipsize_;
     bool wrap_;
     bool selectable_;
@@ -3522,13 +3755,27 @@ public:
         SendMessageW(h_, TBM_SETLINESIZE, 0, 1);
         SendMessageW(h_, TBM_SETPAGESIZE, 0, LPARAM(std::max(1.0, std::round(s.page / step_))));
         set_value(s.value);
-        if (show_value_) value_label_ = create_control(win, parent, L"STATIC", L"", SS_RIGHT);
+        if (show_value_)
+        {
+            // Its value beside it: drawn by the window it lies on (drawn_text),
+            // or a STATIC of its own (RAPPORT_WINDOWED_LABELS).
+            if (windowless_labels())
+            {
+                value_text_.parent = parent;
+                value_text_.right = true;
+            }
+            else
+                value_label_ = create_control(win, parent, L"STATIC", L"", SS_RIGHT);
+        }
         update_label();
     }
     ~slider_impl() override
     {
         if (value_label_) DestroyWindow(value_label_);
+        show_text(value_text_, false);
+        stop_drawing(value_text_);
     }
+    bool shows_value() const { return value_label_ || value_text_.parent; }
     // The trackbar's positions are steps along the track from min_; a value
     // set reads back as it was until the slider moves (between two steps,
     // it would drift to the nearer).
@@ -3610,17 +3857,21 @@ public:
     }
     void place(RECT r) override
     {
-        const int label = value_label_ ? label_width() : 0;
+        const int label = shows_value() ? label_width() : 0;
         leaf::place({r.left, r.top, r.right - label, r.bottom});
+        const int top = r.top + (r.bottom - r.top - font_metrics(win_.dpi()).cy) / 2;
         if (value_label_)
-            move_control(value_label_, r.right - label, r.top + (r.bottom - r.top - font_metrics(win_.dpi()).cy) / 2, label, font_metrics(win_.dpi()).cy);
+            move_control(value_label_, r.right - label, top, label, font_metrics(win_.dpi()).cy);
+        else if (value_text_.parent)
+            place_text(value_text_, RECT{r.right - label, top, r.right, top + font_metrics(win_.dpi()).cy}, win_.dpi());
     }
     void show_all(bool shown) override
     {
         leaf::show_all(shown);
         if (value_label_) show_control(value_label_, shown && visible);
+        if (value_text_.parent && (!g_moves || !g_moves->ahead)) show_text(value_text_, shown && visible);
     }
-    SIZE measure() override { return {px(140) + (value_label_ ? label_width() : 0), px(marks_.empty() ? 26 : 30)}; }
+    SIZE measure() override { return {px(140) + (shows_value() ? label_width() : 0), px(marks_.empty() ? 26 : 30)}; }
 
 private:
     int label_width() const { return font_metrics(win_.dpi()).cx * (digits_ + 5); }
@@ -3654,10 +3905,13 @@ private:
     }
     void update_label()
     {
-        if (!value_label_) return;
+        if (!shows_value()) return;
         wchar_t buf[64];
         swprintf(buf, 64, L"%.*f", digits_, value());
-        SetWindowTextW(value_label_, buf);
+        if (value_label_)
+            SetWindowTextW(value_label_, buf);
+        else
+            set_drawn_text(value_text_, buf);
     }
 
     slider_map map_;
@@ -3667,6 +3921,7 @@ private:
     int digits_;
     std::vector<std::pair<double, std::string>> marks_;
     HWND value_label_ = nullptr;
+    drawn_text value_text_;  // the value, when it has no window of its own
     std::function<void(double)> changed_;
 };
 
@@ -6073,6 +6328,7 @@ public:
         : leaf(win)
     {
         adopt(create_control(win, parent, WC_TABCONTROLW, L"", WS_CLIPSIBLINGS | WS_TABSTOP));
+        SetWindowSubclass(h_, tab_draws_text, 6, 0);
         SetWindowSubclass(h_, dark_tabs_proc, 1, 0);
         for (size_t i = 0; i < s.titles.size(); ++i)
         {
