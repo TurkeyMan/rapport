@@ -39,17 +39,8 @@ jobs:
       - name: Shell probe
         run: build/bin/rapport-shell-example-probe --extended .
 
-      - name: Translations
-        run: build/bin/rapport-i18n-test tests/i18n
-
-      - name: Theme palette
-        run: build/bin/rapport-theme-palette-test
-
-      - name: List press rule
-        run: build/bin/rapport-list-press-test
-
-      - name: Explorer view snapshots
-        run: build/bin/rapport-explorer-view-test
+      - name: Portable tests
+        run: ctest --test-dir build --output-on-failure --no-tests=error
 
       # Synthesized input through the real backends, off any desktop: GTK 3
       # on a Broadway server, Qt on its offscreen platform; GTK 4's entry
@@ -94,25 +85,8 @@ jobs:
           $p = Start-Process .\rapport-gallery.exe -PassThru -Wait
           if ($p.ExitCode -ne 0 -or -not (Test-Path $env:RAPPORT_SNAPSHOT)) { throw "rapport-gallery didn't snapshot" }
 
-      - name: Translations
-        run: |
-          build/bin/Release/rapport-i18n-test.exe tests/i18n
-          if ($LASTEXITCODE) { throw 'rapport-i18n-test failed' }
-
-      - name: Theme palette
-        run: |
-          build/bin/Release/rapport-theme-palette-test.exe
-          if ($LASTEXITCODE) { throw 'rapport-theme-palette-test failed' }
-
-      - name: List press rule
-        run: |
-          build/bin/Release/rapport-list-press-test.exe
-          if ($LASTEXITCODE) { throw 'rapport-list-press-test failed' }
-
-      - name: Explorer view snapshots
-        run: |
-          build/bin/Release/rapport-explorer-view-test.exe
-          if ($LASTEXITCODE) { throw 'rapport-explorer-view-test failed' }
+      - name: Portable tests
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
 
       - name: Shell extension
         working-directory: build/bin/Release
