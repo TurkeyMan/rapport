@@ -144,7 +144,7 @@ void origins()
 class server
 {
 public:
-    explicit server(std::function<std::string(std::string_view path)> answer)
+    explicit server(std::function<std::string(std::string_view path, std::string_view headers)> answer)
         : answer_(std::move(answer))
     {
         listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -201,7 +201,8 @@ private:
             if (!stop_ && from != 0 && to != std::string::npos)
             {
                 const std::string reply =
-                    answer_(std::string_view(request).substr(from, to - from));
+                    answer_(std::string_view(request).substr(from, to - from),
+                            std::string_view(request).substr(request.find("\r\n")));
                 ::send(c, reply.data(), int(reply.size()), 0);
                 if (std::string_view(request).substr(from).starts_with("/quiet")) hold(c);
             }
@@ -226,7 +227,7 @@ private:
         }
     }
 
-    std::function<std::string(std::string_view)> answer_;
+    std::function<std::string(std::string_view, std::string_view)> answer_;
     socket_t listener_ = INVALID_SOCKET;
     std::uint16_t port_ = 0;
     std::atomic<bool> stop_ = false;
@@ -257,9 +258,20 @@ void requests()
     std::ofstream(secret) << "local secret";
     const std::string secret_url = file_url(secret);
 
+    constexpr std::string_view nested = "/login?next=https://example.org/";
+    const auto received = [&](std::string_view path, std::string_view headers)
+    {
+        if (path != nested) return response("404 Not Found", {}, "");
+        const bool auth = headers.find("\r\nAuthorization: Bearer test\r\n") != std::string_view::npos;
+        return response("200 OK", {}, auth ? "with credentials" : "without credentials");
+    };
+    server other(received);
     server s(
-        [&](std::string_view path) -> std::string
+        [&](std::string_view path, std::string_view headers) -> std::string
         {
+            if (path == "/same-origin") return response("302 Found", nested, "");
+            if (path == "/other-origin") return response("302 Found", other.url(nested), "");
+            if (path == nested) return received(path, headers);
             if (path == "/ok") return response("200 OK", {}, "hello");
             if (path == "/to-file") return response("302 Found", secret_url, "");
             if (path == "/to-ftp") return response("302 Found", "ftp://127.0.0.1/x", "");
@@ -283,7 +295,7 @@ void requests()
             }
             return response("404 Not Found", {}, "");
         });
-    if (!s)
+    if (!s || !other)
     {
         check(false, "http: a server on the loopback");
         return;
@@ -297,6 +309,14 @@ void requests()
         return;
     }
     check(ok.status == 200 && ok.body == "hello" && ok.error.empty(), "http: a plain GET");
+
+    const rap::sys::http_options auth{.headers = {{"Authorization", "Bearer test"}}};
+    const auto same = rap::sys::http_get(s.url("/same-origin"), auth);
+    check(same.status == 200 && same.body == "with credentials" && same.url == s.url(nested),
+          "redirect: a URL in a relative target's query stays on the original origin");
+    const auto across = rap::sys::http_get(s.url("/other-origin"), auth);
+    check(across.status == 200 && across.body == "without credentials" && across.url == other.url(nested),
+          "redirect: a different port receives the target without credentials");
 
     bool refused = true;
     for (const char* path : {"/to-file", "/to-ftp"})

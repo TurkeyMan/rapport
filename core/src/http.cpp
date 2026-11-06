@@ -59,10 +59,20 @@ void add_header_line(std::string_view line, http_headers& out)
 
 // -- redirects ------------------------------------------------------------
 
+// A URI scheme can only appear at the start of a reference.
+bool has_scheme(std::string_view ref)
+{
+    constexpr std::string_view letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    constexpr std::string_view scheme_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+.-";
+    if (ref.empty() || letters.find(ref.front()) == std::string_view::npos) return false;
+    const size_t end = ref.find_first_not_of(scheme_chars);
+    return end != std::string_view::npos && ref[end] == ':';
+}
+
 // A Location against the URL it came from.
 std::string resolve(const std::string& base, const std::string& location)
 {
-    if (location.find("://") != std::string::npos) return location;
+    if (has_scheme(location)) return location;
     const size_t colon = base.find("://");
     if (colon == std::string::npos) return location;
     if (location.starts_with("//")) return base.substr(0, colon + 1) + location;
