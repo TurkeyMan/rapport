@@ -13,7 +13,7 @@ For a scripted run, finish the last drag step, allow its deferred pane paints an
 
 ## Capture limits
 
-An enabled process reserves 32 per-thread rings with 65,536 events each (about 112 MiB). Threads claim a ring on first use. Writes perform no allocation, locking or file I/O. A full ring overwrites its oldest events. Dumps export complete pairs and report overwritten, concurrently overwritten and unpaired events in `omittedEvents`. `unrecordedThreads` counts threads beyond the pool capacity. For comparable runs, check both counts and shorten the workload if needed. On-demand dumps can run alongside producers. Dumping a second time or exiting can include scopes that were still open in an earlier snapshot.
+An enabled process reserves 32 per-thread rings with 65,536 events each (48 bytes per event slot, 96 MiB total, about 100.7 MB). Threads claim a ring on first use. Writes perform no allocation, locking or file I/O. A full ring overwrites its oldest events. Dumps export complete pairs and report overwritten, concurrently overwritten and unpaired events in `omittedEvents`. `unrecordedThreads` counts threads beyond the pool capacity. For comparable runs, check both counts and shorten the workload if needed. On-demand dumps can run alongside producers. Dumping a second time or exiting can include scopes that were still open in an earlier snapshot.
 
 ## Control and message detail
 
