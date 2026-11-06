@@ -1,0 +1,34 @@
+# Win32 layout and presentation tracing
+
+Set `RAPPORT_TRACE` to an absolute output filename before starting the application. Use a distinct path per process and create its parent directory first. Rapport reads the setting when its Win32 backend initializes. An unset or empty value leaves recording disabled. The file contains Chrome trace-event JSON and can be opened in Perfetto.
+
+For a scripted run, finish the last drag step, allow its deferred pane paints and readback publications to run, then exit normally. To take a snapshot without exiting, call the private C function `bool rapport_win32_trace_dump()` from the harness. Static Win32 builds can link it directly. Plugin builds can resolve it by name from the loaded `rapport_win32.dll` with `GetProcAddress`. It returns true on a successful write. Each dump replaces the configured file; copy it before exit to retain an intermediate snapshot. Call from outside the measured loop.
+
+## Reading a capture
+
+- A top-level resize or splitter step starts a burst ID. Nested scopes inherit it. A deferred panel paint carries the most recent move batch that invalidated the panel. The last `pane.paint` end for that burst includes the panel print and copy. If several steps coalesce into one paint, the paint belongs to the latest step.
+- Readback submission, worker callback and UI publication share a frame ID in `args.arg` and a causal burst in `args.burst`. A submitted frame can be superseded or rejected before publication. Compare timestamps across threads for queue latency. The callback scope measures CPU work once the readback has completed.
+- Other `arg` values identify the HWND (or swap chain for Present), the number of parent groups in a child-move batch, or the wait budget in milliseconds. `ts` is QPC converted to microseconds. Raw QPC ticks and the top-level `qpcFrequency` allow alignment with a client trace taken on the same clock.
+- Read durations by thread and nesting. EndDeferWindowPos may dispatch WM_SIZE, and RDW_UPDATENOW may paint synchronously. Adding all those inclusive durations double-counts time. Present and GPU waits measure the caller's wall time. Measuring when a frame physically appeared requires separate compositor/display evidence.
+
+## Capture limits
+
+An enabled process reserves 32 per-thread rings with 65,536 events each (about 112 MiB). Threads claim a ring on first use. Writes perform no allocation, locking or file I/O. A full ring overwrites its oldest events. Dumps export complete pairs and report overwritten, concurrently overwritten and unpaired events in `omittedEvents`. `unrecordedThreads` counts threads beyond the pool capacity. For comparable runs, check both counts and shorten the workload if needed. On-demand dumps can run alongside producers. Dumping a second time or exiting can include scopes that were still open in an earlier snapshot.
+
+## Control and message detail
+
+Traced UI threads install thread-local call/return hooks, removed when the backend is destroyed. `message` pairs record synchronous window-procedure time and carry `args.message` (the numeric Windows message), `args.arg` (HWND), a common-control `class` name, and the native `classAtom` for other classes. `visible` uses effective Win32 visibility. `inBatch` covers the lifetime of a layout move pass, including application of the deferred moves. `inSize` identifies messages sent while another WM_SIZE is executing. Filter WM_PAINT (15) and WM_ERASEBKGND (20) to check unexpected painting during a batch or during a control's own WM_SIZE. WM_PRINT (791) and WM_PRINTCLIENT (792) pairs nested inside `pane.WM_PRINT` give inclusive per-child print time by class. Hooks cover the traced UI thread; worker threads still record their explicit scopes.
+
+`window.move` covers each SetWindowPos or DeferWindowPos call. Deferred calls enqueue work; the application cost is in EndDeferWindowPos and its nested per-window messages. WM_WINDOWPOSCHANGING (70) carries `sizeChanged`, computed against the current window rectangle. WM_WINDOWPOSCHANGED (71) includes the control's resulting handling. These CPU timings exclude compositor work after the calls return.
+
+`move.decision` reports each placed_at check with arg 0 for already placed and 1 for requiring a move. Count these within a pass to compare skipped checks and requested moves. Hidden parked controls and duplicate requests filtered out of the deferred batch don't result in a `window.move`; count issued moves separately.
+
+`pane.invalidate` marks the batch's final panel invalidation. Match its HWND and burst to `pane.paint` for idle queue latency. Count `pane.WM_PRINT` against `splitter.step` events per time interval to see coalescing. `pane.printed_pixels` is the full panel client area; `pane.visible_pixels` is its rectangular intersection with its immediate host. This is a clipping upper bound, without subtracting occlusion from other windows or clipping by higher ancestors.
+
+`input.message_time` records GetMessageTime for a native splitter WM_MOUSEMOVE. `input.age_ms` records the unsigned GetTickCount difference from that time immediately afterwards. Subtract that age from the event's QPC time to estimate input-to-Present for the same burst, with the millisecond clock's granularity. A scripted set_sizes call has no native input timestamp. `dispatch` records messages returned by the backend message loop, even those consumed by keyboard/dialog handling. Nested `message` pairs show synchronous message cascades. Counts of `WM_CTLCOLORSTATIC`, `tab.cache_miss` and `TCM_ADJUSTRECT` are available per pass.
+
+These detailed hooks and extra QPC reads add overhead while enabled. Compare builds with the same trace enabled and retain an untraced wall-time reference. All hooks are absent when tracing is disabled. Recording a long drag may overwrite earlier events; use short runs and check omittedEvents.
+
+## Scripted native splitter input
+
+The splitter consumes posted WM_LBUTTONDOWN, WM_MOUSEMOVE and WM_LBUTTONUP through the normal native handler. It uses the down/up sequence and its own dragging state. Each mouse position is relative to the bar's current client origin, which changes during the drag. Send the next step only after the preceding step has been processed and remap the desired parent coordinate each time. The handler calls SetCapture and ReleaseCapture, so this method can interact with real desktop capture despite leaving the pointer position alone. Capture loss ends the drag. A measurement harness should detect that and report an interrupted run.

@@ -120,3 +120,13 @@ foreach(mode ordinary self)
                 -DMODE=${mode} -DDIR=${CMAKE_CURRENT_BINARY_DIR}/watch-${mode}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/watch_lifetime.cmake)
 endforeach()
+
+if(TARGET rapport_win32)
+    add_executable(rapport-win32-trace-test win32_trace_test.cpp ../backends/win32/win32_trace.cpp)
+    target_include_directories(rapport-win32-trace-test PRIVATE ../backends/win32)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME win32-trace COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/win32_trace_test.py $<TARGET_FILE:rapport-win32-trace-test>)
+    endif()
+endif()
