@@ -4,6 +4,7 @@
 // are bare GObjects tagged with their row index; cells pull text from the
 // rap::list_model at bind time. Painted columns are GtkDrawingAreas.
 #include "../common/container_state.h"
+#include "../common/line_control.h"
 #include <gtk/gtk.h>
 
 #include "builtin_icons.h"
@@ -4389,16 +4390,6 @@ public:
     }
 
 private:
-    static bool is_line_control(const rap::node_spec& s)
-    {
-        return std::holds_alternative<spec::label>(s) || std::holds_alternative<spec::button>(s) ||
-               std::holds_alternative<spec::check>(s) || std::holds_alternative<spec::entry>(s) ||
-               std::holds_alternative<spec::drop_down>(s) || std::holds_alternative<spec::combo>(s) ||
-               std::holds_alternative<spec::menu_button>(s) ||
-               std::holds_alternative<spec::progress_bar>(s) ||
-               std::holds_alternative<spec::date_picker>(s);
-    }
-
     static bool fills_form_row(const rap::node_spec& s)
     {
         return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
@@ -4429,7 +4420,7 @@ private:
             GtkWidget* w = build(c, s.dir);
             // Single-line controls keep their natural height when a taller
             // sibling (a stack of checkboxes) sets the row height.
-            if (s.dir == orientation::horizontal && is_line_control(c.spec))
+            if (s.dir == orientation::horizontal && rap::detail::is_line_control(c.spec))
                 gtk_widget_set_valign(w, GTK_ALIGN_CENTER);
             gtk_box_append(GTK_BOX(box), w);
         }
