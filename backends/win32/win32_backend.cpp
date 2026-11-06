@@ -531,7 +531,7 @@ bool paint_pane(HWND panel)
         {
             trace::scope timing(trace::phase::pane_print, uintptr_t(panel));
             SendMessageW(panel, WM_PRINT, reinterpret_cast<WPARAM>(mem),
-                         PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN);
+                         PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND | PRF_CHILDREN);
         }
         g_printing_pane = nullptr;
         {
@@ -543,7 +543,10 @@ bool paint_pane(HWND panel)
     if (bitmap) DeleteObject(bitmap);
     if (mem) DeleteDC(mem);
     ReleaseDC(panel, screen);
-    if (drawn) RedrawWindow(panel, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_ALLCHILDREN);
+    // Frames too (RDW_NOFRAME, else a control moved or resized keeps its
+    // frame's paint due and is sent WM_PAINT for it, painting itself again
+    // on screen after the copy): the print had them (PRF_NONCLIENT).
+    if (drawn) RedrawWindow(panel, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_NOFRAME | RDW_ALLCHILDREN);
     // Its host, moved without redrawing too (move_pane_window): its scroll
     // bar, and any of it the panel doesn't cover.
     if (HWND host = GetParent(panel)) RedrawWindow(host, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_NOCHILDREN);
@@ -1112,8 +1115,11 @@ public:
         // band at a time over several frames (a pane's controls, top to
         // bottom, while the app was busy). Not the panes: nothing on one
         // paints in this update (a trackbar invalidates itself as it takes a
-        // size), as a pane is drawn whole, off screen.
-        for (HWND whole : buffered) RedrawWindow(whole, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_ALLCHILDREN);
+        // size), as a pane is drawn whole, off screen. Their frames' paints
+        // too (RDW_NOFRAME): a window moved or resized has one due, which
+        // RDW_VALIDATE alone leaves, and it was sent WM_PAINT for it in the
+        // update (a pane's canvas rendering there, then again in the print).
+        for (HWND whole : buffered) RedrawWindow(whole, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_NOFRAME | RDW_ALLCHILDREN);
         std::set<HWND> roots;
         for (auto& [parent, list] : batch_.moves) roots.insert(GetAncestor(parent, GA_ROOT));
         for (auto [h, shown] : batch_.shown)
@@ -2046,16 +2052,17 @@ LRESULT CALLBACK enter_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
 // their padding); the edge is painted with the background its text has
 // instead of the themed border. Themed EDITs repaint that border on focus
 // and hover (WM_NCPAINT), so all of its painting comes here.
-LRESULT CALLBACK frameless_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+// Its edge painted on `dc`, the window's own (0, 0 its top left): on screen
+// (WM_NCPAINT) or printed (WM_PRINT with PRF_NONCLIENT: a scroll pane drawn
+// off screen, which validates the frame's paint as well).
+void paint_frameless_edge(HWND h, HDC dc)
 {
-    if (msg != WM_NCPAINT) return DefSubclassProc(h, msg, wp, lp);
     RECT window, client;
     GetWindowRect(h, &window);
     GetClientRect(h, &client);
     MapWindowPoints(h, nullptr, reinterpret_cast<POINT*>(&client), 2);
     OffsetRect(&client, -window.left, -window.top);
     OffsetRect(&window, -window.left, -window.top);
-    HDC dc = GetWindowDC(h);
     // What the text's background is: the parent's WM_CTLCOLORSTATIC brush
     // for a read-only EDIT, else the edit colour.
     HBRUSH brush = nullptr;
@@ -2064,9 +2071,26 @@ LRESULT CALLBACK frameless_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT
             SendMessageW(GetParent(h), WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(dc),
                          reinterpret_cast<LPARAM>(h)));
     if (!brush) brush = GetSysColorBrush(COLOR_WINDOW);
+    const int saved = SaveDC(dc);
     ExcludeClipRect(dc, client.left, client.top, client.right, client.bottom);
     FillRect(dc, &window, brush);
-    ReleaseDC(h, dc);
+    RestoreDC(dc, saved);
+}
+
+LRESULT CALLBACK frameless_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg == WM_PRINT && (lp & PRF_NONCLIENT))
+    {
+        const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+        paint_frameless_edge(h, reinterpret_cast<HDC>(wp));
+        return r;
+    }
+    if (msg != WM_NCPAINT) return DefSubclassProc(h, msg, wp, lp);
+    if (HDC dc = GetWindowDC(h))
+    {
+        paint_frameless_edge(h, dc);
+        ReleaseDC(h, dc);
+    }
     return 0;
 }
 
@@ -7444,7 +7468,11 @@ private:
             if (g_canvases_quiet)
                 ;
             else if (with_pane())
-                render_into(dc);
+            {
+                // Nothing of it due (a paint for its frame alone): it's drawn
+                // with its pane's print instead.
+                if (!IsRectEmpty(&ps.rcPaint)) render_into(dc);
+            }
             else
                 render();
             EndPaint(h_, &ps);
