@@ -111,3 +111,12 @@ if(TARGET rapport_win32)
     add_test(NAME pane-frame-order COMMAND rapport-pane-readback-loss-test --ordering)
     set_tests_properties(pane-readback-loss pane-frame-order PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30 ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 endif()
+
+add_executable(rapport-watch-lifetime-test watch_lifetime_test.cpp)
+target_link_libraries(rapport-watch-lifetime-test PRIVATE rapport::rapport)
+foreach(mode ordinary self)
+    add_test(NAME watch-${mode}
+        COMMAND ${CMAKE_COMMAND} -DWATCH=$<TARGET_FILE:rapport-watch-lifetime-test>
+                -DMODE=${mode} -DDIR=${CMAKE_CURRENT_BINARY_DIR}/watch-${mode}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/watch_lifetime.cmake)
+endforeach()
