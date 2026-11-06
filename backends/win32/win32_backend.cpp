@@ -7544,7 +7544,11 @@ private:
     void read_back(rap::gpu::texture_ptr texture)
     {
         const std::shared_ptr<rap::gpu::device> dev = gpu_device();
-        if (!dev || !texture || texture->format() != rap::gpu::format::rgba8) return;
+        if (!dev || !texture || texture->format() != rap::gpu::format::rgba8)
+        {
+            clear_frame();  // supersede pending work and discard the previous pane pixels
+            return;
+        }
         if (!slot_)
         {
             slot_ = std::make_shared<read_back_slot>();
