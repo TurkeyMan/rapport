@@ -64,7 +64,7 @@ int main(int argc, char** argv)
     std::shared_ptr<rap::gpu::device> dev;
     rap::gpu::texture_ptr texture;
     std::array<std::byte, 4> retired{};
-    enum class step { red, cleared, cpu, gpu, loss };
+    enum class step { red, cleared, cpu, gpu, rejected, loss };
     step phase = step::red;
     bool delivered = false;
     // Queue a UI notification after this frame's GPU worker callback and
@@ -136,7 +136,18 @@ int main(int argc, char** argv)
                 phase = step::gpu;
                 after_readback();
                 break;
-            case step::gpu: (*ui)->quit(actual == RGB(255, 0, 0) ? 0 : 1); break;
+            case step::gpu:
+            {
+                if (actual != RGB(255, 0, 0)) { (*ui)->quit(1); return; }
+                auto unsupported = dev->create({1, 1, rap::gpu::format::r8});
+                if (!unsupported) { (*ui)->quit(1); return; }
+                pane->present(texture, {});
+                pane->present(unsupported, {});
+                phase = step::rejected;
+                after_readback();
+                break;
+            }
+            case step::rejected: (*ui)->quit(actual == background ? 0 : 1); break;
             case step::loss: (*ui)->quit(dev->lost() && actual == RGB(255, 0, 0) ? 0 : 1); break;
             case step::red: break;
             }
