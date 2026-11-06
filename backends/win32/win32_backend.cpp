@@ -509,6 +509,9 @@ bool paint_pane(HWND panel)
     if (mem) DeleteDC(mem);
     ReleaseDC(panel, screen);
     if (drawn) RedrawWindow(panel, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_ALLCHILDREN);
+    // Its host, moved without redrawing too (move_pane_window): its scroll
+    // bar, and any of it the panel doesn't cover.
+    if (HWND host = GetParent(panel)) RedrawWindow(host, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_NOCHILDREN);
     return drawn;
 }
 
@@ -1047,17 +1050,24 @@ public:
         }
         for (auto [h, shown] : batch_.shown) show_now(h, shown);
         buffered.insert(batch_.panes.begin(), batch_.panes.end());
-        for (HWND whole : buffered) InvalidateRect(whole, nullptr, FALSE);
         // Then painted, all of them, before anything else runs: left to their
         // WM_PAINTs, which come only once the queue is idle, they landed a
         // band at a time over several frames (a pane's controls, top to
-        // bottom, while the app was busy).
+        // bottom, while the app was busy). Not the panes: nothing on one
+        // paints in this update (a trackbar invalidates itself as it takes a
+        // size), as a pane is drawn whole, off screen.
+        for (HWND whole : buffered) RedrawWindow(whole, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_ALLCHILDREN);
         std::set<HWND> roots;
         for (auto& [parent, list] : batch_.moves) roots.insert(GetAncestor(parent, GA_ROOT));
         for (auto [h, shown] : batch_.shown)
             if (shown) roots.insert(GetAncestor(h, GA_ROOT));
         for (HWND root : roots)
             if (IsWindowVisible(root)) RedrawWindow(root, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+        // The panes after that, drawn when nothing else is waiting
+        // (paint_pane), so the windows beside them keep up with a drag.
+        // Invalidated before the update above, they were printed in it: a
+        // whole-panel print inside every step.
+        for (HWND whole : buffered) InvalidateRect(whole, nullptr, FALSE);
     }
 
 private:
@@ -6556,7 +6566,9 @@ public:
             return;
         }
         g_moves->panes.insert(panel_);
-        if (!placed_at(h, x, y, w, hgt)) SetWindowPos(h, nullptr, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
+        // Without redrawing either: what it uncovers keeps what was there a
+        // moment, until the panel's drawn.
+        if (!placed_at(h, x, y, w, hgt)) SetWindowPos(h, nullptr, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
     }
     void show_all(bool shown) override
     {
