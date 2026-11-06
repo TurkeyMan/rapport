@@ -87,6 +87,9 @@ install(EXPORT rapportTargets NAMESPACE rapport::
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/rapportConfig.cmake
     "include(\${CMAKE_CURRENT_LIST_DIR}/rapportTargets.cmake)\n"
     "include(\${CMAKE_CURRENT_LIST_DIR}/RapportShaders.cmake)\n"
+    "if(NOT TARGET rapport::headers)\n"
+    "    add_library(rapport::headers ALIAS rapport::rapport_headers)\n"
+    "endif()\n"
     "set(RAPPORT_PLUGIN_DIR \"${RAPPORT_INSTALL_LIBDIR}/rapport\")\n")
 write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/rapportConfigVersion.cmake
     COMPATIBILITY ExactVersion)
