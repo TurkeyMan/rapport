@@ -1,6 +1,7 @@
 // Headless backend: builds stub widgets, prints the layout tree, and runs
 // posted tasks until quit(). For tests and for checking plugin loading on
 // machines without a toolkit.
+#include "../common/container_state.h"
 #include "rapport/backend.h"
 
 #include <algorithm>
@@ -395,12 +396,7 @@ public:
         std::printf("%*s", depth * 2, "");
         if (!form_label.empty()) std::printf("[%s] ", form_label.c_str());
         std::visit([&](const auto& s) { visit(n, s, depth); }, n.spec);
-        const bool container = std::holds_alternative<spec::box>(n.spec) ||
-                               std::holds_alternative<spec::form>(n.spec) ||
-                               std::holds_alternative<spec::group>(n.spec) ||
-                               std::holds_alternative<spec::scroll>(n.spec) ||
-                               std::holds_alternative<spec::toolbar>(n.spec);
-        if (container && (n.common.handle || !n.common.visible)) make<stub<rap::widget>>(n);
+        if (rap::detail::needs_container_wrapper(n)) make<stub<rap::widget>>(n);
     }
 
 private:
