@@ -167,20 +167,29 @@ LRESULT CALLBACK dark_header_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_P
 // A sunken edge (WS_EX_CLIENTEDGE) in dark mode: rich text and list boxes
 // draw theirs white; over it, the border colour outside and the field's
 // inside.
+void paint_dark_edge(HWND h, HDC dc)
+{
+    RECT w;
+    GetWindowRect(h, &w);
+    OffsetRect(&w, -w.left, -w.top);
+    FrameRect(dc, &w, theme_brush(theme_color::border));
+    InflateRect(&w, -1, -1);
+    FrameRect(dc, &w, theme_brush(theme_color::base));
+}
+// On screen (WM_NCPAINT), and printed (WM_PRINT with PRF_NONCLIENT: a scroll
+// pane drawn off screen, which validates the frame's paint as well).
 LRESULT CALLBACK dark_edge_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
 {
-    if (msg != WM_NCPAINT || !dark_mode() ||
+    const bool print = msg == WM_PRINT && (lp & PRF_NONCLIENT);
+    if ((msg != WM_NCPAINT && !print) || !dark_mode() ||
         !(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_CLIENTEDGE))
         return DefSubclassProc(h, msg, wp, lp);
     const LRESULT r = DefSubclassProc(h, msg, wp, lp);
-    if (HDC dc = GetWindowDC(h))
+    if (print)
+        paint_dark_edge(h, reinterpret_cast<HDC>(wp));
+    else if (HDC dc = GetWindowDC(h))
     {
-        RECT w;
-        GetWindowRect(h, &w);
-        OffsetRect(&w, -w.left, -w.top);
-        FrameRect(dc, &w, theme_brush(theme_color::border));
-        InflateRect(&w, -1, -1);
-        FrameRect(dc, &w, theme_brush(theme_color::base));
+        paint_dark_edge(h, dc);
         ReleaseDC(h, dc);
     }
     return r;
@@ -189,6 +198,27 @@ LRESULT CALLBACK dark_edge_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
 // A separator (an etched static) in dark mode: its etched edge is drawn
 // white whatever WM_CTLCOLORSTATIC says, so the line is drawn here, a
 // pixel of the divider colour across its middle.
+// The whole window, on `dc` (0, 0 its top left).
+void paint_dark_separator(HWND h, HDC dc)
+{
+    RECT w;
+    GetWindowRect(h, &w);
+    OffsetRect(&w, -w.left, -w.top);
+    FillRect(dc, &w, theme_brush(theme_color::window));
+    const bool vertical = (GetWindowLongPtrW(h, GWL_STYLE) & SS_TYPEMASK) == SS_ETCHEDVERT;
+    RECT line = w;
+    if (vertical)
+    {
+        line.left = (w.left + w.right - 1) / 2;
+        line.right = line.left + 1;
+    }
+    else
+    {
+        line.top = (w.top + w.bottom - 1) / 2;
+        line.bottom = line.top + 1;
+    }
+    FillRect(dc, &line, theme_brush(theme_color::divider));
+}
 LRESULT CALLBACK dark_separator_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
 {
     if (!dark_mode()) return DefSubclassProc(h, msg, wp, lp);
@@ -203,28 +233,19 @@ LRESULT CALLBACK dark_separator_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UIN
         PAINTSTRUCT ps;
         BeginPaint(h, &ps);
         EndPaint(h, &ps);
-        HDC dc = GetWindowDC(h);
-        if (!dc) return 0;
-        RECT w;
-        GetWindowRect(h, &w);
-        OffsetRect(&w, -w.left, -w.top);
-        FillRect(dc, &w, theme_brush(theme_color::window));
-        const bool vertical = (GetWindowLongPtrW(h, GWL_STYLE) & SS_TYPEMASK) == SS_ETCHEDVERT;
-        RECT line = w;
-        if (vertical)
+        if (HDC dc = GetWindowDC(h))
         {
-            line.left = (w.left + w.right - 1) / 2;
-            line.right = line.left + 1;
+            paint_dark_separator(h, dc);
+            ReleaseDC(h, dc);
         }
-        else
-        {
-            line.top = (w.top + w.bottom - 1) / 2;
-            line.bottom = line.top + 1;
-        }
-        FillRect(dc, &line, theme_brush(theme_color::divider));
-        ReleaseDC(h, dc);
         return 0;
     }
+    // Printed as painted (a scroll pane drawn off screen): no frame, so the
+    // client is the window.
+    case WM_PRINT:
+    case WM_PRINTCLIENT:
+        if (lp & PRF_CLIENT) paint_dark_separator(h, reinterpret_cast<HDC>(wp));
+        return 0;
     }
     return DefSubclassProc(h, msg, wp, lp);
 }
