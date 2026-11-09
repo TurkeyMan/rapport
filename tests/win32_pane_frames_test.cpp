@@ -95,7 +95,8 @@ pixels on_screen(HWND root)
     DwmFlush();
     return capture(r.right - r.left, r.bottom - r.top, [&](HDC dc) {
         HDC screen = GetDC(nullptr);
-        BitBlt(dc, 0, 0, r.right - r.left, r.bottom - r.top, screen, r.left, r.top, SRCCOPY);
+        expect(BitBlt(dc, 0, 0, r.right - r.left, r.bottom - r.top, screen, r.left, r.top, SRCCOPY) != FALSE,
+               "the screen could be read");
         ReleaseDC(nullptr, screen);
     });
 }

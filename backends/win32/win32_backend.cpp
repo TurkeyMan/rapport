@@ -496,6 +496,7 @@ struct pane_frames
     HWND panel;
     HRGN shown;
     std::vector<HWND> windows;
+    bool failed = false;  // the region couldn't be made: no copy, then
 };
 
 BOOL CALLBACK collect_pane_frame(HWND h, LPARAM lp)
@@ -523,16 +524,13 @@ BOOL CALLBACK collect_pane_frame(HWND h, LPARAM lp)
     if (IsRectEmpty(&shown)) return TRUE;
     IntersectRect(&inner, &inner, &shown);
     f->windows.push_back(h);
-    if (!f->shown) return TRUE;
     HRGN ring = CreateRectRgnIndirect(&shown);
     HRGN hole = CreateRectRgnIndirect(&inner);
-    if (ring && hole && CombineRgn(ring, ring, hole, RGN_DIFF) != ERROR)
-    {
-        POINT origin{};
-        ClientToScreen(f->panel, &origin);
-        OffsetRgn(ring, -origin.x, -origin.y);
-        CombineRgn(f->shown, f->shown, ring, RGN_OR);
-    }
+    POINT origin{};
+    ClientToScreen(f->panel, &origin);
+    if (!f->shown || !ring || !hole || CombineRgn(ring, ring, hole, RGN_DIFF) == ERROR ||
+        OffsetRgn(ring, -origin.x, -origin.y) == ERROR || CombineRgn(f->shown, f->shown, ring, RGN_OR) == ERROR)
+        f->failed = true;
     if (ring) DeleteObject(ring);
     if (hole) DeleteObject(hole);
     return TRUE;
@@ -577,8 +575,11 @@ bool paint_pane(HWND panel)
     bool drawn = false;
     pane_frames frames{panel, CreateRectRgn(0, 0, 0, 0), {}};
     if (old && old != HGDI_ERROR)
-    {
         EnumChildWindows(panel, collect_pane_frame, reinterpret_cast<LPARAM>(&frames));
+    // Copied with those frames left out, or not at all (they'd show classic).
+    if (old && old != HGDI_ERROR && !frames.failed &&
+        (frames.windows.empty() || ExtSelectClipRgn(screen, frames.shown, RGN_DIFF) != ERROR))
+    {
         g_printing_pane = panel;
         {
             trace::scope timing(trace::phase::pane_print, uintptr_t(panel));
@@ -588,13 +589,13 @@ bool paint_pane(HWND panel)
         g_printing_pane = nullptr;
         {
             trace::scope timing(trace::phase::pane_blit, uintptr_t(panel));
-            // Not over the controls' frames: printed, a themed one comes out
-            // as the classic sunken edge, and it's painted for real below.
-            if (frames.shown) ExtSelectClipRgn(screen, frames.shown, RGN_DIFF);
+            // Not over the controls' frames (clipped out above): printed, a
+            // themed one comes out as the classic sunken edge, and it's
+            // painted for real below.
             drawn = BitBlt(screen, 0, 0, c.right, c.bottom, mem, 0, 0, SRCCOPY) != FALSE;
         }
-        SelectObject(mem, old);
     }
+    if (old && old != HGDI_ERROR) SelectObject(mem, old);
     if (bitmap) DeleteObject(bitmap);
     if (mem) DeleteDC(mem);
     ReleaseDC(panel, screen);
