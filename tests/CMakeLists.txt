@@ -142,3 +142,11 @@ if(TARGET rapport_win32)
     add_test(NAME win32-trace-splitter COMMAND rapport-win32-trace-splitter-test)
     set_tests_properties(win32-trace-splitter PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 endif()
+
+if(WIN32)
+    add_executable(rapport-shell-overlay-names-test shell_overlay_names_test.cpp)
+    target_compile_features(rapport-shell-overlay-names-test PRIVATE cxx_std_23)
+    target_include_directories(rapport-shell-overlay-names-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shell/src/win32)
+    add_test(NAME shell-overlay-names COMMAND rapport-shell-overlay-names-test)
+endif()
