@@ -1051,6 +1051,7 @@ public:
     }
     void select(const std::string& id) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         quiet q(*this);
         if (!select_quietly(id)) view()->clearSelection();
     }
@@ -1058,6 +1059,8 @@ public:
     {
         if (auto it = by_id_.find(id); it != by_id_.end())
         {
+            // Asks wait until Qt's finished: a handler may destroy the tree.
+            lazy_tree::tracker::batch b(lazy_);
             it->second->setExpanded(open);
             if (open) lazy_.opened(id);
         }

@@ -1127,6 +1127,7 @@ public:
     }
     void select(const std::string& id) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         quiet q(*this);
         if (!select_quietly(id)) gtk_tree_selection_unselect_all(sel_);
     }
@@ -1134,6 +1135,8 @@ public:
     {
         if (GtkTreePath* path = path_of(id))
         {
+            // Asks wait until GTK's finished: a handler may destroy the tree.
+            lazy_tree::tracker::batch b(lazy_);
             if (open)
                 gtk_tree_view_expand_row(GTK_TREE_VIEW(w_), path, false);
             else

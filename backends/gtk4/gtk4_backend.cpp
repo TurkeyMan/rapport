@@ -795,8 +795,13 @@ public:
 // A GtkListView over a GtkTreeListModel, rows a GtkTreeExpander holding a
 // box (hidden for items without one) and a label.
 // The models hold GtkStringObjects naming the app's ids; labels and children
-// come from nodes_. A node with children not loaded yet holds one placeholder
-// node, which is what gives it a chevron. A row's chevron is decided once, when
+// come from nodes_. A node with children not loaded yet (node::loading) has one
+// placeholder row, a GtkStringObject flagged rather than named, so it can't be
+// taken for an app's id; that row is what gives it a chevron. From GTK 4.10
+// every row has a model for its children and shows or hides its expander, so
+// a chevron comes and goes on the row as it is. Before that a row's chevron is
+// decided once, when it's made, so one that gains or loses it is replaced in
+// its parent's store (reinsert). A row's chevron is decided once, when
 // the row is made, so one that gains or loses it is put back in its parent's
 // store for a new row (reinsert); that's also how a row shows new text.
 class tree_impl : public widget_base<rap::tree>
@@ -934,7 +939,7 @@ public:
         const std::optional<std::string> keep = selected();
         const std::optional<std::string> focus = focused_row();
         const std::unordered_map<std::string, bool> open = open_states();
-        const bool had_children = !found->second.children.empty();
+        const bool had_children = !found->second.children.empty() || found->second.loading;
         for (const std::string& c : std::vector<std::string>(found->second.children)) forget_subtree(c);
         lazy_.forget(id);
         std::vector<std::string> children;
@@ -947,22 +952,19 @@ public:
             if (auto n = nodes_.find(other); n != nodes_.end() && other != id) n->second.expanded = is_open;
         node& parent = nodes_[id];
         parent.children = children;
+        parent.loading = false;
         parent.expanded = !children.empty() && (open.contains(id) ? open.at(id) : parent.expanded);
-        const auto store = stores_.find(id);
-        if (children.empty() || !had_children || store == stores_.end())
-        {
-            // No store: nothing has asked for its children, so there's only
-            // the row's chevron to see to.
-            if (children.empty() || !had_children) reinsert(id);
-        }
+#if GTK_CHECK_VERSION(4, 10, 0)
+        (void)had_children;
+        sync_store(id);
+        if (children.empty()) close_row(id);
+        rebind(id);
+#else
+        if (children.empty() || !had_children)
+            reinsert(id);
         else
-        {
-            std::vector<gpointer> fresh;
-            for (const std::string& c : children) fresh.push_back(gtk_string_object_new(c.c_str()));
-            g_list_store_splice(store->second, 0, g_list_model_get_n_items(G_LIST_MODEL(store->second)), fresh.data(),
-                                guint(fresh.size()));
-            for (gpointer o : fresh) g_object_unref(o);
-        }
+            sync_store(id);
+#endif
         restore_open();
         restore_selection(keep);
         restore_focus(focus);
@@ -983,8 +985,12 @@ public:
         if (has_children && !waiting && found->second.children.empty())
         {
             lazy_.mark(id);
-            found->second.children.push_back(add_placeholder(id));
+            found->second.loading = true;
         }
+#if GTK_CHECK_VERSION(4, 10, 0)
+        if (found->second.loading) sync_store(id);
+        rebind(id);
+#else
         quiet q(*this);
         const std::optional<std::string> keep = selected();
         const std::optional<std::string> focus = focused_row();
@@ -994,6 +1000,7 @@ public:
         restore_open();
         restore_selection(keep);
         restore_focus(focus);
+#endif
     }
     // The item with the keyboard focus (the list view's cursor, which
     // Ctrl+arrows move off the selection), else the selected one.
@@ -1012,7 +1019,7 @@ public:
             GtkWidget* child = gtk_widget_get_first_child(f);
             if (child && GTK_IS_TREE_EXPANDER(child))
                 if (GtkTreeListRow* row = gtk_tree_expander_get_list_row(GTK_TREE_EXPANDER(child)))
-                    return id_at(gtk_tree_list_row_get_position(row));
+                    if (!is_placeholder(row)) return id_of(row);
         }
         return std::nullopt;
     }
@@ -1038,6 +1045,7 @@ public:
     }
     void select(const std::string& id) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         quiet q(*this);
         if (!select_quietly(id)) gtk_single_selection_set_selected(sel_, GTK_INVALID_LIST_POSITION);
     }
@@ -1046,6 +1054,8 @@ public:
         if (auto pos = position_of(id))
             if (GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, *pos))
             {
+                // Asks wait until GTK's finished: a handler may destroy the tree.
+                lazy_tree::tracker::batch b(lazy_);
                 gtk_tree_list_row_set_expanded(row, open);
                 g_object_unref(row);
                 if (open) lazy_.opened(id);
@@ -1085,7 +1095,7 @@ private:
         bool expanded = false;
         std::optional<check_state> check;
         GIcon* icon = nullptr;  // owned by the cache it came from
-        bool placeholder = false;
+        bool loading = false;   // children not loaded yet: shows a placeholder
     };
     struct quiet
     {
@@ -1111,20 +1121,18 @@ private:
         if (t.has_children && t.children.empty())
         {
             lazy_.mark(t.id);
-            n.children.push_back(add_placeholder(t.id));
+            n.loading = true;
         }
         nodes_[t.id] = std::move(n);
         parent_[t.id] = parent;
     }
-    // Its id can't be one of the app's: ids are looked up, never shown.
-    std::string add_placeholder(const std::string& parent)
+    static bool is_placeholder_object(gpointer o) { return g_object_get_data(G_OBJECT(o), "rapport-placeholder"); }
+    static bool is_placeholder(GtkTreeListRow* row)
     {
-        std::string id = "\x1fplaceholder:" + parent;
-        node n{rap::i18n::tr("rapport", "Loading…")};
-        n.placeholder = true;
-        nodes_[id] = std::move(n);
-        parent_[id] = parent;
-        return id;
+        gpointer o = gtk_tree_list_row_get_item(row);
+        const bool placeholder = o && is_placeholder_object(o);
+        if (o) g_object_unref(o);
+        return placeholder;
     }
     static GIcon* g_icon_of(const rap::icon& icon)
     {
@@ -1159,7 +1167,7 @@ private:
         for (guint i = 0, n = rows(); i < n; ++i)
             if (GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, i))
             {
-                open[id_of(row)] = gtk_tree_list_row_get_expanded(row);
+                if (!is_placeholder(row)) open[id_of(row)] = gtk_tree_list_row_get_expanded(row);
                 g_object_unref(row);
             }
         return open;
@@ -1171,8 +1179,8 @@ private:
             if (GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, i))
             {
                 const std::string id = id_of(row);
-                auto it = nodes_.find(id);
-                if (it != nodes_.end() && it->second.expanded && !it->second.children.empty())
+                auto it = is_placeholder(row) ? nodes_.end() : nodes_.find(id);
+                if (it != nodes_.end() && it->second.expanded && (!it->second.children.empty() || it->second.loading))
                 {
                     gtk_tree_list_row_set_expanded(row, true);
                     lazy_.opened(id);
@@ -1204,7 +1212,7 @@ private:
         for (guint i = 0, n = g_list_model_get_n_items(G_LIST_MODEL(store)); i < n; ++i)
         {
             auto* o = static_cast<GtkStringObject*>(g_list_model_get_item(G_LIST_MODEL(store), i));
-            const bool same = id == gtk_string_object_get_string(o);
+            const bool same = !is_placeholder_object(o) && id == gtk_string_object_get_string(o);
             g_object_unref(o);
             if (!same) continue;
             gpointer fresh = gtk_string_object_new(id.c_str());
@@ -1215,19 +1223,61 @@ private:
     }
     GListModel* children_of(gpointer item)
     {
+        if (is_placeholder_object(item)) return nullptr;
         const std::string parent = gtk_string_object_get_string(GTK_STRING_OBJECT(item));
         auto it = nodes_.find(parent);
-        if (it == nodes_.end() || it->second.children.empty()) return nullptr;
+        if (it == nodes_.end()) return nullptr;
+#if !GTK_CHECK_VERSION(4, 10, 0)
+        if (it->second.children.empty() && !it->second.loading) return nullptr;
+#endif
         GListStore* store = g_list_store_new(GTK_TYPE_STRING_OBJECT);
-        for (const std::string& id : it->second.children)
-        {
-            GtkStringObject* o = gtk_string_object_new(id.c_str());
-            g_list_store_append(store, o);
-            g_object_unref(o);
-        }
+        std::vector<gpointer> objects = child_objects(it->second);
+        g_list_store_splice(store, 0, 0, objects.data(), guint(objects.size()));
+        for (gpointer o : objects) g_object_unref(o);
         drop_store(parent);
         stores_[parent] = G_LIST_STORE(g_object_ref(store));
         return G_LIST_MODEL(store);
+    }
+    static std::vector<gpointer> child_objects(const node& n)
+    {
+        std::vector<gpointer> objects;
+        if (n.loading)
+        {
+            GtkStringObject* o = gtk_string_object_new("");
+            g_object_set_data(G_OBJECT(o), "rapport-placeholder", GINT_TO_POINTER(1));
+            objects.push_back(o);
+        }
+        for (const std::string& c : n.children) objects.push_back(gtk_string_object_new(c.c_str()));
+        return objects;
+    }
+    // What's under a node's row, where it has one yet.
+    void sync_store(const std::string& id)
+    {
+        const auto store = stores_.find(id);
+        if (store == stores_.end()) return;
+        std::vector<gpointer> objects = child_objects(nodes_[id]);
+        g_list_store_splice(store->second, 0, g_list_model_get_n_items(G_LIST_MODEL(store->second)), objects.data(),
+                            guint(objects.size()));
+        for (gpointer o : objects) g_object_unref(o);
+    }
+    void close_row(const std::string& id)
+    {
+        if (const std::optional<guint> pos = position_of(id))
+            if (GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, *pos))
+            {
+                gtk_tree_list_row_set_expanded(row, false);
+                g_object_unref(row);
+            }
+    }
+    // The row showing a node, if one is: its label, icon and chevron again.
+    void rebind(const std::string& id)
+    {
+        for (GtkWidget* b : boxes_)
+        {
+            auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
+            auto* row = li ? GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)) : nullptr;
+            if (row && !is_placeholder(row) && id_of(row) == id) bind_row(li);
+        }
     }
     // Rows are made as they're needed, so it's when one first shows that
     // it's watched; opening one that isn't showing is the app's, and tells
@@ -1235,7 +1285,18 @@ private:
     static void row_expanded(GtkTreeListRow* row, GParamSpec*, gpointer p)
     {
         auto* self = static_cast<tree_impl*>(p);
-        if (self->alive_ && gtk_tree_list_row_get_expanded(row)) self->lazy_.opened(id_of(row));
+        if (!self->alive_ || !gtk_tree_list_row_get_expanded(row)) return;
+        const std::string id = id_of(row);
+#if GTK_CHECK_VERSION(4, 10, 0)
+        // Every row can open now; the keyboard shouldn't open one with nothing in it.
+        if (const auto it = self->nodes_.find(id);
+            it != self->nodes_.end() && it->second.children.empty() && !it->second.loading)
+        {
+            gtk_tree_list_row_set_expanded(row, false);
+            return;
+        }
+#endif
+        self->lazy_.opened(id);
     }
     void setup(GtkListItem* li)
     {
@@ -1277,7 +1338,7 @@ private:
         auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(g), "rapport-item"));
         const guint pos = gtk_list_item_get_position(li);
         if (pos == GTK_INVALID_LIST_POSITION) return;
-        if (const auto n = self->nodes_.find(self->id_at(pos)); n != self->nodes_.end() && n->second.placeholder) return;
+        if (auto* item = GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)); item && is_placeholder(item)) return;
         if (gtk_single_selection_get_selected(self->sel_) != pos)
             gtk_single_selection_set_selected(self->sel_, pos);  // the user's: reported
         GtkWidget* row = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
@@ -1312,19 +1373,26 @@ private:
         auto* row = GTK_TREE_LIST_ROW(gtk_list_item_get_item(li));
         GtkWidget* expander = gtk_list_item_get_child(li);
         gtk_tree_expander_set_list_row(GTK_TREE_EXPANDER(expander), row);
-        auto it = nodes_.find(id_of(row));
+        const bool placeholder = is_placeholder(row);
+        auto it = placeholder ? nodes_.end() : nodes_.find(id_of(row));
         GtkWidget* box = gtk_tree_expander_get_child(GTK_TREE_EXPANDER(expander));
         GtkWidget* check = gtk_widget_get_first_child(box);
         GtkWidget* image = gtk_widget_get_next_sibling(check);
         GtkWidget* label = gtk_widget_get_next_sibling(image);
-        gtk_label_set_text(GTK_LABEL(label), it != nodes_.end() ? it->second.label.c_str() : "");
+        gtk_label_set_text(GTK_LABEL(label), placeholder            ? rap::i18n::tr("rapport", "Loading…")
+                                             : it != nodes_.end() ? it->second.label.c_str()
+                                                                  : "");
+#if GTK_CHECK_VERSION(4, 10, 0)
+        gtk_tree_expander_set_hide_expander(
+            GTK_TREE_EXPANDER(expander),
+            it == nodes_.end() || (it->second.children.empty() && !it->second.loading));
+#endif
         const bool has = it != nodes_.end() && it->second.check;
         gtk_widget_set_visible(check, has);
         if (has) show_check(check, *it->second.check);
         GIcon* icon = it != nodes_.end() ? it->second.icon : nullptr;
         gtk_widget_set_visible(image, icon != nullptr);
         if (icon) gtk_image_set_from_gicon(GTK_IMAGE(image), icon);
-        const bool placeholder = it != nodes_.end() && it->second.placeholder;
         gtk_list_item_set_selectable(li, !placeholder);
         gtk_list_item_set_activatable(li, !placeholder);
         if (!g_object_get_data(G_OBJECT(row), "rapport-watched"))
@@ -1352,7 +1420,12 @@ private:
     std::optional<guint> position_of(const std::string& id) const
     {
         for (guint i = 0, n = rows(); i < n; ++i)
-            if (id_at(i) == id) return i;
+            if (GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, i))
+            {
+                const bool found = !is_placeholder(row) && id_of(row) == id;
+                g_object_unref(row);
+                if (found) return i;
+            }
         return std::nullopt;
     }
     bool select_quietly(const std::string& id)

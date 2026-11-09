@@ -1,6 +1,5 @@
-// A GTK 4 tree's row replaced in its parent's store (how a row gains or loses
-// its chevron, or shows new text): selection, focus and what's open all stay
-// by id.
+// A GTK 4 tree's row gaining or losing its chevron, or showing new text:
+// selection, focus and what's open all stay by id.
 //   rapport-tree-reinsert-test-gtk4   (needs a display; GDK_BACKEND=broadway will do)
 #include <rapport/rapport.h>
 
@@ -68,8 +67,19 @@ struct view
     }
     bool chevron(const std::string& id) const
     {
+#if GTK_CHECK_VERSION(4, 10, 0)
+        for (GtkWidget* c = gtk_widget_get_first_child(list); c; c = gtk_widget_get_next_sibling(c))
+        {
+            GtkWidget* e = gtk_widget_get_first_child(c);
+            if (!e || !GTK_IS_TREE_EXPANDER(e)) continue;
+            GtkTreeListRow* r = gtk_tree_expander_get_list_row(GTK_TREE_EXPANDER(e));
+            if (r && id_of(r) == id) return !gtk_tree_expander_get_hide_expander(GTK_TREE_EXPANDER(e));
+        }
+        return false;
+#else
         GtkTreeListRow* r = row(id);
         return r && gtk_tree_list_row_is_expandable(r);
+#endif
     }
     void focus(const std::string& id) const
     {
