@@ -130,6 +130,29 @@ void tracker_rules()
         check(calls == 1 && !owner, "a handler can destroy its tree, and nothing more is asked");
     }
 
+    // A handler holding the last owner of its tree, removing itself: the tree
+    // goes when the running copy of the handler does.
+    {
+        auto owner = std::make_shared<tracker>();
+        const std::weak_ptr<tracker> watch = owner;
+        int calls = 0;
+        owner->mark("x");
+        owner->mark("y");
+        {
+            tracker::batch b(*owner);
+            owner->opened("x");
+            owner->opened("y");
+        }
+        owner->on_request(
+            [&calls, &owner, keep = owner](const std::string&)
+            {
+                ++calls;
+                owner->on_request({});
+                owner.reset();
+            });
+        check(calls == 1 && watch.expired(), "a handler holding the last owner can remove itself");
+    }
+
     // A handler that removes itself: the rest wait for the next one.
     {
         tracker u;
