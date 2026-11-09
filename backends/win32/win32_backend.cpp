@@ -3097,12 +3097,43 @@ public:
         // have it (its dark one in dark mode).
         theme_control(h_);
         TreeView_SetExtendedStyle(h_, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
+        if (s.navigator && windows_build() >= 22000)
+        {
+            navigator_ = true;
+            // A new DPI comes with a new font: the spacing follows it.
+            SetWindowSubclass(
+                h_,
+                [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
+                {
+                    const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+                    if (msg == WM_SETFONT) reinterpret_cast<tree_impl*>(data)->apply_navigator_spacing();
+                    return result;
+                },
+                1, reinterpret_cast<DWORD_PTR>(this));
+            apply_navigator_spacing();
+        }
         set_items(s.items);
     }
     ~tree_impl() override
     {
         if (state_images_) ImageList_Destroy(state_images_);
     }
+
+    void theme_changed() override
+    {
+        if (navigator_) apply_navigator_spacing();
+    }
+    // Windows 11 Explorer's own, measured from its tree at 96 DPI.
+    void apply_navigator_spacing()
+    {
+        // Undocumented, and set on Explorer's own tree: the expander keeps its
+        // full size when the indent is narrower than it.
+        constexpr DWORD tvs_ex_full_size_expanders = 0x1000;
+        TreeView_SetExtendedStyle(h_, tvs_ex_full_size_expanders, tvs_ex_full_size_expanders);
+        TreeView_SetIndent(h_, px(8));
+        TreeView_SetItemHeight(h_, px(32));
+    }
+    bool navigator_ = false;
 
     void set_items(std::vector<tree_item> items) override
     {
@@ -4432,6 +4463,28 @@ public:
         SetWindowSubclass(h_, selection_proc, 4, reinterpret_cast<DWORD_PTR>(this));
         SetWindowSubclass(h_, size_proc, 8, reinterpret_cast<DWORD_PTR>(this));
         SetWindowSubclass(h_, tooltip_proc, 10, reinterpret_cast<DWORD_PTR>(this));
+        if (s.file_view && windows_build() >= 22000)
+        {
+            // A new DPI comes with a new font: the row height follows it.
+            SetWindowSubclass(
+                h_,
+                [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
+                {
+                    const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+                    if (msg == WM_SETFONT) reinterpret_cast<list_impl*>(data)->apply_file_view_rows();
+                    return result;
+                },
+                11, reinterpret_cast<DWORD_PTR>(this));
+            apply_file_view_rows();
+        }
+    }
+    // Windows 11 Explorer's row spacing at 96 DPI. A report view takes its row height
+    // from its image list, plus a pixel: this one is a sliver, as the rows
+    // paint their own.
+    void apply_file_view_rows()
+    {
+        HIMAGELIST rows = ImageList_Create(1, px(28) - 1, ILC_COLOR32, 1, 0);
+        if (HIMAGELIST old = ListView_SetImageList(h_, rows, LVSIL_SMALL)) ImageList_Destroy(old);
     }
     ~list_impl() override
     {
