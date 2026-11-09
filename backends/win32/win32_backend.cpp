@@ -3093,9 +3093,10 @@ public:
     tree_impl(win_context& win, HWND parent, const spec::tree& s)
         : leaf(win)
     {
-        adopt(create_control(win, parent, WC_TREEVIEWW, L"",
-                             TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | WS_TABSTOP,
-                             WS_EX_CLIENTEDGE));
+        DWORD style = TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | WS_TABSTOP;
+        // As Explorer's: long names clip, and their tooltips show them whole.
+        if (s.navigator && windows_build() >= 22000) style |= TVS_NOHSCROLL;
+        adopt(create_control(win, parent, WC_TREEVIEWW, L"", style, WS_EX_CLIENTEDGE));
         // Explorer's look (chevrons, hover, no lines), as Windows' own trees
         // have it (its dark one in dark mode).
         theme_control(h_);

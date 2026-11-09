@@ -69,6 +69,14 @@ void press_with_ctrl(HWND tree, WPARAM key)
     SetKeyboardState(keys);
 }
 
+DWORD windows_build()
+{
+    using get_version_fn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    const auto get_version = reinterpret_cast<get_version_fn>(GetProcAddress(GetModuleHandleW(L"ntdll"), "RtlGetVersion"));
+    OSVERSIONINFOW info{sizeof info};
+    return get_version && get_version(&info) == 0 ? info.dwBuildNumber : 0;
+}
+
 rap::tree_item item(std::string id, bool lazy)
 {
     rap::tree_item t;
@@ -190,7 +198,23 @@ int main(int argc, char** argv)
         expect(t->selected() == "lazy", "and pressing it again isn't stuck anywhere new");
     }
 
+    const LONG plain_style = GetWindowLongW(tree_hwnd, GWL_STYLE);
+    expect(!(plain_style & TVS_NOHSCROLL), "a plain tree keeps its horizontal scroll bar");
     win->close();
+    win.reset();
+
+    // A navigator: no horizontal scroll bar from Windows 11, tooltips on.
+    {
+        rap::tree* nav = nullptr;
+        auto nav_win = (*ui)->create(window{"n", {tree{{item("a", false)}}.navigator().bind(nav)}});
+        nav_win->show();
+        HWND nav_hwnd = find_tree();
+        const LONG style = GetWindowLongW(nav_hwnd, GWL_STYLE);
+        expect(((style & TVS_NOHSCROLL) != 0) == (windows_build() >= 22000), "a navigator's scroll bar follows the build");
+        expect(!(style & TVS_NOTOOLTIPS), "and it keeps its tooltips, for names that clip");
+        nav_win->close();
+    }
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
