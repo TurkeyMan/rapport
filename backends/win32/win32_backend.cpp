@@ -2,6 +2,7 @@
 // DirectWrite for canvases and drawn icons, our own box/form layout (Win32
 // has none), per-monitor DPI awareness.
 #include "container_state.h"
+#include "lazy_tree.h"
 #include "win32_common.h"
 #define RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
 #include "win32_trace.h"
@@ -3083,7 +3084,9 @@ private:
 // The common controls' tree view. Items are found by the app's ids; each
 // item's lParam is its index into ids_. Boxes are state images of our own
 // (TVS_CHECKBOXES has no mixed state, and flips them itself): 1 unchecked,
-// 2 checked, 3 mixed, 0 none.
+// 2 checked, 3 mixed, 0 none. A node with children not loaded yet holds one
+// placeholder item, which is what gives it a chevron: its lParam is
+// k_placeholder, and it can't be selected.
 class tree_impl : public leaf<rap::tree>
 {
 public:
@@ -3112,16 +3115,19 @@ public:
                 1, reinterpret_cast<DWORD_PTR>(this));
             apply_navigator_spacing();
         }
+        SetWindowSubclass(h_, key_proc, 2, reinterpret_cast<DWORD_PTR>(this));
         set_items(s.items);
     }
     ~tree_impl() override
     {
         if (state_images_) ImageList_Destroy(state_images_);
+        if (icons_) ImageList_Destroy(icons_);
     }
 
     void theme_changed() override
     {
         if (navigator_) apply_navigator_spacing();
+        rebuild_icons();
     }
     // Windows 11 Explorer's own, measured from its tree at 96 DPI.
     void apply_navigator_spacing()
@@ -3137,6 +3143,7 @@ public:
 
     void set_items(std::vector<tree_item> items) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         // How the user left things, by id.
         const std::optional<std::string> keep = selected();
         std::unordered_map<std::string, bool> open;
@@ -3146,8 +3153,10 @@ public:
         SendMessageW(h_, WM_SETREDRAW, FALSE, 0);
         TreeView_DeleteAllItems(h_);
         ids_.clear();
+        free_ids_.clear();
         by_id_.clear();
         checks_.clear();
+        lazy_.clear();
         if (!state_images_ && has_check(items)) make_state_images();
         insert(items, TVI_ROOT, open);
         if (keep) select_quietly(*keep);
@@ -3166,7 +3175,11 @@ public:
     }
     void set_expanded(const std::string& id, bool open) override
     {
-        if (auto it = by_id_.find(id); it != by_id_.end()) TreeView_Expand(h_, it->second, open ? TVE_EXPAND : TVE_COLLAPSE);
+        const auto it = by_id_.find(id);
+        if (it == by_id_.end()) return;
+        TreeView_Expand(h_, it->second, open ? TVE_EXPAND : TVE_COLLAPSE);
+        // TVM_EXPAND stops notifying after a node's first time.
+        if (open) lazy_.opened(id);
     }
     void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
@@ -3180,6 +3193,65 @@ public:
                               TVIS_STATEIMAGEMASK);
     }
     void on_toggled(std::function<void(const std::string&)> f) override { toggled_ = std::move(f); }
+    void on_expanding(std::function<void(const std::string&)> f) override { lazy_.on_request(std::move(f)); }
+
+    // No WM_SETREDRAW here, unlike set_items: it hides a control from DWM
+    // while it's off, which flickers on a live navigator, and a batch from
+    // one message repaints afterwards anyway.
+    void set_children(const std::string& id, std::vector<tree_item> items) override
+    {
+        const auto it = by_id_.find(id);
+        if (it == by_id_.end()) return;
+        lazy_tree::tracker::batch b(lazy_);
+        quiet q(*this);
+        const HTREEITEM parent = it->second;
+        const std::optional<std::string> keep = selected();
+        std::unordered_map<std::string, bool> open;
+        for (auto& [other, h] : by_id_)
+            open[other] = (TreeView_GetItemState(h_, h, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
+        const bool was_open = open[id];
+        // The new ones go in before the old come out, so the node is never
+        // empty and doesn't collapse in between.
+        std::vector<HTREEITEM> old;
+        for (HTREEITEM c = TreeView_GetChild(h_, parent); c; c = TreeView_GetNextSibling(h_, c)) old.push_back(c);
+        for (const HTREEITEM c : old) forget_subtree(c);
+        lazy_.forget(id);
+        insert(items, parent, open);
+        for (const HTREEITEM c : old) TreeView_DeleteItem(h_, c);
+        if (items.empty())
+        {
+            TreeView_SetItemState(h_, parent, 0, TVIS_EXPANDED | TVIS_EXPANDEDONCE);
+        }
+        else if (was_open)
+            TreeView_Expand(h_, parent, TVE_EXPAND);
+        restore_selection(keep);
+    }
+    void update_item(const std::string& id, const std::string& label, const rap::icon& icon, bool has_children) override
+    {
+        const auto it = by_id_.find(id);
+        if (it == by_id_.end()) return;
+        lazy_tree::tracker::batch b(lazy_);
+        const HTREEITEM h = it->second;
+        std::wstring text = wide(label);
+        TVITEMW item{};
+        item.mask = TVIF_TEXT;
+        item.hItem = h;
+        item.pszText = text.data();
+        if (icon || icons_)
+        {
+            item.mask |= TVIF_IMAGE | TVIF_SELECTEDIMAGE;
+            item.iImage = item.iSelectedImage = image_of(icon);
+        }
+        TreeView_SetItem(h_, &item);
+        const bool waiting = lazy_.unloaded(id);
+        if (!has_children && waiting)
+            set_children(id, {});
+        else if (has_children && !waiting && !TreeView_GetChild(h_, h))
+        {
+            lazy_.mark(id);
+            add_placeholder(h);
+        }
+    }
 
     LRESULT notify(NMHDR* n, bool& handled) override
     {
@@ -3197,6 +3269,16 @@ public:
             if (!checks_.contains(id)) return 0;
             if (toggled_) toggled_(id);
             return 1;
+        }
+        case TVN_SELCHANGINGW:
+            // The arrow keys step past a placeholder (key_proc): this stops
+            // the mouse, and the rarer ways of landing on one.
+            return !quiet_ && is_placeholder(reinterpret_cast<NMTREEVIEWW*>(n)->itemNew.hItem);
+        case TVN_ITEMEXPANDEDW:
+        {
+            const auto* tv = reinterpret_cast<NMTREEVIEWW*>(n);
+            if (tv->action & TVE_EXPAND) lazy_.opened(id_of(tv->itemNew.hItem));
+            return 0;
         }
         case TVN_SELCHANGEDW:
             if (!quiet_ && changed_) changed_();
@@ -3273,18 +3355,202 @@ private:
             in.hInsertAfter = TVI_LAST;
             in.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_STATE;
             in.item.pszText = text.data();
-            in.item.lParam = LPARAM(ids_.size());
+            size_t slot = ids_.size();
+            if (!free_ids_.empty())
+            {
+                slot = free_ids_.back();
+                free_ids_.pop_back();
+            }
+            in.item.lParam = LPARAM(slot);
             in.item.stateMask = TVIS_STATEIMAGEMASK;
             in.item.state = INDEXTOSTATEIMAGEMASK(i.check ? int(*i.check) + 1 : 0);
+            if (i.icon)
+            {
+                in.item.mask |= TVIF_IMAGE | TVIF_SELECTEDIMAGE;
+                in.item.iImage = in.item.iSelectedImage = image_of(i.icon);
+            }
             if (i.check) checks_[i.id] = *i.check;
             const HTREEITEM h = TreeView_InsertItem(h_, &in);
-            if (!h) continue;
-            ids_.push_back(i.id);
+            if (!h)
+            {
+                if (slot != ids_.size()) free_ids_.push_back(slot);
+                continue;
+            }
+            if (slot == ids_.size())
+                ids_.push_back(i.id);
+            else
+                ids_[slot] = i.id;
             by_id_[i.id] = h;
+            if (i.has_children && i.children.empty())
+            {
+                lazy_.mark(i.id);
+                add_placeholder(h);
+            }
             insert(i.children, h, open);
             const auto was = open.find(i.id);
-            if (!i.children.empty() && (was != open.end() ? was->second : i.expanded)) TreeView_Expand(h_, h, TVE_EXPAND);
+            if ((!i.children.empty() || lazy_.unloaded(i.id)) && (was != open.end() ? was->second : i.expanded))
+            {
+                TreeView_Expand(h_, h, TVE_EXPAND);
+                lazy_.opened(i.id);
+            }
         }
+    }
+    void add_placeholder(HTREEITEM parent)
+    {
+        std::wstring text = wide(rap::i18n::tr("rapport", "Loading…"));
+        TVINSERTSTRUCTW in{};
+        in.hParent = parent;
+        in.hInsertAfter = TVI_LAST;
+        in.item.mask = TVIF_TEXT | TVIF_PARAM;
+        in.item.pszText = text.data();
+        in.item.lParam = k_placeholder;
+        TreeView_InsertItem(h_, &in);
+    }
+    LPARAM param_of(HTREEITEM h) const
+    {
+        TVITEMW item{};
+        item.mask = TVIF_PARAM;
+        item.hItem = h;
+        TreeView_GetItem(h_, &item);
+        return item.lParam;
+    }
+    bool is_placeholder(HTREEITEM h) const { return h && param_of(h) == k_placeholder; }
+    // Everything we know about an item and what's under it; the control's
+    // items stay until they're deleted.
+    void forget_subtree(HTREEITEM h)
+    {
+        for (HTREEITEM c = TreeView_GetChild(h_, h); c; c = TreeView_GetNextSibling(h_, c)) forget_subtree(c);
+        const LPARAM slot = param_of(h);
+        if (slot == k_placeholder || size_t(slot) >= ids_.size()) return;
+        const std::string id = ids_[size_t(slot)];
+        by_id_.erase(id);
+        checks_.erase(id);
+        lazy_.forget(id);
+        free_ids_.push_back(size_t(slot));
+    }
+    void restore_selection(const std::optional<std::string>& keep)
+    {
+        if (!keep) return;
+        const auto it = by_id_.find(*keep);
+        if (it == by_id_.end())
+            TreeView_SelectItem(h_, nullptr);
+        else if (TreeView_GetSelection(h_) != it->second)
+            TreeView_SelectItem(h_, it->second);
+    }
+    static LRESULT CALLBACK key_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<tree_impl*>(data);
+        if (msg == WM_KEYDOWN && self->step_past_placeholder(wp)) return 0;
+        const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+        if (msg == WM_SETFONT) self->rebuild_icons();
+        return result;
+    }
+    // Where an arrow key would land on a placeholder it goes on past it, or
+    // stays where it is: selecting one is refused, and a keyboard stopped by
+    // that would be stuck.
+    bool step_past_placeholder(WPARAM key)
+    {
+        const HTREEITEM from = TreeView_GetSelection(h_);
+        if (!from) return false;
+        HTREEITEM to = nullptr;
+        switch (key)
+        {
+        case VK_DOWN: to = TreeView_GetNextVisible(h_, from); break;
+        case VK_UP: to = TreeView_GetPrevVisible(h_, from); break;
+        case VK_END: to = TreeView_GetLastVisible(h_); break;
+        case VK_RIGHT:
+            if (TreeView_GetItemState(h_, from, TVIS_EXPANDED) & TVIS_EXPANDED) to = TreeView_GetChild(h_, from);
+            break;
+        default: return false;
+        }
+        if (!is_placeholder(to)) return false;
+        const HTREEITEM past = key == VK_DOWN                  ? TreeView_GetNextVisible(h_, to)
+                               : key == VK_UP || key == VK_END ? TreeView_GetPrevVisible(h_, to)
+                                                               : nullptr;
+        if (past && past != from)
+        {
+            TreeView_SelectItem(h_, past);
+            TreeView_EnsureVisible(h_, past);
+        }
+        return true;
+    }
+    // Image 0 is blank, for what has no icon. The list is only made when an
+    // item has an icon, so a tree with none is as it always was.
+    int image_of(const rap::icon& icon)
+    {
+        if (!icon) return 0;
+        if (!icons_)
+        {
+            icons_ = ImageList_Create(px(16), px(16), ILC_COLOR32 | ILC_MASK, 8, 8);
+            if (!icons_) return 0;
+            add_blank(icons_);
+            TreeView_SetImageList(h_, icons_, TVSIL_NORMAL);
+        }
+        const std::string key = icon_key(icon);
+        if (!key.empty())
+            if (const auto it = image_index_.find(key); it != image_index_.end()) return it->second;
+        const int image = ImageList_GetImageCount(icons_);
+        add_image(icons_, icon);
+        image_sources_.push_back(icon);
+        if (!key.empty()) image_index_[key] = image;
+        return image;
+    }
+    static std::string icon_key(const rap::icon& icon)
+    {
+        if (icon.file.empty()) return icon.name.empty() ? std::string() : "n:" + icon.name;
+        if (icon.file.back() == '/') return "f:/";
+        const size_t slash = icon.file.find_last_of("/\\");
+        const std::string base = icon.file.substr(slash == std::string::npos ? 0 : slash + 1);
+        const size_t dot = base.rfind('.');
+        return "f:" + (dot == std::string::npos ? base : base.substr(dot));
+    }
+    void add_image(HIMAGELIST list, const rap::icon& icon)
+    {
+        HICON h = nullptr;
+        if (!icon.file.empty())
+        {
+            const bool folder = icon.file.back() == '/';
+            const std::string key = icon_key(icon).substr(2);
+            const std::wstring probe = folder ? L"folder" : key.starts_with('.') ? L"file" + wide(key) : wide(key);
+            SHFILEINFOW info{};
+            if (SHGetFileInfoW(probe.c_str(), folder ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL, &info, sizeof info,
+                               SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES))
+                h = info.hIcon;
+        }
+        else
+            h = render_icon_handle(icon, px(16), win_.scale());
+        if (h)
+        {
+            ImageList_ReplaceIcon(list, -1, h);
+            DestroyIcon(h);
+        }
+        else
+            add_blank(list);  // keeps the numbering
+    }
+    // By mask: a 32-bit bitmap whose alpha is all zero counts as having none,
+    // and draws black.
+    void add_blank(HIMAGELIST list)
+    {
+        const int size = px(16);
+        const size_t bytes = size_t((size + 15) / 16 * 2) * size;
+        const std::vector<BYTE> transparent(bytes, 0xFF), colour(bytes, 0);
+        if (HICON h = CreateIcon(instance(), size, size, 1, 1, transparent.data(), colour.data()))
+        {
+            ImageList_ReplaceIcon(list, -1, h);
+            DestroyIcon(h);
+        }
+    }
+    // At a new DPI or theme: the same images, so the same numbers.
+    void rebuild_icons()
+    {
+        if (!icons_) return;
+        HIMAGELIST fresh = ImageList_Create(px(16), px(16), ILC_COLOR32 | ILC_MASK, 8, 8);
+        if (!fresh) return;
+        add_blank(fresh);
+        for (const rap::icon& icon : image_sources_) add_image(fresh, icon);
+        TreeView_SetImageList(h_, fresh, TVSIL_NORMAL);
+        ImageList_Destroy(icons_);
+        icons_ = fresh;
     }
     bool select_quietly(const std::string& id)
     {
@@ -3363,7 +3629,7 @@ private:
         GetCursorPos(&hit.pt);
         ScreenToClient(h_, &hit.pt);
         const HTREEITEM h = TreeView_HitTest(h_, &hit);
-        return h && (hit.flags & TVHT_ONITEM) ? h : nullptr;
+        return h && (hit.flags & TVHT_ONITEM) && !is_placeholder(h) ? h : nullptr;
     }
     void show_menu(HTREEITEM h, POINT screen)
     {
@@ -3375,8 +3641,14 @@ private:
     std::function<void()> changed_;
     std::function<void(const std::string&)> activate_;
     std::function<menu(std::optional<std::string>)> context_;
+    static constexpr LPARAM k_placeholder = -1;
     std::vector<std::string> ids_;
+    std::vector<size_t> free_ids_;  // in ids_, left by what set_children removed
     std::unordered_map<std::string, HTREEITEM> by_id_;
+    lazy_tree::tracker lazy_;
+    HIMAGELIST icons_ = nullptr;
+    std::vector<rap::icon> image_sources_;  // image 1 on
+    std::unordered_map<std::string, int> image_index_;
     std::unordered_map<std::string, check_state> checks_;  // the items with boxes
     std::function<void(const std::string&)> toggled_;
     HIMAGELIST state_images_ = nullptr;
