@@ -85,8 +85,10 @@ private:
             const auto it = nodes_.find(id);
             if (it == nodes_.end() || it->second != state::queued) continue;
             it->second = state::requested;
-            const auto request = request_;  // it may replace itself
-            request(id);
+            {
+                const auto request = request_;  // it may replace itself
+                request(id);
+            }  // the copy may hold the last owner of the tree: gone before the check
             if (alive.expired()) return;  // it destroyed the tree, and this with it
         }
         queue_.erase(queue_.begin(), queue_.begin() + std::ptrdiff_t(i));
