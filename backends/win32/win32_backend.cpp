@@ -488,6 +488,55 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
 // their notifications on.
 HWND g_printing_pane = nullptr;  // a pane's panel being drawn off screen (paint_pane)
 
+// The non-client areas (frames, scroll bars) of the controls on a pane's
+// panel, as shown, in the panel's coordinates.
+struct pane_frames
+{
+    HWND panel;
+    HRGN shown;
+    std::vector<HWND> windows;
+};
+
+BOOL CALLBACK collect_pane_frame(HWND h, LPARAM lp)
+{
+    auto* f = reinterpret_cast<pane_frames*>(lp);
+    // Only those a control paints in its WM_NCPAINT (an etched separator's
+    // edge is non-client too, but it draws that in its WM_PAINT).
+    const bool client_edge = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_CLIENTEDGE) != 0;
+    const bool scroll_bars = (GetWindowLongPtrW(h, GWL_STYLE) & (WS_VSCROLL | WS_HSCROLL)) != 0;
+    if ((!client_edge && !scroll_bars) || !IsWindowVisible(h)) return TRUE;
+    RECT outer, inner;
+    GetWindowRect(h, &outer);
+    GetClientRect(h, &inner);
+    MapWindowPoints(h, nullptr, reinterpret_cast<POINT*>(&inner), 2);
+    if (EqualRect(&outer, &inner)) return TRUE;
+    // Only what shows: the windows it's inside, up to the panel, cut it off.
+    RECT shown = outer;
+    for (HWND up = GetParent(h); up; up = up == f->panel ? nullptr : GetParent(up))
+    {
+        RECT c;
+        GetClientRect(up, &c);
+        MapWindowPoints(up, nullptr, reinterpret_cast<POINT*>(&c), 2);
+        IntersectRect(&shown, &shown, &c);
+    }
+    if (IsRectEmpty(&shown)) return TRUE;
+    IntersectRect(&inner, &inner, &shown);
+    f->windows.push_back(h);
+    if (!f->shown) return TRUE;
+    HRGN ring = CreateRectRgnIndirect(&shown);
+    HRGN hole = CreateRectRgnIndirect(&inner);
+    if (ring && hole && CombineRgn(ring, ring, hole, RGN_DIFF) != ERROR)
+    {
+        POINT origin{};
+        ClientToScreen(f->panel, &origin);
+        OffsetRgn(ring, -origin.x, -origin.y);
+        CombineRgn(f->shown, f->shown, ring, RGN_OR);
+    }
+    if (ring) DeleteObject(ring);
+    if (hole) DeleteObject(hole);
+    return TRUE;
+}
+
 // A scroll pane's panel and everything on it drawn off screen (WM_PRINT: its
 // background, then its controls in turn, into the one bitmap), then put on
 // screen in one go: its controls, moved and sized by a layout pass without
@@ -525,8 +574,10 @@ bool paint_pane(HWND panel)
     HBITMAP bitmap = mem ? CreateCompatibleBitmap(screen, c.right, c.bottom) : nullptr;
     HGDIOBJ old = bitmap ? SelectObject(mem, bitmap) : nullptr;
     bool drawn = false;
+    pane_frames frames{panel, CreateRectRgn(0, 0, 0, 0), {}};
     if (old && old != HGDI_ERROR)
     {
+        EnumChildWindows(panel, collect_pane_frame, reinterpret_cast<LPARAM>(&frames));
         g_printing_pane = panel;
         {
             trace::scope timing(trace::phase::pane_print, uintptr_t(panel));
@@ -536,6 +587,9 @@ bool paint_pane(HWND panel)
         g_printing_pane = nullptr;
         {
             trace::scope timing(trace::phase::pane_blit, uintptr_t(panel));
+            // Not over the controls' frames: printed, a themed one comes out
+            // as the classic sunken edge, and it's painted for real below.
+            if (frames.shown) ExtSelectClipRgn(screen, frames.shown, RGN_DIFF);
             drawn = BitBlt(screen, 0, 0, c.right, c.bottom, mem, 0, 0, SRCCOPY) != FALSE;
         }
         SelectObject(mem, old);
@@ -543,10 +597,17 @@ bool paint_pane(HWND panel)
     if (bitmap) DeleteObject(bitmap);
     if (mem) DeleteDC(mem);
     ReleaseDC(panel, screen);
+    if (frames.shown) DeleteObject(frames.shown);
     // Frames too (RDW_NOFRAME, else a control moved or resized keeps its
     // frame's paint due and is sent WM_PAINT for it, painting itself again
-    // on screen after the copy): the print had them (PRF_NONCLIENT).
-    if (drawn) RedrawWindow(panel, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_NOFRAME | RDW_ALLCHILDREN);
+    // on screen after the copy). Each is then painted by the control itself,
+    // which only its WM_NCPAINT can do: a client edge's themed look, its
+    // state (focus, hot) and its scroll bars aren't what WM_PRINT draws.
+    if (drawn)
+    {
+        RedrawWindow(panel, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_NOFRAME | RDW_ALLCHILDREN);
+        for (HWND h : frames.windows) SendMessageW(h, WM_NCPAINT, 1, 0);
+    }
     // Its host, moved without redrawing too (move_pane_window): its scroll
     // bar, and any of it the panel doesn't cover.
     if (HWND host = GetParent(panel)) RedrawWindow(host, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_NOCHILDREN);

@@ -107,6 +107,8 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-pane-frames-test rapport_win32)
     add_test(NAME win32-pane-frames COMMAND rapport-win32-pane-frames-test)
     set_tests_properties(win32-pane-frames PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+    add_test(NAME win32-pane-frames-light COMMAND rapport-win32-pane-frames-test)
+    set_tests_properties(win32-pane-frames-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
 
     add_executable(rapport-pane-readback-loss-test pane_readback_loss_test.cpp)
     target_compile_definitions(rapport-pane-readback-loss-test PRIVATE RAPPORT_TEST_READBACK)
