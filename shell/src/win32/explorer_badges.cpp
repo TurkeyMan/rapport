@@ -70,13 +70,14 @@ std::wstring clsid_string(const CLSID& id)
     return s;
 }
 
-// "    Tortilla1Conflicted": four spaces, sorting ahead of the three most
-// others use; then the extension, and the kind in priority order.
+// "     Tortilla1Conflicted": five spaces, sorting ahead of the four OneDrive
+// uses for its seven overlays, which otherwise leave no room for an app's
+// last badge; then the extension, and the kind in priority order.
 std::wstring registry_name(size_t i)
 {
     std::wstring id = wide(kinds()[i].id);
     if (!id.empty()) id[0] = wchar_t(towupper(id[0]));
-    return L"    " + wide(this_extension.name) + std::to_wstring(i + 1) + id;
+    return L"     " + wide(this_extension.name) + std::to_wstring(i + 1) + id;
 }
 
 // The provider's badge for `path`. Explorer asks each overlay class in turn
@@ -233,9 +234,39 @@ HRESULT badge_class_object(REFCLSID clsid, REFIID riid, void** out)
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+// Takes our names out of the overlays: any whose default value is one of ours,
+// so a name an older version chose goes too.
+static void remove_overlay_names(HKEY root)
+{
+    HKEY overlays = nullptr;
+    std::wstring parent(k_overlays);
+    parent.pop_back();
+    if (RegOpenKeyExW(root, parent.c_str(), 0, KEY_ALL_ACCESS | KEY_WOW64_64KEY, &overlays) !=
+        ERROR_SUCCESS)
+        return;
+    std::vector<std::wstring> ours;
+    wchar_t name[256];
+    for (DWORD i = 0, n = 256;
+         RegEnumKeyExW(overlays, i, name, &n, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+         ++i, n = 256)
+    {
+        wchar_t value[64];
+        DWORD bytes = sizeof value;
+        if (RegGetValueW(overlays, name, nullptr, RRF_RT_REG_SZ, nullptr, value, &bytes) !=
+            ERROR_SUCCESS)
+            continue;
+        for (size_t k = 0; k < 15; ++k)
+            if (_wcsicmp(value, clsid_string(kind_clsid(k)).c_str()) == 0) ours.push_back(name);
+    }
+    for (const std::wstring& n : ours) RegDeleteTreeW(overlays, n.c_str());
+    RegCloseKey(overlays);
+}
+
 bool register_badges(HKEY root, const std::wstring& module)
 {
     bool ok = true;
+    // An upgrade may be replacing names; a stale one would take a second slot.
+    if (root == HKEY_LOCAL_MACHINE) remove_overlay_names(root);
     for (size_t i = 0; i < kinds().size(); ++i)
     {
         const std::wstring clsid = clsid_string(kind_clsid(i));
@@ -265,30 +296,7 @@ void unregister_badges(HKEY root)
         if (have_classes) RegDeleteTreeW(classes, clsid.c_str());
     }
     if (have_classes) RegCloseKey(classes);
-    if (root != HKEY_LOCAL_MACHINE) return;
-    // Our names under the overlays: any whose default value is one of ours.
-    HKEY overlays = nullptr;
-    std::wstring parent(k_overlays);
-    parent.pop_back();
-    if (RegOpenKeyExW(root, parent.c_str(), 0, KEY_ALL_ACCESS | KEY_WOW64_64KEY, &overlays) !=
-        ERROR_SUCCESS)
-        return;
-    std::vector<std::wstring> ours;
-    wchar_t name[256];
-    for (DWORD i = 0, n = 256;
-         RegEnumKeyExW(overlays, i, name, &n, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
-         ++i, n = 256)
-    {
-        wchar_t value[64];
-        DWORD bytes = sizeof value;
-        if (RegGetValueW(overlays, name, nullptr, RRF_RT_REG_SZ, nullptr, value, &bytes) !=
-            ERROR_SUCCESS)
-            continue;
-        for (size_t k = 0; k < 15; ++k)
-            if (_wcsicmp(value, clsid_string(kind_clsid(k)).c_str()) == 0) ours.push_back(name);
-    }
-    for (const std::wstring& n : ours) RegDeleteTreeW(overlays, n.c_str());
-    RegCloseKey(overlays);
+    if (root == HKEY_LOCAL_MACHINE) remove_overlay_names(root);
 }
 
 }  // namespace rap::shell::detail
