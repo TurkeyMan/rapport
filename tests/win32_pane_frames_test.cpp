@@ -169,8 +169,10 @@ int main(int argc, char** argv)
     auto win = (*ui)->create(window{"Rapport pane frames", {scroll{vbox{
         entry{}.frame(false),
         entry{},
-        list{{{"Name", {}, true}}, &model},
-        tree{{rap::tree_item{"a", "a"}, rap::tree_item{"b", "b"}}},
+        hbox{
+            list{{{"Name", {}, true}}, &model},
+            tree{{rap::tree_item{"a", "a"}, rap::tree_item{"b", "b"}}},
+        },
         text_view{"rich text"}.read_only(),
         separator{},
         tabs{{"one", label{"first"}}, {"two", label{"second"}}}.sidebar(),
@@ -178,6 +180,8 @@ int main(int argc, char** argv)
     win->show();
     HWND root = FindWindowW(nullptr, L"Rapport pane frames");
     if (!root) return 2;
+    // On the desktop: a CI machine's is small, and pixels off it can't be read.
+    SetWindowPos(root, nullptr, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     // RAPPORT_TEST_AT=x,y: where to show it (away from someone's work).
     if (const char* at = std::getenv("RAPPORT_TEST_AT"))
     {
@@ -192,7 +196,7 @@ int main(int argc, char** argv)
     // follows the window's), each copied from the pane's print.
     for (int i = 0; i < 6; ++i)
     {
-        SetWindowPos(root, nullptr, 0, 0, 480 + (i % 2 ? 40 : 0), 900,
+        SetWindowPos(root, nullptr, 0, 0, 480 + (i % 2 ? 40 : 0), 640,
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         pump();
     }
@@ -212,15 +216,24 @@ int main(int argc, char** argv)
         if (!h) { std::fprintf(stderr, "no %s\n", c.what); return 2; }
         hs.push_back(h);
     }
-    // Each wholly in view (the pane's host clips its content).
-    RECT client;
-    GetClientRect(root, &client);
-    MapWindowPoints(root, nullptr, reinterpret_cast<POINT*>(&client), 2);
+    // Each wholly in view: inside every window it's in (the pane's host clips
+    // its content), and on the desktop.
+    const RECT desktop{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                       GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                       GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
     for (size_t i = 0; i < hs.size(); ++i)
     {
         RECT hr, meet;
         GetWindowRect(hs[i], &hr);
-        if (!IntersectRect(&meet, &hr, &client) || !EqualRect(&meet, &hr))
+        bool whole = IntersectRect(&meet, &hr, &desktop) && EqualRect(&meet, &hr);
+        for (HWND up = GetParent(hs[i]); up && whole; up = up == root ? nullptr : GetParent(up))
+        {
+            RECT client;
+            GetClientRect(up, &client);
+            MapWindowPoints(up, nullptr, reinterpret_cast<POINT*>(&client), 2);
+            whole = IntersectRect(&meet, &hr, &client) && EqualRect(&meet, &hr);
+        }
+        if (!whole)
         {
             std::fprintf(stderr, "%s not wholly in view\n", controls[i].what);
             return 2;
