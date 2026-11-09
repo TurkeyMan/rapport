@@ -1,9 +1,11 @@
-// Controls whose frames rapport paints itself (a frameless entry's edge, dark
-// mode's rich text, list box and separator) look the same on a scroll pane,
-// whose content is printed off screen and copied (paint_pane), as painted
-// by Windows: printed (WM_PRINT), on screen after layout passes, and after a
-// real frame paint. A pane's copy validates its controls' frame paints, so a
-// correction drawn only in WM_NCPAINT would be lost.
+// Controls' frames look the same on a scroll pane, whose content is printed
+// off screen and copied (paint_pane), as when Windows paints them. A pane's
+// copy validates its controls' frame paints, and printing a themed client
+// edge gives the classic sunken one, so each is painted for real after the
+// copy: on screen after layout passes must match a real frame paint, for
+// every class with a client edge, light and dark (RAPPORT_THEME=light). The
+// frames rapport paints itself (a frameless entry's edge, dark mode's rich
+// text, list box and separator) must print the same too.
 #include <rapport/rapport.h>
 #include <windows.h>
 #include <dwmapi.h>
@@ -11,6 +13,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+
+// Common controls 6: themed client edges, which are what can't be printed.
+#ifdef _MSC_VER
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#endif
 
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
 RAPPORT_BUILTIN_BACKEND(win32);
@@ -123,10 +130,11 @@ std::vector<DWORD> printed_ring(HWND h)
     return out;
 }
 
-// The first shown window of class `cls` (an etched static, for "Static").
-HWND find_class(HWND root, const wchar_t* cls)
+// The shown window of class `cls` after skipping `skip` (an etched static,
+// for "Static").
+HWND find_class(HWND root, const wchar_t* cls, int skip)
 {
-    struct search { const wchar_t* cls; HWND found; } s{cls, nullptr};
+    struct search { const wchar_t* cls; int skip; HWND found; } s{cls, skip, nullptr};
     EnumChildWindows(root, [](HWND h, LPARAM lp) -> BOOL {
         auto* s = reinterpret_cast<search*>(lp);
         wchar_t name[64]{};
@@ -134,11 +142,18 @@ HWND find_class(HWND root, const wchar_t* cls)
         if (_wcsicmp(name, s->cls) || !IsWindowVisible(h)) return TRUE;
         const LONG_PTR type = GetWindowLongPtrW(h, GWL_STYLE) & SS_TYPEMASK;
         if (!_wcsicmp(name, L"Static") && type != SS_ETCHEDHORZ && type != SS_ETCHEDVERT) return TRUE;
+        if (s->skip-- > 0) return TRUE;
         s->found = h;
         return FALSE;
     }, reinterpret_cast<LPARAM>(&s));
     return s.found;
 }
+
+struct rows : rap::list_model
+{
+    size_t row_count() const override { return 3; }
+    std::string text(size_t, size_t) const override { return "row"; }
+};
 }
 
 int main(int argc, char** argv)
@@ -148,8 +163,14 @@ int main(int argc, char** argv)
     auto ui = rap::ui::load(argc, argv, options);
     if (!ui) return 1;
     using namespace rap::layout;
+    const char* theme = std::getenv("RAPPORT_THEME");
+    const bool dark = !theme || std::strcmp(theme, "light");
+    rows model;
     auto win = (*ui)->create(window{"Rapport pane frames", {scroll{vbox{
         entry{}.frame(false),
+        entry{},
+        list{{{"Name", {}, true}}, &model},
+        tree{{rap::tree_item{"a", "a"}, rap::tree_item{"b", "b"}}},
         text_view{"rich text"}.read_only(),
         separator{},
         tabs{{"one", label{"first"}}, {"two", label{"second"}}}.sidebar(),
@@ -171,20 +192,23 @@ int main(int argc, char** argv)
     // follows the window's), each copied from the pane's print.
     for (int i = 0; i < 6; ++i)
     {
-        SetWindowPos(root, nullptr, 0, 0, 480 + (i % 2 ? 40 : 0), 640,
+        SetWindowPos(root, nullptr, 0, 0, 480 + (i % 2 ? 40 : 0), 900,
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         pump();
     }
-    const struct { const wchar_t* cls; const char* what; } controls[] = {
-        {L"Edit", "frameless entry"},
-        {L"RICHEDIT50W", "dark rich text"},
-        {L"ListBox", "dark list box"},
-        {L"Static", "dark separator"},
+    const struct { const wchar_t* cls; int skip; const char* what; bool own; } controls[] = {
+        {L"Edit", 0, "frameless entry", true},
+        {L"Edit", 1, "entry", false},
+        {L"SysListView32", 0, "list view", false},
+        {L"SysTreeView32", 0, "tree view", false},
+        {L"RICHEDIT50W", 0, "rich text", true},
+        {L"ListBox", 0, "list box", true},
+        {L"Static", 0, "separator", true},
     };
     std::vector<HWND> hs;
     for (auto& c : controls)
     {
-        HWND h = find_class(root, c.cls);
+        HWND h = find_class(root, c.cls, c.skip);
         if (!h) { std::fprintf(stderr, "no %s\n", c.what); return 2; }
         hs.push_back(h);
     }
@@ -215,6 +239,7 @@ int main(int argc, char** argv)
         const auto native = ring(painted, root, hs[i]);
         std::snprintf(why, sizeof why, "%s: on screen after layout, as painted", controls[i].what);
         expect_same(ring(after_layout, root, hs[i]), native, why);
+        if (!controls[i].own || !dark) continue;  // themed: printing isn't how it gets there
         std::snprintf(why, sizeof why, "%s: printed, as painted", controls[i].what);
         expect_same(printed[i], native, why);
     }
