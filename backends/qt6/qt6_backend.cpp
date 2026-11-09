@@ -987,6 +987,7 @@ public:
     {
         view()->setHeaderHidden(true);
         view()->setColumnCount(1);
+        if (!s.frame) view()->setFrameShape(QFrame::NoFrame);
         view()->setSelectionMode(QAbstractItemView::SingleSelection);
         view()->setUniformRowHeights(true);
         QObject::connect(view(), &QTreeWidget::itemSelectionChanged, view(),
@@ -1504,6 +1505,7 @@ public:
         : widget_base(new QPlainTextEdit)
     {
         auto* e = edit();
+        if (!s.frame) e->setFrameShape(QFrame::NoFrame);
         QFont f = s.compact ? compact_font(e->font()) : e->font();
         if (s.monospace) f = styled_font(f, text_style{.monospace = true});
         e->setFont(f);
@@ -2583,6 +2585,7 @@ public:
     {
         view_ = static_cast<list_view*>(w_);
         view_->owner = this;
+        if (!s.frame) view_->setFrameShape(QFrame::NoFrame);
         rows_ = new rows_model(s.columns, view_);
         delegate_ = new row_delegate(view_);
         view_->setItemDelegate(delegate_);

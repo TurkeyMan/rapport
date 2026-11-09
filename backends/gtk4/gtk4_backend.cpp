@@ -843,7 +843,7 @@ public:
             this);
         w_ = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(sel_)), factory);
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
-        gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
+        gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), s.frame);
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(outer_), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
         ctx_menu_ = std::make_unique<menu_actions>(w_, "ctx");
         connect(sel_, "selection-changed",
@@ -2171,7 +2171,7 @@ public:
         : text_view_common(gtk_scrolled_window_new())
     {
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
-        gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
+        gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), s.frame);
         if (s.compact) set_compact_font(w_);
         setup(s);
     }
@@ -2495,7 +2495,7 @@ public:
             gtk_widget_add_css_class(w_, "rapport-soft");
         }
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
-        gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), true);
+        gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), s.frame);
 
         for (size_t i = 0; i < s.columns.size(); ++i) add_column(s.columns[i], i);
 

@@ -261,6 +261,7 @@ struct text_view
     bool monospace = false;
     bool wrap = true;
     bool compact = false;  // the same denser font as compact lists
+    bool frame = true;  // the toolkit's frame round it
     std::function<void()> on_changed;
     rap::text_view** bind = nullptr;
 };
@@ -270,6 +271,7 @@ struct list
     list_model* model = nullptr;
     selection_mode selection = selection_mode::multi;
     bool headers = true;
+    bool frame = true;  // the toolkit's frame round it
     // Denser rows: a slightly smaller font and less cell padding, closer
     // to Windows list views than the toolkit default.
     bool compact = false;
@@ -307,6 +309,7 @@ struct list
 struct tree
 {
     std::vector<tree_item> items;
+    bool frame = true;  // the toolkit's frame round it
     std::function<void()> on_selection_changed;
     std::function<void(const std::string&)> on_activate;
     std::function<menu(std::optional<std::string>)> on_context_menu;
@@ -902,6 +905,11 @@ class text_view : public builder<text_view, spec::text_view>
 {
 public:
     explicit text_view(std::string text = {}) { s().text = std::move(text); }
+    text_view& frame(bool v = true)
+    {
+        s().frame = v;
+        return *this;
+    }
     text_view& read_only(bool v = true)
     {
         s().read_only = v;
@@ -941,6 +949,11 @@ public:
     {
         s().columns = std::move(columns);
         s().model = model;
+    }
+    list& frame(bool v = true)
+    {
+        s().frame = v;
+        return *this;
     }
     list& selection(selection_mode m)
     {
@@ -1044,6 +1057,11 @@ class tree : public builder<tree, spec::tree>
 {
 public:
     explicit tree(std::vector<tree_item> items = {}) { s().items = std::move(items); }
+    tree& frame(bool v = true)
+    {
+        s().frame = v;
+        return *this;
+    }
     tree& navigator(bool v = true)
     {
         s().navigator = v;
