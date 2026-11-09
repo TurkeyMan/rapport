@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -74,17 +75,21 @@ private:
     {
         if (depth_ || flushing_ || !request_) return;
         flushing_ = true;
-        // By index: a handler that answers can queue more.
-        for (size_t i = 0; i < queue_.size(); ++i)
+        const std::weak_ptr<void> alive = alive_;
+        // By index: a handler that answers can queue more. A handler that
+        // removes itself leaves the rest waiting for the next one.
+        size_t i = 0;
+        for (; i < queue_.size() && request_; ++i)
         {
             const std::string id = queue_[i];
             const auto it = nodes_.find(id);
             if (it == nodes_.end() || it->second != state::queued) continue;
             it->second = state::requested;
-            const auto request = request_;
+            const auto request = request_;  // it may replace itself
             request(id);
+            if (alive.expired()) return;  // it destroyed the tree, and this with it
         }
-        queue_.clear();
+        queue_.erase(queue_.begin(), queue_.begin() + std::ptrdiff_t(i));
         flushing_ = false;
     }
 
@@ -93,6 +98,7 @@ private:
     std::function<void(const std::string&)> request_;
     int depth_ = 0;
     bool flushing_ = false;
+    std::shared_ptr<void> alive_ = std::make_shared<char>();
 };
 
 }  // namespace rap::lazy_tree

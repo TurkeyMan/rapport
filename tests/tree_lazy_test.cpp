@@ -109,6 +109,45 @@ void tracker_rules()
     t.forget("a");
     t.opened("a");
     check(asked.empty(), "a node that isn't waiting doesn't ask");
+
+    // A handler that destroys the tree it's handling.
+    {
+        auto owner = std::make_unique<tracker>();
+        int calls = 0;
+        owner->mark("x");
+        owner->mark("y");
+        {
+            tracker::batch b(*owner);
+            owner->opened("x");
+            owner->opened("y");
+            owner->on_request(
+                [&](const std::string&)
+                {
+                    ++calls;
+                    owner.reset();
+                });
+        }
+        check(calls == 1 && !owner, "a handler can destroy its tree, and nothing more is asked");
+    }
+
+    // A handler that removes itself: the rest wait for the next one.
+    {
+        tracker u;
+        list_of got;
+        u.mark("x");
+        u.mark("y");
+        u.opened("x");
+        u.opened("y");
+        u.on_request(
+            [&](const std::string& id)
+            {
+                got.push_back(id);
+                u.on_request({});
+            });
+        check(got == list_of{"x"}, "a handler removed part way stops the delivery");
+        u.on_request([&](const std::string& id) { got.push_back(id); });
+        check((got == list_of{"x", "y"}), "and what's left goes to the next handler");
+    }
 }
 
 }  // namespace
