@@ -224,6 +224,23 @@ int main(int argc, char** argv)
         check(f.t->selected() == "c", "and its synchronous answer lands");
     }
 
+    // A handler that destroys the window, from a call the app made.
+    {
+        fixture f(**ui, {lazy("a")});
+        f.answer = [&](const std::string&) { f.win.reset(); };
+        f.t->set_expanded("a", true);
+        check(!f.win && f.asked == list_of{"a"}, "a handler can destroy the window it's in");
+    }
+    // A real item with what could look like an internal name.
+    {
+        const std::string odd = "\x1fplaceholder:a";
+        fixture f(**ui, {lazy("a"), plain(odd)});
+        f.t->set_expanded("a", true);
+        f.t->set_children("a", {});
+        f.t->select(odd);
+        check(f.t->selected() == odd, "no id the app uses collides with a placeholder");
+    }
+
     // Edge cases.
     {
         fixture f(**ui, {lazy("a")});

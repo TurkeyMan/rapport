@@ -58,6 +58,17 @@ void press(HWND tree, WPARAM key)
     SendMessageW(tree, WM_KEYUP, key, 0xC0000001);
 }
 
+void press_with_ctrl(HWND tree, WPARAM key)
+{
+    BYTE keys[256] = {};
+    keys[VK_CONTROL] = 0x80;
+    SetKeyboardState(keys);
+    SendMessageW(tree, WM_KEYDOWN, key, 1);
+    SendMessageW(tree, WM_KEYUP, key, 0xC0000001);
+    keys[VK_CONTROL] = 0;
+    SetKeyboardState(keys);
+}
+
 rap::tree_item item(std::string id, bool lazy)
 {
     rap::tree_item t;
@@ -123,6 +134,28 @@ int main(int argc, char** argv)
     expect(changes == 0, "set_children and update_item report no selection change");
     press(tree_hwnd, VK_DOWN);
     expect(t->selected() == "x", "the answer is there to step onto");
+
+    // Ctrl with the arrows scrolls and leaves the selection where it was.
+    {
+        t->set_items({item("p", true), item("q", false)});
+        t->set_expanded("p", true);
+        t->select("p");
+        press_with_ctrl(tree_hwnd, VK_DOWN);
+        expect(t->selected() == "p", "Ctrl+Down over a placeholder doesn't select");
+        press_with_ctrl(tree_hwnd, VK_END);
+        expect(t->selected() == "p", "and nor does Ctrl+End");
+    }
+
+    // Boxes that first arrive in a lazy answer, nested too.
+    {
+        t->set_items({item("r", true)});
+        rap::tree_item parent = item("s", false);
+        rap::tree_item boxed = item("t", false);
+        boxed.check = rap::check_state::unchecked;
+        parent.children = {boxed};
+        t->set_children("r", {parent});
+        expect(TreeView_GetImageList(tree_hwnd, TVSIL_STATE) != nullptr, "a nested box in an answer has its images");
+    }
 
     // The paging keys, landing exactly on a placeholder.
     {

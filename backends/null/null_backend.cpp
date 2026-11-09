@@ -100,6 +100,7 @@ public:
     std::optional<std::string> selected() const override { return current; }
     void select(const std::string& id) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         if (std::ranges::find(ids, id) != ids.end())
         {
             current = id;

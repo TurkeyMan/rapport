@@ -3170,6 +3170,7 @@ public:
     }
     void select(const std::string& id) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         quiet q(*this);
         if (!select_quietly(id)) TreeView_SelectItem(h_, nullptr);
     }
@@ -3177,6 +3178,8 @@ public:
     {
         const auto it = by_id_.find(id);
         if (it == by_id_.end()) return;
+        // Asks wait until the control's finished: a handler may destroy it.
+        lazy_tree::tracker::batch b(lazy_);
         TreeView_Expand(h_, it->second, open ? TVE_EXPAND : TVE_COLLAPSE);
         // TVM_EXPAND stops notifying after a node's first time.
         if (open) lazy_.opened(id);
@@ -3216,6 +3219,7 @@ public:
         for (HTREEITEM c = TreeView_GetChild(h_, parent); c; c = TreeView_GetNextSibling(h_, c)) old.push_back(c);
         for (const HTREEITEM c : old) forget_subtree(c);
         lazy_.forget(id);
+        if (!state_images_ && has_check(items)) make_state_images();
         insert(items, parent, open);
         for (const HTREEITEM c : old) TreeView_DeleteItem(h_, c);
         if (items.empty())

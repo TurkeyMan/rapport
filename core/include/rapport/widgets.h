@@ -642,7 +642,7 @@ struct date
 struct tree_item
 {
     std::string label;
-    std::string id;  // unique in the tree: what selection and the handlers name it by
+    std::string id;  // unique in the tree, not empty: what selection and the handlers name it by
     std::vector<tree_item> children;
     bool expanded = false;  // shown open at first
     // A box before the label (a folder that stands for everything in it,
