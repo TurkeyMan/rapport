@@ -822,8 +822,13 @@ public:
             +[](GtkSignalListItemFactory*, GObject* li, gpointer p)
             {
                 auto* self = static_cast<tree_impl*>(p);
-                std::erase_if(self->boxes_, [li](GtkWidget* b)
-                              { return g_object_get_data(G_OBJECT(b), "rapport-item") == li; });
+                std::erase_if(self->boxes_,
+                              [li](GtkWidget* b)
+                              {
+                                  if (g_object_get_data(G_OBJECT(b), "rapport-item") != li) return false;
+                                  g_object_unref(b);
+                                  return true;
+                              });
             },
             this);
         w_ = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(sel_)), factory);
@@ -881,6 +886,7 @@ public:
         g_object_unref(sel_);
         g_object_unref(model_);
         g_object_unref(root_);
+        for (GtkWidget* b : boxes_) g_object_unref(b);
     }
 
     void set_items(std::vector<tree_item> items) override
@@ -1042,7 +1048,7 @@ private:
         gtk_widget_set_visible(check, false);
         g_object_set_data(G_OBJECT(check), "rapport-item", li);
         g_signal_connect(check, "toggled", G_CALLBACK(check_toggled), this);
-        boxes_.push_back(check);
+        boxes_.push_back(GTK_WIDGET(g_object_ref(check)));  // a row can go before its teardown
         GtkWidget* label = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(label), 0);
         gtk_box_append(GTK_BOX(box), check);
