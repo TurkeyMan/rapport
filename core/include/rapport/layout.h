@@ -273,6 +273,10 @@ struct list
     // Denser rows: a slightly smaller font and less cell padding, closer
     // to Windows list views than the toolkit default.
     bool compact = false;
+    // A file manager's details view: rows spaced as the platform's own are,
+    // where that differs from a list's default (Windows 11: Explorer's).
+    // Nothing on Windows 10, or on other toolkits yet.
+    bool file_view = false;
     // Selected rows in a light tint of the accent colour with normal text
     // (as Windows list views do) instead of the toolkit's solid highlight.
     // Painted cells see the same colours through theme_color::highlight and
@@ -307,6 +311,10 @@ struct tree
     std::function<void(const std::string&)> on_activate;
     std::function<menu(std::optional<std::string>)> on_context_menu;
     std::function<void(const std::string&)> on_toggled;  // a box clicked
+    // A file manager's folder tree: spaced as the platform's own is, where
+    // that differs from a tree's default (Windows 11: Explorer's shallow
+    // indent and tall rows). Nothing on Windows 10, or on other toolkits yet.
+    bool navigator = false;
     rap::tree** bind = nullptr;
 };
 struct menu_button
@@ -957,6 +965,11 @@ public:
         s().compact = v;
         return *this;
     }
+    list& file_view(bool v = true)
+    {
+        s().file_view = v;
+        return *this;
+    }
     list& headers(bool v)
     {
         s().headers = v;
@@ -1029,6 +1042,11 @@ class tree : public builder<tree, spec::tree>
 {
 public:
     explicit tree(std::vector<tree_item> items = {}) { s().items = std::move(items); }
+    tree& navigator(bool v = true)
+    {
+        s().navigator = v;
+        return *this;
+    }
     tree& on_selection_changed(std::function<void()> f)
     {
         s().on_selection_changed = std::move(f);
