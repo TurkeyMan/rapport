@@ -311,6 +311,7 @@ struct tree
     std::function<void(const std::string&)> on_activate;
     std::function<menu(std::optional<std::string>)> on_context_menu;
     std::function<void(const std::string&)> on_toggled;  // a box clicked
+    std::function<void(const std::string&)> on_expanding;  // load a node's children
     // A file manager's folder tree: spaced as the platform's own is, where
     // that differs from a tree's default (Windows 11: Explorer's shallow
     // indent and tall rows). Nothing on Windows 10, or on other toolkits yet.
@@ -1065,6 +1066,11 @@ public:
     tree& on_toggled(std::function<void(const std::string&)> f)
     {
         s().on_toggled = std::move(f);
+        return *this;
+    }
+    tree& on_expanding(std::function<void(const std::string&)> f)
+    {
+        s().on_expanding = std::move(f);
         return *this;
     }
     tree& bind(rap::tree*& h)

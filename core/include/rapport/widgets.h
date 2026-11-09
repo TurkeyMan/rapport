@@ -648,6 +648,14 @@ struct tree_item
     // A box before the label (a folder that stands for everything in it,
     // checked, unchecked or mixed); none when unset.
     std::optional<check_state> check;
+    // May have children that aren't loaded yet: shows a chevron, and asks for
+    // them when it's opened (tree::on_expanding). Ignored with `children`.
+    bool has_children = false;
+    // Before the label, as a list cell's: a tree where no item has one looks
+    // exactly as if this weren't here. Items without one, in a tree where
+    // others have one, may leave room for it, depending on the toolkit.
+    // Trees don't draw its overlay; GTK trees show named and file icons only.
+    rap::icon icon;
 };
 
 // A hierarchy of labelled items, one selected at a time (folders, say): the
@@ -679,6 +687,35 @@ public:
     // make the folder's mixed). An item made without a box gets none.
     virtual void set_check(const std::string& id, check_state) = 0;
     virtual void on_toggled(std::function<void(const std::string& id)>) = 0;
+
+    // Loading children on demand (tree_item::has_children).
+    //
+    // A request to load, not a report of a change: called whenever a node
+    // that has_children and has nothing loaded becomes open, whoever opened
+    // it (the user, set_expanded, select() opening ancestors, tree_item::
+    // expanded, or set_items and set_children keeping a node open). Once
+    // until it's answered: closing and reopening with an answer outstanding
+    // doesn't ask again. Once loaded, reopening never asks; the app refreshes
+    // with set_children. The node shows open at once with a placeholder row,
+    // which the app never sees. Called after any change under way has
+    // finished, so answering from inside the handler is fine.
+    virtual void on_expanding(std::function<void(const std::string& id)>) = 0;
+    // The answer, at any time after, or a refresh with nobody asking. Replaces
+    // everything under `id` as set_items replaces the whole tree: the
+    // selection stays on the same id if it's still there, and is cleared if
+    // not; items keep being open or closed as the user left them; new ones
+    // take tree_item::expanded; nothing is called back for the selection.
+    // Empty: no children, so no chevron, and the node closes. An answer for a
+    // node closed since applies and leaves it closed. An id that isn't there
+    // is ignored (the node went while the answer was on its way).
+    virtual void set_children(const std::string& id, std::vector<tree_item>) = 0;
+    // One node in place: its children, open state, selection and box are left
+    // alone. has_children false with an answer outstanding is an empty
+    // answer. has_children true on a node with nothing loaded brings its
+    // chevron back (a watcher saw a new subfolder); on one with children
+    // loaded it does nothing.
+    virtual void update_item(const std::string& id, const std::string& label, const rap::icon&,
+                             bool has_children) = 0;
 };
 
 class date_picker : public widget

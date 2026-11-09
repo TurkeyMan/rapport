@@ -12,6 +12,8 @@
 #include "frame_layer.h"
 #include "gpu_readback.h"
 #include "gtk_common.h"
+#include "lazy_tree.h"
+#include "rapport/i18n.h"
 #include "list_press.h"
 
 #include <cmath>
@@ -900,14 +902,16 @@ public:
 // -- tree ---------------------------------------------------------------------
 
 // A GtkTreeView over a GtkTreeStore: column 0 the label, column 1 the id,
-// column 2 the box (a check_state, or -1 for none).
+// column 2 the box (a check_state, or -1 for none), column 3 the icon. A node
+// with children not loaded yet holds one placeholder row, with no id, which is
+// what gives it a chevron.
 class tree_impl : public widget_base<rap::tree>
 {
 public:
     explicit tree_impl(const spec::tree& s)
         : widget_base(gtk_tree_view_new(), gtk_scrolled_window_new(nullptr, nullptr))
     {
-        store_ = gtk_tree_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT);
+        store_ = gtk_tree_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_ICON);
         auto* view = GTK_TREE_VIEW(w_);
         gtk_tree_view_set_model(view, GTK_TREE_MODEL(store_));
         gtk_container_add(GTK_CONTAINER(outer_), w_);
@@ -944,6 +948,11 @@ public:
                 if (!id.empty() && self->toggled_) self->toggled_(id);
             },
             this);
+        // Hidden until an item has an icon, so a tree with none is as before.
+        icon_cell_ = gtk_cell_renderer_pixbuf_new();
+        g_object_set(icon_cell_, "visible", FALSE, nullptr);
+        gtk_tree_view_column_pack_start(column, icon_cell_, false);
+        gtk_tree_view_column_add_attribute(column, icon_cell_, "gicon", 3);
         GtkCellRenderer* text = gtk_cell_renderer_text_new();
         gtk_tree_view_column_pack_start(column, text, true);
         gtk_tree_view_column_add_attribute(column, text, "text", 0);
@@ -955,9 +964,21 @@ public:
         // chose it, so it's refused.
         gtk_tree_selection_set_select_function(
             sel_,
-            +[](GtkTreeSelection*, GtkTreeModel*, GtkTreePath*, gboolean selected, gpointer p) -> gboolean
-            { return selected || !static_cast<tree_impl*>(p)->focusing_; },
+            +[](GtkTreeSelection*, GtkTreeModel*, GtkTreePath* path, gboolean selected, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<tree_impl*>(p);
+                if (!selected && self->id_at(path).empty()) return false;  // a placeholder
+                return selected || !self->focusing_;
+            },
             this, nullptr);
+        connect(
+            w_, "row-expanded",
+            +[](GtkTreeView*, GtkTreeIter*, GtkTreePath* path, gpointer p)
+            {
+                auto* self = static_cast<tree_impl*>(p);
+                self->lazy_.opened(self->id_at(path));
+            },
+            this);
         connect(w_, "grab-focus", +[](GtkWidget*, gpointer p) { static_cast<tree_impl*>(p)->focusing_ = true; }, this);
         connect_after(w_, "grab-focus", +[](GtkWidget*, gpointer p) { static_cast<tree_impl*>(p)->focusing_ = false; },
                       this);
@@ -990,7 +1011,7 @@ public:
             +[](GtkTreeView*, GtkTreePath* path, GtkTreeViewColumn*, gpointer p)
             {
                 auto* self = static_cast<tree_impl*>(p);
-                if (self->activate_) self->activate_(self->id_at(path));
+                if (const std::string id = self->id_at(path); self->activate_ && !id.empty()) self->activate_(id);
             },
             this);
         connect(
@@ -1002,7 +1023,13 @@ public:
                 // The item under the pointer is selected first, as file managers do.
                 GtkTreePath* path = nullptr;
                 if (gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(self->w_), int(e->x), int(e->y), &path, nullptr,
-                                                  nullptr, nullptr))
+                                                  nullptr, nullptr) &&
+                    self->id_at(path).empty())
+                {
+                    gtk_tree_path_free(path);  // a placeholder: blank space
+                    path = nullptr;
+                }
+                if (path)
                 {
                     gtk_tree_view_set_cursor(GTK_TREE_VIEW(self->w_), path, nullptr, false);  // reported
                     gtk_tree_path_free(path);
@@ -1025,26 +1052,71 @@ public:
 
     void set_items(std::vector<tree_item> items) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         const std::optional<std::string> keep = selected();
-        std::unordered_map<std::string, bool> open;
-        for (auto& [id, ref] : by_id_)
-            if (GtkTreePath* path = gtk_tree_row_reference_get_path(ref))
-            {
-                open[id] = gtk_tree_view_row_expanded(GTK_TREE_VIEW(w_), path);
-                gtk_tree_path_free(path);
-            }
+        const std::unordered_map<std::string, bool> open = open_states();
         quiet q(*this);
         clear_refs();
         gtk_tree_store_clear(store_);
+        lazy_.clear();
         std::vector<std::string> expand;
         insert(items, nullptr, open, expand);
-        for (const std::string& id : expand)
-            if (GtkTreePath* path = path_of(id))
-            {
-                gtk_tree_view_expand_row(GTK_TREE_VIEW(w_), path, false);
-                gtk_tree_path_free(path);
-            }
+        expand_all(expand);
         if (keep) select_quietly(*keep);
+    }
+    void on_expanding(std::function<void(const std::string&)> f) override { lazy_.on_request(std::move(f)); }
+    void set_children(const std::string& id, std::vector<tree_item> items) override
+    {
+        GtkTreePath* parent_path = path_of(id);
+        if (!parent_path) return;
+        lazy_tree::tracker::batch b(lazy_);
+        quiet q(*this);
+        const std::optional<std::string> keep = selected();
+        const std::unordered_map<std::string, bool> open = open_states();
+        GtkTreeModel* model = GTK_TREE_MODEL(store_);
+        GtkTreeIter parent;
+        gtk_tree_model_get_iter(model, &parent, parent_path);
+        const int old = gtk_tree_model_iter_n_children(model, &parent);
+        GtkTreeIter child;
+        for (int c = 0; c < old; ++c)
+            if (gtk_tree_model_iter_nth_child(model, &child, &parent, c)) forget_subtree(&child);
+        lazy_.forget(id);
+        // The new ones go in before the old come out, so the node is never
+        // empty and doesn't collapse in between.
+        std::vector<std::string> expand;
+        insert(items, &parent, open, expand);
+        for (int c = 0; c < old; ++c)
+            if (gtk_tree_model_iter_nth_child(model, &child, &parent, 0)) gtk_tree_store_remove(store_, &child);
+        gtk_tree_path_free(parent_path);
+        expand_all(expand);
+        if (keep)
+        {
+            if (by_id_.contains(*keep))
+            {
+                if (selected() != keep) select_quietly(*keep);
+            }
+            else
+                gtk_tree_selection_unselect_all(sel_);
+        }
+    }
+    void update_item(const std::string& id, const std::string& label, const rap::icon& icon, bool has_children) override
+    {
+        GtkTreePath* path = path_of(id);
+        if (!path) return;
+        lazy_tree::tracker::batch b(lazy_);
+        GtkTreeIter it;
+        const bool found = gtk_tree_model_get_iter(GTK_TREE_MODEL(store_), &it, path);
+        gtk_tree_path_free(path);
+        if (!found) return;
+        gtk_tree_store_set(store_, &it, 0, label.c_str(), 3, g_icon_of(icon), -1);
+        const bool waiting = lazy_.unloaded(id);
+        if (!has_children && waiting)
+            set_children(id, {});
+        else if (has_children && !waiting && !gtk_tree_model_iter_has_child(GTK_TREE_MODEL(store_), &it))
+        {
+            lazy_.mark(id);
+            add_placeholder(&it);
+        }
     }
     std::optional<std::string> selected() const override
     {
@@ -1067,6 +1139,7 @@ public:
             else
                 gtk_tree_view_collapse_row(GTK_TREE_VIEW(w_), path);
             gtk_tree_path_free(path);
+            if (open) lazy_.opened(id);
         }
     }
     void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
@@ -1114,16 +1187,72 @@ private:
         for (const tree_item& t : items)
         {
             GtkTreeIter it;
-            gtk_tree_store_insert_with_values(store_, &it, parent, -1, 0, t.label.c_str(), 1,
-                                              t.id.c_str(), 2, t.check ? int(*t.check) : -1, -1);
+            gtk_tree_store_insert_with_values(store_, &it, parent, -1, 0, t.label.c_str(), 1, t.id.c_str(), 2,
+                                              t.check ? int(*t.check) : -1, 3, g_icon_of(t.icon), -1);
             GtkTreePath* path = gtk_tree_model_get_path(GTK_TREE_MODEL(store_), &it);
             by_id_[t.id] = gtk_tree_row_reference_new(GTK_TREE_MODEL(store_), path);
             gtk_tree_path_free(path);
+            if (t.has_children && t.children.empty())
+            {
+                lazy_.mark(t.id);
+                add_placeholder(&it);
+            }
             // Parents first: GTK won't expand a row inside a collapsed one.
             const auto was = open.find(t.id);
-            if (!t.children.empty() && (was != open.end() ? was->second : t.expanded)) expand.push_back(t.id);
+            if ((!t.children.empty() || lazy_.unloaded(t.id)) && (was != open.end() ? was->second : t.expanded))
+                expand.push_back(t.id);
             insert(t.children, &it, open, expand);
         }
+    }
+    void add_placeholder(GtkTreeIter* parent)
+    {
+        GtkTreeIter it;
+        gtk_tree_store_insert_with_values(store_, &it, parent, -1, 0, rap::i18n::tr("rapport", "Loading…"), 1, "", 2,
+                                          -1, -1);
+    }
+    GIcon* g_icon_of(const rap::icon& icon)
+    {
+        GIcon* g = !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
+        if (g) g_object_set(icon_cell_, "visible", TRUE, nullptr);
+        return g;
+    }
+    std::unordered_map<std::string, bool> open_states() const
+    {
+        std::unordered_map<std::string, bool> open;
+        for (auto& [id, ref] : by_id_)
+            if (GtkTreePath* path = gtk_tree_row_reference_get_path(ref))
+            {
+                open[id] = gtk_tree_view_row_expanded(GTK_TREE_VIEW(w_), path);
+                gtk_tree_path_free(path);
+            }
+        return open;
+    }
+    void expand_all(const std::vector<std::string>& ids)
+    {
+        for (const std::string& id : ids)
+            if (GtkTreePath* path = path_of(id))
+            {
+                gtk_tree_view_expand_row(GTK_TREE_VIEW(w_), path, false);
+                gtk_tree_path_free(path);
+                lazy_.opened(id);
+            }
+    }
+    // Everything we know about a row and what's under it; the rows stay
+    // until they're removed.
+    void forget_subtree(GtkTreeIter* it)
+    {
+        GtkTreeIter child;
+        for (bool more = gtk_tree_model_iter_children(GTK_TREE_MODEL(store_), &child, it); more;
+             more = gtk_tree_model_iter_next(GTK_TREE_MODEL(store_), &child))
+            forget_subtree(&child);
+        const std::string id = id_at(it);
+        if (id.empty()) return;
+        if (const auto found = by_id_.find(id); found != by_id_.end())
+        {
+            gtk_tree_row_reference_free(found->second);
+            by_id_.erase(found);
+        }
+        lazy_.forget(id);
     }
     void clear_refs()
     {
@@ -1175,6 +1304,8 @@ private:
 
     GtkTreeStore* store_ = nullptr;
     GtkTreeSelection* sel_ = nullptr;
+    GtkCellRenderer* icon_cell_ = nullptr;
+    lazy_tree::tracker lazy_;
     std::unordered_map<std::string, GtkTreeRowReference*> by_id_;
     std::function<void()> changed_;
     std::function<void(const std::string&)> activate_;
