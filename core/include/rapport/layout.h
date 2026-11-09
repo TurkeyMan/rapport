@@ -314,7 +314,8 @@ struct tree
     std::function<void(const std::string&)> on_expanding;  // load a node's children
     // A file manager's folder tree: spaced as the platform's own is, where
     // that differs from a tree's default (Windows 11: Explorer's shallow
-    // indent and tall rows). Nothing on Windows 10, or on other toolkits yet.
+    // indent and tall rows, and no horizontal scroll bar). Nothing on
+    // Windows 10, or on other toolkits yet.
     bool navigator = false;
     rap::tree** bind = nullptr;
 };
