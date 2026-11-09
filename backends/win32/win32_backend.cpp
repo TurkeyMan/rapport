@@ -3271,9 +3271,14 @@ public:
             return 1;
         }
         case TVN_SELCHANGINGW:
+        {
             // The arrow keys step past a placeholder (key_proc): this stops
-            // the mouse, and the rarer ways of landing on one.
-            return !quiet_ && is_placeholder(reinterpret_cast<NMTREEVIEWW*>(n)->itemNew.hItem);
+            // the mouse and the paging keys, which key_proc then moves on.
+            const HTREEITEM to = reinterpret_cast<NMTREEVIEWW*>(n)->itemNew.hItem;
+            if (quiet_ || !is_placeholder(to)) return 0;
+            refused_ = to;
+            return 1;
+        }
         case TVN_ITEMEXPANDEDW:
         {
             const auto* tv = reinterpret_cast<NMTREEVIEWW*>(n);
@@ -3441,7 +3446,9 @@ private:
     {
         auto* self = reinterpret_cast<tree_impl*>(data);
         if (msg == WM_KEYDOWN && self->step_past_placeholder(wp)) return 0;
+        self->refused_ = nullptr;
         const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+        if (msg == WM_KEYDOWN && (wp == VK_NEXT || wp == VK_PRIOR) && self->refused_) self->page_past_placeholder(wp);
         if (msg == WM_SETFONT) self->rebuild_icons();
         return result;
     }
@@ -3450,6 +3457,8 @@ private:
     // that would be stuck.
     bool step_past_placeholder(WPARAM key)
     {
+        // Ctrl with the arrows scrolls: the selection stays, so nothing lands.
+        if (GetKeyState(VK_CONTROL) < 0) return false;
         const HTREEITEM from = TreeView_GetSelection(h_);
         if (!from) return false;
         HTREEITEM to = nullptr;
@@ -3473,6 +3482,26 @@ private:
             TreeView_EnsureVisible(h_, past);
         }
         return true;
+    }
+    // A page key landed on a placeholder and was refused: on to the nearest
+    // row in its direction, or back the other way at the end of the tree.
+    // Refused and left there, the same press would land there again.
+    void page_past_placeholder(WPARAM key)
+    {
+        const auto nearest = [&](bool down)
+        {
+            HTREEITEM h = refused_;
+            do
+                h = down ? TreeView_GetNextVisible(h_, h) : TreeView_GetPrevVisible(h_, h);
+            while (h && is_placeholder(h));
+            return h;
+        };
+        const bool down = key == VK_NEXT;
+        HTREEITEM to = nearest(down);
+        if (!to) to = nearest(!down);
+        if (!to || to == TreeView_GetSelection(h_)) return;
+        TreeView_SelectItem(h_, to);
+        TreeView_EnsureVisible(h_, to);
     }
     // Image 0 is blank, for what has no icon. The list is only made when an
     // item has an icon, so a tree with none is as it always was.
@@ -3646,6 +3675,7 @@ private:
     std::vector<size_t> free_ids_;  // in ids_, left by what set_children removed
     std::unordered_map<std::string, HTREEITEM> by_id_;
     lazy_tree::tracker lazy_;
+    HTREEITEM refused_ = nullptr;  // the placeholder a selection just tried to land on
     HIMAGELIST icons_ = nullptr;
     std::vector<rap::icon> image_sources_;  // image 1 on
     std::unordered_map<std::string, int> image_index_;
