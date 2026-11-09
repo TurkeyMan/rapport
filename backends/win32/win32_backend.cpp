@@ -2498,7 +2498,7 @@ public:
         adopt(create_control(win, parent, L"RICHEDIT50W", L"",
                             ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP | ES_NOHIDESEL |
                                 (s.wrap ? 0 : ES_AUTOHSCROLL | WS_HSCROLL) | (s.read_only ? ES_READONLY : 0),
-                            WS_EX_CLIENTEDGE));
+                            s.frame ? WS_EX_CLIENTEDGE : 0));
         SendMessageW(h_, EM_SETEVENTMASK, 0, ENM_CHANGE);
         // RichEdit holds 32,767 characters unless told otherwise, and cuts
         // longer text off silently (a big diff showed only its start).
@@ -3096,7 +3096,7 @@ public:
         DWORD style = TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | WS_TABSTOP;
         // As Explorer's: long names clip, and their tooltips show them whole.
         if (s.navigator && windows_build() >= 22000) style |= TVS_NOHSCROLL;
-        adopt(create_control(win, parent, WC_TREEVIEWW, L"", style, WS_EX_CLIENTEDGE));
+        adopt(create_control(win, parent, WC_TREEVIEWW, L"", style, s.frame ? WS_EX_CLIENTEDGE : 0));
         // Explorer's look (chevrons, hover, no lines), as Windows' own trees
         // have it (its dark one in dark mode).
         theme_control(h_);
@@ -4741,7 +4741,7 @@ public:
         DWORD style = LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | WS_TABSTOP;
         if (s.selection == selection_mode::single || s.selection == selection_mode::none) style |= LVS_SINGLESEL;
         if (!s.headers) style |= LVS_NOCOLUMNHEADER;
-        adopt(create_control(win, parent, WC_LISTVIEWW, L"", style, WS_EX_CLIENTEDGE));
+        adopt(create_control(win, parent, WC_LISTVIEWW, L"", style, s.frame ? WS_EX_CLIENTEDGE : 0));
         ListView_SetExtendedListViewStyle(h_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP);
         // LVS_EX_DOUBLEBUFFER covers the rows, not the header: it flashed
         // whenever the list was resized.

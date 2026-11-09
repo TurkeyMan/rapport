@@ -915,7 +915,7 @@ public:
         auto* view = GTK_TREE_VIEW(w_);
         gtk_tree_view_set_model(view, GTK_TREE_MODEL(store_));
         gtk_container_add(GTK_CONTAINER(outer_), w_);
-        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), GTK_SHADOW_IN);
+        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), s.frame ? GTK_SHADOW_IN : GTK_SHADOW_NONE);
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(outer_), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
         gtk_tree_view_set_headers_visible(view, false);
         gtk_tree_view_set_enable_tree_lines(view, true);
@@ -1750,7 +1750,7 @@ public:
         : text_view_common(gtk_scrolled_window_new(nullptr, nullptr))
     {
         gtk_container_add(GTK_CONTAINER(outer_), w_);
-        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), GTK_SHADOW_IN);
+        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), s.frame ? GTK_SHADOW_IN : GTK_SHADOW_NONE);
         if (s.compact)
         {
             std::string rule =
@@ -1944,7 +1944,7 @@ public:
         rows_ = RAPPORT_TREE_ROWS(g_object_new(rapport_tree_rows_get_type(), nullptr));
         auto* view = GTK_TREE_VIEW(w_);
         gtk_container_add(GTK_CONTAINER(outer_), w_);
-        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), GTK_SHADOW_IN);
+        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), s.frame ? GTK_SHADOW_IN : GTK_SHADOW_NONE);
         gtk_tree_view_set_headers_visible(view, s.headers);
         gtk_tree_view_set_fixed_height_mode(view, true);
         // No rubber-band (drag-rectangle) selection: report-style lists on
