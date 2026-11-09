@@ -4484,6 +4484,7 @@ public:
     void apply_file_view_rows()
     {
         HIMAGELIST rows = ImageList_Create(1, px(28) - 1, ILC_COLOR32, 1, 0);
+        if (!rows) return;  // the spacing it has is better than none
         if (HIMAGELIST old = ListView_SetImageList(h_, rows, LVSIL_SMALL)) ImageList_Destroy(old);
     }
     ~list_impl() override
