@@ -261,6 +261,7 @@ struct text_view
     bool monospace = false;
     bool wrap = true;
     bool compact = false;  // the same denser font as compact lists
+    bool frame = true;  // the toolkit's frame round it
     std::function<void()> on_changed;
     rap::text_view** bind = nullptr;
 };
@@ -270,9 +271,14 @@ struct list
     list_model* model = nullptr;
     selection_mode selection = selection_mode::multi;
     bool headers = true;
+    bool frame = true;  // the toolkit's frame round it
     // Denser rows: a slightly smaller font and less cell padding, closer
     // to Windows list views than the toolkit default.
     bool compact = false;
+    // A file manager's details view: rows spaced as the platform's own are,
+    // where that differs from a list's default (Windows 11: Explorer's).
+    // Nothing on Windows 10, or on other toolkits yet.
+    bool file_view = false;
     // Selected rows in a light tint of the accent colour with normal text
     // (as Windows list views do) instead of the toolkit's solid highlight.
     // Painted cells see the same colours through theme_color::highlight and
@@ -303,10 +309,17 @@ struct list
 struct tree
 {
     std::vector<tree_item> items;
+    bool frame = true;  // the toolkit's frame round it
     std::function<void()> on_selection_changed;
     std::function<void(const std::string&)> on_activate;
     std::function<menu(std::optional<std::string>)> on_context_menu;
     std::function<void(const std::string&)> on_toggled;  // a box clicked
+    std::function<void(const std::string&)> on_expanding;  // load a node's children
+    // A file manager's folder tree: spaced as the platform's own is, where
+    // that differs from a tree's default (Windows 11: Explorer's shallow
+    // indent and tall rows, and no horizontal scroll bar). Nothing on
+    // Windows 10, or on other toolkits yet.
+    bool navigator = false;
     rap::tree** bind = nullptr;
 };
 struct menu_button
@@ -892,6 +905,11 @@ class text_view : public builder<text_view, spec::text_view>
 {
 public:
     explicit text_view(std::string text = {}) { s().text = std::move(text); }
+    text_view& frame(bool v = true)
+    {
+        s().frame = v;
+        return *this;
+    }
     text_view& read_only(bool v = true)
     {
         s().read_only = v;
@@ -932,6 +950,11 @@ public:
         s().columns = std::move(columns);
         s().model = model;
     }
+    list& frame(bool v = true)
+    {
+        s().frame = v;
+        return *this;
+    }
     list& selection(selection_mode m)
     {
         s().selection = m;
@@ -955,6 +978,11 @@ public:
     list& compact(bool v = true)
     {
         s().compact = v;
+        return *this;
+    }
+    list& file_view(bool v = true)
+    {
+        s().file_view = v;
         return *this;
     }
     list& headers(bool v)
@@ -1029,6 +1057,16 @@ class tree : public builder<tree, spec::tree>
 {
 public:
     explicit tree(std::vector<tree_item> items = {}) { s().items = std::move(items); }
+    tree& frame(bool v = true)
+    {
+        s().frame = v;
+        return *this;
+    }
+    tree& navigator(bool v = true)
+    {
+        s().navigator = v;
+        return *this;
+    }
     tree& on_selection_changed(std::function<void()> f)
     {
         s().on_selection_changed = std::move(f);
@@ -1047,6 +1085,11 @@ public:
     tree& on_toggled(std::function<void(const std::string&)> f)
     {
         s().on_toggled = std::move(f);
+        return *this;
+    }
+    tree& on_expanding(std::function<void(const std::string&)> f)
+    {
+        s().on_expanding = std::move(f);
         return *this;
     }
     tree& bind(rap::tree*& h)

@@ -234,3 +234,7 @@ msgstr ""
 #: core/src/i18n.cpp:602
 msgid "Right"
 msgstr ""
+
+#: tree: where a folder's children will be, while they load
+msgid "Loading…"
+msgstr ""

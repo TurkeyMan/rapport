@@ -2,6 +2,7 @@
 // posted tasks until quit(). For tests and for checking plugin loading on
 // machines without a toolkit.
 #include "../common/container_state.h"
+#include "../common/lazy_tree.h"
 #include "rapport/backend.h"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace rap::null
 {
@@ -84,20 +86,40 @@ class null_tree : public stub<rap::tree>
 public:
     void set_items(std::vector<tree_item> items) override
     {
+        lazy_tree::tracker::batch b(lazy_);
+        const auto was = open_states();
         ids.clear();
         checks.clear();
-        add(items);
-        if (current && std::ranges::find(ids, *current) == ids.end()) current.reset();
+        kids_.clear();
+        parent_.clear();
+        open_.clear();
+        lazy_.clear();
+        add(items, "", was);
+        drop_lost_selection();
     }
     std::optional<std::string> selected() const override { return current; }
     void select(const std::string& id) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         if (std::ranges::find(ids, id) != ids.end())
+        {
             current = id;
+            for (std::string p = parent_[id]; !p.empty(); p = parent_[p]) set_expanded(p, true);
+        }
         else
             current.reset();
     }
-    void set_expanded(const std::string&, bool) override {}
+    void set_expanded(const std::string& id, bool open) override
+    {
+        if (!open)
+        {
+            open_.erase(id);
+            return;
+        }
+        if (kids_[id].empty() && !lazy_.unloaded(id)) return;
+        open_.insert(id);
+        lazy_.opened(id);
+    }
     void on_selection_changed(std::function<void()>) override {}
     void on_activate(std::function<void(const std::string&)>) override {}
     void on_context_menu(std::function<menu(std::optional<std::string>)>) override {}
@@ -106,21 +128,78 @@ public:
         if (auto it = checks.find(id); it != checks.end()) it->second = s;
     }
     void on_toggled(std::function<void(const std::string&)>) override {}
+    void on_expanding(std::function<void(const std::string&)> f) override { lazy_.on_request(std::move(f)); }
+    void set_children(const std::string& id, std::vector<tree_item> items) override
+    {
+        if (std::ranges::find(ids, id) == ids.end()) return;
+        lazy_tree::tracker::batch b(lazy_);
+        const auto was = open_states();
+        remove_under(id);
+        lazy_.forget(id);
+        add(items, id, was);
+        if (items.empty()) open_.erase(id);
+        drop_lost_selection();
+    }
+    void update_item(const std::string& id, const std::string&, const rap::icon&, bool has_children) override
+    {
+        if (std::ranges::find(ids, id) == ids.end()) return;
+        lazy_tree::tracker::batch b(lazy_);
+        const bool waiting = lazy_.unloaded(id);
+        if (!has_children && waiting)
+            set_children(id, {});
+        else if (has_children && !waiting && kids_[id].empty())
+            lazy_.mark(id);
+    }
 
     std::vector<std::string> ids;
     std::optional<std::string> current;
     std::unordered_map<std::string, check_state> checks;  // the items with boxes
 
 private:
-    void add(const std::vector<tree_item>& items)
+    std::unordered_map<std::string, bool> open_states() const
+    {
+        std::unordered_map<std::string, bool> was;
+        for (const std::string& id : ids) was[id] = open_.contains(id);
+        return was;
+    }
+    void add(const std::vector<tree_item>& items, const std::string& parent,
+             const std::unordered_map<std::string, bool>& was)
     {
         for (const tree_item& i : items)
         {
             ids.push_back(i.id);
+            parent_[i.id] = parent;
+            kids_[parent].push_back(i.id);
             if (i.check) checks[i.id] = *i.check;
-            add(i.children);
+            if (i.has_children && i.children.empty()) lazy_.mark(i.id);
+            add(i.children, i.id, was);
+            const auto it = was.find(i.id);
+            if (it != was.end() ? it->second : i.expanded) set_expanded(i.id, true);
         }
     }
+    void remove_under(const std::string& id)
+    {
+        const std::vector<std::string> children = std::move(kids_[id]);
+        kids_[id].clear();
+        for (const std::string& c : children)
+        {
+            remove_under(c);
+            std::erase(ids, c);
+            checks.erase(c);
+            open_.erase(c);
+            parent_.erase(c);
+            lazy_.forget(c);
+        }
+    }
+    void drop_lost_selection()
+    {
+        if (current && std::ranges::find(ids, *current) == ids.end()) current.reset();
+    }
+
+    std::unordered_map<std::string, std::vector<std::string>> kids_;
+    std::unordered_map<std::string, std::string> parent_;
+    std::unordered_set<std::string> open_;
+    lazy_tree::tracker lazy_;
 };
 
 class null_entry_action : public rap::entry_action

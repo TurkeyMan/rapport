@@ -221,6 +221,9 @@ private:
         if (s.on_context_menu) t.on_context_menu(s.on_context_menu);
         if (s.on_toggled) t.on_toggled(s.on_toggled);
         bind(s.bind, w);
+        // After the bind: nodes made open ask straight away, and its handler
+        // may use the handle.
+        if (s.on_expanding) t.on_expanding(s.on_expanding);
     }
     static void apply(const spec::date_picker& s, widget& w)
     {

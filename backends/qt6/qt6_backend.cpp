@@ -13,6 +13,7 @@
 #include "builtin_icons.h"
 #include "frame_layer.h"
 #include "gpu_readback.h"
+#include "lazy_tree.h"
 #include "list_press.h"
 
 #include <QAbstractTableModel>
@@ -986,6 +987,7 @@ public:
     {
         view()->setHeaderHidden(true);
         view()->setColumnCount(1);
+        if (!s.frame) view()->setFrameShape(QFrame::NoFrame);
         view()->setSelectionMode(QAbstractItemView::SingleSelection);
         view()->setUniformRowHeights(true);
         QObject::connect(view(), &QTreeWidget::itemSelectionChanged, view(),
@@ -1012,7 +1014,12 @@ public:
         QObject::connect(view(), &QTreeWidget::itemActivated, view(),
                          [this](QTreeWidgetItem* i, int)
                          {
-                             if (i && activate_) activate_(id_of(i));
+                             if (i && activate_ && !id_of(i).empty()) activate_(id_of(i));
+                         });
+        QObject::connect(view(), &QTreeWidget::itemExpanded, view(),
+                         [this](QTreeWidgetItem* i)
+                         {
+                             if (i) lazy_.opened(id_of(i));
                          });
         hook(view()->viewport(),
              [this](QEvent* e)
@@ -1026,6 +1033,7 @@ public:
 
     void set_items(std::vector<tree_item> items) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         const std::optional<std::string> keep = selected();
         std::unordered_map<std::string, bool> open;
         for (auto& [id, i] : by_id_) open[id] = i->isExpanded();
@@ -1033,6 +1041,7 @@ public:
         view()->clear();
         by_id_.clear();
         checks_.clear();
+        lazy_.clear();
         insert(items, nullptr, open);
         if (keep) select_quietly(*keep);
     }
@@ -1043,12 +1052,62 @@ public:
     }
     void select(const std::string& id) override
     {
+        lazy_tree::tracker::batch b(lazy_);
         quiet q(*this);
         if (!select_quietly(id)) view()->clearSelection();
     }
     void set_expanded(const std::string& id, bool open) override
     {
-        if (auto it = by_id_.find(id); it != by_id_.end()) it->second->setExpanded(open);
+        if (auto it = by_id_.find(id); it != by_id_.end())
+        {
+            // Asks wait until Qt's finished: a handler may destroy the tree.
+            lazy_tree::tracker::batch b(lazy_);
+            it->second->setExpanded(open);
+            if (open) lazy_.opened(id);
+        }
+    }
+    void on_expanding(std::function<void(const std::string&)> f) override { lazy_.on_request(std::move(f)); }
+    void set_children(const std::string& id, std::vector<tree_item> items) override
+    {
+        const auto it = by_id_.find(id);
+        if (it == by_id_.end()) return;
+        lazy_tree::tracker::batch b(lazy_);
+        quiet q(*this);
+        QTreeWidgetItem* parent = it->second;
+        const std::optional<std::string> keep = selected();
+        std::unordered_map<std::string, bool> open;
+        for (auto& [other, i] : by_id_) open[other] = i->isExpanded();
+        const bool was_open = parent->isExpanded();
+        for (int c = 0; c < parent->childCount(); ++c) forget_subtree(parent->child(c));
+        lazy_.forget(id);
+        const QList<QTreeWidgetItem*> old = parent->takeChildren();
+        insert(items, parent, open);
+        qDeleteAll(old);
+        parent->setExpanded(!items.empty() && was_open);
+        if (keep)
+        {
+            if (const auto kept = by_id_.find(*keep); kept == by_id_.end())
+                view()->clearSelection();
+            else if (view()->currentItem() != kept->second)
+                view()->setCurrentItem(kept->second);
+        }
+    }
+    void update_item(const std::string& id, const std::string& label, const rap::icon& icon, bool has_children) override
+    {
+        const auto it = by_id_.find(id);
+        if (it == by_id_.end()) return;
+        lazy_tree::tracker::batch b(lazy_);
+        QTreeWidgetItem* i = it->second;
+        i->setText(0, qs(label));
+        i->setIcon(0, icon ? to_q_icon(icon, 16, view()) : QIcon());
+        const bool waiting = lazy_.unloaded(id);
+        if (!has_children && waiting)
+            set_children(id, {});
+        else if (has_children && !waiting && i->childCount() == 0)
+        {
+            lazy_.mark(id);
+            add_placeholder(i);
+        }
     }
     void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void(const std::string&)> f) override { activate_ = std::move(f); }
@@ -1094,6 +1153,7 @@ private:
             auto* i = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(view());
             i->setText(0, qs(t.label));
             i->setData(0, Qt::UserRole, qs(t.id));
+            if (t.icon) i->setIcon(0, to_q_icon(t.icon, 16, view()));
             if (t.check)
             {
                 i->setFlags(i->flags() | Qt::ItemIsUserCheckable);
@@ -1101,10 +1161,33 @@ private:
                 checks_[t.id] = *t.check;
             }
             by_id_[t.id] = i;
+            if (t.has_children && t.children.empty())
+            {
+                lazy_.mark(t.id);
+                add_placeholder(i);
+            }
             insert(t.children, i, open);
             const auto was = open.find(t.id);
-            i->setExpanded(!t.children.empty() && (was != open.end() ? was->second : t.expanded));
+            const bool opens = (!t.children.empty() || lazy_.unloaded(t.id)) && (was != open.end() ? was->second : t.expanded);
+            i->setExpanded(opens);
+            if (opens) lazy_.opened(t.id);
         }
+    }
+    // What gives a node with children not loaded yet its chevron: no id, and
+    // not selectable.
+    void add_placeholder(QTreeWidgetItem* parent)
+    {
+        auto* i = new QTreeWidgetItem(parent);
+        i->setText(0, qs(rap::i18n::tr("rapport", "Loading…")));
+        i->setFlags(Qt::NoItemFlags);
+    }
+    void forget_subtree(QTreeWidgetItem* i)
+    {
+        for (int c = 0; c < i->childCount(); ++c) forget_subtree(i->child(c));
+        const std::string id = id_of(i);
+        by_id_.erase(id);
+        checks_.erase(id);
+        lazy_.forget(id);
     }
     bool select_quietly(const std::string& id)
     {
@@ -1124,6 +1207,7 @@ private:
         if (e->reason() == QContextMenuEvent::Mouse)
         {
             item = view()->itemAt(e->pos());
+            if (item && id_of(item).empty()) item = nullptr;  // a placeholder
             if (item && item != view()->currentItem()) view()->setCurrentItem(item);  // the user's: reported
         }
         else
@@ -1141,6 +1225,7 @@ private:
     std::function<void(const std::string&)> toggled_;
     std::unordered_map<std::string, QTreeWidgetItem*> by_id_;
     std::unordered_map<std::string, check_state> checks_;  // the items with boxes
+    lazy_tree::tracker lazy_;
     bool quiet_ = false;
 };
 
@@ -1420,6 +1505,7 @@ public:
         : widget_base(new QPlainTextEdit)
     {
         auto* e = edit();
+        if (!s.frame) e->setFrameShape(QFrame::NoFrame);
         QFont f = s.compact ? compact_font(e->font()) : e->font();
         if (s.monospace) f = styled_font(f, text_style{.monospace = true});
         e->setFont(f);
@@ -2499,6 +2585,7 @@ public:
     {
         view_ = static_cast<list_view*>(w_);
         view_->owner = this;
+        if (!s.frame) view_->setFrameShape(QFrame::NoFrame);
         rows_ = new rows_model(s.columns, view_);
         delegate_ = new row_delegate(view_);
         view_->setItemDelegate(delegate_);

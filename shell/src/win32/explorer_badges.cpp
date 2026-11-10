@@ -7,6 +7,7 @@
 // as it starts: a machine install, and the badges appear after the next
 // sign-in (or Explorer restart).
 #include "explorer_badges.h"
+#include "overlay_names.h"
 
 #include <rapport/shell.h>
 
@@ -19,6 +20,7 @@
 #include <cwctype>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -70,13 +72,14 @@ std::wstring clsid_string(const CLSID& id)
     return s;
 }
 
-// "    Tortilla1Conflicted": four spaces, sorting ahead of the three most
-// others use; then the extension, and the kind in priority order.
+// "     Tortilla1Conflicted": five spaces, sorting ahead of the four OneDrive
+// uses for its seven overlays, which otherwise leave no room for an app's
+// last badge; then the extension, and the kind in priority order.
 std::wstring registry_name(size_t i)
 {
     std::wstring id = wide(kinds()[i].id);
     if (!id.empty()) id[0] = wchar_t(towupper(id[0]));
-    return L"    " + wide(this_extension.name) + std::to_wstring(i + 1) + id;
+    return L"     " + wide(this_extension.name) + std::to_wstring(i + 1) + id;
 }
 
 // The provider's badge for `path`. Explorer asks each overlay class in turn
@@ -233,23 +236,100 @@ HRESULT badge_class_object(REFCLSID clsid, REFIID riid, void** out)
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
-bool register_badges(HKEY root, const std::wstring& module)
+namespace
 {
-    bool ok = true;
-    for (size_t i = 0; i < kinds().size(); ++i)
+
+// install_overlays' Ops on the registry. Overlays are only ever under HKLM;
+// elsewhere there's a class to write and no name.
+struct overlay_registry
+{
+    HKEY root;
+    std::wstring module;
+
+    bool machine() const { return root == HKEY_LOCAL_MACHINE; }
+
+    static std::wstring parent()
+    {
+        std::wstring p(k_overlays);
+        p.pop_back();
+        return p;
+    }
+
+    bool write(size_t i)
     {
         const std::wstring clsid = clsid_string(kind_clsid(i));
         const std::wstring server = L"Software\\Classes\\CLSID\\" + clsid;
-        ok = ok &&
-             set_value(root, server, nullptr,
-                       wide(this_extension.name) + L" " + wide(kinds()[i].id) + L" badge") &&
-             set_value(root, server + L"\\InprocServer32", nullptr, module) &&
-             set_value(root, server + L"\\InprocServer32", L"ThreadingModel", L"Apartment");
-        // Explorer reads overlays from HKLM only.
-        if (root == HKEY_LOCAL_MACHINE)
-            ok = ok && set_value(root, k_overlays + registry_name(i), nullptr, clsid);
+        return set_value(root, server, nullptr,
+                         wide(this_extension.name) + L" " + wide(kinds()[i].id) + L" badge") &&
+               set_value(root, server + L"\\InprocServer32", nullptr, module) &&
+               set_value(root, server + L"\\InprocServer32", L"ThreadingModel", L"Apartment") &&
+               (!machine() || set_value(root, k_overlays + registry_name(i), nullptr, clsid));
     }
-    return ok;
+
+    std::optional<std::vector<overlay_entry>> list()
+    {
+        std::vector<overlay_entry> out;
+        if (!machine()) return out;
+        HKEY overlays = nullptr;
+        const LSTATUS opened =
+            RegOpenKeyExW(root, parent().c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &overlays);
+        if (opened == ERROR_FILE_NOT_FOUND) return out;
+        if (opened != ERROR_SUCCESS) return std::nullopt;
+        wchar_t name[256];
+        LSTATUS step;
+        DWORD i = 0, n = 256;
+        while ((step = RegEnumKeyExW(overlays, i, name, &n, nullptr, nullptr, nullptr, nullptr)) ==
+               ERROR_SUCCESS)
+        {
+            wchar_t value[64];
+            DWORD bytes = sizeof value;
+            const LSTATUS got =
+                RegGetValueW(overlays, name, nullptr, RRF_RT_REG_SZ, nullptr, value, &bytes);
+            if (got == ERROR_SUCCESS)
+                out.push_back({name, value});
+            else if (got != ERROR_FILE_NOT_FOUND && got != ERROR_MORE_DATA &&
+                     got != ERROR_UNSUPPORTED_TYPE)  // those can't be a class ID of ours
+            {
+                RegCloseKey(overlays);
+                return std::nullopt;
+            }
+            ++i;
+            n = 256;
+        }
+        RegCloseKey(overlays);
+        if (step != ERROR_NO_MORE_ITEMS) return std::nullopt;
+        return out;
+    }
+
+    bool ours(const std::wstring& clsid)
+    {
+        // Every kind ever registered: up to 15, whatever the provider says now.
+        for (size_t k = 0; k < 15; ++k)
+            if (_wcsicmp(clsid.c_str(), clsid_string(kind_clsid(k)).c_str()) == 0) return true;
+        return false;
+    }
+
+    bool remove(const std::wstring& name)
+    {
+        HKEY overlays = nullptr;
+        const LSTATUS opened =
+            RegOpenKeyExW(root, parent().c_str(), 0, KEY_ALL_ACCESS | KEY_WOW64_64KEY, &overlays);
+        if (opened == ERROR_FILE_NOT_FOUND) return true;
+        if (opened != ERROR_SUCCESS) return false;
+        const LSTATUS deleted = RegDeleteTreeW(overlays, name.c_str());
+        RegCloseKey(overlays);
+        return deleted == ERROR_SUCCESS || deleted == ERROR_FILE_NOT_FOUND;
+    }
+};
+
+}  // namespace
+
+bool register_badges(HKEY root, const std::wstring& module)
+{
+    overlay_registry registry{root, module};
+    std::vector<std::wstring> names;
+    for (size_t i = 0; i < kinds().size(); ++i) names.push_back(registry_name(i));
+    return install_overlays(registry, names);
 }
 
 void unregister_badges(HKEY root)
@@ -265,30 +345,8 @@ void unregister_badges(HKEY root)
         if (have_classes) RegDeleteTreeW(classes, clsid.c_str());
     }
     if (have_classes) RegCloseKey(classes);
-    if (root != HKEY_LOCAL_MACHINE) return;
-    // Our names under the overlays: any whose default value is one of ours.
-    HKEY overlays = nullptr;
-    std::wstring parent(k_overlays);
-    parent.pop_back();
-    if (RegOpenKeyExW(root, parent.c_str(), 0, KEY_ALL_ACCESS | KEY_WOW64_64KEY, &overlays) !=
-        ERROR_SUCCESS)
-        return;
-    std::vector<std::wstring> ours;
-    wchar_t name[256];
-    for (DWORD i = 0, n = 256;
-         RegEnumKeyExW(overlays, i, name, &n, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
-         ++i, n = 256)
-    {
-        wchar_t value[64];
-        DWORD bytes = sizeof value;
-        if (RegGetValueW(overlays, name, nullptr, RRF_RT_REG_SZ, nullptr, value, &bytes) !=
-            ERROR_SUCCESS)
-            continue;
-        for (size_t k = 0; k < 15; ++k)
-            if (_wcsicmp(value, clsid_string(kind_clsid(k)).c_str()) == 0) ours.push_back(name);
-    }
-    for (const std::wstring& n : ours) RegDeleteTreeW(overlays, n.c_str());
-    RegCloseKey(overlays);
+    overlay_registry registry{root, {}};
+    prune_overlays(registry, {});
 }
 
 }  // namespace rap::shell::detail

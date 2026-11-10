@@ -228,3 +228,6 @@ msgstr "Nach oben"
 #: core/src/i18n.cpp:602
 msgid "Right"
 msgstr "Rechts"
+
+msgid "Loading…"
+msgstr "Wird geladen…"
