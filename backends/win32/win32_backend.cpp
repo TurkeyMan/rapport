@@ -990,7 +990,11 @@ HMENU build_menu(const menu& items, std::vector<std::function<void()>>& actions,
     return m;
 }
 
-void show_popup_menu(HWND owner, const menu& items, POINT screen)
+// `anchor`: the button the menu drops from, if any. A click outside a popup
+// menu closes it and still reaches the window under it, so clicking the
+// button again would open the menu again; that click is dropped instead, so
+// the second click closes the menu as a combo box's does.
+void show_popup_menu(HWND owner, const menu& items, POINT screen, HWND anchor = nullptr)
 {
     if (items.empty()) return;
     std::vector<std::function<void()>> actions;
@@ -998,6 +1002,14 @@ void show_popup_menu(HWND owner, const menu& items, POINT screen)
     HMENU m = build_menu(items, actions, &bitmaps);
     const UINT id = UINT(TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, owner, nullptr));
     DestroyMenu(m);
+    if (anchor)
+    {
+        MSG msg;
+        while (PeekMessageW(&msg, anchor, WM_LBUTTONDOWN, WM_LBUTTONDOWN, PM_REMOVE | PM_NOYIELD) ||
+               PeekMessageW(&msg, anchor, WM_LBUTTONDBLCLK, WM_LBUTTONDBLCLK, PM_REMOVE | PM_NOYIELD))
+        {
+        }
+    }
     if (id > 0 && id <= actions.size() && actions[id - 1]) actions[id - 1]();
 }
 
@@ -2213,7 +2225,7 @@ public:
         }
         RECT r{};
         GetWindowRect(h_, &r);
-        show_popup_menu(h_, menu_(), POINT{r.left, r.bottom});
+        show_popup_menu(h_, menu_(), POINT{r.left, r.bottom}, h_);
     }
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
@@ -4207,7 +4219,7 @@ public:
         RECT r;
         GetWindowRect(h_, &r);
         SendMessageW(h_, BM_SETSTATE, TRUE, 0);
-        show_popup_menu(GetAncestor(h_, GA_ROOT), menu_(), POINT{r.left, r.bottom});
+        show_popup_menu(GetAncestor(h_, GA_ROOT), menu_(), POINT{r.left, r.bottom}, h_);
         SendMessageW(h_, BM_SETSTATE, pushed_, 0);
     }
     SIZE measure() override
