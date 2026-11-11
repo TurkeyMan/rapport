@@ -4,6 +4,7 @@
 #include "container_state.h"
 #include "lazy_tree.h"
 #include "menu_dismiss.h"
+#include "win32_shell_icons.h"
 #include "win32_common.h"
 #define RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
 #include "win32_trace.h"
@@ -2185,6 +2186,7 @@ public:
         , icon_(std::move(i))
         , click_(std::move(click))
     {
+        want_icon(icon_, 16, win_.dpi());  // as draw_item paints it
         h_ = CreateWindowExW(0, L"BUTTON", wide(tip).c_str(), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                              0, 0, 0, 0, edit, nullptr, instance(), nullptr);
         handlers()[h_] = this;
@@ -2200,6 +2202,7 @@ public:
     void set_icon(const icon& i) override
     {
         icon_ = i;
+        want_icon(icon_, 16, win_.dpi());
         InvalidateRect(h_, nullptr, TRUE);
     }
     void set_tooltip(const std::string& t) override { set_tooltip_text(h_, t); }
@@ -4250,10 +4253,12 @@ public:
         adopt(create_control(win, parent, L"BUTTON", wide(s.label), BS_OWNERDRAW));
         set_tooltip_text(h_, s.label);
         SetWindowSubclass(h_, hover_proc, 1, reinterpret_cast<DWORD_PTR>(this));
+        want_icon(icon_, 16, win_.dpi());  // as draw_item paints it
     }
     void set_icon(const icon& icon) override
     {
         icon_ = icon;
+        want_icon(icon_, 16, win_.dpi());
         InvalidateRect(h_, nullptr, TRUE);
     }
     bool checked() const override { return toggle_ && checked_; }
@@ -9184,6 +9189,7 @@ private:
     // Every control gets the font for the new DPI.
     void refont(UINT dpi)
     {
+        prepare_wanted_shell_icons(dpi);  // before anything paints at it
         ++g_layout_pass;  // new fonts, new sizes
         EnumChildWindows(
             hwnd_,

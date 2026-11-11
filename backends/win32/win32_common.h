@@ -241,6 +241,10 @@ HBITMAP render_icons(const std::vector<const icon*>& icons, int px, float scale,
 HICON render_icon_handle(const icon& icon, int px, float scale);
 // Draws an icon with a Painter onto an HDC rectangle (owner-drawn buttons).
 void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink);
+// A control that paints `icon` (draw_icon_on_dc) at `logical` px: any of
+// Windows' own (win32_shell_icons.h) prepared for it now and at each new DPI.
+// Call when the control takes the icon, not from paint.
+void want_icon(const icon& icon, int logical, UINT dpi);
 
 // -- layout -------------------------------------------------------------------
 

@@ -126,27 +126,87 @@ std::vector<uint32_t> pixels_of(HICON h, int px)
     return out;
 }
 
+bool has_shell_icon(const std::string& name)
+{
+    for (const stock_name& s : stock_names)
+        if (name == s.name) return true;
+    for (const known_name& k : known_names)
+        if (name == k.name) return true;
+    return false;
+}
+
+struct store
+{
+    std::mutex m;
+    // Map nodes stay put, so a pointer to one's pixels stays good.
+    std::map<std::pair<std::string, int>, std::optional<std::vector<uint32_t>>> cache;
+    std::map<std::pair<std::string, int>, bool> wanted;  // (name, logical px)
+    size_t extractions = 0;
+};
+
+store& the_store()
+{
+    static store s;
+    return s;
+}
+
 }  // namespace
 
 const std::vector<uint32_t>* shell_icon_pixels(const std::string& name, int px)
 {
-    if (px <= 0) return nullptr;
-    static std::mutex m;
-    static std::map<std::pair<std::string, int>, std::optional<std::vector<uint32_t>>> cache;
-    std::lock_guard lock(m);
-    auto key = std::pair{name, px};
-    auto it = cache.find(key);
-    if (it == cache.end())
+    store& s = the_store();
+    std::lock_guard lock(s.m);
+    const auto it = s.cache.find({name, px});
+    return it != s.cache.end() && it->second ? &*it->second : nullptr;
+}
+
+void prepare_shell_icon(const std::string& name, int px)
+{
+    if (px <= 0 || !has_shell_icon(name)) return;
+    store& s = the_store();
     {
-        std::optional<std::vector<uint32_t>> pixels;
-        if (HICON h = lookup(name, px))
-        {
-            if (std::vector<uint32_t> p = pixels_of(h, px); !p.empty()) pixels = std::move(p);
-            DestroyIcon(h);  // ours is the copy
-        }
-        it = cache.emplace(std::move(key), std::move(pixels)).first;
+        std::lock_guard lock(s.m);
+        if (s.cache.contains({name, px})) return;
+        ++s.extractions;
     }
-    return it->second ? &*it->second : nullptr;
+    // The shell unlocked: it can take a while.
+    std::optional<std::vector<uint32_t>> pixels;
+    if (HICON h = lookup(name, px))
+    {
+        if (std::vector<uint32_t> p = pixels_of(h, px); !p.empty()) pixels = std::move(p);
+        DestroyIcon(h);  // ours is the copy
+    }
+    std::lock_guard lock(s.m);
+    s.cache.emplace(std::pair{name, px}, std::move(pixels));
+}
+
+void want_shell_icon(const std::string& name, int logical, UINT dpi)
+{
+    if (!has_shell_icon(name)) return;
+    {
+        store& s = the_store();
+        std::lock_guard lock(s.m);
+        s.wanted[{name, logical}] = true;
+    }
+    prepare_shell_icon(name, MulDiv(logical, int(dpi), 96));
+}
+
+void prepare_wanted_shell_icons(UINT dpi)
+{
+    std::vector<std::pair<std::string, int>> wanted;
+    {
+        store& s = the_store();
+        std::lock_guard lock(s.m);
+        for (const auto& [key, _] : s.wanted) wanted.push_back(key);
+    }
+    for (const auto& [name, logical] : wanted) prepare_shell_icon(name, MulDiv(logical, int(dpi), 96));
+}
+
+size_t shell_icon_extractions()
+{
+    store& s = the_store();
+    std::lock_guard lock(s.m);
+    return s.extractions;
 }
 
 }  // namespace rap::win32
