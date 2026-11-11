@@ -134,6 +134,15 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-shell-icons-dpi-test rapport_win32)
     add_test(NAME win32-shell-icons-dpi COMMAND rapport-win32-shell-icons-dpi-test)
     set_tests_properties(win32-shell-icons-dpi PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+
+    # Painting never asks the shell: reads the backend's cache, so static only.
+    if(RAPPORT_STATIC)
+        add_executable(rapport-win32-shell-icons-paint-test win32_shell_icons_paint_test.cpp)
+        target_include_directories(rapport-win32-shell-icons-paint-test PRIVATE ../backends/win32)
+        target_link_libraries(rapport-win32-shell-icons-paint-test PRIVATE rapport::rapport rapport::backend_win32 user32)
+        add_test(NAME win32-shell-icons-paint COMMAND rapport-win32-shell-icons-paint-test)
+        set_tests_properties(win32-shell-icons-paint PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+    endif()
 endif()
 
 if(TARGET rapport_win32)

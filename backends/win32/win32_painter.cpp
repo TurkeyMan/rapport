@@ -756,7 +756,8 @@ namespace
 {
 
 // A name Windows has its own icon for (win32_shell_icons.h) drawn from it,
-// `px` pixels square into `dst`; false for any other name.
+// `px` pixels square into `dst`, if it was prepared at that size; false for
+// any other name. Only reads what was prepared: safe from paint.
 bool draw_shell_icon(ID2D1RenderTarget* rt, const std::string& name, D2D1_RECT_F dst, int px)
 {
     const std::vector<uint32_t>* pixels = shell_icon_pixels(name, px);
@@ -774,6 +775,7 @@ bool draw_shell_icon(ID2D1RenderTarget* rt, const std::string& name, D2D1_RECT_F
 // the icon drawn through a D2DPainter at `scale`.
 com<IWICBitmap> icon_bitmap(const icon& icon, int px, float scale, color ink)
 {
+    if (!icon.draw) prepare_shell_icon(icon.name, px);  // never called from paint
     com<IWICBitmap> wic;
     if (!wic_factory() ||
         FAILED(wic_factory()->CreateBitmap(UINT(px), UINT(px), GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad,
@@ -808,6 +810,8 @@ HBITMAP render_icon(const icon& icon, int px, float scale)
 
 HBITMAP render_icons(const std::vector<const icon*>& icons, int px, float scale, color ink)
 {
+    for (const icon* i : icons)
+        if (!i->draw) prepare_shell_icon(i->name, px);  // never called from paint
     const int w = px * int(icons.size());
     if (w <= 0) return nullptr;
     com<IWICBitmap> wic;
@@ -898,6 +902,13 @@ HICON render_icon_handle(const icon& icon, int px, float scale)
     return h;
 }
 
+void want_icon(const icon& icon, int logical, UINT dpi)
+{
+    if (!icon.draw && !icon.name.empty()) want_shell_icon(icon.name, logical, dpi);
+}
+
+// From paint: an icon of Windows' own is drawn only if it was prepared
+// (want_icon), never asked of the shell here.
 void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink)
 {
     if (!icon) return;
