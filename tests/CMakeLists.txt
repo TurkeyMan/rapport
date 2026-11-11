@@ -222,8 +222,9 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-frames PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 
     # file_view's first-column inset, printed (it shows a window: CI's): with
-    # a Common Controls 6 manifest, and without one, where the process links
-    # comctl32 v5 and the controls are v6.
+    # a Common Controls 6 manifest, and without one, where the controls get
+    # whichever comctl32 is selected after the backend initialises (see
+    # rapport#41).
     foreach(variant IN ITEMS "" "-no-manifest")
         set(t rapport-win32-file-view-inset${variant}-test)
         add_executable(${t} win32_file_view_inset_test.cpp)

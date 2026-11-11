@@ -5033,17 +5033,13 @@ public:
     // One w x 1 image, masked out: drawn, it leaves nothing. Null if any
     // step fails, with nothing left behind. Its mask is made from its colour
     // (all white, all masked): a mask bitmap handed to ImageList_Add was
-    // drawn solid on the header of a process without a manifest. From the
-    // comctl32 the controls are, as the button and toolbar lists are.
+    // drawn solid on the header of a process without a manifest. The source
+    // is 1 bpp, as ImageList_AddMasked documents (no more than 8 bpp). From
+    // the comctl32 the controls are, as the button and toolbar lists are.
     static HIMAGELIST blank_image_list(int w)
     {
         HIMAGELIST list = g_comctl.create(w, 1, ILC_COLOR32 | ILC_MASK, 1, 0);
-        HBITMAP colour = nullptr;
-        if (HDC screen = GetDC(nullptr))
-        {
-            colour = CreateCompatibleBitmap(screen, w, 1);
-            ReleaseDC(nullptr, screen);
-        }
+        HBITMAP colour = CreateBitmap(w, 1, 1, 1, nullptr);
         bool made = false;
         if (list && colour)
             if (HDC dc = CreateCompatibleDC(nullptr))

@@ -8,8 +8,9 @@
 // the same.
 //   rapport-win32-file-view-inset-test             (a Common Controls 6 manifest)
 //   rapport-win32-file-view-inset-no-manifest-test (RAPPORT_TEST_NO_MANIFEST:
-//     none, so the process links comctl32 v5 and rapport's activation context
-//     makes the controls v6; the arrows aren't checked there)
+//     none; which comctl32 the controls get is the DLL selected after the
+//     backend initialises, printed by the test (5.82 on 22621, unthemed:
+//     rapport#41); the arrows aren't checked there)
 #include <rapport/rapport.h>
 
 #define NOMINMAX
@@ -91,10 +92,10 @@ std::vector<HWND> lists()
     return found;
 }
 
-// The comctl32 the controls are, for reading their image lists: without a
-// manifest the imported one is v5 and the controls' lists are v6, so the
-// functions come from the DLL loaded under rapport's activation context (as
-// the backend's g_comctl does). With one, it's the same DLL.
+// The comctl32 the controls are, for reading their image lists: the
+// functions come from the DLL selected after the backend initialises (as
+// the backend's g_comctl takes them), which needn't be the one this process
+// imports; its version is printed. With a manifest, it's the same DLL.
 struct comctl
 {
     struct dll_version
