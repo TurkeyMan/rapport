@@ -5014,32 +5014,51 @@ public:
         if (!header) return;
         const int w = std::max(title_inset(), 1);
         if (!header_images_ || header_images_w_ != w)
-        {
-            HIMAGELIST fresh = ImageList_Create(w, 1, ILC_COLOR32 | ILC_MASK, 1, 0);
-            if (!fresh) return;
-            // Masked out: drawn, it leaves nothing.
-            HDC screen = GetDC(nullptr);
-            HBITMAP colour = CreateCompatibleBitmap(screen, w, 1), mask = CreateBitmap(w, 1, 1, 1, nullptr);
-            ReleaseDC(nullptr, screen);
-            if (HDC dc = CreateCompatibleDC(nullptr))
+            if (HIMAGELIST fresh = blank_image_list(w))
             {
-                const HGDIOBJ old = SelectObject(dc, mask);
-                PatBlt(dc, 0, 0, w, 1, WHITENESS);  // a set mask bit: transparent
-                SelectObject(dc, old);
-                DeleteDC(dc);
+                Header_SetImageList(header, fresh);
+                if (header_images_) ImageList_Destroy(header_images_);
+                header_images_ = fresh;
+                header_images_w_ = w;
             }
-            ImageList_Add(fresh, colour, mask);
-            DeleteObject(colour);
-            DeleteObject(mask);
-            Header_SetImageList(header, fresh);
-            if (header_images_) ImageList_Destroy(header_images_);
-            header_images_ = fresh;
-            header_images_w_ = w;
-        }
-        else if (reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0)) != header_images_)
+        // The list the header has (when a new one couldn't be made: the
+        // last, or none rather than the rows' row-tall one).
+        if (reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0)) != header_images_)
             Header_SetImageList(header, header_images_);
         SendMessageW(header, HDM_SETBITMAPMARGIN, 0, 0);
         InvalidateRect(header, nullptr, FALSE);
+    }
+    // One w x 1 image, masked out: drawn, it leaves nothing. Null if any
+    // step fails, with nothing left behind.
+    static HIMAGELIST blank_image_list(int w)
+    {
+        HIMAGELIST list = ImageList_Create(w, 1, ILC_COLOR32 | ILC_MASK, 1, 0);
+        HBITMAP colour = nullptr, mask = CreateBitmap(w, 1, 1, 1, nullptr);
+        if (HDC screen = GetDC(nullptr))
+        {
+            colour = CreateCompatibleBitmap(screen, w, 1);
+            ReleaseDC(nullptr, screen);
+        }
+        bool made = false;
+        if (list && colour && mask)
+            if (HDC dc = CreateCompatibleDC(nullptr))
+            {
+                if (const HGDIOBJ old = SelectObject(dc, mask))
+                {
+                    made = PatBlt(dc, 0, 0, w, 1, WHITENESS);  // a set mask bit: transparent
+                    SelectObject(dc, old);
+                }
+                DeleteDC(dc);
+            }
+        made = made && ImageList_Add(list, colour, mask) == 0;
+        if (colour) DeleteObject(colour);
+        if (mask) DeleteObject(mask);
+        if (!made && list)
+        {
+            ImageList_Destroy(list);
+            list = nullptr;
+        }
+        return list;
     }
     ~list_impl() override
     {
