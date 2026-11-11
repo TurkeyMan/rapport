@@ -6966,23 +6966,24 @@ public:
     bool has_focus() const override { return false; }
     void on_moved(std::function<void()> f) override { moved_ = std::move(f); }
     float divider() const override { return float(bar()) / win_.scale(); }
-    // The sizes it was given or dragged to, else those it was laid out at.
+    // The sizes the panes were laid out at, as GTK's and Qt's report them,
+    // so a pane that takes what the window gains is seen to grow (#29).
     std::vector<float> sizes() const override
     {
         std::vector<float> out;
-        for (long s : sizes_.size() == panes.size() ? sizes_ : placed_)
-            out.push_back(std::max(0L, s) / win_.scale());
+        for (long s : current()) out.push_back(std::max(0L, s) / win_.scale());
         return out;
     }
-    // A size of 0 leaves that pane's as it was.
+    // A size of 0 leaves that pane's as it is now.
     void set_sizes(const std::vector<float>& s) override
     {
         trace::scope step(trace::phase::drag_step, uintptr_t(parent_));
-        std::vector<long> was = sizes_.size() == panes.size() ? sizes_ : placed_;
+        std::vector<long> was = current();
         was.resize(panes.size(), 0);
         sizes_.assign(panes.size(), 0);
         for (size_t i = 0; i < panes.size(); ++i)
             sizes_[i] = i < s.size() && s[i] > 0 ? long(s[i] * win_.scale()) : was[i];
+        asked_ = true;
         win_.relayout();
     }
 
@@ -7097,6 +7098,7 @@ public:
         }
         for (; b < bars_.size(); ++b) show_control(bars_[b], false);
         placed_ = sz;
+        asked_ = false;
     }
     void show_all(bool shown) override
     {
@@ -7142,6 +7144,19 @@ private:
     {
         const SIZE n = size_of(panes[i]);
         return dir_ == orientation::horizontal ? n.cx : n.cy;
+    }
+    // Each pane's size now: as last laid out. Before that, or with sizes
+    // asked for and not laid out yet, the ones asked for. A hidden pane, laid
+    // out at nothing, has the size it comes back at.
+    std::vector<long> current() const
+    {
+        const bool remembered = sizes_.size() == panes.size();
+        if (placed_.size() != panes.size() || (asked_ && remembered)) return remembered ? sizes_ : placed_;
+        std::vector<long> out = placed_;
+        if (remembered)
+            for (size_t i = 0; i < panes.size(); ++i)
+                if (!panes[i]->visible) out[i] = sizes_[i];
+        return out;
     }
     LRESULT bar_message(size_t index, HWND h, UINT msg, LPARAM lp, bool& handled)
     {
@@ -7252,6 +7267,7 @@ private:
     std::vector<HWND> bars_;
     std::vector<std::unique_ptr<std::function<LRESULT(HWND, UINT, WPARAM, LPARAM, bool&)>>> fns_;
     std::vector<long> sizes_, placed_;
+    bool asked_ = false;  // set_sizes since the last layout
     RECT rect_{};
     bool dragging_ = false;
     std::vector<long> pressed_;  // the sizes when the drag began
