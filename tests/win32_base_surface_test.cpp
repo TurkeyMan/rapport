@@ -150,6 +150,33 @@ RECT rect_of(HWND h)
     return r;
 }
 
+// The commonest colour of `h` printed (WM_PRINT, as a pane's copy prints
+// it) into a w x h bitmap.
+DWORD printed_commonest(HWND h, int w, int ht)
+{
+    if (w <= 0 || ht <= 0) return 0xff000000;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -ht, 1, 32, BI_RGB};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    SendMessageW(h, WM_PRINT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND | PRF_NONCLIENT);
+    GdiFlush();
+    std::map<DWORD, size_t> n;
+    for (size_t i = 0; i < size_t(w) * ht; ++i) ++n[static_cast<DWORD*>(bits)[i] & 0xffffff];
+    DWORD best = 0xff000000;
+    size_t most = 0;
+    for (auto& [c, k] : n)
+        if (k > most) most = k, best = c;
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    return best;
+}
+
 // A tab control's page body, in its client coordinates.
 RECT body_of(HWND tab)
 {
@@ -212,6 +239,7 @@ int main(int argc, char** argv)
         tabs{{"One", vbox{label{"On the tab"}, check{"Tab check"}, slider{0, 10, 3}}}, {"Two", label{"Second"}}},
         scroll{vbox{
             label{"On the pane"}, check{"Pane check"}, slider{0, 10, 7},
+            toolbar{tool_button{rap::icon{"go-up"}, "Pane up"}, tool_button{rap::icon{"view-refresh"}, "Pane refresh"}},
             tabs{{"Pane one", vbox{label{"On the pane's tab"}}}, {"Pane two", label{"Pane second"}}},
         }}.stretch(),
     }}}.base_surface().size(480_px, 720_px));
@@ -239,7 +267,6 @@ int main(int argc, char** argv)
     // The window's own background, most of what's around its content.
     expect_colour(shot, client, surface, "the window");
     const struct { const wchar_t* cls; const wchar_t* text; int skip; const char* what; } controls[] = {
-        {TOOLBARCLASSNAMEW, nullptr, 0, "the toolbar"},
         {L"Static", L"A label", 0, "a label"},
         {L"Button", L"A check box", 0, "a check box"},
         {L"Static", L"In the group", 0, "a label in a group box"},
@@ -256,6 +283,34 @@ int main(int argc, char** argv)
             return 2;
         }
         expect_colour(shot, rect_of(h), surface, c.what);
+    }
+
+    // The toolbars: on the window, and on the pane (drawn with its copy).
+    // Each on screen, and printed as the pane's copy prints it.
+    {
+        HWND pane_panel = GetParent(find(root, L"Static", L"On the pane"));
+        HWND bar = nullptr, pane_bar = nullptr;
+        for (int i = 0; HWND h = find(root, TOOLBARCLASSNAMEW, nullptr, i); ++i)
+            (GetParent(h) == pane_panel ? pane_bar : bar) = h;
+        if (!bar || !pane_bar)
+        {
+            std::fprintf(stderr, "no toolbar\n");
+            return 2;
+        }
+        expect_colour(shot, rect_of(bar), surface, "the toolbar");
+        expect_colour(shot, rect_of(pane_bar), surface, "a toolbar on a scroll pane");
+        for (HWND t : {bar, pane_bar})
+        {
+            RECT r;
+            GetClientRect(t, &r);
+            const DWORD got = printed_commonest(t, r.right, r.bottom);
+            if (got != surface)
+            {
+                std::fprintf(stderr, "failed: %s printed is %06lx, not %06lx\n",
+                             t == bar ? "the toolbar" : "a toolbar on a scroll pane", got, surface);
+                ++failures;
+            }
+        }
     }
 
     // Inside the group box's frame, between it and its content.
