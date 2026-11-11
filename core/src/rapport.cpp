@@ -109,6 +109,14 @@ public:
         if (b.bind) *b.bind = &w;
     }
 
+    void created(const spec::document_tabs& s, document_tabs& t) override
+    {
+        if (s.on_select) t.on_select(s.on_select);
+        if (s.on_close) t.on_close(s.on_close);
+        if (s.on_new) t.on_new(s.on_new);
+        if (s.bind) *s.bind = &t;
+    }
+
 private:
     template <class T>
     static void bind(T** handle, widget& w)
