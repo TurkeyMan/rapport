@@ -116,6 +116,17 @@ bool dark_mode();
 bool high_contrast();
 // A solid brush of a role, kept until the colours change.
 HBRUSH theme_brush(theme_color role);
+// What the background of `h`'s window is painted in, wherever rapport paints
+// it (its own and its containers' erase, labels' and check boxes'
+// WM_CTLCOLOR*, group boxes, tab pages, toolbars, a scroll pane's off-screen
+// print): base for a window_spec::base_surface window on Windows 11, else
+// the window colour. And the text on it.
+theme_color surface_of(HWND h);
+theme_color surface_text_of(HWND h);
+// Marks top-level `h` as a base surface window (base_surface_supported()
+// checked by the caller).
+void set_base_surface(HWND h, bool on);
+bool base_surface_supported();
 // The Windows build number (RtlGetVersion: GetVersionEx lies).
 DWORD windows_build();
 // Dark mode for native chrome (win32_theme.cpp): the app's menus, a
