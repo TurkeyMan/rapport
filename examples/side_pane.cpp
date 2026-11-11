@@ -12,6 +12,8 @@
 //     link at the Build row's end in view), with no need to drag the bar.
 //   rapport-side-pane --more    presses "More..." after a second
 //   rapport-side-pane --tall    gives the picture its whole 96 px
+//   rapport-side-pane --thin    thin dividers (splitter::thin), as
+//                               Explorer's: a line on the lists' white
 #include <rapport/rapport.h>
 
 #include <cmath>
@@ -77,11 +79,12 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "%s", ui.error().c_str());
         return 1;
     }
-    bool more = false, tall = false;
+    bool more = false, tall = false, thin = false;
     for (int i = 1; i < argc; ++i)
     {
         if (std::string_view(argv[i]) == "--more") more = true;
         if (std::string_view(argv[i]) == "--tall") tall = true;
+        if (std::string_view(argv[i]) == "--thin") thin = true;
     }
 
     rows_model commits(200, "Commit"), checks(14, "Job");
@@ -135,6 +138,7 @@ int main(int argc, char** argv)
                         .height(tall ? 9_lines : 3_lines),
                     list{{{"Path", {}, true}}, &commits}.height(4_lines).stretch(2),
                 }
+                    .thin(thin)
                     .width(30_ch)
                     .stretch(3),
                 vbox{
@@ -169,8 +173,10 @@ int main(int argc, char** argv)
                 }
                     .width(30_ch),
             }
+                .thin(thin)
                 .stretch(2),
-        }}}.size(150_ch, 36_lines));
+        }
+             .thin(thin)}}.size(150_ch, 36_lines));
     details->set_text("The commit's message, beside its author's picture (a circle in a square).",
                       {});
     body->set_text(description, {});

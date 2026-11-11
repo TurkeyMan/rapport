@@ -95,6 +95,10 @@ struct splitter
     orientation dir;  // direction the panes are laid out in
     nodes panes;
     rap::splitter** bind = nullptr;
+    // A thin divider, a line on the panes' base colour (as Explorer has
+    // between its panes) rather than the toolkit's usual handle; it's
+    // dragged as easily. For panes that are lists and trees edge to edge.
+    bool thin = false;
 };
 struct group
 {
@@ -571,6 +575,11 @@ public:
     splitter& bind(rap::splitter*& h)
     {
         s().bind = &h;
+        return *this;
+    }
+    splitter& thin(bool v = true)
+    {
+        s().thin = v;
         return *this;
     }
 };

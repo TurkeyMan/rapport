@@ -521,7 +521,8 @@ private:
     }
     void visit(const node& n, const spec::splitter& s, int d)
     {
-        std::printf("splitter %s", s.dir == orientation::vertical ? "vertical" : "horizontal");
+        std::printf("splitter %s%s", s.dir == orientation::vertical ? "vertical" : "horizontal",
+                    s.thin ? " thin" : "");
         suffix(n);
         make<null_splitter>(n);
         children(s.panes, d);

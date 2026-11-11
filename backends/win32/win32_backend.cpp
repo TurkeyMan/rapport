@@ -6797,13 +6797,19 @@ private:
 
 // Panes side by side with draggable bars between them. Sizes are device px
 // per pane; the window keeps the panes' proportions until a drag.
+// A thin splitter's bars (spec::splitter::thin) are as wide to drag, but
+// drawn as Explorer draws its panes' divider: the base colour, with a line
+// of the divider colour two pixels in from the pane before it. Next to
+// lists and trees that's one pixel of line with their white either side,
+// not a grey bar that merges with a scroll bar beside it.
 class splitter_impl : public rap::splitter, public item
 {
 public:
-    splitter_impl(win_context& win, HWND parent, orientation dir)
+    splitter_impl(win_context& win, HWND parent, orientation dir, bool thin)
         : win_(win)
         , parent_(parent)
         , dir_(dir)
+        , thin_(thin)
     {
     }
     ~splitter_impl() override
@@ -6827,6 +6833,19 @@ public:
             [this, index = bars_.size()](HWND h, UINT msg, WPARAM, LPARAM lp, bool& handled) -> LRESULT
             { return bar_message(index, h, msg, lp, handled); });
         SetWindowLongPtrW(bar, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(fn));
+        // Its erase, which the host's (the window colour) would otherwise
+        // take, on screen and printed with a pane's copy alike.
+        if (thin_)
+            SetWindowSubclass(
+                bar,
+                [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR self) -> LRESULT
+                {
+                    if (msg != WM_ERASEBKGND) return DefSubclassProc(h, msg, wp, lp);
+                    reinterpret_cast<splitter_impl*>(self)->paint_thin_bar(
+                        h, reinterpret_cast<HDC>(wp));
+                    return 1;
+                },
+                0, reinterpret_cast<DWORD_PTR>(this));
         bars_.push_back(bar);
         fns_.emplace_back(fn);
     }
@@ -6983,7 +7002,28 @@ public:
     }
 
 private:
+    // Five pixels to drag, thin or not.
     int bar() const { return win_.px(5); }
+    // The base colour, and the divider's line across it at px(2).
+    void paint_thin_bar(HWND h, HDC dc) const
+    {
+        RECT c;
+        GetClientRect(h, &c);
+        FillRect(dc, &c, theme_brush(theme_color::base));
+        RECT line = c;
+        const int at = win_.px(2), width = std::max(1, win_.px(1));
+        if (dir_ == orientation::horizontal)
+        {
+            line.left = c.left + at;
+            line.right = line.left + width;
+        }
+        else
+        {
+            line.top = c.top + at;
+            line.bottom = line.top + width;
+        }
+        FillRect(dc, &line, theme_brush(theme_color::divider));
+    }
     // A pane's size: natural, or the width or height it was given (as a
     // box takes it). Ignoring that, a pane of wrapping text 60 characters
     // wide asked for its text's whole single-line width.
@@ -7104,6 +7144,7 @@ private:
     win_context& win_;
     HWND parent_;
     orientation dir_;
+    bool thin_;
     std::vector<HWND> bars_;
     std::vector<std::unique_ptr<std::function<LRESULT(HWND, UINT, WPARAM, LPARAM, bool&)>>> fns_;
     std::vector<long> sizes_, placed_;
@@ -9433,7 +9474,7 @@ private:
     }
     item* make(const node& n, const spec::splitter& s, HWND parent, orientation)
     {
-        auto* sp = own<splitter_impl>(win_, parent, s.dir);
+        auto* sp = own<splitter_impl>(win_, parent, s.dir, s.thin);
         for (size_t i = 0; i < s.panes.size(); ++i)
         {
             sp->panes.push_back(build(s.panes[i], parent, s.dir));
