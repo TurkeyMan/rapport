@@ -4952,7 +4952,7 @@ public:
         {
             file_view_ = !columns_.empty();
             // The header's first item shows image 0 of its image list: a
-            // blank as wide as the inset, so its text moves in with the rows'.
+            // blank as wide as the title's inset, which moves its text in.
             if (file_view_)
             {
                 LVCOLUMNW col{};
@@ -4992,14 +4992,18 @@ public:
         if (!rows) return;  // the spacing it has is better than none
         if (HIMAGELIST old = ListView_SetImageList(h_, rows, LVSIL_SMALL)) ImageList_Destroy(old);
         // The list_view has just given the header that list too, as tall as a
-        // row: the header gets its own instead, one blank as wide as the inset.
+        // row: the header gets its own instead, one blank as wide as its inset.
         apply_header_inset();
     }
-    // Explorer's details view starts its first column's content (and the
-    // header's title over it) further in than a list_view does. This is an
-    // estimate in DIPs, not a measure: it wants checking against Explorer.
-    static constexpr float file_view_first_inset = 16;
+    // Explorer's details view starts its first column's content, and the
+    // header's title over it, further in than a list_view does. Measured on
+    // Windows 11 at 96 DPI, from the list's left edge: the icon at 19 px
+    // (a list_view's, and the rows', at 4), the title's text at 31 (a
+    // list_view's at 7), between the icon and the name, not over either.
+    static constexpr float file_view_first_inset = 15;
+    static constexpr float file_view_title_inset = 24;
     int first_inset() const { return file_view_ ? px(file_view_first_inset) : 0; }
+    int title_inset() const { return file_view_ ? px(file_view_title_inset) : 0; }
     // The header puts a bitmap margin either side of an item's image, then
     // its text margin and the text: with no bitmap margin the text moves by
     // the image's width alone, at any DPI and font.
@@ -5008,7 +5012,7 @@ public:
         if (!file_view_) return;
         HWND header = ListView_GetHeader(h_);
         if (!header) return;
-        const int w = std::max(first_inset(), 1);
+        const int w = std::max(title_inset(), 1);
         if (!header_images_ || header_images_w_ != w)
         {
             HIMAGELIST fresh = ImageList_Create(w, 1, ILC_COLOR32 | ILC_MASK, 1, 0);

@@ -1,7 +1,8 @@
 // A Win32 file_view list's first column, against a plain list's: on Windows
-// 11 its content and its title start further in by the same inset, which is
-// the list_view's own image slot, and the header stays as tall. Printed with
-// WM_PRINTCLIENT, not captured. Before Windows 11 the two are the same.
+// 11 its content starts further in by the list_view's own image slot (the
+// icon 19 px in at 96 DPI, as Explorer's) and its title by its own inset
+// (31 px in), and the header stays as tall. Printed with WM_PRINTCLIENT, not
+// captured. Before Windows 11 the two are the same.
 //   rapport-win32-file-view-inset-test
 #include <rapport/rapport.h>
 
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,12 +35,21 @@ void expect(bool ok, const std::string& what)
 }
 
 // Both columns' text starts with the same letter, as do their titles, so
-// where their ink starts compares the cells' offsets alone.
+// where their ink starts compares the cells' offsets alone. Row 1's first
+// cell has an icon, a solid square, so where its ink starts is the icon's.
 class rows : public rap::list_model
 {
 public:
     size_t row_count() const override { return 3; }
     std::string text(size_t, size_t col) const override { return col == 0 ? "Nfile" : "Nnote"; }
+    rap::icon icon(size_t row, size_t col) const override
+    {
+        if (row != 1 || col != 0) return {};
+        return rap::icon::drawn(
+            [](rap::painter& p, rap::size_f s) {
+                p.rect({0, 0, s.w, s.h}, 0, rap::paint{rap::theme_color::text}, std::nullopt);
+            });
+    }
 };
 
 std::vector<HWND> lists()
@@ -156,6 +167,7 @@ struct measures
     int header_h = 0;
     int title_ink[2] = {-1, -1};  // from each header item's left
     int row_ink[2] = {-1, -1};    // row 0's, from each column's left
+    int icon_ink = -1;            // row 1's first cell's, from the list's left
 };
 
 measures measure(HWND list)
@@ -198,6 +210,10 @@ measures measure(HWND list)
         m.title_ink[i] = t < 0 ? -1 : t - item[i].left;
         m.row_ink[i] = r < 0 ? -1 : r - item[i].left;
     }
+    RECT row1{};
+    ListView_GetItemRect(list, 1, &row1, LVIR_BOUNDS);
+    const int i = ink(body, item[0].left, item[0].right - 4, row1.top + 1, row1.bottom - 1);
+    m.icon_ink = i < 0 ? -1 : i - item[0].left;
     return m;
 }
 
@@ -236,27 +252,35 @@ int main(int argc, char** argv)
     auto check = [&](const char* when)
     {
         const UINT dpi = GetDpiForWindow(top);
-        const int inset = eleven ? int(std::lround(16.0 * dpi / 96)) : 0;
+        const int inset = eleven ? int(std::lround(15.0 * dpi / 96)) : 0;
+        const int title_inset = eleven ? int(std::lround(24.0 * dpi / 96)) : 0;
         const measures plain = measure(found[0]), fv = measure(found[1]);
         const std::string at = std::string(" (") + when + ", " + str(int(dpi)) + " dpi)";
-        std::printf(
-            "     plain: slot %d label %d margin %u title ink %d/%d row ink %d/%d header %d px\n",
-            plain.slot, plain.label, plain.margin, plain.title_ink[0], plain.title_ink[1],
-            plain.row_ink[0], plain.row_ink[1], plain.header_h);
+        std::printf("     plain: slot %d label %d margin %u title ink %d/%d row ink %d/%d icon %d "
+                    "header %d px\n",
+                    plain.slot, plain.label, plain.margin, plain.title_ink[0], plain.title_ink[1],
+                    plain.row_ink[0], plain.row_ink[1], plain.icon_ink, plain.header_h);
         std::printf("     file_view: slot %d label %d margin %u image %d title ink %d/%d row ink "
-                    "%d/%d header %d px\n",
+                    "%d/%d icon %d header %d px\n",
                     fv.slot, fv.label, fv.margin, fv.header_image, fv.title_ink[0], fv.title_ink[1],
-                    fv.row_ink[0], fv.row_ink[1], fv.header_h);
+                    fv.row_ink[0], fv.row_ink[1], fv.icon_ink, fv.header_h);
         expect(plain.title_ink[0] >= 0 && plain.title_ink[1] >= 0 && plain.row_ink[0] >= 0 &&
                    plain.row_ink[1] >= 0 && fv.title_ink[0] >= 0 && fv.title_ink[1] >= 0 &&
-                   fv.row_ink[0] >= 0 && fv.row_ink[1] >= 0,
-               "every title and cell printed some text" + at);
-        expect(fv.title_ink[0] - plain.title_ink[0] == inset,
-               "the first title starts " + str(inset) + " px further in" + at);
+                   fv.row_ink[0] >= 0 && fv.row_ink[1] >= 0 && plain.icon_ink >= 0 &&
+                   fv.icon_ink >= 0,
+               "every title, cell and icon printed something" + at);
+        expect(fv.title_ink[0] - plain.title_ink[0] == title_inset,
+               "the first title starts " + str(title_inset) + " px further in" + at);
         expect(fv.row_ink[0] - plain.row_ink[0] == inset,
                "the first column's text starts " + str(inset) + " px further in" + at);
-        expect(fv.title_ink[0] - fv.row_ink[0] == plain.title_ink[0] - plain.row_ink[0],
-               "the first title lines up with its column's text as a plain list's does" + at);
+        expect(fv.icon_ink - plain.icon_ink == inset,
+               "the first column's icon starts " + str(inset) + " px further in" + at);
+        // Explorer's, measured at 96 DPI: the icon 19 px in, the title's text 31.
+        if (eleven && dpi == 96)
+        {
+            expect(fv.icon_ink == 19, "the icon is 19 px in, as Explorer's" + at);
+            expect(fv.title_ink[0] == 31, "the title's text is 31 px in, as Explorer's" + at);
+        }
         expect(fv.title_ink[1] == plain.title_ink[1] && fv.row_ink[1] == plain.row_ink[1],
                "the second column and its title are where a plain list's are" + at);
         expect(fv.header_h == plain.header_h, "the header is as tall as a plain list's" + at);
@@ -265,8 +289,9 @@ int main(int argc, char** argv)
             expect(fv.slot == inset && fv.label - plain.label == inset - plain.slot,
                    "the inset is the list_view's own image slot" + at);
             expect(
-                fv.title_image && !fv.other_image && fv.margin == 0 && fv.header_image == inset,
-                "the first title alone has an image, a blank as wide as the inset, with no margin" +
+                fv.title_image && !fv.other_image && fv.margin == 0 &&
+                    fv.header_image == title_inset,
+                "the first title alone has an image, a blank as wide as its inset, with no margin" +
                     at);
         }
         else
@@ -282,7 +307,8 @@ int main(int argc, char** argv)
     GetWindowRect(top, &r);
     SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&r));
     // GetDpiForWindow still answers the monitor's: the lists' font says what they're at.
-    const int expect_inset = eleven ? int(std::lround(16.0 * to / 96)) : 0;
+    const int expect_inset = eleven ? int(std::lround(15.0 * to / 96)) : 0;
+    const int expect_title = eleven ? int(std::lround(24.0 * to / 96)) : 0;
     {
         RECT icon{};
         ListView_GetItemRect(found[1], 0, &icon, LVIR_ICON);
@@ -294,10 +320,10 @@ int main(int argc, char** argv)
                     icon.right - icon.left, cx,
                     UINT(SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0)));
         if (eleven)
-            expect(icon.right - icon.left == expect_inset && cx == expect_inset &&
+            expect(icon.right - icon.left == expect_inset && cx == expect_title &&
                        SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0) == 0,
-                   "after WM_DPICHANGED to " + str(int(to)) +
-                       " dpi the slot and the title's blank are " + str(expect_inset) + " px");
+                   "after WM_DPICHANGED to " + str(int(to)) + " dpi the slot is " +
+                       str(expect_inset) + " px and the title's blank " + str(expect_title));
     }
 
     win->close();
