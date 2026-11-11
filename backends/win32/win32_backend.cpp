@@ -195,6 +195,7 @@ struct comctl6
     decltype(&ImageList_Create) create = ImageList_Create;
     decltype(&ImageList_Destroy) destroy = ImageList_Destroy;
     decltype(&ImageList_ReplaceIcon) replace_icon = ImageList_ReplaceIcon;
+    decltype(&ImageList_Add) add = ImageList_Add;
 
     void resolve()
     {
@@ -203,6 +204,7 @@ struct comctl6
         if (auto f = reinterpret_cast<decltype(&ImageList_Create)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_Create")))) create = f;
         if (auto f = reinterpret_cast<decltype(&ImageList_Destroy)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_Destroy")))) destroy = f;
         if (auto f = reinterpret_cast<decltype(&ImageList_ReplaceIcon)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_ReplaceIcon")))) replace_icon = f;
+        if (auto f = reinterpret_cast<decltype(&ImageList_Add)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_Add")))) add = f;
     }
 };
 comctl6 g_comctl;
@@ -4988,9 +4990,9 @@ public:
     // measures of the column (its label rect, its auto-size) count it.
     void apply_file_view_rows()
     {
-        HIMAGELIST rows = ImageList_Create(std::max(first_inset(), 1), px(28) - 1, ILC_COLOR32, 1, 0);
+        HIMAGELIST rows = g_comctl.create(std::max(first_inset(), 1), px(28) - 1, ILC_COLOR32, 1, 0);
         if (!rows) return;  // the spacing it has is better than none
-        if (HIMAGELIST old = ListView_SetImageList(h_, rows, LVSIL_SMALL)) ImageList_Destroy(old);
+        if (HIMAGELIST old = ListView_SetImageList(h_, rows, LVSIL_SMALL)) g_comctl.destroy(old);
         // The list_view has just given the header that list too, as tall as a
         // row: the header gets its own instead, one blank as wide as its inset.
         apply_header_inset();
@@ -5017,7 +5019,7 @@ public:
             if (HIMAGELIST fresh = blank_image_list(w))
             {
                 Header_SetImageList(header, fresh);
-                if (header_images_) ImageList_Destroy(header_images_);
+                if (header_images_) g_comctl.destroy(header_images_);
                 header_images_ = fresh;
                 header_images_w_ = w;
             }
@@ -5029,10 +5031,11 @@ public:
         InvalidateRect(header, nullptr, FALSE);
     }
     // One w x 1 image, masked out: drawn, it leaves nothing. Null if any
-    // step fails, with nothing left behind.
+    // step fails, with nothing left behind. From comctl32 v6, as the header
+    // is: a v5 list on it (no manifest) draws its blank solid.
     static HIMAGELIST blank_image_list(int w)
     {
-        HIMAGELIST list = ImageList_Create(w, 1, ILC_COLOR32 | ILC_MASK, 1, 0);
+        HIMAGELIST list = g_comctl.create(w, 1, ILC_COLOR32 | ILC_MASK, 1, 0);
         HBITMAP colour = nullptr, mask = CreateBitmap(w, 1, 1, 1, nullptr);
         if (HDC screen = GetDC(nullptr))
         {
@@ -5050,12 +5053,12 @@ public:
                 }
                 DeleteDC(dc);
             }
-        made = made && ImageList_Add(list, colour, mask) == 0;
+        made = made && g_comctl.add(list, colour, mask) == 0;
         if (colour) DeleteObject(colour);
         if (mask) DeleteObject(mask);
         if (!made && list)
         {
-            ImageList_Destroy(list);
+            g_comctl.destroy(list);
             list = nullptr;
         }
         return list;
@@ -5066,7 +5069,7 @@ public:
         {
             // The header doesn't own it: off the header first, as it may paint again.
             if (HWND header = ListView_GetHeader(h_)) Header_SetImageList(header, nullptr);
-            ImageList_Destroy(header_images_);
+            g_comctl.destroy(header_images_);
         }
         if (anchor_) DestroyWindow(anchor_);
         if (tip_) DestroyWindow(tip_);
