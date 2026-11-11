@@ -8,6 +8,8 @@
 #include <commctrl.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -136,8 +138,14 @@ struct line_check
 // row's background) by main.
 COLORREF g_ink = CLR_INVALID;
 
+// As rapport decides it: RAPPORT_THEME=dark|light first, else the desktop's.
 bool light_theme()
 {
+    if (const char* forced = std::getenv("RAPPORT_THEME"))
+    {
+        if (!std::strcmp(forced, "dark")) return false;
+        if (!std::strcmp(forced, "light")) return true;
+    }
     DWORD light = 1, size = sizeof light;
     RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
                  L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
