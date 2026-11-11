@@ -135,6 +135,9 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-tree-separator-test rapport_win32)
     add_test(NAME win32-tree-separator COMMAND rapport-win32-tree-separator-test)
     set_tests_properties(win32-tree-separator PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+    # Light forced: the line's exact colour checked whatever the desktop's theme.
+    add_test(NAME win32-tree-separator-light COMMAND rapport-win32-tree-separator-test)
+    set_tests_properties(win32-tree-separator-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
 endif()
 
 if(TARGET rapport_win32)
