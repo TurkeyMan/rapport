@@ -3939,6 +3939,7 @@ public:
                     GDK_LEAVE_NOTIFY_MASK | GDK_KEY_PRESS_MASK | GDK_KEY_RELEASE_MASK);
         gtk_widget_set_can_focus(w_, s.focusable);
         focusable_ = s.focusable;
+        g_object_set_data(G_OBJECT(w_), k_canvas_key, this);
         connect(
             w_, "draw",
             +[](GtkWidget* w, cairo_t* cr, gpointer p) -> gboolean
@@ -4165,7 +4166,7 @@ private:
         pointer_event ev{e->type == GDK_BUTTON_PRESS ? pointer_event_type::press
                                                     : pointer_event_type::release,
                         {float(e->x), float(e->y)},
-                        int(e->button),
+                        canvas_button(e->button),
                         1,
                         modifiers(e->state)};
         if (ev.type == pointer_event_type::press)
@@ -4202,7 +4203,7 @@ private:
     static gboolean make_key_event(GtkWidget*, GdkEventKey* e, gpointer p)
     {
         auto* self = static_cast<canvas_impl*>(p);
-        if (!self->key_) return false;
+        if (!self->key_ || navigation_key(key_for(e->keyval))) return false;  // the window's
         key_event ev;
         ev.press = e->type == GDK_KEY_PRESS;
         ev.key = key_for(e->keyval);
@@ -4402,13 +4403,59 @@ public:
                 focus &&
                 (GTK_IS_EDITABLE(focus) ||
                  (GTK_IS_TEXT_VIEW(focus) && gtk_text_view_get_editable(GTK_TEXT_VIEW(focus))));
-            const bool not_text = e->keyval == GDK_KEY_Escape ||
+            const bool navigation = navigation_key(key_for(e->keyval));
+            if (navigation && e->type != GDK_KEY_PRESS) return false;  // presses only
+            const bool not_text = navigation || e->keyval == GDK_KEY_Escape ||
                                  (e->keyval >= GDK_KEY_F1 && e->keyval <= GDK_KEY_F12);
             if (typing && !not_text) return false;
             return self->on_key_(ev);
         };
         connect(win_, "key-press-event", key, this);
         connect(win_, "key-release-event", key, this);
+
+        // The mouse's side buttons are back and forward, pressed anywhere in
+        // the window: taken on the way down (capture), before a list or a
+        // tree selects with them. A canvas has them first; those it doesn't
+        // take come back up to the window.
+        side_buttons_ = gtk_gesture_multi_press_new(win_);
+        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(side_buttons_), 0);
+        gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(side_buttons_),
+                                                   GTK_PHASE_CAPTURE);
+        connect(
+            side_buttons_, "pressed",
+            +[](GtkGestureMultiPress* g, gint, gdouble, gdouble, gpointer p)
+            {
+                auto* self = static_cast<window_impl*>(p);
+                auto* single = GTK_GESTURE_SINGLE(g);
+                const GdkEvent* e =
+                    gtk_gesture_get_last_event(GTK_GESTURE(g), gtk_gesture_single_get_current_sequence(single));
+                const auto k = side_button_key(gtk_gesture_single_get_current_button(single));
+                GdkModifierType state{};
+                const bool taken = k && e && !in_canvas(gtk_get_event_widget(const_cast<GdkEvent*>(e))) &&
+                                   gdk_event_get_state(e, &state) && self->navigate(*k, modifiers(state));
+                gtk_gesture_set_state(GTK_GESTURE(g), taken ? GTK_EVENT_SEQUENCE_CLAIMED
+                                                            : GTK_EVENT_SEQUENCE_DENIED);
+            },
+            this);
+        connect(
+            win_, "button-press-event",
+            +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
+            {
+                const auto k = side_button_key(e->button);
+                return k && e->type == GDK_BUTTON_PRESS && in_canvas(gtk_get_event_widget(reinterpret_cast<GdkEvent*>(e))) &&
+                       static_cast<window_impl*>(p)->navigate(*k, modifiers(e->state));
+            },
+            this);
+    }
+
+    // Back or forward, from a side button.
+    bool navigate(key k, unsigned mods)
+    {
+        if (!on_key_) return false;
+        key_event ev;
+        ev.key = k;
+        ev.modifiers = mods;
+        return on_key_(ev);
     }
 
     ~window_impl() override
@@ -4417,6 +4464,7 @@ public:
         for (auto& part : parts) part->disconnect();
         disconnect();
         gtk_widget_destroy(win_);
+        g_object_unref(side_buttons_);
     }
 
     void set_title(const std::string& t) override
@@ -4765,6 +4813,7 @@ private:
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     std::function<void(bool)> on_fullscreen_;
     std::function<bool(const key_event&)> on_key_;
+    GtkGesture* side_buttons_ = nullptr;  // owned: GTK 3 gestures don't belong to their widget
     bool fullscreen_ = false;
     bool maximized_ = false;
 };

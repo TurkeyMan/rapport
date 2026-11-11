@@ -16,6 +16,7 @@
 #include "lazy_tree.h"
 #include "rapport/i18n.h"
 #include "list_press.h"
+#include "side_buttons.h"
 
 #include <memory>
 
@@ -4219,6 +4220,7 @@ public:
         : widget_base(gtk_drawing_area_new())
     {
         gtk_widget_set_focusable(w_, s.focusable);
+        g_object_set_data(G_OBJECT(w_), k_canvas_key, this);
         gtk_drawing_area_set_draw_func(
             GTK_DRAWING_AREA(w_),
             +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
@@ -4490,7 +4492,7 @@ private:
         if (type == GDK_BUTTON_PRESS || type == GDK_BUTTON_RELEASE)
         {
             pointer_event ev{type == GDK_BUTTON_PRESS ? pointer_event_type::press : pointer_event_type::release, widget_pos(e),
-                            int(gdk_button_event_get_button(e)), 1, modifiers(gdk_event_get_modifier_state(e))};
+                            canvas_button(gdk_button_event_get_button(e)), 1, modifiers(gdk_event_get_modifier_state(e))};
             if (ev.type == pointer_event_type::press)
             {
                 if (focusable_ && !gtk_widget_has_focus(w_)) gtk_widget_grab_focus(w_);
@@ -4546,7 +4548,7 @@ private:
 
     bool key(bool press, guint keyval, guint code, GdkModifierType state)
     {
-        if (!key_) return false;
+        if (!key_ || navigation_key(key_for(keyval))) return false;  // the window's
         key_event ev;
         ev.press = press;
         ev.key = key_for(keyval);
@@ -4612,6 +4614,22 @@ public:
         connect(keys, "key-released", +[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer p)
                 { static_cast<window_impl*>(p)->window_key(false, keyval, state); }, this);
         gtk_widget_add_controller(win_, keys);
+        // The mouse's side buttons are back and forward, pressed anywhere in
+        // the window: taken on the way down (capture), before a list or a
+        // tree selects with them. A canvas has them first; those it doesn't
+        // take come back up to the window (bubble).
+        for (const bool canvas : {false, true})
+        {
+            GtkEventController* side = gtk_event_controller_legacy_new();
+            gtk_event_controller_set_propagation_phase(side, canvas ? GTK_PHASE_BUBBLE : GTK_PHASE_CAPTURE);
+            if (canvas)
+                connect(side, "event", +[](GtkEventControllerLegacy*, GdkEvent* e, gpointer p) -> gboolean
+                        { return static_cast<window_impl*>(p)->side_button(e, true); }, this);
+            else
+                connect(side, "event", +[](GtkEventControllerLegacy*, GdkEvent* e, gpointer p) -> gboolean
+                        { return static_cast<window_impl*>(p)->side_button(e, false); }, this);
+            gtk_widget_add_controller(win_, side);
+        }
         connect(win_, "notify::fullscreened",
                 +[](GObject*, GParamSpec*, gpointer p)
                 {
@@ -4888,8 +4906,9 @@ public:
         const bool typing =
             focus && (GTK_IS_EDITABLE(focus) || (GTK_IS_TEXT_VIEW(focus) &&
                                                  gtk_text_view_get_editable(GTK_TEXT_VIEW(focus))));
-        const bool not_text =
-            keyval == GDK_KEY_Escape || (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12);
+        const bool navigation = navigation_key(ev.key);
+        if (navigation && !press) return false;  // presses only
+        const bool not_text = navigation || keyval == GDK_KEY_Escape || (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12);
         if (typing && !not_text) return false;
         return on_key_(ev);
     }
@@ -4921,7 +4940,48 @@ public:
         }
         return doc_tabs->key(ev);
     }
+    // A side button's press as back or forward: on the way down where it
+    // isn't going to a canvas, on the way up (the canvas left it) where it is.
+    // Where it's going is the pointer's grab's, not what's under it: every
+    // press and release passes the way down, so side_ follows the grab.
+    bool side_button(GdkEvent* e, bool canvas_turn)
+    {
+        const GdkEventType type = gdk_event_get_event_type(e);
+        if (type != GDK_BUTTON_PRESS && type != GDK_BUTTON_RELEASE) return false;
+        const guint button = gdk_button_event_get_button(e);
+        if (!canvas_turn)
+        {
+            if (type == GDK_BUTTON_RELEASE)
+            {
+                side_.release(int(button));
+                return false;
+            }
+            constexpr unsigned held_mask = GDK_BUTTON1_MASK | GDK_BUTTON2_MASK | GDK_BUTTON3_MASK |
+                                           GDK_BUTTON4_MASK | GDK_BUTTON5_MASK;
+            const bool held = (gdk_event_get_modifier_state(e) & held_mask) != 0;
+            to_canvas_ = side_.press(int(button), held, [e] { return pressed_in_canvas(e); });
+        }
+        if (!on_key_ || type != GDK_BUTTON_PRESS) return false;
+        const auto k = side_button_key(button);
+        if (!k || to_canvas_ != canvas_turn) return false;
+        key_event ev;
+        ev.key = *k;
+        ev.modifiers = modifiers(gdk_event_get_modifier_state(e));
+        return on_key_(ev);
+    }
+    static bool pressed_in_canvas(GdkEvent* e)
+    {
+        GdkSurface* surface = gdk_event_get_surface(e);
+        GtkNative* native = surface ? gtk_native_get_for_surface(surface) : nullptr;
+        if (!native) return false;
+        double x = 0, y = 0, sx = 0, sy = 0;
+        gdk_event_get_position(e, &x, &y);
+        gtk_native_get_surface_transform(native, &sx, &sy);
+        return in_canvas(gtk_widget_pick(GTK_WIDGET(native), x - sx, y - sy, GTK_PICK_DEFAULT));
+    }
     std::function<bool(const key_event&)> on_key_;
+    side_buttons::router side_;  // where the pointer's presses go
+    bool to_canvas_ = false;     // the last press: to a canvas
     std::function<void(bool)> on_fullscreen;
     bool fullscreen_ = false;
 

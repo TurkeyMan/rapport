@@ -1083,6 +1083,12 @@ enum class key
     f10,
     f11,
     f12,
+    // Navigation: the mouse's side buttons (the X buttons), and the keys
+    // some keyboards have. Only presses are reported, and only to the
+    // window's on_key, whatever has focus. A canvas taking a side button
+    // itself (on_pointer returning true for button 4 or 5) produces none.
+    back,
+    forward,
     other,
 };
 
@@ -1314,9 +1320,9 @@ public:
 
     // Keys reach this before the focused widget; return true to consume. For
     // app-wide keys (navigation, fullscreen, find) that must work whatever
-    // has focus. While an editable text field has focus only Escape and the
-    // function keys come here; the rest are typing. Read-only text views
-    // don't count as editable.
+    // has focus. While an editable text field has focus only Escape, the
+    // function keys and back/forward come here; the rest are typing.
+    // Read-only text views don't count as editable.
     virtual void on_key(std::function<bool(const key_event&)>) = 0;
     // Dialogs: fired once with the role of the button that ended it
     // (Cancel for Esc / close box). There is no blocking exec(): GTK4
