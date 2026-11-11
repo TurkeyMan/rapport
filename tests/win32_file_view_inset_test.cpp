@@ -22,6 +22,14 @@
 #include <string>
 #include <vector>
 
+// Common controls 6, as an application with a manifest has: v5 headers draw
+// no sort arrows.
+#ifdef _MSC_VER
+#pragma comment(                                                                                   \
+    linker,                                                                                        \
+    "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#endif
+
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
 RAPPORT_BUILTIN_BACKEND(win32);
 #endif
@@ -31,10 +39,11 @@ namespace
 
 int fails = 0;
 
-void expect(bool ok, const std::string& what)
+bool expect(bool ok, const std::string& what)
 {
     std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
     if (!ok) ++fails;
+    return ok;
 }
 
 // Both columns' text starts with the same letter, as do their titles, so
@@ -79,18 +88,56 @@ std::vector<HWND> lists()
     return found;
 }
 
-HWND top_window()
+// The comctl32 this process draws its controls with, as major.minor.
+std::string comctl_version()
 {
-    HWND top = nullptr;
-    EnumThreadWindows(
-        GetCurrentThreadId(),
-        [](HWND h, LPARAM p) -> BOOL
-        {
-            if (!GetParent(h) && IsWindow(h)) *reinterpret_cast<HWND*>(p) = h;
-            return *reinterpret_cast<HWND*>(p) == nullptr;
-        },
-        reinterpret_cast<LPARAM>(&top));
-    return top;
+    struct dll_version
+    {
+        DWORD size, major, minor, build, platform;
+    };
+    using fn = HRESULT(CALLBACK*)(dll_version*);
+    dll_version v{sizeof v};
+    if (HMODULE m = GetModuleHandleW(L"comctl32.dll"))
+        if (auto f =
+                reinterpret_cast<fn>(reinterpret_cast<void*>(GetProcAddress(m, "DllGetVersion"))))
+            if (SUCCEEDED(f(&v))) return std::to_string(v.major) + "." + std::to_string(v.minor);
+    return "unknown";
+}
+
+// Everything the measures come from, for a failed check to explain itself.
+void dump(const char* name, HWND list)
+{
+    HWND header = ListView_GetHeader(list);
+    RECT client{}, hclient{}, icon{}, label{}, bounds{};
+    GetClientRect(list, &client);
+    GetClientRect(header, &hclient);
+    ListView_GetItemRect(list, 0, &icon, LVIR_ICON);
+    ListView_GetItemRect(list, 0, &label, LVIR_LABEL);
+    ListView_GetItemRect(list, 0, &bounds, LVIR_BOUNDS);
+    int sx = 0, sy = 0, hx = 0, hy = 0;
+    const HIMAGELIST rows_images = ListView_GetImageList(list, LVSIL_SMALL);
+    if (rows_images) ImageList_GetIconSize(rows_images, &sx, &sy);
+    const auto himl = reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0));
+    if (himl) ImageList_GetIconSize(himl, &hx, &hy);
+    std::printf("     %s: dpi %u, client %ldx%ld, header %ldx%ld, bitmap margin %d\n", name,
+                GetDpiForWindow(list), client.right, client.bottom, hclient.right, hclient.bottom,
+                int(SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0)));
+    std::printf("       row 0: bounds %ld..%ld, icon %ld..%ld, label %ld..%ld\n", bounds.left,
+                bounds.right, icon.left, icon.right, label.left, label.right);
+    std::printf("       small images %p %dx%d (%d), header images %p %dx%d (%d)\n",
+                static_cast<void*>(rows_images), sx, sy,
+                rows_images ? ImageList_GetImageCount(rows_images) : 0, static_cast<void*>(himl),
+                hx, hy, himl ? ImageList_GetImageCount(himl) : 0);
+    for (int i = 0; i < Header_GetItemCount(header); ++i)
+    {
+        RECT r{};
+        Header_GetItemRect(header, i, &r);
+        HDITEMW hd{};
+        hd.mask = HDI_FORMAT | HDI_IMAGE;
+        Header_GetItem(header, i, &hd);
+        std::printf("       title %d: %ld..%ld, format %x, image %d\n", i, r.left, r.right, hd.fmt,
+                    hd.iImage);
+    }
 }
 
 DWORD windows_build()
@@ -266,8 +313,12 @@ int main(int argc, char** argv)
     win->show();
     const std::vector<HWND> found = lists();
     expect(found.size() == 2, "both lists are there");
-    HWND top = top_window();
-    if (found.size() != 2 || !top) return 1;
+    if (found.size() != 2) return 1;
+    // The window the lists are in, not the thread's first unowned one.
+    HWND top = GetAncestor(found[1], GA_ROOT);
+    expect(top && GetAncestor(found[0], GA_ROOT) == top, "both lists are in one window");
+    if (!top) return 1;
+    std::printf("comctl32 %s\n", comctl_version().c_str());
 
     const DWORD build = windows_build();
     const bool eleven = build >= 22000;
@@ -275,6 +326,7 @@ int main(int argc, char** argv)
 
     auto check = [&](const char* when)
     {
+        const int fails_before = fails;
         const UINT dpi = GetDpiForWindow(top);
         const int inset = eleven ? int(std::lround(15.0 * dpi / 96)) : 0;
         const int title_inset = eleven ? int(std::lround(24.0 * dpi / 96)) : 0;
@@ -321,6 +373,11 @@ int main(int argc, char** argv)
         else
             expect(!fv.title_image && fv.slot == plain.slot,
                    "the file_view list's first column is a plain one's" + at);
+        if (fails != fails_before)
+        {
+            dump("plain", found[0]);
+            dump("file_view", found[1]);
+        }
     };
     check("shown");
 
@@ -363,10 +420,10 @@ int main(int argc, char** argv)
                    "the sort flags are where they were set" + at);
             expect(ink0 == unsorted_ink, "the first title stays where it was" + at);
             if (eleven) expect((f0 & HDF_IMAGE) != 0, "the first title keeps its image" + at);
-            if (st.fmt0)
-                expect(changed > 0, "the first title's arrow is drawn" + at);
-            else
-                expect(changed == 0, "the first title is drawn as unsorted" + at);
+            const bool drawn =
+                st.fmt0 ? expect(changed > 0, "the first title's arrow is drawn" + at)
+                        : expect(changed == 0, "the first title is drawn as unsorted" + at);
+            if (!drawn) dump("file_view", found[1]);
         }
     }
 
@@ -395,12 +452,13 @@ int main(int argc, char** argv)
             "image %d, margin %u\n",
             to, now, rebuilt ? "rebuilt" : "kept", icon.right - icon.left, cx,
             UINT(SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0)));
-        if (eleven)
-            expect(rebuilt && icon.right - icon.left == expect_inset && cx == expect_title &&
-                       SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0) == 0,
-                   "after WM_DPICHANGED the rows' list is rebuilt, at the window's " +
-                       str(int(now)) + " dpi: the slot " + str(expect_inset) +
-                       " px and the title's blank " + str(expect_title));
+        if (eleven &&
+            !expect(rebuilt && icon.right - icon.left == expect_inset && cx == expect_title &&
+                        SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0) == 0,
+                    "after WM_DPICHANGED the rows' list is rebuilt, at the window's " +
+                        str(int(now)) + " dpi: the slot " + str(expect_inset) +
+                        " px and the title's blank " + str(expect_title)))
+            dump("file_view", found[1]);
         check("after WM_DPICHANGED");
     }
 
