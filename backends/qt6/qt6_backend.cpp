@@ -981,12 +981,32 @@ private:
 // -- tree ---------------------------------------------------------------------
 
 // A QTreeWidget with no header; each item carries the app's id.
+// tree_item::separator_before's line: over the top of the item's cell, which
+// starts past its indent, in the palette's mid colour as QFrame draws lines.
+// Only for an item with a sibling before it (row 0 has none).
+class tree_line_delegate : public QStyledItemDelegate
+{
+public:
+    static constexpr int line_role = Qt::UserRole + 1;
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter* p, const QStyleOptionViewItem& o, const QModelIndex& i) const override
+    {
+        QStyledItemDelegate::paint(p, o, i);
+        if (i.row() == 0 || !i.data(line_role).toBool()) return;
+        p->save();
+        p->setPen(QPen(o.palette.color(QPalette::Mid), 0));
+        p->drawLine(o.rect.topLeft(), o.rect.topRight());
+        p->restore();
+    }
+};
+
 class tree_impl : public widget_base<rap::tree>
 {
 public:
     explicit tree_impl(const spec::tree& s)
         : widget_base(new QTreeWidget)
     {
+        view()->setItemDelegate(new tree_line_delegate(view()));
         view()->setHeaderHidden(true);
         view()->setColumnCount(1);
         if (!s.frame) view()->setFrameShape(QFrame::NoFrame);
@@ -1094,6 +1114,11 @@ public:
                 view()->setCurrentItem(kept->second);
         }
     }
+    void set_separator_before(const std::string& id, bool on) override
+    {
+        const auto it = by_id_.find(id);
+        if (it != by_id_.end()) it->second->setData(0, tree_line_delegate::line_role, on);
+    }
     void update_item(const std::string& id, const std::string& label, const rap::icon& icon, bool has_children) override
     {
         const auto it = by_id_.find(id);
@@ -1155,6 +1180,7 @@ private:
             auto* i = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(view());
             i->setText(0, qs(t.label));
             i->setData(0, Qt::UserRole, qs(t.id));
+            if (t.separator_before) i->setData(0, tree_line_delegate::line_role, true);
             if (t.icon) i->setIcon(0, to_q_icon(t.icon, 16, view()));
             if (t.check)
             {

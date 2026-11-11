@@ -912,9 +912,22 @@ public:
     explicit tree_impl(const spec::tree& s)
         : widget_base(gtk_tree_view_new(), gtk_scrolled_window_new(nullptr, nullptr))
     {
-        store_ = gtk_tree_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_ICON);
+        // Label, id, box state, icon, and whether the row is a separator: one
+        // goes before an item with tree_item::separator_before. They're the
+        // view's alone (no id, like placeholders): never selected, activated
+        // or reported, and the keys step over them.
+        store_ = gtk_tree_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_ICON, G_TYPE_BOOLEAN);
         auto* view = GTK_TREE_VIEW(w_);
         gtk_tree_view_set_model(view, GTK_TREE_MODEL(store_));
+        gtk_tree_view_set_row_separator_func(
+            view,
+            +[](GtkTreeModel* model, GtkTreeIter* it, gpointer) -> gboolean
+            {
+                gboolean separator = false;
+                gtk_tree_model_get(model, it, 4, &separator, -1);
+                return separator;
+            },
+            nullptr, nullptr);
         gtk_container_add(GTK_CONTAINER(outer_), w_);
         gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(outer_), s.frame ? GTK_SHADOW_IN : GTK_SHADOW_NONE);
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(outer_), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -1119,6 +1132,25 @@ public:
             add_placeholder(&it);
         }
     }
+    void set_separator_before(const std::string& id, bool on) override
+    {
+        GtkTreePath* path = path_of(id);
+        if (!path) return;
+        GtkTreeIter it;
+        const bool found = gtk_tree_model_get_iter(GTK_TREE_MODEL(store_), &it, path);
+        gtk_tree_path_free(path);
+        if (!found) return;
+        // A row in or out before the selected one shifts its path, which GTK
+        // reports as a selection change: it isn't one.
+        quiet q(*this);
+        GtkTreeIter before = it;
+        const bool has_before = gtk_tree_model_iter_previous(GTK_TREE_MODEL(store_), &before);
+        const bool has_line = has_before && is_separator(&before);
+        if (!on && has_line)
+            gtk_tree_store_remove(store_, &before);
+        else if (on && has_before && !has_line)
+            add_separator(nullptr, &it);
+    }
     std::optional<std::string> selected() const override
     {
         GtkTreeModel* model = nullptr;
@@ -1188,8 +1220,11 @@ private:
     void insert(const std::vector<tree_item>& items, GtkTreeIter* parent,
                 const std::unordered_map<std::string, bool>& open, std::vector<std::string>& expand)
     {
+        bool first = true;
         for (const tree_item& t : items)
         {
+            if (t.separator_before && !first) add_separator(parent, nullptr);
+            first = false;
             GtkTreeIter it;
             gtk_tree_store_insert_with_values(store_, &it, parent, -1, 0, t.label.c_str(), 1, t.id.c_str(), 2,
                                               t.check ? int(*t.check) : -1, 3, g_icon_of(t.icon), -1);
@@ -1207,6 +1242,22 @@ private:
                 expand.push_back(t.id);
             insert(t.children, &it, open, expand);
         }
+    }
+    // A separator row: before `sibling`, else last under `parent`.
+    void add_separator(GtkTreeIter* parent, GtkTreeIter* sibling)
+    {
+        GtkTreeIter it;
+        if (sibling)
+            gtk_tree_store_insert_before(store_, &it, nullptr, sibling);
+        else
+            gtk_tree_store_append(store_, &it, parent);
+        gtk_tree_store_set(store_, &it, 0, "", 1, "", 2, -1, 4, TRUE, -1);
+    }
+    bool is_separator(GtkTreeIter* it) const
+    {
+        gboolean separator = false;
+        gtk_tree_model_get(GTK_TREE_MODEL(store_), it, 4, &separator, -1);
+        return separator;
     }
     void add_placeholder(GtkTreeIter* parent)
     {

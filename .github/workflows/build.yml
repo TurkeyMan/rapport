@@ -61,22 +61,34 @@ jobs:
 
   # MSVC with the static runtime, as the apps ship: as plugins and statically
   # linked. The examples must run, and the shell extension must load into
-  # Explorer's way of calling it and need nothing but Windows.
+  # Explorer's way of calling it and need nothing but Windows. Server 2022 is
+  # build 20348, below Windows 11's 22000, so what's gated on Windows 11 runs
+  # only on Server 2025 (build 26100).
   windows:
-    name: windows msvc ${{ matrix.link }}
-    runs-on: windows-2022
+    name: windows msvc ${{ matrix.link }}${{ matrix.tag }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { link: plugins, flags: '' }
-          - { link: static,  flags: '-DRAPPORT_STATIC=ON' }
+          - { link: plugins, flags: '',                    os: windows-2022, tag: '' }
+          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2022, tag: '' }
+          - { link: plugins, flags: '',                    os: windows-2025, tag: ' (build 26100)' }
     steps:
       - uses: actions/checkout@v4
 
+      - name: Windows build
+        run: |
+          $b = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+          "Windows build $b"
+          if ('${{ matrix.os }}' -eq 'windows-2025' -and $b -lt 22000) { throw "expected build 22000 or later, got $b" }
+
       - name: Build
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+          # Server 2025's image has a newer Visual Studio than 2022: CMake
+          # picks the newest there.
+          $gen = if ('${{ matrix.os }}' -eq 'windows-2022') { @('-G', 'Visual Studio 17 2022') } else { @() }
+          cmake -S . -B build @gen -A x64 `
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" ${{ matrix.flags }}
           cmake --build build --config Release --parallel
 
@@ -122,7 +134,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gallery-${{ matrix.link }}
+          name: gallery-${{ matrix.link }}-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/gallery.png
             ${{ runner.temp }}/document-tabs-*.png
