@@ -52,6 +52,7 @@
 #include <future>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace rap::win32
@@ -3243,6 +3244,7 @@ public:
         TreeView_SetItemHeight(h_, px(32));
     }
     bool navigator_ = false;
+    std::unordered_set<std::string> lines_;  // ids with tree_item::separator_before
 
     void set_items(std::vector<tree_item> items) override
     {
@@ -3258,6 +3260,7 @@ public:
         ids_.clear();
         free_ids_.clear();
         by_id_.clear();
+        lines_.clear();
         checks_.clear();
         lazy_.clear();
         if (!state_images_ && has_check(items)) make_state_images();
@@ -3333,6 +3336,17 @@ public:
             TreeView_Expand(h_, parent, TVE_EXPAND);
         restore_selection(keep);
     }
+    void set_separator_before(const std::string& id, bool on) override
+    {
+        const auto it = by_id_.find(id);
+        if (it == by_id_.end() || lines_.contains(id) == on) return;
+        if (on)
+            lines_.insert(id);
+        else
+            lines_.erase(id);
+        RECT r{};
+        if (TreeView_GetItemRect(h_, it->second, &r, FALSE)) InvalidateRect(h_, &r, FALSE);
+    }
     void update_item(const std::string& id, const std::string& label, const rap::icon& icon, bool has_children) override
     {
         const auto it = by_id_.find(id);
@@ -3391,6 +3405,20 @@ public:
             const auto* tv = reinterpret_cast<NMTREEVIEWW*>(n);
             if (tv->action & TVE_EXPAND) lazy_.opened(id_of(tv->itemNew.hItem));
             return 0;
+        }
+        case NM_CUSTOMDRAW:
+        {
+            // tree_item::separator_before: drawn after the row is, so its
+            // selection, hover and focus can't cover it.
+            auto* cd = reinterpret_cast<NMTVCUSTOMDRAW*>(n);
+            const auto item = reinterpret_cast<HTREEITEM>(cd->nmcd.dwItemSpec);
+            switch (cd->nmcd.dwDrawStage)
+            {
+            case CDDS_PREPAINT: return lines_.empty() ? CDRF_DODEFAULT : CDRF_NOTIFYITEMDRAW;
+            case CDDS_ITEMPREPAINT: return draws_line(item) ? CDRF_NOTIFYPOSTPAINT : CDRF_DODEFAULT;
+            case CDDS_ITEMPOSTPAINT: draw_line(cd->nmcd.hdc, item); return CDRF_DODEFAULT;
+            default: return CDRF_DODEFAULT;
+            }
         }
         case TVN_SELCHANGEDW:
             if (!quiet_ && changed_) changed_();
@@ -3493,6 +3521,10 @@ private:
             else
                 ids_[slot] = i.id;
             by_id_[i.id] = h;
+            if (i.separator_before)
+                lines_.insert(i.id);
+            else
+                lines_.erase(i.id);
             if (i.has_children && i.children.empty())
             {
                 lazy_.mark(i.id);
@@ -3506,6 +3538,29 @@ private:
                 lazy_.opened(i.id);
             }
         }
+    }
+    // An item's line, when it has one and a sibling before it.
+    bool draws_line(HTREEITEM h) const
+    {
+        if (!h || is_placeholder(h) || !TreeView_GetPrevSibling(h_, h)) return false;
+        return lines_.contains(id_of(h));
+    }
+    // Along the top of the row, from where the item's icon (else its label)
+    // starts, so lines line up with the items at their level; the border
+    // colour, a system one in high contrast.
+    void draw_line(HDC dc, HTREEITEM h)
+    {
+        RECT row{}, text{};
+        if (!TreeView_GetItemRect(h_, h, &row, FALSE) || !TreeView_GetItemRect(h_, h, &text, TRUE)) return;
+        int left = text.left;
+        TVITEMW item{};
+        item.mask = TVIF_IMAGE;
+        item.hItem = h;
+        int cx = 0, cy = 0;
+        if (icons_ && TreeView_GetItem(h_, &item) && item.iImage > 0 && ImageList_GetIconSize(icons_, &cx, &cy))
+            left -= cx + px(3);
+        RECT line{std::max(0L, long(left)), row.top, row.right, row.top + std::max(1, px(1))};
+        FillRect(dc, &line, theme_brush(theme_color::border));
     }
     void add_placeholder(HTREEITEM parent)
     {

@@ -5,6 +5,7 @@
 //   - Music is open from the start and never answered: "Loading…" stays, can't
 //     be selected, and the arrow keys step past it.
 //   - Opening Empty shows "Loading…", then the chevron goes.
+//   - A line above Empty sets it and Loaded apart (tree_item::separator_before).
 //   rapport-lazy-tree --snapshot file.png    saves the window and exits
 #include <rapport/rapport.h>
 
@@ -16,9 +17,10 @@
 namespace
 {
 
-rap::tree_item folder(std::string name, bool lazy, bool expanded = false)
+rap::tree_item folder(std::string name, bool lazy, bool expanded = false, bool line = false)
 {
     rap::tree_item t;
+    t.separator_before = line;
     t.label = name;
     t.id = std::move(name);
     t.has_children = lazy;
@@ -45,7 +47,7 @@ int main(int argc, char** argv)
     using namespace rap::layout;
     auto win = (*ui)->create(window{
         "Lazy tree",
-        {rap::layout::tree{{folder("Documents", true), folder("Music", true, true), folder("Empty", true),
+        {rap::layout::tree{{folder("Documents", true), folder("Music", true, true), folder("Empty", true, false, true),
                             folder("Loaded", false)}}
              .bind(tree)
              .on_expanding(

@@ -651,6 +651,12 @@ struct tree_item
     // May have children that aren't loaded yet: shows a chevron, and asks for
     // them when it's opened (tree::on_expanding). Ignored with `children`.
     bool has_children = false;
+    // A line above the item, setting it apart from the ones before it (a
+    // file manager's groups of places). Drawn only when the item has a
+    // sibling before it: never over a tree's first row or right under its
+    // parent. It's only drawn: the item is selected, reached by the keys and
+    // read out as any other, and nothing else is in the tree for it.
+    bool separator_before = false;
     // Before the label, as a list cell's: a tree where no item has one looks
     // exactly as if this weren't here. Items without one, in a tree where
     // others have one, may leave room for it, depending on the toolkit.
@@ -716,6 +722,9 @@ public:
     // loaded it does nothing.
     virtual void update_item(const std::string& id, const std::string& label, const rap::icon&,
                              bool has_children) = 0;
+    // An item's tree_item::separator_before, in place: only its line changes.
+    // An id that isn't there is ignored.
+    virtual void set_separator_before(const std::string& id, bool) = 0;
 };
 
 class date_picker : public widget
