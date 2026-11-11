@@ -723,8 +723,10 @@ public:
     virtual void update_item(const std::string& id, const std::string& label, const rap::icon&,
                              bool has_children) = 0;
     // An item's tree_item::separator_before, in place (update_item leaves it
-    // alone): only that item's row is redrawn, and nothing else about it or
-    // the tree changes. An id that isn't there is ignored.
+    // alone). The item keeps its id, selection and open state, as do the
+    // others. How it's shown is the toolkit's: on Win32 only that item's row
+    // is redrawn; on GTK 3 a separator row comes or goes before it, moving
+    // the rows below. An id that isn't there is ignored.
     virtual void set_separator_before(const std::string& id, bool) = 0;
 };
 
