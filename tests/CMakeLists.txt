@@ -256,6 +256,14 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-base-surface PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
     add_test(NAME win32-base-surface-light COMMAND rapport-win32-base-surface-test)
     set_tests_properties(win32-base-surface-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
+    # Under high contrast, which only a CI runner may turn on: skipped
+    # unless GITHUB_ACTIONS=true and RAPPORT_TEST_SET_HIGH_CONTRAST=1.
+    add_executable(rapport-win32-high-contrast-run win32_high_contrast_run.cpp)
+    target_link_libraries(rapport-win32-high-contrast-run PRIVATE user32)
+    add_test(NAME win32-base-surface-high-contrast
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-base-surface-test>)
+    set_tests_properties(win32-base-surface-high-contrast PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 
     add_executable(rapport-pane-readback-loss-test pane_readback_loss_test.cpp)
     target_compile_definitions(rapport-pane-readback-loss-test PRIVATE RAPPORT_TEST_READBACK)

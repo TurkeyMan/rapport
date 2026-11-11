@@ -4544,6 +4544,18 @@ public:
             handled = true;
             return dark_draw(reinterpret_cast<NMTBCUSTOMDRAW*>(n));
         }
+        // Light, it draws its background in the style's (the window colour)
+        // whatever is behind it, double buffered or printed: on a base
+        // surface that's filled in the surface's colour first, the buttons'
+        // looks (hot, pressed, checked, disabled) left to it.
+        if (n->code == NM_CUSTOMDRAW && surface_of(h_) == theme_color::base)
+        {
+            handled = true;
+            auto* cd = reinterpret_cast<NMTBCUSTOMDRAW*>(n);
+            if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)
+                FillRect(cd->nmcd.hdc, &cd->nmcd.rc, theme_brush(theme_color::base));
+            return CDRF_DODEFAULT;
+        }
         handled = n->code == TBN_GETINFOTIPW;
         if (!handled) return 0;
         auto* tip = reinterpret_cast<NMTBGETINFOTIPW*>(n);
