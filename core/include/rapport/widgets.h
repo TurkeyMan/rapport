@@ -722,8 +722,9 @@ public:
     // loaded it does nothing.
     virtual void update_item(const std::string& id, const std::string& label, const rap::icon&,
                              bool has_children) = 0;
-    // An item's tree_item::separator_before, in place: only its line changes.
-    // An id that isn't there is ignored.
+    // An item's tree_item::separator_before, in place (update_item leaves it
+    // alone): only that item's row is redrawn, and nothing else about it or
+    // the tree changes. An id that isn't there is ignored.
     virtual void set_separator_before(const std::string& id, bool) = 0;
 };
 
