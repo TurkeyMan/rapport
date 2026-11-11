@@ -195,7 +195,7 @@ struct comctl6
     decltype(&ImageList_Create) create = ImageList_Create;
     decltype(&ImageList_Destroy) destroy = ImageList_Destroy;
     decltype(&ImageList_ReplaceIcon) replace_icon = ImageList_ReplaceIcon;
-    decltype(&ImageList_Add) add = ImageList_Add;
+    decltype(&ImageList_AddMasked) add_masked = ImageList_AddMasked;
 
     void resolve()
     {
@@ -204,7 +204,7 @@ struct comctl6
         if (auto f = reinterpret_cast<decltype(&ImageList_Create)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_Create")))) create = f;
         if (auto f = reinterpret_cast<decltype(&ImageList_Destroy)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_Destroy")))) destroy = f;
         if (auto f = reinterpret_cast<decltype(&ImageList_ReplaceIcon)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_ReplaceIcon")))) replace_icon = f;
-        if (auto f = reinterpret_cast<decltype(&ImageList_Add)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_Add")))) add = f;
+        if (auto f = reinterpret_cast<decltype(&ImageList_AddMasked)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_AddMasked")))) add_masked = f;
     }
 };
 comctl6 g_comctl;
@@ -5031,31 +5031,32 @@ public:
         InvalidateRect(header, nullptr, FALSE);
     }
     // One w x 1 image, masked out: drawn, it leaves nothing. Null if any
-    // step fails, with nothing left behind. From comctl32 v6, as the header
-    // is: a v5 list on it (no manifest) draws its blank solid.
+    // step fails, with nothing left behind. Its mask is made from its colour
+    // (all white, all masked): a mask bitmap handed to ImageList_Add was
+    // drawn solid on the header of a process without a manifest. From the
+    // comctl32 the controls are, as the button and toolbar lists are.
     static HIMAGELIST blank_image_list(int w)
     {
         HIMAGELIST list = g_comctl.create(w, 1, ILC_COLOR32 | ILC_MASK, 1, 0);
-        HBITMAP colour = nullptr, mask = CreateBitmap(w, 1, 1, 1, nullptr);
+        HBITMAP colour = nullptr;
         if (HDC screen = GetDC(nullptr))
         {
             colour = CreateCompatibleBitmap(screen, w, 1);
             ReleaseDC(nullptr, screen);
         }
         bool made = false;
-        if (list && colour && mask)
+        if (list && colour)
             if (HDC dc = CreateCompatibleDC(nullptr))
             {
-                if (const HGDIOBJ old = SelectObject(dc, mask))
+                if (const HGDIOBJ old = SelectObject(dc, colour))
                 {
-                    made = PatBlt(dc, 0, 0, w, 1, WHITENESS);  // a set mask bit: transparent
+                    made = PatBlt(dc, 0, 0, w, 1, WHITENESS);
                     SelectObject(dc, old);
                 }
                 DeleteDC(dc);
             }
-        made = made && g_comctl.add(list, colour, mask) == 0;
+        made = made && g_comctl.add_masked(list, colour, RGB(255, 255, 255)) == 0;
         if (colour) DeleteObject(colour);
-        if (mask) DeleteObject(mask);
         if (!made && list)
         {
             g_comctl.destroy(list);
