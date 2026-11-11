@@ -70,7 +70,9 @@ HTREEITEM item_named(HWND tree, const wchar_t* label)
         it.hItem = h;
         it.pszText = text;
         it.cchTextMax = 64;
-        if (TreeView_GetItem(tree, &it) && !wcscmp(text, label)) return h;
+        // Wide by name: this test isn't built UNICODE, so TreeView_GetItem
+        // would ask for (and write) ANSI text.
+        if (SendMessageW(tree, TVM_GETITEMW, 0, reinterpret_cast<LPARAM>(&it)) && !wcscmp(text, label)) return h;
     }
     return nullptr;
 }
