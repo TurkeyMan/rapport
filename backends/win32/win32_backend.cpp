@@ -7045,6 +7045,11 @@ private:
         case WM_NOTIFY:
             if (self->tooltip_text(reinterpret_cast<NMHDR*>(lp))) return 0;
             break;
+        // The tabs have no close buttons (the control has none): a right
+        // click has the menu, for a mouse with no middle button.
+        case WM_CONTEXTMENU:
+            self->context_menu(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+            return 0;
         case WM_ERASEBKGND:
             if (dark_mode()) return 1;
             break;
@@ -7053,6 +7058,41 @@ private:
             break;
         }
         return DefSubclassProc(h, msg, wp, lp);
+    }
+    // New Tab, and Close Tab for the tab clicked (or the current one, from
+    // the keyboard), as the keys do.
+    void context_menu(POINT screen)
+    {
+        int i = -1;
+        if (screen.x == -1 && screen.y == -1)
+        {
+            i = state.current;
+            RECT r{};
+            if (i >= 0) TabCtrl_GetItemRect(h_, i, &r);
+            screen = {r.left, r.bottom};
+            ClientToScreen(h_, &screen);
+        }
+        else
+        {
+            TCHITTESTINFO hit{screen, 0};
+            ScreenToClient(h_, &hit.pt);
+            i = TabCtrl_HitTest(h_, &hit);
+        }
+        menu items;
+        items.push_back({rap::i18n::tr("rapport", "_New Tab"),
+                         [this] { state.new_asked(); },
+                         {},
+                         rap::i18n::shortcut_label("Ctrl+T")});
+        if (i >= 0)
+        {
+            const std::string id = state.tabs[size_t(i)].id;
+            items.push_back(menu_item::separator());
+            items.push_back({rap::i18n::tr("rapport", "_Close Tab"),
+                             [this, id] { state.close_asked(state.index_of(id)); },
+                             {},
+                             rap::i18n::shortcut_label("Ctrl+W")});
+        }
+        show_popup_menu(GetAncestor(h_, GA_ROOT), items, screen);
     }
     // The tab control has no dark style: painted here as the page tabs are
     // (dark_tabs_proc), each tab its icon and title at its start, cut short
@@ -9403,9 +9443,15 @@ public:
     {
         // The document tabs' keys first, whatever has the focus (none of
         // them is typing), and while the strip is hidden too.
-        if (doc_tabs && (m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN) &&
-            doc_tabs->key(make_key_event(m.wParam, m.lParam, true)))
-            return true;
+        if (doc_tabs && (m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN))
+        {
+            const key_event e = make_key_event(m.wParam, m.lParam, true);
+            // Except Ctrl+Tab where the focus has a use for it: a page's
+            // tabs switch, as a property sheet's do; a text field that
+            // takes tabs has it as typing.
+            if (doc_tabs::is_ctrl_tab(e) && page_tabs_key(e)) return true;
+            if (!(doc_tabs::is_ctrl_tab(e) && focus_takes_tabs()) && doc_tabs->key(e)) return true;
+        }
         if (!on_key_) return false;
         wchar_t cls[32] = {};
         GetClassNameW(GetFocus(), cls, 32);
@@ -9414,6 +9460,64 @@ public:
         const bool not_text = m.wParam == VK_ESCAPE || (m.wParam >= VK_F1 && m.wParam <= VK_F12);
         if (typing && !not_text) return false;
         return on_key_(make_key_event(m.wParam, m.lParam, m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN));
+    }
+
+    // The page tabs (layout::tabs) the focus is on or in, innermost first:
+    // Ctrl+Tab and Ctrl+Shift+Tab go round their pages, and the focus goes
+    // to their tabs, as a property sheet's do. False if it's in none.
+    bool page_tabs_key(const key_event& e)
+    {
+        const HWND f = GetFocus();
+        if (!f || !IsChild(hwnd_, f)) return false;
+        RECT at;
+        GetWindowRect(f, &at);
+        HWND best = nullptr;
+        long best_area = 0;
+        EnumChildWindows(
+            hwnd_,
+            [](HWND c, LPARAM p) -> BOOL
+            {
+                reinterpret_cast<std::vector<HWND>*>(p)->push_back(c);
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&scratch_children_));
+        for (HWND c : std::exchange(scratch_children_, {}))
+        {
+            if (c == doc_tabs->hwnd() || !IsWindowVisible(c) ||
+                !dynamic_cast<tabs_impl*>(handler_of(c)))
+                continue;
+            RECT body;
+            GetClientRect(c, &body);
+            traced_tab_adjust(c, FALSE, &body);
+            MapWindowPoints(c, nullptr, reinterpret_cast<POINT*>(&body), 2);
+            RECT overlap;
+            const bool in =
+                f == c || (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at));
+            const long area = (body.right - body.left) * (body.bottom - body.top);
+            if (in && (!best || area < best_area))
+            {
+                best = c;
+                best_area = area;
+            }
+        }
+        if (!best) return false;
+        const int n = TabCtrl_GetItemCount(best);
+        if (n < 2) return true;
+        const int next = (TabCtrl_GetCurSel(best) + ((e.modifiers & mod_shift) ? n - 1 : 1)) % n;
+        SetFocus(best);
+        TabCtrl_SetCurFocus(best, next);  // selects it and notifies, as a click does
+        return true;
+    }
+    std::vector<HWND> scratch_children_;
+    // A text field that takes Tab as typing (multi-line, editable).
+    static bool focus_takes_tabs()
+    {
+        const HWND f = GetFocus();
+        wchar_t cls[32] = {};
+        if (!f || !GetClassNameW(f, cls, 32)) return false;
+        const LONG_PTR style = GetWindowLongPtrW(f, GWL_STYLE);
+        return (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
+               (style & ES_MULTILINE) && !(style & ES_READONLY);
     }
 
     void finish(dialog_role role)

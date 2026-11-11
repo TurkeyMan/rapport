@@ -50,6 +50,14 @@ inline action for_key(const key_event& e, int current, int count)
     return {};
 }
 
+// Ctrl+Tab or Ctrl+Shift+Tab, pressed: the one key a focused control may
+// have a use of its own for (a page's tabs switching, a text view's tabs).
+inline bool is_ctrl_tab(const key_event& e)
+{
+    return e.press && e.key == key::tab && (e.modifiers & mod_ctrl) &&
+           !(e.modifiers & (mod_alt | mod_meta));
+}
+
 // The tab current once the one at `removed` goes, of `count_after` left:
 // the one after it, else the one before, as browsers do; -1 for none.
 inline int current_after_removal(int removed, int current, int count_after)

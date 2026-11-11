@@ -242,3 +242,11 @@ msgstr ""
 #: document tabs: a tab's close button, its tooltip and name
 msgid "Close Tab"
 msgstr ""
+
+#: document tabs (Windows): a tab's right-click menu
+msgid "_New Tab"
+msgstr ""
+
+#: document tabs (Windows): a tab's right-click menu
+msgid "_Close Tab"
+msgstr ""

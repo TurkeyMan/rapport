@@ -81,6 +81,7 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTextBlock>
+#include <QTextEdit>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
@@ -4325,7 +4326,20 @@ public:
         ev.repeat = k->isAutoRepeat();
         // The document tabs' keys first, whatever has the focus (none of
         // them is typing), and while the bar is hidden too.
-        if (doc_tabs && doc_tabs->key(ev)) return true;
+        // Except Ctrl+Tab where the focus has a use for it: a page's tabs
+        // (QTabWidget goes round its pages) or a text edit that takes tabs.
+        bool focus_keeps = false;
+        if (doc_tabs::is_ctrl_tab(ev))
+        {
+            for (QWidget* p = focus; p && !focus_keeps; p = p->parentWidget())
+                focus_keeps = qobject_cast<QTabWidget*>(p) != nullptr;
+            auto* plain = qobject_cast<QPlainTextEdit*>(focus);
+            auto* rich = qobject_cast<QTextEdit*>(focus);
+            focus_keeps = focus_keeps ||
+                          (plain && !plain->isReadOnly() && !plain->tabChangesFocus()) ||
+                          (rich && !rich->isReadOnly() && !rich->tabChangesFocus());
+        }
+        if (doc_tabs && !focus_keeps && doc_tabs->key(ev)) return true;
         if (!on_key_) return false;
         // While typing, only Escape and the function keys come here.
         auto* plain = qobject_cast<QPlainTextEdit*>(focus);

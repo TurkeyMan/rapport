@@ -234,3 +234,9 @@ msgstr "Wird geladen…"
 
 msgid "Close Tab"
 msgstr "Tab schließen"
+
+msgid "_New Tab"
+msgstr "_Neuer Tab"
+
+msgid "_Close Tab"
+msgstr "Tab _schließen"

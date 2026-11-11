@@ -18,6 +18,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QTabBar>
+#include <QTabWidget>
 #elif defined(RAPPORT_TEST_WIN32)
 #include <windows.h>
 // After windows.h, which it needs.
@@ -69,6 +70,14 @@ public:
     virtual void middle_click(int i) = 0;
     // The tab's close button; false where tabs have none (Windows').
     virtual bool close_button(int i) = 0;
+    // Windows' tabs only: a right click on tab i opens its menu (false
+    // elsewhere); then, from the menu's own loop, item `item` (0 New Tab,
+    // 1 Close Tab) chosen with the keys.
+    virtual bool open_menu(int) { return false; }
+    virtual void choose_in_menu(int) {}
+    // Before focusing a control: the window active where the toolkit only
+    // has a focus widget in the active window (Qt).
+    virtual void activate() {}
 };
 
 #if defined(RAPPORT_TEST_GTK3)
@@ -291,7 +300,8 @@ public:
     {
         if (!bar_)
             for (QWidget* w : QApplication::topLevelWidgets())
-                if ((bar_ = w->findChild<QTabBar*>())) break;
+                for (QTabBar* b : w->findChildren<QTabBar*>())
+                    if (!qobject_cast<QTabWidget*>(b->parentWidget())) bar_ = b;  // not a page's
         return bar_ && bar_->isVisible();
     }
     int count() override { return bar_->count(); }
@@ -342,6 +352,14 @@ public:
     }
 
 private:
+public:
+    void activate() override
+    {
+        bar_->window()->activateWindow();
+        QApplication::processEvents();
+    }
+
+private:
     QTabBar* bar_ = nullptr;
 };
 constexpr const char* backend_name = "qt6";
@@ -377,7 +395,7 @@ public:
         state[VK_SHIFT] = state[VK_LSHIFT] = shift ? 0x80 : 0;
         SetKeyboardState(state);
         const LPARAM lp = 1 | (LPARAM(MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC)) << 16);
-        HWND to = edit_ ? edit_ : GetParent(tab_);
+        HWND to = GetFocus() ? GetFocus() : GetParent(tab_);
         PostMessageW(to, WM_KEYDOWN, vk, lp);
         PostMessageW(to, WM_KEYUP, vk, lp | (LPARAM(3) << 30));
         pending_keys_ = true;
@@ -402,6 +420,32 @@ public:
         SendMessageW(tab_, WM_MBUTTONUP, 0, at);
     }
     bool close_button(int) override { return false; }
+    // Posted, as a right click's WM_CONTEXTMENU is: the menu's loop runs in
+    // the backend's, and the next step finds the menu there.
+    bool open_menu(int i) override
+    {
+        RECT r;
+        TabCtrl_GetItemRect(tab_, i, &r);
+        POINT at{(r.left + r.right) / 2, (r.top + r.bottom) / 2};
+        ClientToScreen(tab_, &at);
+        PostMessageW(tab_, WM_CONTEXTMENU, WPARAM(tab_), MAKELPARAM(at.x, at.y));
+        return true;
+    }
+    void choose_in_menu(int item) override
+    {
+        HWND menu = FindWindowW(L"#32768", nullptr);
+        if (!menu) return;
+        // Down to the item (the separator is passed over), then Enter.
+        for (int n = 0; n <= item; ++n) PostMessageW(menu, WM_KEYDOWN, VK_DOWN, 0);
+        PostMessageW(menu, WM_KEYDOWN, VK_RETURN, 0);
+    }
+    // A menu left open (the keys missed it) is closed, so the test ends.
+    static bool close_menu()
+    {
+        if (!FindWindowW(L"#32768", nullptr)) return false;
+        EndMenu();
+        return true;
+    }
 
 private:
     static BOOL CALLBACK find(HWND top, LPARAM p)
@@ -413,14 +457,16 @@ private:
                 auto* self = reinterpret_cast<native*>(p);
                 wchar_t name[32] = {};
                 GetClassNameW(c, name, 32);
-                if (!_wcsicmp(name, WC_TABCONTROLW)) self->tab_ = c;
-                if (!_wcsicmp(name, L"Edit")) self->edit_ = c;
+                // The document tabs' (fixed width), not a page's.
+                if (!_wcsicmp(name, WC_TABCONTROLW) &&
+                    (GetWindowLongPtrW(c, GWL_STYLE) & TCS_FIXEDWIDTH))
+                    self->tab_ = c;
                 return TRUE;
             },
             p);
         return TRUE;
     }
-    HWND tab_ = nullptr, edit_ = nullptr;
+    HWND tab_ = nullptr;
     bool pending_keys_ = false;
 };
 constexpr const char* backend_name = "win32";
@@ -441,12 +487,21 @@ int main(int argc, char** argv)
     }
     rap::document_tabs* tabs = nullptr;
     rap::entry* field = nullptr;
+    rap::entry* inner_field = nullptr;
+    rap::tabs* inner = nullptr;
+    std::vector<int> inner_changed;
     std::vector<std::string> selected, closed;
     int added = 0, next_id = 0;
     using namespace rap::layout;
     auto win = (*ui)->create(
         window{"Document tabs",
-               {vbox{entry{}.bind(field), label{"The current tab's content"}.stretch()}}}
+               {vbox{entry{}.bind(field), label{"The current tab's content"},
+                     // Page tabs in the content: Ctrl+Tab in them is theirs.
+                     rap::layout::tabs{{"One", vbox{entry{}.bind(inner_field)}},
+                                       {"Two", label{"Page two"}}}
+                         .on_changed([&](int i) { inner_changed.push_back(i); })
+                         .bind(inner)
+                         .stretch()}}}
             .size(60_ch, 12_lines)
             .tabs(document_tabs{{{"a", "Alpha", rap::icon::for_file("alpha/"), "/home/me/alpha"},
                                  {"b", "Beta", rap::icon::named("folder"), "/home/me/beta"},
@@ -470,6 +525,7 @@ int main(int argc, char** argv)
     // One step a tick, so each step's input has been through the backend's
     // own loop (win32 takes posted keys there) before the next looks.
     std::vector<std::function<void()>> steps;
+    size_t step = 0;  // the next to run
     auto once = [&](const std::vector<std::string>& got, const std::vector<std::string>& want,
                     const std::string& what) { expect(got == want, what); };
     steps.push_back(
@@ -477,6 +533,7 @@ int main(int argc, char** argv)
         {
             expect(d.count() == 3 && d.current() == 1 && tabs && tabs->current() == "b",
                    "made with three tabs, the second current");
+            d.activate();
             if (field) field->focus();  // the keys work while a field has the focus
             d.key(k::tab, false);
         });
@@ -547,9 +604,52 @@ int main(int argc, char** argv)
             tabs->select("c");
             expect(d.current() == 2 && selected.size() == 1,
                    "the app's update and select fire nothing");
+            // In a page's tabs, Ctrl+Tab goes round their pages instead.
+            if (inner_field) inner_field->focus();
+            inner_changed.clear();  // GTK 3's page tabs tell of their first page as they show
+            d.key(k::tab, false);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(inner && inner->current() == 1 && inner_changed == std::vector<int>{1},
+                   "Ctrl+Tab with the focus in a page's tabs: their next page, on_changed once "
+                   "(page " +
+                       std::to_string(inner ? inner->current() : -1) + ", " +
+                       std::to_string(inner_changed.size()) + " changes)");
+            expect(selected.size() == 1 && d.current() == 2, "and the document tabs don't move");
+            // Ctrl+T there is still the document tabs'.
+            d.key(k::t, false);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(added == 2, "Ctrl+T with the focus in a page's tabs: on_new");
+            closed.clear();
+            added = 0;
+            if (!d.open_menu(0)) step += 4;  // tabs with no menu (all but Windows')
+        });
+    steps.push_back([&] { d.choose_in_menu(1); });  // in the menu's loop
+    steps.push_back(
+        [&]
+        {
+#if defined(RAPPORT_TEST_WIN32)
+            expect(!native::close_menu(), "the menu took its keys");
+#endif
+            once(closed, {"a"}, "the right-click menu's Close Tab: on_close(a) once");
+            if (d.open_menu(0)) return;
+            step += 1;
+        });
+    steps.push_back([&] { d.choose_in_menu(0); });
+    steps.push_back(
+        [&]
+        {
+#if defined(RAPPORT_TEST_WIN32)
+            native::close_menu();
+            expect(added == 1 && closed.size() == 1, "the right-click menu's New Tab: on_new once");
+#endif
         });
 
-    size_t step = 0;
     int waited = 0;
     rap::subscription tick = (*ui)->timer(
         30, true,

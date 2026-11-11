@@ -2557,6 +2557,7 @@ public:
                          });
     }
 
+    GtkWidget* notebook() const { return w_; }
     doc_tabs::state state;
 
 private:
@@ -4881,7 +4882,7 @@ public:
         ev.modifiers = modifiers(state);
         // The document tabs' keys first, whatever has the focus (none of
         // them is typing), and while the strip is hidden too.
-        if (doc_tabs && doc_tabs->key(ev)) return true;
+        if (doc_tabs && document_tabs_key(ev)) return true;
         if (!on_key_) return false;
         GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
         const bool typing =
@@ -4893,6 +4894,33 @@ public:
         return on_key_(ev);
     }
     document_tabs_impl* doc_tabs = nullptr;  // window_spec::tabs, among the parts
+    // The document tabs' keys, but Ctrl+Tab where the focus has a use for
+    // it: in a page's tabs (layout::tabs) it goes round their pages, as
+    // it does Qt's and a Windows property sheet's (GTK's own is
+    // Ctrl+PgDn, which still works); in a text view, its own.
+    bool document_tabs_key(const key_event& ev)
+    {
+        if (doc_tabs::is_ctrl_tab(ev))
+        {
+            GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
+            for (GtkWidget* w = focus; w; w = gtk_widget_get_parent(w))
+                if (GTK_IS_NOTEBOOK(w) && w != doc_tabs->notebook())
+                {
+                    auto* nb = GTK_NOTEBOOK(w);
+                    const int n = gtk_notebook_get_n_pages(nb);
+                    if (n > 1)
+                        gtk_notebook_set_current_page(nb,
+                                                      (gtk_notebook_get_current_page(nb) +
+                                                       ((ev.modifiers & mod_shift) ? n - 1 : 1)) %
+                                                          n);
+                    return true;
+                }
+            if (focus && GTK_IS_TEXT_VIEW(focus) &&
+                gtk_text_view_get_editable(GTK_TEXT_VIEW(focus)))
+                return false;
+        }
+        return doc_tabs->key(ev);
+    }
     std::function<bool(const key_event&)> on_key_;
     std::function<void(bool)> on_fullscreen;
     bool fullscreen_ = false;
