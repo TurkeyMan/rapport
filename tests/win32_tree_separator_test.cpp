@@ -1,4 +1,4 @@
-// tree_item::separator_before on Win32: a border-coloured line along the
+// tree_item::separator_before on Win32: a divider-coloured line along the
 // top of the item's row, from where its icon (else its label) starts; none
 // over the first row or right under a parent; none once turned off. The
 // arrow keys go item to item as ever. Printed (WM_PRINTCLIENT), not captured.
@@ -130,6 +130,26 @@ struct line_check
     RECT row{}, text{};
 };
 
+// The line's colour, theme_color::divider: in light, COLOR_3DLIGHT
+// (COLOR_WINDOWTEXT in high contrast); in dark, rapport's own dark palette's,
+// which the test can't name, so set from b's line (and checked against its
+// row's background) by main.
+COLORREF g_ink = CLR_INVALID;
+
+bool light_theme()
+{
+    DWORD light = 1, size = sizeof light;
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                 L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
+    return light != 0;
+}
+
+bool high_contrast()
+{
+    HIGHCONTRASTW hc{sizeof hc};
+    return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof hc, &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
 line_check line_of(HWND tree, const printed& p, HTREEITEM h, bool has_icon)
 {
     line_check c;
@@ -139,7 +159,7 @@ line_check line_of(HWND tree, const printed& p, HTREEITEM h, bool has_icon)
     RECT& text = c.text;
     c.measured = TreeView_GetItemRect(tree, h, &row, FALSE) && TreeView_GetItemRect(tree, h, &text, TRUE);
     if (!c.measured) return c;
-    const COLORREF ink = GetSysColor(COLOR_3DSHADOW);
+    const COLORREF ink = g_ink;
     const UINT dpi = GetDpiForWindow(tree);
     int cx = 0, cy = 0;
     HIMAGELIST icons = TreeView_GetImageList(tree, TVSIL_NORMAL);
@@ -177,6 +197,21 @@ int main(int argc, char** argv)
     expect(tree != nullptr, "the tree is there");
     if (!tree) return 1;
 
+    if (high_contrast())
+        g_ink = GetSysColor(COLOR_WINDOWTEXT);
+    else if (light_theme())
+        g_ink = GetSysColor(COLOR_3DLIGHT);
+    else
+    {
+        printed p(tree);
+        RECT row{}, text{};
+        const HTREEITEM b_item = item_named(tree, L"b");
+        if (b_item && TreeView_GetItemRect(tree, b_item, &row, FALSE) && TreeView_GetItemRect(tree, b_item, &text, TRUE))
+        {
+            g_ink = p.at(text.left, row.top);
+            expect(g_ink != p.at(text.left, row.top + 2), "dark: b's line stands out from its row");
+        }
+    }
     {
         printed p(tree);
         auto has = [&](const wchar_t* name, bool icon = false)
