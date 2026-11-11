@@ -804,6 +804,8 @@ public:
 // its parent's store (reinsert). A row's chevron is decided once, when
 // the row is made, so one that gains or loses it is put back in its parent's
 // store for a new row (reinsert); that's also how a row shows new text.
+void install_tree_line_css(GtkWidget* w);
+
 class tree_impl : public widget_base<rap::tree>
 {
 public:
@@ -912,7 +914,7 @@ public:
         std::vector<std::string> top;
         for (const tree_item& t : items)
         {
-            add(t, "");
+            add(t, "", !top.empty());
             top.push_back(t.id);
         }
         for (auto& [id, node] : nodes_)
@@ -945,7 +947,7 @@ public:
         std::vector<std::string> children;
         for (const tree_item& t : items)
         {
-            add(t, id);
+            add(t, id, !children.empty());
             children.push_back(t.id);
         }
         for (auto& [other, is_open] : open)
@@ -968,6 +970,13 @@ public:
         restore_open();
         restore_selection(keep);
         restore_focus(focus);
+    }
+    void set_separator_before(const std::string& id, bool on) override
+    {
+        const auto found = nodes_.find(id);
+        if (found == nodes_.end() || found->second.separator_before == on) return;
+        found->second.separator_before = on;
+        rebind(id);  // its row, if it's showing; a row made later binds it
     }
     void update_item(const std::string& id, const std::string& label, const rap::icon& icon, bool has_children) override
     {
@@ -1096,6 +1105,8 @@ private:
         std::optional<check_state> check;
         GIcon* icon = nullptr;  // owned by the cache it came from
         bool loading = false;   // children not loaded yet: shows a placeholder
+        bool separator_before = false;
+        bool after_sibling = false;  // has a sibling before it: where a line can go
     };
     struct quiet
     {
@@ -1110,13 +1121,15 @@ private:
         bool was;
     };
 
-    void add(const tree_item& t, const std::string& parent)
+    void add(const tree_item& t, const std::string& parent, bool after_sibling)
     {
         node n{t.label, {}, t.expanded, t.check, g_icon_of(t.icon)};
+        n.separator_before = t.separator_before;
+        n.after_sibling = after_sibling;
         for (const tree_item& c : t.children)
         {
+            add(c, t.id, !n.children.empty());
             n.children.push_back(c.id);
-            add(c, t.id);
         }
         if (t.has_children && t.children.empty())
         {
@@ -1395,6 +1408,15 @@ private:
         if (icon) gtk_image_set_from_gicon(GTK_IMAGE(image), icon);
         gtk_list_item_set_selectable(li, !placeholder);
         gtk_list_item_set_activatable(li, !placeholder);
+        // tree_item::separator_before: a top border on the row.
+        if (GtkWidget* row_widget = gtk_widget_get_parent(expander))
+        {
+            install_tree_line_css(row_widget);
+            if (it != nodes_.end() && it->second.separator_before && it->second.after_sibling)
+                gtk_widget_add_css_class(row_widget, "rapport-separator-before");
+            else
+                gtk_widget_remove_css_class(row_widget, "rapport-separator-before");
+        }
         if (!g_object_get_data(G_OBJECT(row), "rapport-watched"))
         {
             g_object_set_data(G_OBJECT(row), "rapport-watched", GINT_TO_POINTER(1));
@@ -1696,6 +1718,21 @@ void set_image_icon(GtkImage* image, const icon& icon)
 
 // The look of an entry's buttons, installed once per display: a flat
 // button as small as an entry's icon allows, and a menu's drop arrow.
+// tree_item::separator_before's line: a 1 px top border on the list view's
+// row, in the colour GTK's own separators take.
+void install_tree_line_css(GtkWidget* w)
+{
+    static bool installed = false;
+    if (installed) return;
+    GtkCssProvider* css = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(
+        css, "listview > row.rapport-separator-before { border-top: 1px solid alpha(currentColor, 0.15); }");
+    gtk_style_context_add_provider_for_display(gtk_widget_get_display(w), GTK_STYLE_PROVIDER(css),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
+    installed = true;
+}
+
 void install_entry_icon_css(GtkWidget* w)
 {
     static bool installed = false;

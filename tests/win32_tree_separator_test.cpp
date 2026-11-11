@@ -1,0 +1,208 @@
+// tree_item::separator_before on Win32: a border-coloured line along the
+// top of the item's row, from where its icon (else its label) starts; none
+// over the first row or right under a parent; none once turned off. The
+// arrow keys go item to item as ever. Printed (WM_PRINTCLIENT), not captured.
+//   rapport-win32-tree-separator-test
+#include <rapport/rapport.h>
+#include <windows.h>
+#include <commctrl.h>
+
+#include <cstdio>
+#include <string>
+#include <vector>
+
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+RAPPORT_BUILTIN_BACKEND(win32);
+#endif
+
+namespace
+{
+
+int fails = 0;
+
+void expect(bool ok, const std::string& what)
+{
+    std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+    if (!ok) ++fails;
+}
+
+rap::tree_item item(std::string id, bool line, std::vector<rap::tree_item> children = {})
+{
+    rap::tree_item t;
+    t.label = id;
+    t.id = std::move(id);
+    t.separator_before = line;
+    t.children = std::move(children);
+    t.expanded = !t.children.empty();
+    return t;
+}
+
+HWND find_tree()
+{
+    HWND found = nullptr;
+    EnumThreadWindows(
+        GetCurrentThreadId(),
+        [](HWND top, LPARAM p) -> BOOL
+        {
+            EnumChildWindows(
+                top,
+                [](HWND c, LPARAM q) -> BOOL
+                {
+                    wchar_t name[32] = {};
+                    GetClassNameW(c, name, 32);
+                    if (!_wcsicmp(name, WC_TREEVIEWW)) *reinterpret_cast<HWND*>(q) = c;
+                    return TRUE;
+                },
+                p);
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
+HTREEITEM item_named(HWND tree, const wchar_t* label)
+{
+    for (HTREEITEM h = TreeView_GetRoot(tree); h; h = TreeView_GetNextVisible(tree, h))
+    {
+        wchar_t text[64] = {};
+        TVITEMW it{};
+        it.mask = TVIF_TEXT;
+        it.hItem = h;
+        it.pszText = text;
+        it.cchTextMax = 64;
+        if (TreeView_GetItem(tree, &it) && !wcscmp(text, label)) return h;
+    }
+    return nullptr;
+}
+
+// The tree as it paints, printed into a bitmap.
+struct printed
+{
+    explicit printed(HWND tree)
+    {
+        RECT r{};
+        GetClientRect(tree, &r);
+        w = r.right;
+        h = r.bottom;
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        dc = CreateCompatibleDC(nullptr);
+        bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, reinterpret_cast<void**>(&bits), nullptr, 0);
+        old = SelectObject(dc, bmp);
+        SendMessageW(tree, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT | PRF_ERASEBKGND);
+        GdiFlush();
+    }
+    ~printed()
+    {
+        SelectObject(dc, old);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+    }
+    COLORREF at(int x, int y) const
+    {
+        if (x < 0 || y < 0 || x >= w || y >= h) return CLR_INVALID;
+        const uint32_t p = bits[size_t(y) * size_t(w) + size_t(x)];
+        return RGB((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+    }
+    int w = 0, h = 0;
+    HDC dc = nullptr;
+    HBITMAP bmp = nullptr;
+    HGDIOBJ old = nullptr;
+    uint32_t* bits = nullptr;
+};
+
+// Where a line for `h` starts (its icon, else its label), and how much of
+// its row's top edge from there is the line's colour.
+struct line_check
+{
+    int left = 0;
+    double covered = 0;
+    bool before_left = false;  // the colour just before where it starts
+};
+
+line_check line_of(HWND tree, const printed& p, HTREEITEM h, bool has_icon)
+{
+    line_check c;
+    RECT row{}, text{};
+    if (!TreeView_GetItemRect(tree, h, &row, FALSE) || !TreeView_GetItemRect(tree, h, &text, TRUE)) return c;
+    const COLORREF ink = GetSysColor(COLOR_3DSHADOW);
+    const UINT dpi = GetDpiForWindow(tree);
+    int cx = 0, cy = 0;
+    HIMAGELIST icons = TreeView_GetImageList(tree, TVSIL_NORMAL);
+    if (has_icon && icons) ImageList_GetIconSize(icons, &cx, &cy);
+    c.left = has_icon ? text.left - cx - MulDiv(3, int(dpi), 96) : text.left;
+    int on = 0, span = 0;
+    for (int x = c.left; x < row.right; ++x, ++span) on += p.at(x, row.top) == ink;
+    c.covered = span ? double(on) / span : 0;
+    c.before_left = p.at(c.left - 2, row.top) == ink;
+    return c;
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    auto ui = rap::ui::load(argc, argv);
+    if (!ui)
+    {
+        std::printf("FAIL %s\n", ui.error().c_str());
+        return 1;
+    }
+    rap::tree_item disk = item("d", true);
+    disk.icon = rap::icon::named("drive-harddisk");
+    rap::tree* t = nullptr;
+    using namespace rap::layout;
+    using rap::operator""_ch;
+    using rap::operator""_lines;
+    auto win = (*ui)->create(window{
+        "t", {tree{{item("a", false), item("b", true), item("c", true, {item("c1", true), item("c2", true)}), disk}}
+                  .bind(t)}}
+                             .size(40_ch, 20_lines));
+    win->show();
+    HWND tree = find_tree();
+    expect(tree != nullptr, "the tree is there");
+    if (!tree) return 1;
+
+    {
+        printed p(tree);
+        auto has = [&](const wchar_t* name, bool icon = false)
+        { return line_of(tree, p, item_named(tree, name), icon); };
+        const line_check a = has(L"a"), b = has(L"b"), c = has(L"c"), c1 = has(L"c1"), c2 = has(L"c2"),
+                         d = has(L"d", true);
+        expect(a.covered == 0, "no line over the first row");
+        expect(b.covered > 0.95 && !b.before_left, "a line over b, from its label to the row's end");
+        expect(c.covered > 0.95, "a line over c");
+        expect(c1.covered == 0, "none over c1, right under its parent");
+        expect(c2.covered > 0.95 && !c2.before_left, "a line over c2, from c2's own label (its level's inset)");
+        expect(c2.left > b.left, "c2's line starts further in than b's");
+        expect(d.covered > 0.95 && !d.before_left, "a line over d, from its icon");
+    }
+
+    t->set_separator_before("b", false);
+    t->set_separator_before("a", true);
+    UpdateWindow(tree);
+    {
+        printed p(tree);
+        expect(line_of(tree, p, item_named(tree, L"b"), false).covered == 0, "b's line turned off");
+        expect(line_of(tree, p, item_named(tree, L"a"), false).covered == 0, "a's turned on, still none: first row");
+        expect(line_of(tree, p, item_named(tree, L"c"), false).covered > 0.95, "c's unchanged");
+    }
+
+    // The keys, item to item.
+    t->select("a");
+    for (const char* want : {"b", "c", "c1", "c2", "d"})
+    {
+        SendMessageW(tree, WM_KEYDOWN, VK_DOWN, 0);
+        SendMessageW(tree, WM_KEYUP, VK_DOWN, 0);
+        expect(t->selected() == std::optional<std::string>(want), std::string("Down onto ") + want);
+    }
+
+    win->close();
+    std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
+    return fails ? 1 : 0;
+}

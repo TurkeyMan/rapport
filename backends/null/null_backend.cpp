@@ -140,6 +140,7 @@ public:
         if (items.empty()) open_.erase(id);
         drop_lost_selection();
     }
+    void set_separator_before(const std::string&, bool) override {}
     void update_item(const std::string& id, const std::string&, const rap::icon&, bool has_children) override
     {
         if (std::ranges::find(ids, id) == ids.end()) return;
