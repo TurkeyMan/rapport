@@ -371,6 +371,15 @@ struct buttons
 {
     std::vector<dialog_button> buttons;
 };
+// A window's document tabs (window_spec::tabs; see rap::document_tabs).
+struct document_tabs
+{
+    std::vector<document_tab> items;
+    std::string current;  // empty: the first
+    std::function<void(const std::string&)> on_select, on_close;
+    std::function<void()> on_new;
+    rap::document_tabs** bind = nullptr;
+};
 
 }  // namespace spec
 
@@ -410,6 +419,9 @@ struct window_spec
     // and libadwaita is adopted: unset, for dialogs only; false keeps the
     // window's own chrome (a viewer's menu bar, toolbar and status bar).
     std::optional<bool> header_bar;
+    // A row of document tabs under the menu bar, across the window (outside
+    // the margins), above the content: a browser's or a file manager's.
+    std::optional<spec::document_tabs> tabs;
     // The window's background in the base colour (a list's, a field's)
     // rather than the window colour, as Windows 11 Explorer's panes and
     // toolbar are white: its labels, check boxes, sliders, group boxes, tab
@@ -1386,6 +1398,45 @@ public:
     buttons(std::initializer_list<spec::dialog_button> buttons) { s().buttons = buttons; }
 };
 
+// A window's document tabs, for window::tabs:
+//     document_tabs{{{"1", "Home", icon::for_file("/home/me/"), "/home/me"}}}
+//         .current("1").on_select(show).on_close(close_tab).on_new(new_tab)
+class document_tabs
+{
+public:
+    document_tabs(std::vector<document_tab> items = {}) { t_.items = std::move(items); }
+    document_tabs& current(std::string id)
+    {
+        t_.current = std::move(id);
+        return *this;
+    }
+    document_tabs& on_select(std::function<void(const std::string&)> f)
+    {
+        t_.on_select = std::move(f);
+        return *this;
+    }
+    document_tabs& on_close(std::function<void(const std::string&)> f)
+    {
+        t_.on_close = std::move(f);
+        return *this;
+    }
+    document_tabs& on_new(std::function<void()> f)
+    {
+        t_.on_new = std::move(f);
+        return *this;
+    }
+    document_tabs& bind(rap::document_tabs*& h)
+    {
+        t_.bind = &h;
+        return *this;
+    }
+    operator spec::document_tabs() const& { return t_; }
+    operator spec::document_tabs() && { return std::move(t_); }
+
+private:
+    spec::document_tabs t_;
+};
+
 namespace detail
 {
 inline node single(std::initializer_list<node> content)
@@ -1427,6 +1478,11 @@ public:
     window& menu_bar(std::vector<menu_bar_item> menus)
     {
         w_.menu_bar = std::move(menus);
+        return *this;
+    }
+    window& tabs(spec::document_tabs t)
+    {
+        w_.tabs = std::move(t);
         return *this;
     }
     operator window_spec() const& { return w_; }

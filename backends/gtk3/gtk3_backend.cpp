@@ -5,6 +5,7 @@
 // rap::list_model through cell data functions, so only visible rows are
 // ever touched. Painted columns use a custom cell renderer.
 #include "../common/container_state.h"
+#include "../common/document_tabs.h"
 #include "../common/line_control.h"
 #include <gtk/gtk.h>
 
@@ -1980,6 +1981,224 @@ private:
     std::vector<std::function<node()>> lazy_;
     std::vector<GtkWidget*> pages_;
     std::function<GtkWidget*(const node&)> build_;
+};
+
+// -- document tabs ------------------------------------------------------------
+
+// A window's document tabs (window_spec::tabs): a GtkNotebook as a strip,
+// its tabs alone over empty pages and no frame, as GNOME's apps had their
+// tabs before libadwaita. Each tab is its icon, its title (cut short with
+// an ellipsis) and a flat close button; a middle click on it closes it too.
+// The notebook never takes the focus: the window's keys work it.
+class document_tabs_impl : public widget_base<rap::document_tabs>
+{
+public:
+    document_tabs_impl()
+        : widget_base(gtk_notebook_new())
+    {
+        auto* nb = GTK_NOTEBOOK(w_);
+        gtk_notebook_set_show_border(nb, false);
+        gtk_notebook_set_scrollable(nb, true);
+        gtk_widget_set_can_focus(w_, false);
+        connect(
+            w_, "switch-page",
+            +[](GtkNotebook*, GtkWidget*, guint page, gpointer p)
+            {
+                auto* self = static_cast<document_tabs_impl*>(p);
+                if (!self->quiet_) self->state.picked(int(page));
+            },
+            this);
+        // Narrower tabs as the row fills; set once allocated, not during it.
+        connect(
+            w_, "size-allocate",
+            +[](GtkWidget*, GdkRectangle* a, gpointer p)
+            {
+                auto* self = static_cast<document_tabs_impl*>(p);
+                self->available_ = a->width;
+                self->fit_later();
+            },
+            this);
+    }
+
+    void insert(int index, const document_tab& t) override
+    {
+        const int at = state.insert(index, t);
+        GtkWidget* page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        GtkWidget* tab = make_tab(t);
+        quiet q(this);
+        gtk_notebook_insert_page(GTK_NOTEBOOK(w_), page, tab, at);
+        gtk_widget_show_all(page);
+        gtk_widget_show_all(tab);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), state.current);
+        fit_later();
+    }
+    void remove(const std::string& id) override
+    {
+        const int i = state.remove(id);
+        if (i < 0) return;
+        quiet q(this);
+        gtk_notebook_remove_page(GTK_NOTEBOOK(w_), i);
+        if (state.current >= 0) gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), state.current);
+        fit_later();
+    }
+    void update(const document_tab& t) override
+    {
+        const int i = state.index_of(t.id);
+        if (i < 0) return;
+        state.tabs[size_t(i)] = t;
+        GtkWidget* page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(w_), i);
+        GtkWidget* tab = make_tab(t);
+        gtk_notebook_set_tab_label(GTK_NOTEBOOK(w_), page, tab);
+        gtk_widget_show_all(tab);
+        fit_later();
+    }
+    void select(const std::string& id) override
+    {
+        const int i = state.index_of(id);
+        if (i < 0) return;
+        state.current = i;
+        quiet q(this);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
+    }
+    std::string current() const override { return state.current_id(); }
+    std::vector<std::string> ids() const override { return state.ids(); }
+    void on_select(std::function<void(const std::string&)> f) override
+    {
+        state.on_select = std::move(f);
+    }
+    void on_close(std::function<void(const std::string&)> f) override
+    {
+        state.on_close = std::move(f);
+    }
+    void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+
+    bool key(const key_event& e)
+    {
+        return state.key(e,
+                         [this](int i)
+                         {
+                             quiet q(this);
+                             gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
+                         });
+    }
+
+    GtkWidget* notebook() const { return w_; }
+    doc_tabs::state state;
+
+private:
+    // The notebook's own changes of page (as a tab goes) aren't the user's.
+    struct quiet
+    {
+        explicit quiet(document_tabs_impl* t)
+            : t_(t)
+            , was_(std::exchange(t->quiet_, true))
+        {
+        }
+        ~quiet() { t_->quiet_ = was_; }
+        document_tabs_impl* t_;
+        bool was_;
+    };
+
+    // A tab's label: its icon, its title and a close button, in a box the
+    // width fit() gives it (the title's natural width is a character, so the
+    // box's request is what counts), in an event box for the middle click.
+    GtkWidget* make_tab(const document_tab& t)
+    {
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        GtkWidget* image = nullptr;
+        if (!t.icon.file.empty())
+        {
+            image = gtk_image_new_from_gicon(file_type_icon(t.icon.file), GTK_ICON_SIZE_MENU);
+            gtk_image_set_pixel_size(GTK_IMAGE(image), 16);
+        }
+        else
+            image = icon_widget(t.icon, 16);
+        if (image) gtk_box_pack_start(GTK_BOX(box), image, false, false, 0);
+        GtkWidget* title = gtk_label_new(t.title.c_str());
+        gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
+        gtk_label_set_max_width_chars(GTK_LABEL(title), 1);
+        gtk_label_set_xalign(GTK_LABEL(title), 0);
+        gtk_widget_set_hexpand(title, true);
+        gtk_box_pack_start(GTK_BOX(box), title, true, true, 0);
+        GtkWidget* close =
+            gtk_button_new_from_icon_name("window-close-symbolic", GTK_ICON_SIZE_MENU);
+        gtk_button_set_relief(GTK_BUTTON(close), GTK_RELIEF_NONE);
+        gtk_widget_set_focus_on_click(close, false);
+        gtk_widget_set_tooltip_text(close, rap::i18n::tr("rapport", "Close Tab"));
+        g_object_set_data_full(G_OBJECT(close), "rapport-tab", g_strdup(t.id.c_str()), g_free);
+        // Not through connect(): a tab's widgets go with it, before the window.
+        g_signal_connect(close, "clicked",
+                         G_CALLBACK(+[](GtkButton* b, gpointer p)
+                                    {
+                                        auto* self = static_cast<document_tabs_impl*>(p);
+                                        const auto* id = static_cast<const char*>(
+                                            g_object_get_data(G_OBJECT(b), "rapport-tab"));
+                                        self->state.close_asked(self->state.index_of(id));
+                                    }),
+                         this);
+        gtk_box_pack_start(GTK_BOX(box), close, false, false, 0);
+        if (!t.tooltip.empty()) gtk_widget_set_tooltip_text(box, t.tooltip.c_str());
+        gtk_widget_set_size_request(box, width_, -1);
+        GtkWidget* events = gtk_event_box_new();
+        gtk_event_box_set_visible_window(GTK_EVENT_BOX(events), false);
+        gtk_widget_add_events(events, GDK_BUTTON_RELEASE_MASK);
+        g_object_set_data_full(G_OBJECT(events), "rapport-tab", g_strdup(t.id.c_str()), g_free);
+        g_signal_connect(events, "button-release-event",
+                         G_CALLBACK(+[](GtkWidget* w, GdkEventButton* e, gpointer p) -> gboolean
+                                    {
+                                        if (e->button != 2) return false;
+                                        auto* self = static_cast<document_tabs_impl*>(p);
+                                        const auto* id = static_cast<const char*>(
+                                            g_object_get_data(G_OBJECT(w), "rapport-tab"));
+                                        self->state.close_asked(self->state.index_of(id));
+                                        return true;
+                                    }),
+                         this);
+        gtk_container_add(GTK_CONTAINER(events), box);
+        return events;
+    }
+
+    // Each tab as wide as doc_tabs::tab_width says for the row's width.
+    void fit_later()
+    {
+        if (fit_source_) return;
+        fit_source_ = g_idle_add(
+            +[](gpointer p) -> gboolean
+            {
+                auto* self = static_cast<document_tabs_impl*>(p);
+                self->fit_source_ = 0;
+                self->fit();
+                return G_SOURCE_REMOVE;
+            },
+            this);
+    }
+    void fit()
+    {
+        if (available_ <= 0) return;  // not allocated yet
+        // The width of the title's box, less what the tab's frame and the
+        // close button take (about), so the tab is about that wide whole.
+        const int w =
+            std::max(doc_tabs::tab_width(available_, state.count(), int(doc_tabs::narrowest_tab),
+                                         int(doc_tabs::widest_tab)) -
+                         24,
+                     24);
+        if (w == width_) return;
+        width_ = w;
+        auto* nb = GTK_NOTEBOOK(w_);
+        for (int i = 0; i < gtk_notebook_get_n_pages(nb); ++i)
+            if (GtkWidget* label = gtk_notebook_get_tab_label(nb, gtk_notebook_get_nth_page(nb, i)))
+                if (GtkWidget* box = gtk_bin_get_child(GTK_BIN(label)))
+                    gtk_widget_set_size_request(box, w, -1);
+    }
+    void on_disconnect() override
+    {
+        if (fit_source_) g_source_remove(fit_source_);
+        fit_source_ = 0;
+    }
+
+    bool quiet_ = false;
+    int available_ = 0, width_ = int(doc_tabs::widest_tab) - 24;
+    guint fit_source_ = 0;
 };
 
 // -- list ---------------------------------------------------------------------
@@ -4169,6 +4388,15 @@ public:
             auto* self = static_cast<window_impl*>(p);
             if (e->keyval == GDK_KEY_F10 && e->type == GDK_KEY_PRESS)
                 self->rebuild_menu_bar();  // opens it
+            key_event ev;
+            ev.press = e->type == GDK_KEY_PRESS;
+            ev.key = key_for(e->keyval);
+            if (ev.key == key::character)
+                ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(e->keyval));
+            ev.modifiers = modifiers(e->state);
+            // The document tabs' keys first, whatever has the focus (none of
+            // them is typing), and while the strip is hidden too.
+            if (self->doc_tabs && self->document_tabs_key(ev)) return true;
             if (!self->on_key_) return false;
             GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(w));
             const bool typing =
@@ -4180,12 +4408,6 @@ public:
             const bool not_text = navigation || e->keyval == GDK_KEY_Escape ||
                                  (e->keyval >= GDK_KEY_F1 && e->keyval <= GDK_KEY_F12);
             if (typing && !not_text) return false;
-            key_event ev;
-            ev.press = e->type == GDK_KEY_PRESS;
-            ev.key = key_for(e->keyval);
-            if (ev.key == key::character)
-                ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(e->keyval));
-            ev.modifiers = modifiers(e->state);
             return self->on_key_(ev);
         };
         connect(win_, "key-press-event", key, this);
@@ -4414,15 +4636,48 @@ public:
         gtk_widget_set_margin_top(content, margin);
         gtk_widget_set_margin_bottom(content, margin);
         GtkWidget* top = content;
-        if (!menus.empty())
+        if (!menus.empty() || doc_tabs)
         {
             top = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-            gtk_box_pack_start(GTK_BOX(top), build_menu_bar(menus), false, false, 0);
+            if (!menus.empty())
+                gtk_box_pack_start(GTK_BOX(top), build_menu_bar(menus), false, false, 0);
+            // The document tabs edge to edge, the content in its margins.
+            if (doc_tabs) gtk_box_pack_start(GTK_BOX(top), doc_tabs->outer(), false, false, 0);
             gtk_box_pack_start(GTK_BOX(top), content, true, true, 0);
         }
         gtk_container_add(GTK_CONTAINER(win_), top);
         // GTK 3 widgets start hidden; widgets the app hides later stay hidden.
         gtk_widget_show_all(top);
+    }
+
+    document_tabs_impl* doc_tabs = nullptr;  // window_spec::tabs, among the parts
+
+    // The document tabs' keys, but Ctrl+Tab where the focus has a use for
+    // it: in a page's tabs (layout::tabs) it goes round their pages, as
+    // it does Qt's and a Windows property sheet's (GTK's own is
+    // Ctrl+PgDn, which still works); in a text view, its own.
+    bool document_tabs_key(const key_event& ev)
+    {
+        if (doc_tabs::is_ctrl_tab(ev))
+        {
+            GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
+            for (GtkWidget* w = focus; w; w = gtk_widget_get_parent(w))
+                if (GTK_IS_NOTEBOOK(w) && w != doc_tabs->notebook())
+                {
+                    auto* nb = GTK_NOTEBOOK(w);
+                    const int n = gtk_notebook_get_n_pages(nb);
+                    if (n > 1)
+                        gtk_notebook_set_current_page(nb,
+                                                      (gtk_notebook_get_current_page(nb) +
+                                                       ((ev.modifiers & mod_shift) ? n - 1 : 1)) %
+                                                          n);
+                    return true;
+                }
+            if (focus && GTK_IS_TEXT_VIEW(focus) &&
+                gtk_text_view_get_editable(GTK_TEXT_VIEW(focus)))
+                return false;
+        }
+        return doc_tabs->key(ev);
     }
 
     void set_app_id(const std::string&) override {}  // the process's (.desktop), not a window's
@@ -5109,6 +5364,15 @@ public:
                                                 build_sink& sink) override
     {
         auto win = std::make_unique<window_impl>(spec, static_cast<window_impl*>(parent));
+        if (spec.tabs)
+        {
+            auto tabs = std::make_unique<document_tabs_impl>();
+            win->doc_tabs = tabs.get();
+            for (const document_tab& t : spec.tabs->items) tabs->insert(-1, t);
+            if (!spec.tabs->current.empty()) tabs->select(spec.tabs->current);
+            sink.created(*spec.tabs, *tabs);
+            win->parts.push_back(std::move(tabs));
+        }
         win->set_content(builder(*win, sink).build(spec.content, orientation::vertical),
                         spec.margins, spec.menu_bar);
         return win;

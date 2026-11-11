@@ -2,6 +2,7 @@
 // posted tasks until quit(). For tests and for checking plugin loading on
 // machines without a toolkit.
 #include "../common/container_state.h"
+#include "../common/document_tabs.h"
 #include "../common/lazy_tree.h"
 #include "rapport/backend.h"
 
@@ -412,6 +413,35 @@ private:
     int w_, h_;
 };
 
+// The document tabs' bookkeeping alone, which the tests read back.
+class null_document_tabs : public stub<rap::document_tabs>
+{
+public:
+    void insert(int index, const document_tab& t) override { state.insert(index, t); }
+    void remove(const std::string& id) override { state.remove(id); }
+    void update(const document_tab& t) override
+    {
+        if (const int i = state.index_of(t.id); i >= 0) state.tabs[size_t(i)] = t;
+    }
+    void select(const std::string& id) override
+    {
+        if (const int i = state.index_of(id); i >= 0) state.current = i;
+    }
+    std::string current() const override { return state.current_id(); }
+    std::vector<std::string> ids() const override { return state.ids(); }
+    void on_select(std::function<void(const std::string&)> f) override
+    {
+        state.on_select = std::move(f);
+    }
+    void on_close(std::function<void(const std::string&)> f) override
+    {
+        state.on_close = std::move(f);
+    }
+    void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+
+    doc_tabs::state state;
+};
+
 class null_window : public rap::window
 {
 public:
@@ -721,6 +751,15 @@ public:
     {
         auto w = std::make_unique<null_window>();
         std::printf("%s \"%s\"\n", spec.dialog ? "dialog" : "window", spec.title.c_str());
+        if (spec.tabs)
+        {
+            auto tabs = std::make_unique<null_document_tabs>();
+            for (const document_tab& t : spec.tabs->items) tabs->insert(-1, t);
+            if (!spec.tabs->current.empty()) tabs->select(spec.tabs->current);
+            std::printf("  document_tabs %zu\n", spec.tabs->items.size());
+            sink.created(*spec.tabs, *tabs);
+            w->widgets.push_back(std::move(tabs));
+        }
         builder(*w, sink).build(spec.content, 1);
         return w;
     }

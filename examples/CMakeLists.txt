@@ -42,6 +42,9 @@ target_link_libraries(rapport-lazy-tree PRIVATE rapport::rapport)
 add_executable(rapport-frames frames.cpp)
 target_link_libraries(rapport-frames PRIVATE rapport::rapport)
 
+add_executable(rapport-document-tabs document_tabs.cpp)
+target_link_libraries(rapport-document-tabs PRIVATE rapport::rapport)
+
 add_executable(rapport-side-pane side_pane.cpp)
 target_link_libraries(rapport-side-pane PRIVATE rapport::rapport)
 
@@ -66,7 +69,8 @@ if(RAPPORT_STATIC)
     endforeach()
     file(GENERATE OUTPUT ${builtins_cpp} CONTENT "${builtins}")
     foreach(example rapport-demo rapport-gallery rapport-canvas rapport-frame rapport-gpu rapport-print rapport-list-dnd
-                    rapport-theme-roles rapport-split-show rapport-side-pane rapport-lazy-tree rapport-frames)
+                    rapport-theme-roles rapport-split-show rapport-side-pane rapport-lazy-tree rapport-frames
+                    rapport-document-tabs)
         if(NOT TARGET ${example})
             continue()
         endif()
