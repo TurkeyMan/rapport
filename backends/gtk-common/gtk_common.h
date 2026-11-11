@@ -1036,11 +1036,47 @@ inline key key_for(guint keyval)
     case GDK_KEY_KP_Page_Up: return key::page_up;
     case GDK_KEY_Page_Down:
     case GDK_KEY_KP_Page_Down: return key::page_down;
+    case GDK_KEY_Back: return key::back;
+    case GDK_KEY_Forward: return key::forward;
     default: break;
     }
     if (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12)
         return key(int(key::f1) + int(keyval - GDK_KEY_F1));
     return gdk_keyval_to_unicode(keyval) ? key::character : key::other;
+}
+
+// Back and forward go to the window alone, and only as they're pressed.
+inline bool navigation_key(key k)
+{
+    return k == key::back || k == key::forward;
+}
+
+// The mouse's side buttons, which GDK numbers 8 (back) and 9 (forward), as
+// the key they are to a window, or nullopt for any other button.
+inline std::optional<key> side_button_key(guint button)
+{
+    if (button == 8) return key::back;
+    if (button == 9) return key::forward;
+    return std::nullopt;
+}
+
+// A button as a canvas reports it: the side buttons are 4 and 5 there.
+inline int canvas_button(guint button)
+{
+    if (button == 8) return 4;
+    if (button == 9) return 5;
+    return int(button);
+}
+
+// A canvas's widget is marked, so a window leaves its side buttons to it:
+// the canvas sees them first, and only those it doesn't take are keys.
+inline constexpr const char* k_canvas_key = "rapport-canvas";
+
+inline bool in_canvas(GtkWidget* w)
+{
+    for (; w; w = gtk_widget_get_parent(w))
+        if (g_object_get_data(G_OBJECT(w), k_canvas_key)) return true;
+    return false;
 }
 
 // -- theme roles --------------------------------------------------------------

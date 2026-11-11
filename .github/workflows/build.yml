@@ -54,6 +54,8 @@ jobs:
           broadwayd :5 & gtk4-broadwayd :7 & sleep 1
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-list-input-test-gtk3
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-list-input-test-qt6
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-back-forward-test-gtk3
+          QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-back-forward-test-qt6
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-entry-buttons-test-gtk4
 
   # MSVC with the static runtime, as the apps ship: as plugins and statically
