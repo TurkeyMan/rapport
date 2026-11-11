@@ -5087,8 +5087,8 @@ public:
     }
     // A width of 0 (or less) leaves its column alone, as the other
     // backends do: a stretch column left so still gets its share of the
-    // width when the list first has a size, rather than 0 px. Those given
-    // a width keep it (restored widths win over the first fit).
+    // width as the list is sized, rather than 0 px. Those given a width
+    // keep it (restored widths win over the fitting).
     void set_column_widths(const std::vector<float>& w) override
     {
         for (size_t i = 0; i < w.size() && i < columns_.size(); ++i)
@@ -5098,10 +5098,6 @@ public:
             restored_[i] = true;
             if (visible_[i]) ListView_SetColumnWidth(h_, int(i), widths_[i]);
         }
-        bool to_fit = false;
-        for (size_t i = 0; i < columns_.size(); ++i)
-            to_fit = to_fit || (columns_[i].stretch && !restored_[i]);
-        if (!to_fit) fitted_ = true;
     }
     bool column_visible(size_t c) const override { return c < visible_.size() && visible_[c]; }
     void set_column_visible(size_t c, bool v) override
@@ -5171,6 +5167,14 @@ public:
         case HDN_ITEMCHANGEDA:
             // A column before the last resized (live while dragged).
             if (reinterpret_cast<NMHEADERW*>(n)->iItem != last_visible_column()) fill_last();
+            handled = false;
+            return 0;
+        case HDN_BEGINTRACKW:
+        case HDN_BEGINTRACKA:
+        case HDN_DIVIDERDBLCLICKW:
+        case HDN_DIVIDERDBLCLICKA:
+            // The user sizes a column: the widths are theirs from now on.
+            user_sized_ = true;
             handled = false;
             return 0;
         case HDN_ENDDRAG:
@@ -5344,16 +5348,19 @@ public:
         const int w = int(std::max<long>(px(40), c.right - others));
         if (ListView_GetColumnWidth(h_, last) != w) ListView_SetColumnWidth(h_, last, w);
     }
-    // Stretch columns share the width the others leave, once, when the list
-    // first has a size. After that only the user changes column widths:
-    // resizing one never resizes the others, and a list wider than its
-    // window scrolls sideways.
-    void fit_stretch()
+    // Stretch columns share the width the others leave whenever the list's
+    // size changes, until the user sizes a column: from then on only they
+    // change column widths, resizing one never resizes the others, and a
+    // list wider than its window scrolls sideways. (Fitted only once, a list
+    // first sized narrow, in a pane still taking its width, kept those
+    // widths at any size.) `width`: the client width to fit, if not the one
+    // it has now (a size on its way in).
+    void fit_stretch(long width = -1)
     {
         RECT c;
         GetClientRect(h_, &c);
-        if (fitted_ || c.right <= 0) return;
-        fitted_ = true;
+        if (width >= 0) c.right = width;
+        if (user_sized_ || c.right <= 0) return;
         long fixed = 0;
         int stretchers = 0;
         const int filled = filled_column();  // has its share, then fill_last's rest
@@ -6193,10 +6200,18 @@ private:
             {
                 const long w = pos->cx - ((wr.right - wr.left) - cr.right);
                 const long hgt = pos->cy - ((wr.bottom - wr.top) - cr.bottom);
-                if (w < cr.right) self->fill_last(self->width_after(w, hgt));
+                if (w < cr.right)
+                {
+                    self->fit_stretch(self->width_after(w, hgt));
+                    self->fill_last(self->width_after(w, hgt));
+                }
             }
         }
-        if (msg == WM_SIZE) self->fill_last(self->width_after(LOWORD(lp), HIWORD(lp)));
+        if (msg == WM_SIZE)
+        {
+            self->fit_stretch(self->width_after(LOWORD(lp), HIWORD(lp)));
+            self->fill_last(self->width_after(LOWORD(lp), HIWORD(lp)));
+        }
         const LRESULT r = DefSubclassProc(h, msg, wp, lp);
         if (msg == WM_SIZE || msg == wm_rapport_fill_last) self->fill_last();
         return r;
@@ -6471,7 +6486,7 @@ private:
     std::string tip_text_;  // its text now; empty: no tool
     std::wstring text_;  // LVN_GETDISPINFO's buffer
     bool quiet_ = false;
-    bool fitted_ = false;  // stretch columns have had their share of the width
+    bool user_sized_ = false;  // the user has sized a column: stretch columns fit no more
     std::vector<bool> restored_;  // per column: given its width by set_column_widths
     bool sel_pending_ = false;  // a selection change is posted, not yet reported
     com<ID2D1DCRenderTarget> row_target_;
