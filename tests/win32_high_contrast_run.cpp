@@ -3,8 +3,10 @@
 // setting, so it refuses to unless both GITHUB_ACTIONS=true and
 // RAPPORT_TEST_SET_HIGH_CONTRAST=1 say it's such a runner (skipped, 77,
 // otherwise). It turns on "High Contrast Black", confirms high contrast is
-// reported on and the system colours are the scheme's, runs the test, and
-// turns it off again whatever the test did.
+// reported on and the system colours have changed (Server 2025 gives a
+// Windows 11 contrast theme's, #202020 windows with white text, for it),
+// runs the test, and turns it off again whatever the test did, waiting for
+// the colours to come back.
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
@@ -55,6 +57,7 @@ int main(int argc, char** argv)
         return 77;
     }
     print_colours("before");
+    const COLORREF window = GetSysColor(COLOR_WINDOW), text = GetSysColor(COLOR_WINDOWTEXT);
     if (high_contrast_on())
     {
         std::fprintf(stderr, "high contrast is already on: not touched\n");
@@ -65,13 +68,11 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "SPI_SETHIGHCONTRAST failed (%lu)\n", GetLastError());
         return 1;
     }
-    // The scheme's colours: black windows with white text. They may take a
-    // moment to arrive.
+    // The scheme's colours, which may take a moment to arrive.
     bool applied = false;
     for (int i = 0; i < 100 && !applied; ++i)
     {
-        applied = high_contrast_on() && GetSysColor(COLOR_WINDOW) == RGB(0, 0, 0) &&
-                  GetSysColor(COLOR_WINDOWTEXT) == RGB(255, 255, 255);
+        applied = high_contrast_on() && GetSysColor(COLOR_WINDOW) != window && GetSysColor(COLOR_WINDOWTEXT) != text;
         if (!applied) Sleep(100);
     }
     print_colours("turned on");
@@ -103,7 +104,9 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "couldn't run %s (%lu)\n", argv[1], GetLastError());
     }
     set_high_contrast(false);
-    for (int i = 0; i < 100 && high_contrast_on(); ++i) Sleep(100);
+    for (int i = 0; i < 300 && (high_contrast_on() || GetSysColor(COLOR_WINDOW) != window); ++i) Sleep(100);
     print_colours("turned off");
+    if (high_contrast_on() || GetSysColor(COLOR_WINDOW) != window)
+        std::fprintf(stderr, "note: the desktop's colours didn't come back as they were\n");
     return code;
 }
