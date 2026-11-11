@@ -57,6 +57,9 @@ jobs:
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-back-forward-test-gtk3
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-back-forward-test-qt6
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-entry-buttons-test-gtk4
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-gtk3
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-gtk4
+          QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-qt6
 
   # MSVC with the static runtime, as the apps ship: as plugins and statically
   # linked. The examples must run, and the shell extension must load into
@@ -99,6 +102,19 @@ jobs:
           $p = Start-Process .\rapport-gallery.exe -PassThru -Wait
           if ($p.ExitCode -ne 0 -or -not (Test-Path $env:RAPPORT_SNAPSHOT)) { throw "rapport-gallery didn't snapshot" }
 
+      # The document tabs' strip, light and dark, narrowed and scrolling: to
+      # look at, as no test can.
+      - name: Document tabs snapshots
+        working-directory: build/bin/Release
+        run: |
+          foreach ($theme in 'light', 'dark') {
+            $env:RAPPORT_THEME = $theme
+            $env:RAPPORT_SNAPSHOT = "$env:RUNNER_TEMP\document-tabs-$theme.png"
+            $p = Start-Process .\rapport-document-tabs.exe -ArgumentList '--many' -PassThru -Wait
+            if ($p.ExitCode -ne 0 -or -not (Test-Path $env:RAPPORT_SNAPSHOT)) { throw "rapport-document-tabs didn't snapshot ($theme)" }
+          }
+          Remove-Item Env:RAPPORT_THEME
+
       # Server 2025's runner also runs the base surface test under high
       # contrast (win32-base-surface-high-contrast), which changes a system
       # setting: only on a throwaway runner, and only this job.
@@ -126,5 +142,7 @@ jobs:
         if: always()
         with:
           name: gallery-${{ matrix.link }}-${{ matrix.os }}
-          path: ${{ runner.temp }}/gallery.png
+          path: |
+            ${{ runner.temp }}/gallery.png
+            ${{ runner.temp }}/document-tabs-*.png
           if-no-files-found: ignore
