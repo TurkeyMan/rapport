@@ -231,3 +231,6 @@ msgstr "Rechts"
 
 msgid "Loading…"
 msgstr "Wird geladen…"
+
+msgid "Close Tab"
+msgstr "Tab schließen"

@@ -42,6 +42,9 @@ target_link_libraries(rapport-lazy-tree PRIVATE rapport::rapport)
 add_executable(rapport-frames frames.cpp)
 target_link_libraries(rapport-frames PRIVATE rapport::rapport)
 
+add_executable(rapport-document-tabs document_tabs.cpp)
+target_link_libraries(rapport-document-tabs PRIVATE rapport::rapport)
+
 add_executable(rapport-side-pane side_pane.cpp)
 target_link_libraries(rapport-side-pane PRIVATE rapport::rapport)
 

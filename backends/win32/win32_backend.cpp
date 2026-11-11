@@ -2,10 +2,11 @@
 // DirectWrite for canvases and drawn icons, our own box/form layout (Win32
 // has none), per-monitor DPI awareness.
 #include "container_state.h"
+#include "document_tabs.h"
 #include "lazy_tree.h"
 #include "menu_dismiss.h"
-#include "win32_shell_icons.h"
 #include "win32_common.h"
+#include "win32_shell_icons.h"
 #define RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
 #include "win32_trace.h"
 
@@ -6736,6 +6737,332 @@ private:
     std::function<void(int)> changed_;
 };
 
+// -- document tabs ------------------------------------------------------------
+
+// A tab's title as the tab control shows it: '&' is its mnemonic prefix.
+std::wstring tab_title(const std::string& s)
+{
+    std::wstring w;
+    for (wchar_t c : wide(s))
+    {
+        if (c == L'&') w += L'&';
+        w += c;
+    }
+    return w;
+}
+
+// An icon as a HICON `size` px square for a tab: a file's kind from the
+// shell, as the tree has it, else drawn (or Windows' own by name, prepared
+// first). Not from paint: the shell is slow.
+HICON tab_icon_handle(const rap::icon& icon, int size, UINT dpi, float scale)
+{
+    if (!icon) return nullptr;
+    if (!icon.file.empty())
+    {
+        const bool folder = icon.file.back() == '/';
+        const size_t slash =
+            icon.file.find_last_of("/\\", folder ? icon.file.size() - 2 : std::string::npos);
+        const std::string base = icon.file.substr(slash == std::string::npos ? 0 : slash + 1);
+        const size_t dot = base.rfind('.');
+        const std::wstring probe = folder                     ? L"folder"
+                                   : dot == std::string::npos ? wide(base)
+                                                              : L"file" + wide(base.substr(dot));
+        SHFILEINFOW info{};
+        if (SHGetFileInfoW(probe.c_str(), folder ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL,
+                           &info, sizeof info,
+                           SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES))
+            return info.hIcon;
+        return nullptr;
+    }
+    want_icon(icon, 16, dpi);
+    return render_icon_handle(icon, size, scale);
+}
+
+// A window's document tabs (window_spec::tabs): the tab control as a strip,
+// its row of tabs alone and no page under it, across the top of the client
+// area. Its tab and tab item roles in UI Automation, and their selection,
+// are the control's own. It never takes the focus (as a browser's tabs):
+// the window's keys work it, wherever the focus is.
+class document_tabs_impl : public leaf<rap::document_tabs>
+{
+public:
+    explicit document_tabs_impl(win_context& win)
+        : leaf(win)
+    {
+        adopt(create_control(win, win.hwnd(), WC_TABCONTROLW, L"",
+                             WS_CLIPSIBLINGS | TCS_FIXEDWIDTH | TCS_FORCELABELLEFT |
+                                 TCS_FOCUSNEVER | TCS_TOOLTIPS));
+        SetWindowSubclass(h_, proc, 1, reinterpret_cast<DWORD_PTR>(this));
+        dpi_ = win.dpi();
+        // Its tooltips ask the window for their text (TTN_GETDISPINFO), as
+        // from the tooltip control: brought here by its handle.
+        if ((tip_ = TabCtrl_GetToolTips(h_))) handlers()[tip_] = this;
+    }
+    ~document_tabs_impl() override
+    {
+        if (tip_) handlers().erase(tip_);
+        RemoveWindowSubclass(h_, proc, 1);
+        TabCtrl_SetImageList(h_, nullptr);
+        if (images_) g_comctl.destroy(images_);
+        for (HICON i : icons_)
+            if (i) DestroyIcon(i);
+    }
+
+    void insert(int index, const document_tab& t) override
+    {
+        const int at = state.insert(index, t);
+        icons_.insert(icons_.begin() + at, tab_icon_handle(t.icon, px(16), dpi_, win_.scale()));
+        const std::wstring title = tab_title(t.title);
+        TCITEMW item{};
+        item.mask = TCIF_TEXT | TCIF_IMAGE;
+        item.pszText = const_cast<wchar_t*>(title.c_str());
+        item.iImage = -1;
+        TabCtrl_InsertItem(h_, at, &item);
+        rebuild_images();
+        TabCtrl_SetCurSel(h_, state.current);
+        win_.relayout();  // the tabs' widths
+    }
+    void remove(const std::string& id) override
+    {
+        const int i = state.remove(id);
+        if (i < 0) return;
+        if (icons_[size_t(i)]) DestroyIcon(icons_[size_t(i)]);
+        icons_.erase(icons_.begin() + i);
+        TabCtrl_DeleteItem(h_, i);
+        rebuild_images();
+        TabCtrl_SetCurSel(h_, state.current);
+        win_.relayout();
+    }
+    void update(const document_tab& t) override
+    {
+        const int i = state.index_of(t.id);
+        if (i < 0) return;
+        state.tabs[size_t(i)] = t;
+        if (icons_[size_t(i)]) DestroyIcon(icons_[size_t(i)]);
+        icons_[size_t(i)] = tab_icon_handle(t.icon, px(16), dpi_, win_.scale());
+        const std::wstring title = tab_title(t.title);
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = const_cast<wchar_t*>(title.c_str());
+        TabCtrl_SetItem(h_, i, &item);
+        rebuild_images();
+    }
+    void select(const std::string& id) override
+    {
+        const int i = state.index_of(id);
+        if (i < 0) return;
+        state.current = i;
+        TabCtrl_SetCurSel(h_, i);  // sends no TCN_SELCHANGE
+    }
+    std::string current() const override { return state.current_id(); }
+    std::vector<std::string> ids() const override { return state.ids(); }
+    void on_select(std::function<void(const std::string&)> f) override
+    {
+        state.on_select = std::move(f);
+    }
+    void on_close(std::function<void(const std::string&)> f) override
+    {
+        state.on_close = std::move(f);
+    }
+    void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+
+    // A key from the window, before the focused control has it.
+    bool key(const key_event& e)
+    {
+        return state.key(e, [this](int i) { TabCtrl_SetCurSel(h_, i); });
+    }
+
+    LRESULT notify(NMHDR* n, bool& handled) override
+    {
+        if (n->code == TCN_SELCHANGE)
+        {
+            state.picked(TabCtrl_GetCurSel(h_));
+            return 0;
+        }
+        if (tooltip_text(n)) return 0;
+        handled = false;
+        return 0;
+    }
+    void theme_changed() override { rebuild_icons(); }  // drawn ones are in the text colour
+
+    // The strip's height: its row of tabs and the line under it.
+    int height()
+    {
+        fit(width_);
+        RECT r{};
+        if (state.count() > 0 && TabCtrl_GetItemRect(h_, 0, &r)) return r.bottom + px(2);
+        return item_h_ + px(4);
+    }
+    SIZE measure() override { return {0, height()}; }
+    void place(RECT r) override
+    {
+        if (win_.dpi() != dpi_)
+        {
+            dpi_ = win_.dpi();
+            rebuild_icons();
+        }
+        fit(doc_tabs::tab_width(r.right - r.left, state.count(), px(doc_tabs::narrowest_tab),
+                                px(doc_tabs::widest_tab)));
+        leaf::place(r);
+    }
+
+    doc_tabs::state state;
+
+private:
+    // Every tab `w` wide (TCS_FIXEDWIDTH): narrower as tabs are added, down
+    // to the narrowest, then the row scrolls (the control's own arrows).
+    void fit(int w)
+    {
+        if (w <= 0) w = px(doc_tabs::widest_tab);
+        if (line_dpi_ != win_.dpi())  // measured once per DPI, not per layout
+        {
+            line_dpi_ = win_.dpi();
+            line_h_ = text_extent(h_, L"Ag").cy;
+        }
+        const int hgt = std::max(line_h_, px(16)) + px(10);
+        if (w == width_ && hgt == item_h_) return;
+        width_ = w;
+        item_h_ = hgt;
+        TabCtrl_SetItemSize(h_, w, hgt);
+    }
+    void rebuild_icons()
+    {
+        for (size_t i = 0; i < icons_.size(); ++i)
+        {
+            if (icons_[i]) DestroyIcon(icons_[i]);
+            icons_[i] = tab_icon_handle(state.tabs[i].icon, px(16), dpi_, win_.scale());
+        }
+        rebuild_images();
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+    // The control's image list, from the tabs' icons in order: a handful,
+    // made again whole when one changes rather than renumbered.
+    void rebuild_images()
+    {
+        HIMAGELIST fresh = nullptr;
+        if (std::ranges::any_of(icons_, [](HICON i) { return i != nullptr; }))
+            fresh = g_comctl.create(px(16), px(16), ILC_COLOR32 | ILC_MASK, int(icons_.size()), 1);
+        int next = 0;
+        for (size_t i = 0; i < icons_.size(); ++i)
+        {
+            TCITEMW item{};
+            item.mask = TCIF_IMAGE;
+            item.iImage = fresh && icons_[i] && g_comctl.replace_icon(fresh, -1, icons_[i]) >= 0
+                              ? next++
+                              : -1;
+            TabCtrl_SetItem(h_, int(i), &item);
+        }
+        TabCtrl_SetImageList(h_, fresh);
+        if (images_) g_comctl.destroy(images_);
+        images_ = fresh;
+    }
+    // A tab's tooltip: the app's (a full path), else its title, which a
+    // narrow tab cuts short.
+    bool tooltip_text(NMHDR* n)
+    {
+        if (n->code != TTN_GETDISPINFOW || !tip_ || n->hwndFrom != tip_) return false;
+        auto* info = reinterpret_cast<NMTTDISPINFOW*>(n);
+        const size_t i = n->idFrom;
+        tip_text_.clear();
+        if (i < state.tabs.size())
+            tip_text_ =
+                wide(state.tabs[i].tooltip.empty() ? state.tabs[i].title : state.tabs[i].tooltip);
+        info->lpszText = tip_text_.data();
+        return true;
+    }
+
+    static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<document_tabs_impl*>(data);
+        switch (msg)
+        {
+        // A middle click closes the tab under it, as in a browser.
+        case WM_MBUTTONDOWN: return 0;
+        case WM_MBUTTONUP:
+        {
+            TCHITTESTINFO hit{{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}, 0};
+            const int i = TabCtrl_HitTest(h, &hit);
+            if (i >= 0) self->state.close_asked(i);
+            return 0;
+        }
+        case WM_NOTIFY:
+            if (self->tooltip_text(reinterpret_cast<NMHDR*>(lp))) return 0;
+            break;
+        case WM_ERASEBKGND:
+            if (dark_mode()) return 1;
+            break;
+        case WM_PAINT:
+            if (dark_mode()) return self->paint_dark();
+            break;
+        }
+        return DefSubclassProc(h, msg, wp, lp);
+    }
+    // The tab control has no dark style: painted here as the page tabs are
+    // (dark_tabs_proc), each tab its icon and title at its start, cut short
+    // with an ellipsis, and a line under the row.
+    LRESULT paint_dark()
+    {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h_, &ps);
+        RECT c;
+        GetClientRect(h_, &c);
+        FillRect(dc, &c, theme_brush(theme_color::window));
+        HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h_, WM_GETFONT, 0, 0)));
+        SetBkMode(dc, TRANSPARENT);
+        const int n = TabCtrl_GetItemCount(h_), current = TabCtrl_GetCurSel(h_);
+        POINT pointer;
+        GetCursorPos(&pointer);
+        ScreenToClient(h_, &pointer);
+        SetTextColor(dc,
+                     color_ref(theme_color_of(IsWindowEnabled(h_) ? theme_color::window_text
+                                                                  : theme_color::disabled_text)));
+        for (int i = 0; i < n; ++i)
+        {
+            RECT r;
+            if (!TabCtrl_GetItemRect(h_, i, &r)) continue;
+            const bool selected = i == current, hot = PtInRect(&r, pointer);
+            if (selected) InflateRect(&r, px(2), px(2));
+            FillRect(dc, &r,
+                     theme_brush(selected ? theme_color::card
+                                 : hot    ? theme_color::hover
+                                          : theme_color::window));
+            FrameRect(dc, &r, theme_brush(theme_color::border));
+            if (selected)
+            {
+                RECT bar{r.left + px(1), r.bottom - px(3), r.right - px(1), r.bottom};
+                FillRect(dc, &bar, theme_brush(theme_color::accent));
+            }
+            RECT text = r;
+            InflateRect(&text, -px(6), 0);
+            if (size_t(i) < icons_.size() && icons_[size_t(i)])
+            {
+                const int s = px(16);
+                DrawIconEx(dc, text.left, (r.top + r.bottom - s) / 2, icons_[size_t(i)], s, s, 0,
+                           nullptr, DI_NORMAL);
+                text.left += s + px(6);
+            }
+            const std::wstring title =
+                size_t(i) < state.tabs.size() ? wide(state.tabs[size_t(i)].title) : L"";
+            DrawTextW(dc, title.c_str(), -1, &text,
+                      DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+        RECT line{c.left, c.bottom - px(1), c.right, c.bottom};
+        FillRect(dc, &line, theme_brush(theme_color::border));
+        SelectObject(dc, old);
+        EndPaint(h_, &ps);
+        return 0;
+    }
+
+    HWND tip_ = nullptr;
+    std::wstring tip_text_;
+    std::vector<HICON> icons_;  // per tab, in order; null for none
+    HIMAGELIST images_ = nullptr;
+    UINT dpi_ = 96;
+    int width_ = 0, item_h_ = 0;  // as last given to the control
+    UINT line_dpi_ = 0;
+    int line_h_ = 0;
+};
+
 // -- splitter -----------------------------------------------------------------
 
 // Panes side by side with draggable bars between them. Sizes are device px
@@ -8445,6 +8772,7 @@ public:
         if (last_shown() == this) last_shown() = nullptr;
         items.clear();
         widgets.clear();
+        doc_tabs.reset();
         if (hwnd_)
         {
             SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
@@ -8536,7 +8864,8 @@ public:
         GetClientRect(hwnd_, &c);
         const SIZE n = root->natural();
         const int m = margin();
-        const long w = std::max<long>(c.right, n.cx + 2 * m), h = std::max<long>(c.bottom, n.cy + 2 * m);
+        const long w = std::max<long>(c.right, n.cx + 2 * m),
+                   h = std::max<long>(c.bottom, n.cy + 2 * m + strip_height());
         if (w == c.right && h == c.bottom) return;
         RECT r{0, 0, w, h};
         adjust(r);
@@ -8551,8 +8880,19 @@ public:
         if (!root) return;
         RECT r = client();
         const int m = margin();
-        InflateRect(&r, -m, -m);
         moves_in_one_pass batch(ahead_.has_value() && !grow_ahead_);
+        // The document tabs across the top, edge to edge; the content, with
+        // its margins, under them.
+        if (doc_tabs)
+        {
+            doc_tabs->show_all(true);
+            if (const int h = strip_height())
+            {
+                doc_tabs->place({r.left, r.top, r.right, r.top + h});
+                r.top += h;
+            }
+        }
+        InflateRect(&r, -m, -m);
         root->show_all(true);
         root->place(r);
     }
@@ -8565,6 +8905,8 @@ public:
     std::vector<button_impl*> role_buttons;
     std::vector<std::shared_ptr<deferred_build>> deferred;  // built when first idle (see show)
     std::map<std::string, std::vector<form_item*>> form_groups;  // forms aligned by key
+    std::unique_ptr<document_tabs_impl> doc_tabs;                // window_spec::tabs
+    int strip_height() const { return doc_tabs && doc_tabs->visible ? doc_tabs->height() : 0; }
 
     void set_title(const std::string& t) override { SetWindowTextW(hwnd_, wide(t).c_str()); }
     void flush_layout() override
@@ -8577,7 +8919,7 @@ public:
         const SIZE n = root ? root->natural() : SIZE{200, 100};
         const int m = margin();
         return {std::max<long>(n.cx + 2 * m, extent_px(hwnd_, initial_w_, false)),
-                std::max<long>(n.cy + 2 * m, extent_px(hwnd_, initial_h_, true))};
+                std::max<long>(n.cy + 2 * m + strip_height(), extent_px(hwnd_, initial_h_, true))};
     }
     // Once built: sized and laid out, still hidden, so what's in it has its
     // size before the window shows (a program fitting the window to its content).
@@ -8693,7 +9035,7 @@ public:
             const SIZE n = root->natural();
             const int m = margin();
             least.cx = std::max<LONG>(least.cx, n.cx + 2 * m);
-            least.cy = std::max<LONG>(least.cy, n.cy + 2 * m);
+            least.cy = std::max<LONG>(least.cy, n.cy + 2 * m + strip_height());
         }
         return least;
     }
@@ -8961,6 +9303,11 @@ public:
     // From the message loop, before the focused control sees the key.
     bool window_key(const MSG& m)
     {
+        // The document tabs' keys first, whatever has the focus (none of
+        // them is typing), and while the strip is hidden too.
+        if (doc_tabs && (m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN) &&
+            doc_tabs->key(make_key_event(m.wParam, m.lParam, true)))
+            return true;
         if (!on_key_) return false;
         wchar_t cls[32] = {};
         GetClassNameW(GetFocus(), cls, 32);
@@ -9605,6 +9952,13 @@ public:
     {
         auto win = std::make_unique<window_impl>(spec, static_cast<window_impl*>(parent));
         win->set_menu_bar(spec.menu_bar);
+        if (spec.tabs)
+        {
+            win->doc_tabs = std::make_unique<document_tabs_impl>(*win);
+            for (const document_tab& t : spec.tabs->items) win->doc_tabs->insert(-1, t);
+            if (!spec.tabs->current.empty()) win->doc_tabs->select(spec.tabs->current);
+            sink.created(*spec.tabs, *win->doc_tabs);
+        }
         win->root = builder(*win, sink).build(spec.content, win->hwnd(), orientation::vertical);
         win->lay_out_hidden();
         return win;

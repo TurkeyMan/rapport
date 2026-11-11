@@ -5,10 +5,11 @@
 //
 // No moc: signals go to lambdas, and events to overrides and event filters.
 #include "../common/container_state.h"
+#include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "qt_painter.h"
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
-#include "qt_painter.h"
 
 #include "builtin_icons.h"
 #include "frame_layer.h"
@@ -77,6 +78,7 @@
 #include <QStackedWidget>
 #include <QStyleHints>
 #include <QStyledItemDelegate>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTextBlock>
 #include <QTimer>
@@ -1860,6 +1862,152 @@ private:
     QStackedWidget* stack_;
     std::function<void(int)> changed_;
     lazy_pages lazy_;
+};
+
+// -- document tabs ------------------------------------------------------------
+
+// The tab bar of a window's document tabs: as wide as doc_tabs::tab_width
+// says for the bar's width (narrower as tabs are added, then the bar's own
+// scroll buttons), and a middle click on a tab closes it.
+class document_tab_bar : public QTabBar
+{
+public:
+    using QTabBar::QTabBar;
+    std::function<void(int)> middle_clicked;  // cleared when its part goes
+
+protected:
+    QSize tabSizeHint(int i) const override
+    {
+        QSize s = QTabBar::tabSizeHint(i);
+        s.setWidth(doc_tabs::tab_width(width(), count(), int(doc_tabs::narrowest_tab),
+                                       int(doc_tabs::widest_tab)));
+        return s;
+    }
+    QSize minimumTabSizeHint(int i) const override
+    {
+        QSize s = QTabBar::minimumTabSizeHint(i);
+        s.setWidth(int(doc_tabs::narrowest_tab));
+        return s;
+    }
+    void mouseReleaseEvent(QMouseEvent* e) override
+    {
+        if (e->button() == Qt::MiddleButton)
+        {
+            const int i = tabAt(e->position().toPoint());
+            if (i >= 0 && middle_clicked) middle_clicked(i);
+            return;
+        }
+        QTabBar::mouseReleaseEvent(e);
+    }
+};
+
+// A window's document tabs (window_spec::tabs): a QTabBar across the top in
+// document mode, each tab with its close button, as Dolphin's are. It never
+// takes the focus: the window's keys work it.
+class document_tabs_impl : public widget_base<rap::document_tabs>
+{
+public:
+    document_tabs_impl()
+        : widget_base(new document_tab_bar)
+    {
+        bar_ = static_cast<document_tab_bar*>(w_);
+        bar_->setDocumentMode(true);
+        bar_->setTabsClosable(true);
+        bar_->setExpanding(false);
+        bar_->setUsesScrollButtons(true);
+        bar_->setElideMode(Qt::ElideRight);
+        bar_->setFocusPolicy(Qt::NoFocus);
+        bar_->middle_clicked = [this](int i) { state.close_asked(i); };
+        QObject::connect(bar_, &QTabBar::currentChanged, bar_,
+                         [this](int i)
+                         {
+                             if (!quiet_) state.picked(i);
+                         });
+        QObject::connect(bar_, &QTabBar::tabCloseRequested, bar_,
+                         [this](int i) { state.close_asked(i); });
+    }
+    ~document_tabs_impl() override
+    {
+        if (bar_) bar_->middle_clicked = nullptr;
+    }
+
+    void insert(int index, const document_tab& t) override
+    {
+        const int at = state.insert(index, t);
+        quiet q(this);
+        bar_->insertTab(at, to_q_icon(t.icon, 16, bar_), qs(t.title));
+        bar_->setTabToolTip(at, qs(t.tooltip.empty() ? t.title : t.tooltip));
+        bar_->setCurrentIndex(state.current);
+        // A hidden bar (its window not shown yet) doesn't say its size has
+        // changed: one made with no tabs kept the layout's height of none.
+        bar_->updateGeometry();
+    }
+    void remove(const std::string& id) override
+    {
+        const int i = state.remove(id);
+        if (i < 0) return;
+        quiet q(this);
+        bar_->removeTab(i);
+        bar_->setCurrentIndex(state.current);
+        bar_->updateGeometry();
+    }
+    void update(const document_tab& t) override
+    {
+        const int i = state.index_of(t.id);
+        if (i < 0) return;
+        state.tabs[size_t(i)] = t;
+        bar_->setTabIcon(i, to_q_icon(t.icon, 16, bar_));
+        bar_->setTabText(i, qs(t.title));
+        bar_->setTabToolTip(i, qs(t.tooltip.empty() ? t.title : t.tooltip));
+    }
+    void select(const std::string& id) override
+    {
+        const int i = state.index_of(id);
+        if (i < 0) return;
+        state.current = i;
+        quiet q(this);
+        bar_->setCurrentIndex(i);
+    }
+    std::string current() const override { return state.current_id(); }
+    std::vector<std::string> ids() const override { return state.ids(); }
+    void on_select(std::function<void(const std::string&)> f) override
+    {
+        state.on_select = std::move(f);
+    }
+    void on_close(std::function<void(const std::string&)> f) override
+    {
+        state.on_close = std::move(f);
+    }
+    void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+
+    bool key(const key_event& e)
+    {
+        return state.key(e,
+                         [this](int i)
+                         {
+                             quiet q(this);
+                             bar_->setCurrentIndex(i);
+                         });
+    }
+
+    doc_tabs::state state;
+
+private:
+    // The bar's own changes of tab (as one goes) aren't the user's.
+    struct quiet
+    {
+        explicit quiet(document_tabs_impl* t)
+            : t_(t)
+            , was_(std::exchange(t->quiet_, true))
+        {
+        }
+        ~quiet() { t_->quiet_ = was_; }
+        document_tabs_impl* t_;
+        bool was_;
+    };
+
+    QPointer<document_tab_bar> bar_;
+    bool quiet_ = false;
 };
 
 // -- toolbar, values, canvas --------------------------------------------------
@@ -3966,8 +4114,22 @@ public:
     void set_content(QWidget* content, const window_spec& spec)
     {
         const int m = !spec.margins ? 0 : dialog_ ? 12 : 6;
-        layout_->setContentsMargins(m, m, m, m);
-        layout_->addWidget(content);
+        if (doc_tabs)
+        {
+            // The document tabs edge to edge, the content in its margins.
+            layout_->setContentsMargins(0, 0, 0, 0);
+            layout_->addWidget(doc_tabs->widget());
+            auto* inner = new QWidget;
+            auto* in = new QVBoxLayout(inner);
+            in->setContentsMargins(m, m, m, m);
+            in->addWidget(content);
+            layout_->addWidget(inner, 1);
+        }
+        else
+        {
+            layout_->setContentsMargins(m, m, m, m);
+            layout_->addWidget(content);
+        }
         if (!spec.menu_bar.empty()) build_menu_bar(spec.menu_bar);
         const int w = px(spec.width), h = px(spec.height);
         frame_->ensurePolished();  // the style's fonts and margins, before sizing by them
@@ -4089,6 +4251,7 @@ public:
 
     std::vector<std::unique_ptr<part>> parts;
     std::map<std::string, std::vector<QPointer<QWidget>>> form_groups;  // forms aligned by key
+    document_tabs_impl* doc_tabs = nullptr;  // window_spec::tabs, among the parts
 
     // -- from Frame and key_filter --------------------------------------------
 
@@ -4128,6 +4291,15 @@ public:
         if (k->key() == Qt::Key_Control || k->key() == Qt::Key_Shift || k->key() == Qt::Key_Alt ||
             k->key() == Qt::Key_Meta)
             list_impl::drag_keys_changed(k->modifiers());  // as they are after the key
+        key_event ev;
+        ev.press = e->type() == QEvent::KeyPress;
+        ev.key = key_for(k->key());
+        if (ev.key == key::character) ev.codepoint = char32_t(QChar::toLower(char32_t(k->key())));
+        ev.modifiers = modifiers_of(k->modifiers());
+        ev.repeat = k->isAutoRepeat();
+        // The document tabs' keys first, whatever has the focus (none of
+        // them is typing), and while the bar is hidden too.
+        if (doc_tabs && doc_tabs->key(ev)) return true;
         if (!on_key_) return false;
         // While typing, only Escape and the function keys come here.
         auto* plain = qobject_cast<QPlainTextEdit*>(focus);
@@ -4137,12 +4309,6 @@ public:
         const bool not_text =
             k->key() == Qt::Key_Escape || (k->key() >= Qt::Key_F1 && k->key() <= Qt::Key_F12);
         if (typing && !not_text) return false;
-        key_event ev;
-        ev.press = e->type() == QEvent::KeyPress;
-        ev.key = key_for(k->key());
-        if (ev.key == key::character) ev.codepoint = char32_t(QChar::toLower(char32_t(k->key())));
-        ev.modifiers = modifiers_of(k->modifiers());
-        ev.repeat = k->isAutoRepeat();
         return on_key_(ev);
     }
 
@@ -4894,6 +5060,15 @@ public:
                                                 build_sink& sink) override
     {
         auto win = std::make_unique<window_impl>(spec, static_cast<window_impl*>(parent));
+        if (spec.tabs)
+        {
+            auto tabs = std::make_unique<document_tabs_impl>();
+            win->doc_tabs = tabs.get();
+            for (const document_tab& t : spec.tabs->items) tabs->insert(-1, t);
+            if (!spec.tabs->current.empty()) tabs->select(spec.tabs->current);
+            sink.created(*spec.tabs, *tabs);
+            win->parts.push_back(std::move(tabs));
+        }
         win->set_content(builder(*win, sink).build(spec.content, orientation::vertical), spec);
         return win;
     }

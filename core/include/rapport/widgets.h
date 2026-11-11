@@ -970,6 +970,46 @@ public:
     virtual void on_changed(std::function<void(int)>) = 0;
 };
 
+// One of a window's document tabs (window_spec::tabs): a folder in a file
+// manager, a file in an editor.
+struct document_tab
+{
+    std::string id;  // the app's own, unique among the window's tabs
+    std::string title;
+    rap::icon icon;
+    std::string tooltip;  // e.g. the full path the title shortens
+};
+
+// A window's row of document tabs, as a browser's: under the menu bar,
+// across the window, above its content. The tabs only say which document is
+// current; the app swaps the content when it changes.
+//
+// Calls from the app (insert, remove, select...) never fire the handlers;
+// the user's clicks and keys do, once each. The keys, wherever the focus is:
+// Ctrl+T on_new, Ctrl+W on_close for the current tab, Ctrl+Tab and
+// Ctrl+Shift+Tab the next and previous (round), Ctrl+1..8 the first eight
+// and Ctrl+9 the last; a middle click closes the tab under it.
+// Closing is the app's to do (remove): it may ask first, or keep the last
+// tab. A bar with one tab is still shown; set_visible hides it.
+class document_tabs : public widget
+{
+public:
+    // At `index` (-1 or past the end: last). Not made current.
+    virtual void insert(int index, const document_tab&) = 0;
+    void add(const document_tab& t) { insert(-1, t); }
+    // The current one going makes the one after it current (the one before
+    // if it was last), as browsers do; current() says which.
+    virtual void remove(const std::string& id) = 0;
+    // The tab with t.id gets t's title, icon and tooltip.
+    virtual void update(const document_tab& t) = 0;
+    virtual void select(const std::string& id) = 0;
+    virtual std::string current() const = 0;           // empty when there are none
+    virtual std::vector<std::string> ids() const = 0;  // in order
+    virtual void on_select(std::function<void(const std::string& id)>) = 0;
+    virtual void on_close(std::function<void(const std::string& id)>) = 0;
+    virtual void on_new(std::function<void()>) = 0;
+};
+
 // -- canvas -------------------------------------------------------------------
 
 enum class pointer_event_type
