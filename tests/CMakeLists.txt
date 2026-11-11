@@ -32,6 +32,11 @@ add_executable(rapport-list-press-test list_press_test.cpp)
 target_include_directories(rapport-list-press-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
 target_link_libraries(rapport-list-press-test PRIVATE rapport::rapport)
 
+# Where a side button's press goes, for gtk4: the pointer's grab's.
+add_executable(rapport-side-buttons-test side_buttons_test.cpp)
+target_include_directories(rapport-side-buttons-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
+target_compile_features(rapport-side-buttons-test PRIVATE cxx_std_23)
+
 # Explorer's view, carried from Windows 11's entry's first GetState to its
 # second: no COM in it, so it runs everywhere.
 if(TARGET rapport_shell)
@@ -92,6 +97,7 @@ add_test(NAME http COMMAND rapport-http-test)
 add_test(NAME launch COMMAND rapport-launch-test)
 add_test(NAME theme-palette COMMAND rapport-theme-palette-test)
 add_test(NAME list-press COMMAND rapport-list-press-test)
+add_test(NAME side-buttons COMMAND rapport-side-buttons-test)
 if(TARGET rapport-explorer-view-test)
     add_test(NAME explorer-view COMMAND rapport-explorer-view-test)
 endif()
