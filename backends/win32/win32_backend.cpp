@@ -6528,65 +6528,10 @@ HRESULT list_drop_target::Drop(IDataObject* data, DWORD keys, POINTL pt, DWORD* 
 // -- tabs ---------------------------------------------------------------------
 
 // The tab control has no dark style: in dark mode it's painted here, the
-// tabs on the window colour with the current one raised and underlined in
-// the accent, as Windows 11's own tabs are.
-// In light mode on a base surface the style's drawing is kept, on the
-// surface's colour, with its page's body (the style's own lighter shade)
-// filled in the surface's colour too: drawn so for screen and print alike,
-// and so what tab_body_brush measures.
-void print_base_tabs(HWND h, HDC dc, LPARAM flags)
+// tabs on the surface's colour with the current one raised and underlined
+// in the accent, as Windows 11's own tabs are.
+void draw_dark_tabs(HWND h, HDC dc)
 {
-    RECT c;
-    GetClientRect(h, &c);
-    FillRect(dc, &c, theme_brush(theme_color::base));
-    // Its own erase left out: around the tabs is the surface, filled here.
-    DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), flags & ~LPARAM(PRF_ERASEBKGND));
-    RECT body = c;
-    traced_tab_adjust(h, FALSE, &body);
-    if (body.right <= body.left || body.bottom <= body.top) return;
-    const POINT mid{(body.left + body.right) / 2, (body.top + body.bottom) / 2};
-    const COLORREF face = GetPixel(dc, mid.x, mid.y);
-    if (face == CLR_INVALID || face == color_ref(theme_color_of(theme_color::base))) return;
-    // The body's pixels, out to the page's edge, whatever its inset.
-    HGDIOBJ old = SelectObject(dc, theme_brush(theme_color::base));
-    ExtFloodFill(dc, mid.x, mid.y, face, FLOODFILLSURFACE);
-    SelectObject(dc, old);
-}
-LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
-{
-    if (!dark_mode() && (msg == WM_PAINT || msg == WM_ERASEBKGND || msg == WM_PRINTCLIENT) &&
-        surface_of(h) == theme_color::base)
-    {
-        if (msg == WM_ERASEBKGND) return 1;
-        if (msg == WM_PRINTCLIENT)
-        {
-            print_base_tabs(h, reinterpret_cast<HDC>(wp), lp);
-            return 0;
-        }
-        // Through a bitmap: the body's colour is read back to be filled.
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(h, &ps);
-        RECT c;
-        GetClientRect(h, &c);
-        HDC mem = CreateCompatibleDC(dc);
-        HBITMAP bitmap = mem && c.right > 0 && c.bottom > 0 ? CreateCompatibleBitmap(dc, c.right, c.bottom) : nullptr;
-        if (bitmap)
-        {
-            HGDIOBJ old = SelectObject(mem, bitmap);
-            print_base_tabs(h, mem, PRF_CLIENT | PRF_ERASEBKGND);
-            BitBlt(dc, 0, 0, c.right, c.bottom, mem, 0, 0, SRCCOPY);
-            SelectObject(mem, old);
-            DeleteObject(bitmap);
-        }
-        if (mem) DeleteDC(mem);
-        EndPaint(h, &ps);
-        return 0;
-    }
-    if (!dark_mode() || (msg != WM_PAINT && msg != WM_ERASEBKGND))
-        return DefSubclassProc(h, msg, wp, lp);
-    if (msg == WM_ERASEBKGND) return 1;
-    PAINTSTRUCT ps;
-    HDC dc = BeginPaint(h, &ps);
     RECT c;
     GetClientRect(h, &c);
     const theme_color surface = surface_of(h);
@@ -6640,8 +6585,99 @@ LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
         }
     }
     SelectObject(dc, old);
-    EndPaint(h, &ps);
-    return 0;
+}
+
+// In light mode on a base surface the style's drawing is kept, on the
+// surface's colour, with its page's body (the style's own lighter shade)
+// filled in the surface's colour too. The body's colour is read back from
+// `dc`, so it's whole only on a DC that isn't clipped (render_tabs' bitmap).
+void draw_base_tabs(HWND h, HDC dc)
+{
+    RECT c;
+    GetClientRect(h, &c);
+    FillRect(dc, &c, theme_brush(theme_color::base));
+    // Its own erase left out: around the tabs is the surface, filled here.
+    DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
+    RECT body = c;
+    traced_tab_adjust(h, FALSE, &body);
+    if (body.right <= body.left || body.bottom <= body.top) return;
+    const POINT mid{(body.left + body.right) / 2, (body.top + body.bottom) / 2};
+    const COLORREF face = GetPixel(dc, mid.x, mid.y);
+    if (face == CLR_INVALID || face == color_ref(theme_color_of(theme_color::base))) return;
+    // The body's pixels, out to the page's edge, whatever its inset.
+    HGDIOBJ old = SelectObject(dc, theme_brush(theme_color::base));
+    ExtFloodFill(dc, mid.x, mid.y, face, FLOODFILLSURFACE);
+    SelectObject(dc, old);
+}
+
+// Tabs rapport draws itself: dark mode's, and a base surface's.
+bool own_tabs(HWND h)
+{
+    return dark_mode() || surface_of(h) == theme_color::base;
+}
+void draw_own_tabs(HWND h, HDC dc)
+{
+    if (dark_mode())
+        draw_dark_tabs(h, dc);
+    else
+        draw_base_tabs(h, dc);
+}
+
+// The tabs drawn whole into a bitmap of their own, then copied to `dc`
+// through whatever clip it has (a paint's update region, a partial print),
+// which is left as it was. False if the bitmap couldn't be made or copied.
+bool render_tabs(HWND h, HDC dc)
+{
+    RECT c;
+    GetClientRect(h, &c);
+    if (c.right <= 0 || c.bottom <= 0) return true;  // nothing to draw
+    HDC mem = CreateCompatibleDC(dc);
+    if (!mem) return false;
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), c.right, -c.bottom, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = bitmap ? SelectObject(mem, bitmap) : nullptr;
+    bool drawn = false;
+    if (old && old != HGDI_ERROR)
+    {
+        draw_own_tabs(h, mem);
+        GdiFlush();
+        drawn = BitBlt(dc, 0, 0, c.right, c.bottom, mem, 0, 0, SRCCOPY) != FALSE;
+        SelectObject(mem, old);
+    }
+    if (bitmap) DeleteObject(bitmap);
+    DeleteDC(mem);
+    return drawn;
+}
+
+// Screen and print (a pane's off-screen copy, tab_body_brush's measure)
+// alike: through render_tabs, else drawn straight onto the DC, so a failure
+// still paints (a light body may keep the style's shade then), and is never
+// retried.
+LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if ((msg != WM_PAINT && msg != WM_ERASEBKGND && msg != WM_PRINTCLIENT) || !own_tabs(h))
+        return DefSubclassProc(h, msg, wp, lp);
+    switch (msg)
+    {
+    case WM_ERASEBKGND: return 1;
+    case WM_PRINTCLIENT:
+    {
+        if (!(lp & PRF_CLIENT)) return 0;
+        HDC dc = reinterpret_cast<HDC>(wp);
+        if (!render_tabs(h, dc)) draw_own_tabs(h, dc);
+        return 0;
+    }
+    default:
+    {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        if (!render_tabs(h, dc)) draw_own_tabs(h, dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    }
 }
 
 class tabs_impl : public leaf<rap::tabs>

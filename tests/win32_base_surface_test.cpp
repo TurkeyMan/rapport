@@ -4,7 +4,9 @@
 // a group box, on a tab page, and on a scroll pane after layout passes have
 // resized it (its content drawn off screen, paint_pane). Before Windows 11,
 // the window colour as for any other window. Light and dark
-// (RAPPORT_THEME=light), and high contrast where the desktop has it.
+// (RAPPORT_THEME=light), and high contrast where the desktop has it. A tab
+// control printed (as a pane's copy prints it) gives the same, a partial
+// print whose clip leaves out its body's centre too.
 #include <rapport/rapport.h>
 #include <windows.h>
 #include <commctrl.h>
@@ -147,6 +149,39 @@ RECT rect_of(HWND h)
     GetWindowRect(h, &r);
     return r;
 }
+
+// A tab control's page body, in its client coordinates.
+RECT body_of(HWND tab)
+{
+    RECT body;
+    GetClientRect(tab, &body);
+    TabCtrl_AdjustRect(tab, FALSE, &body);
+    return body;
+}
+
+// The pixel at `at` (client coordinates) of tab control `tab` printed
+// (WM_PRINTCLIENT) into a bitmap, its clip `clip` if given.
+DWORD printed(HWND tab, POINT at, const RECT* clip)
+{
+    RECT c;
+    GetClientRect(tab, &c);
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), c.right, -c.bottom, 1, 32, BI_RGB};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    if (clip) IntersectClipRect(mem, clip->left, clip->top, clip->right, clip->bottom);
+    SendMessageW(tab, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND);
+    GdiFlush();
+    const DWORD px = static_cast<DWORD*>(bits)[size_t(at.y) * c.right + at.x] & 0xffffff;
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    return px;
+}
 }
 
 int main(int argc, char** argv)
@@ -175,8 +210,11 @@ int main(int argc, char** argv)
         slider{0, 10, 5},
         group{"A group", vbox{label{"In the group"}, check{"Grouped check"}}},
         tabs{{"One", vbox{label{"On the tab"}, check{"Tab check"}, slider{0, 10, 3}}}, {"Two", label{"Second"}}},
-        scroll{vbox{label{"On the pane"}, check{"Pane check"}, slider{0, 10, 7}}}.stretch(),
-    }}}.base_surface().size(480_px, 640_px));
+        scroll{vbox{
+            label{"On the pane"}, check{"Pane check"}, slider{0, 10, 7},
+            tabs{{"Pane one", vbox{label{"On the pane's tab"}}}, {"Pane two", label{"Pane second"}}},
+        }}.stretch(),
+    }}}.base_surface().size(480_px, 720_px));
     win->show();
     HWND root = FindWindowW(nullptr, L"Rapport base surface");
     if (!root) return 2;
@@ -189,7 +227,7 @@ int main(int argc, char** argv)
     // Layout passes that resize the pane's content, each drawn off screen.
     for (int i = 0; i < 6; ++i)
     {
-        SetWindowPos(root, nullptr, 0, 0, 480 + (i % 2 ? 40 : 0), 640, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(root, nullptr, 0, 0, 480 + (i % 2 ? 40 : 0), 720, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         pump();
     }
 
@@ -229,7 +267,11 @@ int main(int argc, char** argv)
 
     // A tab page's body and what's on it: on a base surface, the surface;
     // otherwise, in light mode, the style's body, which its controls match.
-    HWND tab = find(root, WC_TABCONTROLW, nullptr);
+    // The tab controls: on the window, and on the scroll pane.
+    HWND pane_panel = GetParent(find(root, L"Static", L"On the pane"));
+    HWND tab = nullptr, pane_tab = nullptr;
+    for (int i = 0; HWND h = find(root, WC_TABCONTROLW, nullptr, i); ++i)
+        (GetParent(h) == pane_panel ? pane_tab : tab) = h;
     HWND on_tab = find(root, L"Static", L"On the tab");
     HWND tab_check = find(root, L"Button", L"Tab check");
     if (!tab || !on_tab || !tab_check)
@@ -265,6 +307,55 @@ int main(int argc, char** argv)
     expect_colour(shot, rect_of(on_tab), page, "a label on a tab page");
     expect_colour(shot, rect_of(tab_check), page, "a check box on a tab page");
     expect_colour(shot, rect_of(tab_slider), page, "a slider on a tab page");
+
+    // A tab page on the scroll pane, drawn with the pane's off-screen copy.
+    HWND on_pane_tab = find(root, L"Static", L"On the pane's tab");
+    if (!pane_tab || !on_pane_tab)
+    {
+        std::fprintf(stderr, "no tab page on the pane\n");
+        return 2;
+    }
+    RECT pane_body = body_of(pane_tab);
+    MapWindowPoints(pane_tab, nullptr, reinterpret_cast<POINT*>(&pane_body), 2);
+    {
+        RECT viewport, meet;
+        GetClientRect(GetParent(pane_panel), &viewport);
+        MapWindowPoints(GetParent(pane_panel), nullptr, reinterpret_cast<POINT*>(&viewport), 2);
+        const RECT whole = rect_of(pane_tab);
+        if (!IntersectRect(&meet, &whole, &viewport) || !EqualRect(&meet, &whole))
+        {
+            std::fprintf(stderr, "the pane's tabs aren't wholly in view\n");
+            return 2;
+        }
+    }
+    const DWORD pane_page = base || dark ? surface : commonest(shot, pane_body);
+    expect_colour(shot, pane_body, pane_page, "a tab page on a scroll pane");
+    expect_colour(shot, rect_of(on_pane_tab), pane_page, "a label on a tab page on a scroll pane");
+
+    // Each printed: whole, and through a clip of a strip down the body's
+    // left that leaves out its centre (where its colour is read).
+    for (HWND t : {tab, pane_tab})
+    {
+        const char* where = t == tab ? "the window's" : "the pane's";
+        const RECT b = body_of(t);
+        const RECT strip{b.left, b.top, b.left + 12, b.bottom};
+        const POINT at{b.left + 5, (b.top + b.bottom) / 2};
+        const DWORD whole = printed(t, at, nullptr), part = printed(t, at, &strip);
+        char why[160];
+        if (base || dark)
+        {
+            if (whole != surface)
+            {
+                std::snprintf(why, sizeof why, "%s tab page printed is %06lx, not %06lx", where, whole, surface);
+                expect(false, why);
+            }
+        }
+        if (part != whole)
+        {
+            std::snprintf(why, sizeof why, "%s tab page printed through a clip is %06lx, not %06lx", where, part, whole);
+            expect(false, why);
+        }
+    }
 
     // The scroll pane's viewport, after the passes that resized it.
     if (HWND pane = GetParent(find(root, L"Static", L"On the pane")))
