@@ -6,7 +6,10 @@
 // and the insets are rebuilt at the window's DPI after a WM_DPICHANGED.
 // Printed with WM_PRINTCLIENT, not captured. Before Windows 11 the two are
 // the same.
-//   rapport-win32-file-view-inset-test
+//   rapport-win32-file-view-inset-test             (a Common Controls 6 manifest)
+//   rapport-win32-file-view-inset-no-manifest-test (RAPPORT_TEST_NO_MANIFEST:
+//     none, so the process links comctl32 v5 and rapport's activation context
+//     makes the controls v6; the arrows aren't checked there)
 #include <rapport/rapport.h>
 
 #define NOMINMAX
@@ -24,7 +27,7 @@
 
 // Common controls 6, as an application with a manifest has: v5 headers draw
 // no sort arrows.
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(RAPPORT_TEST_NO_MANIFEST)
 #pragma comment(                                                                                   \
     linker,                                                                                        \
     "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -88,21 +91,44 @@ std::vector<HWND> lists()
     return found;
 }
 
-// The comctl32 this process draws its controls with, as major.minor.
-std::string comctl_version()
+// The comctl32 the controls are, for reading their image lists: without a
+// manifest the imported one is v5 and the controls' lists are v6, so the
+// functions come from the DLL loaded under rapport's activation context (as
+// the backend's g_comctl does). With one, it's the same DLL.
+struct comctl
 {
     struct dll_version
     {
         DWORD size, major, minor, build, platform;
     };
-    using fn = HRESULT(CALLBACK*)(dll_version*);
-    dll_version v{sizeof v};
-    if (HMODULE m = GetModuleHandleW(L"comctl32.dll"))
+    decltype(&ImageList_GetIconSize) icon_size = nullptr;
+    decltype(&ImageList_GetImageCount) image_count = nullptr;
+    std::string version = "unknown";
+
+    void resolve()  // after rap::ui::load
+    {
+        HMODULE m = LoadLibraryW(L"comctl32.dll");
+        if (!m) return;
+        icon_size = reinterpret_cast<decltype(icon_size)>(
+            reinterpret_cast<void*>(GetProcAddress(m, "ImageList_GetIconSize")));
+        image_count = reinterpret_cast<decltype(image_count)>(
+            reinterpret_cast<void*>(GetProcAddress(m, "ImageList_GetImageCount")));
+        using fn = HRESULT(CALLBACK*)(dll_version*);
+        dll_version v{sizeof v};
         if (auto f =
                 reinterpret_cast<fn>(reinterpret_cast<void*>(GetProcAddress(m, "DllGetVersion"))))
-            if (SUCCEEDED(f(&v))) return std::to_string(v.major) + "." + std::to_string(v.minor);
-    return "unknown";
-}
+            if (SUCCEEDED(f(&v))) version = std::to_string(v.major) + "." + std::to_string(v.minor);
+        if (GetModuleHandleW(L"comctl32.dll") != m) version += " (the imported one is another)";
+    }
+    SIZE size(HIMAGELIST il) const
+    {
+        int cx = 0, cy = 0;
+        if (il && icon_size) icon_size(il, &cx, &cy);
+        return {cx, cy};
+    }
+    int count(HIMAGELIST il) const { return il && image_count ? image_count(il) : 0; }
+};
+comctl g_cc;
 
 // Everything the measures come from, for a failed check to explain itself.
 void dump(const char* name, HWND list)
@@ -114,20 +140,17 @@ void dump(const char* name, HWND list)
     ListView_GetItemRect(list, 0, &icon, LVIR_ICON);
     ListView_GetItemRect(list, 0, &label, LVIR_LABEL);
     ListView_GetItemRect(list, 0, &bounds, LVIR_BOUNDS);
-    int sx = 0, sy = 0, hx = 0, hy = 0;
     const HIMAGELIST rows_images = ListView_GetImageList(list, LVSIL_SMALL);
-    if (rows_images) ImageList_GetIconSize(rows_images, &sx, &sy);
     const auto himl = reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0));
-    if (himl) ImageList_GetIconSize(himl, &hx, &hy);
+    const SIZE rs = g_cc.size(rows_images), hs = g_cc.size(himl);
     std::printf("     %s: dpi %u, client %ldx%ld, header %ldx%ld, bitmap margin %d\n", name,
                 GetDpiForWindow(list), client.right, client.bottom, hclient.right, hclient.bottom,
                 int(SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0)));
     std::printf("       row 0: bounds %ld..%ld, icon %ld..%ld, label %ld..%ld\n", bounds.left,
                 bounds.right, icon.left, icon.right, label.left, label.right);
     std::printf("       small images %p %dx%d (%d), header images %p %dx%d (%d)\n",
-                static_cast<void*>(rows_images), sx, sy,
-                rows_images ? ImageList_GetImageCount(rows_images) : 0, static_cast<void*>(himl),
-                hx, hy, himl ? ImageList_GetImageCount(himl) : 0);
+                static_cast<void*>(rows_images), int(rs.cx), int(rs.cy), g_cc.count(rows_images),
+                static_cast<void*>(himl), int(hs.cx), int(hs.cy), g_cc.count(himl));
     for (int i = 0; i < Header_GetItemCount(header); ++i)
     {
         RECT r{};
@@ -239,12 +262,8 @@ measures measure(HWND list)
         Header_GetItem(header, i, &hd);
         (i ? m.other_image : m.title_image) = (hd.fmt & HDF_IMAGE) != 0;
     }
-    if (auto il = reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0)))
-    {
-        int cx = 0, cy = 0;
-        ImageList_GetIconSize(il, &cx, &cy);
-        m.header_image = cx;
-    }
+    m.header_image = int(
+        g_cc.size(reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0))).cx);
     RECT hr{};
     GetWindowRect(header, &hr);
     m.header_h = hr.bottom - hr.top;
@@ -318,7 +337,14 @@ int main(int argc, char** argv)
     HWND top = GetAncestor(found[1], GA_ROOT);
     expect(top && GetAncestor(found[0], GA_ROOT) == top, "both lists are in one window");
     if (!top) return 1;
-    std::printf("comctl32 %s\n", comctl_version().c_str());
+    g_cc.resolve();
+    std::printf("comctl32 %s, %s\n", g_cc.version.c_str(),
+#ifdef RAPPORT_TEST_NO_MANIFEST
+                "no manifest: the arrows aren't checked"
+#else
+                "a Common Controls 6 manifest"
+#endif
+    );
 
     const DWORD build = windows_build();
     const bool eleven = build >= 22000;
@@ -420,9 +446,15 @@ int main(int argc, char** argv)
                    "the sort flags are where they were set" + at);
             expect(ink0 == unsorted_ink, "the first title stays where it was" + at);
             if (eleven) expect((f0 & HDF_IMAGE) != 0, "the first title keeps its image" + at);
+#ifdef RAPPORT_TEST_NO_MANIFEST
+            // What draws the arrow without a manifest isn't rapport's to say.
+            const bool drawn =
+                st.fmt0 || expect(changed == 0, "the first title is drawn as unsorted" + at);
+#else
             const bool drawn =
                 st.fmt0 ? expect(changed > 0, "the first title's arrow is drawn" + at)
                         : expect(changed == 0, "the first title is drawn as unsorted" + at);
+#endif
             if (!drawn) dump("file_view", found[1]);
         }
     }
@@ -443,9 +475,9 @@ int main(int argc, char** argv)
         RECT icon{};
         ListView_GetItemRect(found[1], 0, &icon, LVIR_ICON);
         HWND header = ListView_GetHeader(found[1]);
-        int cx = 0, cy = 0;
-        if (auto il = reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0)))
-            ImageList_GetIconSize(il, &cx, &cy);
+        const int cx = int(
+            g_cc.size(reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0)))
+                .cx);
         const bool rebuilt = ListView_GetImageList(found[1], LVSIL_SMALL) != rows_before;
         std::printf(
             "     after WM_DPICHANGED (sent %u, window at %u): rows' list %s, slot %ld, header "
