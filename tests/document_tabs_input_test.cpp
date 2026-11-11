@@ -16,6 +16,7 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QMouseEvent>
 #include <QTabBar>
 #include <QTabWidget>
@@ -78,6 +79,8 @@ public:
     // Before focusing a control: the window active where the toolkit only
     // has a focus widget in the active window (Qt).
     virtual void activate() {}
+    // Tab i's title shows literally, with no access key in it.
+    virtual bool literal_title(int, const std::string&) { return true; }
 };
 
 #if defined(RAPPORT_TEST_GTK3)
@@ -353,6 +356,12 @@ public:
 
 private:
 public:
+    // "R&D" shows as itself, with no Alt+D mnemonic.
+    bool literal_title(int i, const std::string& title) override
+    {
+        const QString shown = bar_->tabText(i);
+        return QKeySequence::mnemonic(shown).isEmpty() && QString(shown).replace("&&", "&") == QString::fromStdString(title);
+    }
     void activate() override
     {
         bar_->window()->activateWindow();
@@ -600,10 +609,11 @@ int main(int argc, char** argv)
             once(closed, {"b"}, "a middle click: on_close(b) once");
             closed.clear();
             if (d.close_button(2)) once(closed, {"c"}, "the close button: on_close(c) once");
-            tabs->update({"a", "Alpha 2", {}, "elsewhere"});
+            tabs->update({"a", "R&D", {}, "elsewhere"});
             tabs->select("c");
             expect(d.current() == 2 && selected.size() == 1,
                    "the app's update and select fire nothing");
+            expect(d.literal_title(0, "R&D"), "an '&' in a title shows as itself, no access key");
             // In a page's tabs, Ctrl+Tab goes round their pages instead.
             if (inner_field) inner_field->focus();
             inner_changed.clear();  // GTK 3's page tabs tell of their first page as they show

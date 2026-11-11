@@ -1962,7 +1962,7 @@ public:
     {
         const int at = state.insert(index, t);
         quiet q(this);
-        bar_->insertTab(at, to_q_icon(t.icon, 16, bar_), qs(t.title));
+        bar_->insertTab(at, to_q_icon(t.icon, 16, bar_), title(t));
         bar_->setTabToolTip(at, qs(t.tooltip.empty() ? t.title : t.tooltip));
         bar_->setCurrentIndex(state.current);
         // A hidden bar (its window not shown yet) doesn't say its size has
@@ -1984,7 +1984,7 @@ public:
         if (i < 0) return;
         state.tabs[size_t(i)] = t;
         bar_->setTabIcon(i, to_q_icon(t.icon, 16, bar_));
-        bar_->setTabText(i, qs(t.title));
+        bar_->setTabText(i, title(t));
         bar_->setTabToolTip(i, qs(t.tooltip.empty() ? t.title : t.tooltip));
     }
     void select(const std::string& id) override
@@ -2020,6 +2020,10 @@ public:
     doc_tabs::state state;
 
 private:
+    // A title as the bar shows it: '&' would mark a mnemonic (Alt+D would
+    // choose "R&D"), so it's doubled; the state keeps the literal title.
+    static QString title(const document_tab& t) { return qs(t.title).replace('&', QStringLiteral("&&")); }
+
     // The bar's own changes of tab (as one goes) aren't the user's.
     struct quiet
     {
