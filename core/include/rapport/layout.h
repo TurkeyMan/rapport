@@ -409,6 +409,11 @@ struct window_spec
     // and libadwaita is adopted: unset, for dialogs only; false keeps the
     // window's own chrome (a viewer's menu bar, toolbar and status bar).
     std::optional<bool> header_bar;
+    // The window's background in the base colour (a list's, a field's)
+    // rather than the window colour, as Windows 11 Explorer's panes and
+    // toolbar are white: its labels, check boxes, sliders, group boxes, tab
+    // pages and toolbars on it. Windows 11 only; elsewhere the window colour.
+    bool base_surface = false;
 };
 
 // -- builders -----------------------------------------------------------------
@@ -1411,6 +1416,11 @@ public:
     window& margins(bool on)
     {
         w_.margins = on;
+        return *this;
+    }
+    window& base_surface(bool on = true)
+    {
+        w_.base_surface = on;
         return *this;
     }
     window& menu_bar(std::vector<menu_bar_item> menus)

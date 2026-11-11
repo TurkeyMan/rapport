@@ -457,6 +457,8 @@ key key_for(int k)
     case Qt::Key_End: return key::end;
     case Qt::Key_PageUp: return key::page_up;
     case Qt::Key_PageDown: return key::page_down;
+    case Qt::Key_Back: return key::back;
+    case Qt::Key_Forward: return key::forward;
     default: break;
     }
     if (k >= Qt::Key_F1 && k <= Qt::Key_F12) return key(int(key::f1) + (k - Qt::Key_F1));
@@ -2409,7 +2411,10 @@ void canvas_widget::press(QMouseEvent* e)
     pointer_event ev{pointer_event_type::press, {float(e->position().x()), float(e->position().y())}, button_number(e->button()), 1,
                     modifiers_of(e->modifiers())};
     ev.clicks = owner->clicks(ev.button, e->position(), e->timestamp());
-    if (owner->pointer(ev)) e->accept();
+    if (owner->pointer(ev))
+        e->accept();
+    else if (ev.button == 4 || ev.button == 5)
+        e->ignore();  // on up to the window, as back or forward
 }
 
 void canvas_widget::mouseReleaseEvent(QMouseEvent* e)
@@ -2465,7 +2470,12 @@ void canvas_widget::wheelEvent(QWheelEvent* e)
 
 void canvas_widget::key(QKeyEvent* e, bool press)
 {
-    if (!owner) return;
+    const rap::key k = key_for(e->key());
+    if (!owner || k == rap::key::back || k == rap::key::forward)  // the window's
+    {
+        e->ignore();
+        return;
+    }
     key_event ev;
     ev.press = press;
     ev.key = key_for(e->key());
@@ -4143,6 +4153,8 @@ public:
 
     bool filter_key(QObject* o, QEvent* e)
     {
+        if (e->type() == QEvent::MouseButtonPress || e->type() == QEvent::MouseButtonDblClick)
+            return side_button(o, static_cast<QMouseEvent*>(e));
         if (e->type() != QEvent::KeyPress && e->type() != QEvent::KeyRelease) return false;
         auto* w = qobject_cast<QWidget*>(o);
         QWidget* focus = QApplication::focusWidget();
@@ -4160,8 +4172,10 @@ public:
         const bool typing =
             focus && (qobject_cast<QLineEdit*>(focus) || qobject_cast<QAbstractSpinBox*>(focus) ||
                       (plain && !plain->isReadOnly()));
-        const bool not_text =
-            k->key() == Qt::Key_Escape || (k->key() >= Qt::Key_F1 && k->key() <= Qt::Key_F12);
+        const bool navigation = k->key() == Qt::Key_Back || k->key() == Qt::Key_Forward;
+        if (navigation && e->type() != QEvent::KeyPress) return false;  // presses only
+        const bool not_text = navigation || k->key() == Qt::Key_Escape ||
+                              (k->key() >= Qt::Key_F1 && k->key() <= Qt::Key_F12);
         if (typing && !not_text) return false;
         key_event ev;
         ev.press = e->type() == QEvent::KeyPress;
@@ -4169,6 +4183,27 @@ public:
         if (ev.key == key::character) ev.codepoint = char32_t(QChar::toLower(char32_t(k->key())));
         ev.modifiers = modifiers_of(k->modifiers());
         ev.repeat = k->isAutoRepeat();
+        return on_key_(ev);
+    }
+
+    // The mouse's side buttons are back and forward, pressed anywhere in the
+    // window: taken as they reach the widget under the pointer, before it
+    // sees them (a view would select with them). A canvas has them first;
+    // one it doesn't take goes on up to its parent, and is taken there.
+    bool side_button(QObject* o, QMouseEvent* m)
+    {
+        if (m->button() != Qt::BackButton && m->button() != Qt::ForwardButton) return false;
+        auto* w = qobject_cast<QWidget*>(o);
+        if (!on_key_ || !w || w->window() != frame_) return false;
+        if (auto* c = dynamic_cast<canvas_widget*>(w); c && c->owner) return false;
+        // Qt passes a press up to each parent until one takes it, as a new
+        // event each time, which comes here again: once is enough.
+        const side_press press{m->timestamp(), m->button(), m->globalPosition()};
+        if (press == last_side_press_) return false;
+        last_side_press_ = press;
+        key_event ev;
+        ev.key = m->button() == Qt::BackButton ? key::back : key::forward;
+        ev.modifiers = modifiers_of(m->modifiers());
         return on_key_(ev);
     }
 
@@ -4286,6 +4321,14 @@ private:
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     std::function<void(bool)> on_fullscreen_;
     std::function<bool(const key_event&)> on_key_;
+    struct side_press
+    {
+        quint64 time = 0;
+        Qt::MouseButton button = Qt::NoButton;
+        QPointF at;
+        bool operator==(const side_press&) const = default;
+    };
+    side_press last_side_press_;
 };
 
 void frame_widget::reject()

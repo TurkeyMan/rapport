@@ -419,7 +419,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         RECT c;
         GetClientRect(wnd, &c);
         const int saved = SaveDC(dc);
-        FillRect(dc, &c, theme_brush(theme_color::window));
+        FillRect(dc, &c, theme_brush(surface_of(wnd)));
         paint_group_frames(wnd, dc);
         RestoreDC(dc, saved);
         result = 1;
@@ -442,11 +442,11 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
             {
                 SetTextColor(
                     reinterpret_cast<HDC>(wp),
-                    color_ref(theme_color_of(IsWindowEnabled(c) ? theme_color::window_text
+                    color_ref(theme_color_of(IsWindowEnabled(c) ? surface_text_of(wnd)
                                                                 : theme_color::disabled_text)));
                 SetBkColor(reinterpret_cast<HDC>(wp),
-                           color_ref(theme_color_of(theme_color::window)));
-                result = reinterpret_cast<LRESULT>(theme_brush(theme_color::window));
+                           color_ref(theme_color_of(surface_of(wnd))));
+                result = reinterpret_cast<LRESULT>(theme_brush(surface_of(wnd)));
                 return true;
             }
             if (!_wcsicmp(cls, L"Edit"))
@@ -467,10 +467,10 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         SetTextColor(reinterpret_cast<HDC>(wp),
                      color_ref(theme_color_of(!IsWindowEnabled(c) ? theme_color::disabled_text
                                               : link              ? theme_color::link
-                                                                  : theme_color::window_text)));
+                                                                  : surface_text_of(wnd))));
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
         HBRUSH on_tab = dark_mode() ? nullptr : tab_body_under(c);
-        result = reinterpret_cast<LRESULT>(on_tab ? on_tab : theme_brush(theme_color::window));
+        result = reinterpret_cast<LRESULT>(on_tab ? on_tab : theme_brush(surface_of(wnd)));
         return true;
     }
     // Fields and drop-down lists, dark in dark mode (their defaults are
@@ -640,7 +640,7 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             // panel's own paint is done: no loop if the copy fails each time.
             if (!paint_pane(h))
             {
-                FillRect(dc, &ps.rcPaint, reinterpret_cast<HBRUSH>(GetClassLongPtrW(h, GCLP_HBRBACKGROUND)));
+                FillRect(dc, &ps.rcPaint, theme_brush(surface_of(h)));
                 for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
                     RedrawWindow(c, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
             }
@@ -672,6 +672,10 @@ void register_classes()
     wc.lpfnWndProc = host_proc;
     wc.lpszClassName = L"rapportHost";
     RegisterClassExW(&wc);
+    // A base surface window's (surface_of).
+    wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+    wc.lpszClassName = L"rapportHostBase";
+    RegisterClassExW(&wc);
 }
 
 void track_container_control(HWND h);
@@ -679,7 +683,8 @@ void track_container_control(HWND h);
 HWND make_host(HWND parent, DWORD style = 0)
 {
     register_classes();
-    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT, L"rapportHost", L"",
+    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT,
+                             surface_of(parent) == theme_color::base ? L"rapportHostBase" : L"rapportHost", L"",
                              WS_CHILD | WS_CLIPCHILDREN | style, 0, 0, 0, 0, parent, nullptr,
                              instance(), nullptr);
     track_container_control(h);
@@ -2064,7 +2069,7 @@ public:
             state += 1;
         HDC dc = cd->hdc;
         const RECT r = cd->rc;
-        FillRect(dc, &r, theme_brush(theme_color::window));
+        FillRect(dc, &r, theme_brush(surface_of(h_)));
         SIZE box{px(13), px(13)};
         GetThemePartSize(theme, dc, BP_CHECKBOX, state, nullptr, TS_DRAW, &box);
         RECT b{r.left, r.top + (r.bottom - r.top - box.cy) / 2, r.left + box.cx, 0};
@@ -2083,7 +2088,7 @@ public:
             opts.dwSize = sizeof opts;
             opts.dwFlags = DTT_TEXTCOLOR;
             opts.crText = color_ref(theme_color_of(
-                (item & CDIS_DISABLED) ? theme_color::disabled_text : theme_color::window_text));
+                (item & CDIS_DISABLED) ? theme_color::disabled_text : surface_text_of(h_)));
             DrawThemeTextEx(theme, dc, BP_CHECKBOX, state, label.c_str(), -1, flags, &text, &opts);
             if ((item & CDIS_FOCUS) && !(ui & UISF_HIDEFOCUS))
             {
@@ -3036,14 +3041,14 @@ public:
             RECT text{rect_.left + win_.px(9), rect_.top, rect_.left + win_.px(9) + t.cx, rect_.top + t.cy};
             RECT gap = text;
             InflateRect(&gap, win_.px(2), 0);
-            FillRect(dc, &gap, theme_brush(theme_color::window));
+            FillRect(dc, &gap, theme_brush(surface_of(parent_)));
             SetBkMode(dc, TRANSPARENT);
             if (theme)
                 DrawThemeText(theme, dc, BP_GROUPBOX, GBS_NORMAL, title_.c_str(), -1, DT_SINGLELINE | DT_LEFT, 0,
                               &text);
             else
             {
-                SetTextColor(dc, color_ref(theme_color_of(theme_color::window_text)));
+                SetTextColor(dc, color_ref(theme_color_of(surface_text_of(parent_))));
                 DrawTextW(dc, title_.c_str(), -1, &text, DT_SINGLELINE | DT_LEFT);
             }
         }
@@ -4341,14 +4346,14 @@ public:
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
         RECT r = d->rcItem;
-        FillRect(d->hDC, &r, theme_brush(theme_color::window));
+        FillRect(d->hDC, &r, theme_brush(surface_of(h_)));
         const bool pressed = d->itemState & ODS_SELECTED;
         const bool disabled = d->itemState & ODS_DISABLED;
         if (pressed || checked_ || hot_)
         {
             const color base = theme_color_of(theme_color::highlight);
             const float a = pressed ? 0.35f : checked_ ? 0.25f : 0.12f;
-            const color face = theme_color_of(theme_color::window);
+            const color face = theme_color_of(surface_of(h_));
             auto mix = [a](uint8_t x, uint8_t y) { return uint8_t(x * (1 - a) + y * a); };
             HBRUSH b = CreateSolidBrush(RGB(mix(face.r, base.r), mix(face.g, base.g), mix(face.b, base.b)));
             RECT in = r;
@@ -4361,7 +4366,7 @@ public:
         ir.right = ir.left + icon;
         ir.bottom = ir.top + icon;
         draw_icon_on_dc(d->hDC, ir, icon_, win_.scale(),
-                     disabled ? theme_color_of(theme_color::placeholder_text) : theme_color_of(theme_color::window_text));
+                     disabled ? theme_color_of(theme_color::placeholder_text) : theme_color_of(surface_text_of(h_)));
         return true;
     }
     SIZE measure() override { return {px(28), px(28)}; }
@@ -4539,6 +4544,18 @@ public:
             handled = true;
             return dark_draw(reinterpret_cast<NMTBCUSTOMDRAW*>(n));
         }
+        // Light, it draws its background in the style's (the window colour)
+        // whatever is behind it, double buffered or printed: on a base
+        // surface that's filled in the surface's colour first, the buttons'
+        // looks (hot, pressed, checked, disabled) left to it.
+        if (n->code == NM_CUSTOMDRAW && surface_of(h_) == theme_color::base)
+        {
+            handled = true;
+            auto* cd = reinterpret_cast<NMTBCUSTOMDRAW*>(n);
+            if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)
+                FillRect(cd->nmcd.hdc, &cd->nmcd.rc, theme_brush(theme_color::base));
+            return CDRF_DODEFAULT;
+        }
         handled = n->code == TBN_GETINFOTIPW;
         if (!handled) return 0;
         auto* tip = reinterpret_cast<NMTBGETINFOTIPW*>(n);
@@ -4559,7 +4576,7 @@ public:
         switch (cd->nmcd.dwDrawStage)
         {
         case CDDS_PREPAINT:
-            FillRect(cd->nmcd.hdc, &cd->nmcd.rc, theme_brush(theme_color::window));
+            FillRect(cd->nmcd.hdc, &cd->nmcd.rc, theme_brush(surface_of(cd->nmcd.hdr.hwndFrom)));
             return CDRF_NOTIFYITEMDRAW;
         case CDDS_ITEMPREPAINT:
         {
@@ -6538,18 +6555,14 @@ HRESULT list_drop_target::Drop(IDataObject* data, DWORD keys, POINTL pt, DWORD* 
 // -- tabs ---------------------------------------------------------------------
 
 // The tab control has no dark style: in dark mode it's painted here, the
-// tabs on the window colour with the current one raised and underlined in
-// the accent, as Windows 11's own tabs are.
-LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+// tabs on the surface's colour with the current one raised and underlined
+// in the accent, as Windows 11's own tabs are.
+void draw_dark_tabs(HWND h, HDC dc)
 {
-    if (!dark_mode() || (msg != WM_PAINT && msg != WM_ERASEBKGND))
-        return DefSubclassProc(h, msg, wp, lp);
-    if (msg == WM_ERASEBKGND) return 1;
-    PAINTSTRUCT ps;
-    HDC dc = BeginPaint(h, &ps);
     RECT c;
     GetClientRect(h, &c);
-    FillRect(dc, &c, theme_brush(theme_color::window));
+    const theme_color surface = surface_of(h);
+    FillRect(dc, &c, theme_brush(surface));
     const UINT dpi = dpi_of(h);
     auto px = [dpi](int v) { return MulDiv(v, int(dpi), 96); };
     RECT page = c;
@@ -6572,7 +6585,7 @@ LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
         FillRect(dc, &r,
                  theme_brush(selected ? theme_color::card
                              : hot    ? theme_color::hover
-                                      : theme_color::window));
+                                      : surface));
         FrameRect(dc, &r, theme_brush(theme_color::border));
         if (selected)
         {
@@ -6586,7 +6599,7 @@ LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
         item.cchTextMax = int(std::size(text));
         TabCtrl_GetItem(h, i, &item);
         SetTextColor(dc,
-                     color_ref(theme_color_of(IsWindowEnabled(h) ? theme_color::window_text
+                     color_ref(theme_color_of(IsWindowEnabled(h) ? surface_text_of(h)
                                                                  : theme_color::disabled_text)));
         DWORD flags = DT_SINGLELINE | DT_VCENTER | DT_CENTER;
         if (ui & UISF_HIDEACCEL) flags |= DT_HIDEPREFIX;
@@ -6599,8 +6612,99 @@ LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
         }
     }
     SelectObject(dc, old);
-    EndPaint(h, &ps);
-    return 0;
+}
+
+// In light mode on a base surface the style's drawing is kept, on the
+// surface's colour, with its page's body (the style's own lighter shade)
+// filled in the surface's colour too. The body's colour is read back from
+// `dc`, so it's whole only on a DC that isn't clipped (render_tabs' bitmap).
+void draw_base_tabs(HWND h, HDC dc)
+{
+    RECT c;
+    GetClientRect(h, &c);
+    FillRect(dc, &c, theme_brush(theme_color::base));
+    // Its own erase left out: around the tabs is the surface, filled here.
+    DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
+    RECT body = c;
+    traced_tab_adjust(h, FALSE, &body);
+    if (body.right <= body.left || body.bottom <= body.top) return;
+    const POINT mid{(body.left + body.right) / 2, (body.top + body.bottom) / 2};
+    const COLORREF face = GetPixel(dc, mid.x, mid.y);
+    if (face == CLR_INVALID || face == color_ref(theme_color_of(theme_color::base))) return;
+    // The body's pixels, out to the page's edge, whatever its inset.
+    HGDIOBJ old = SelectObject(dc, theme_brush(theme_color::base));
+    ExtFloodFill(dc, mid.x, mid.y, face, FLOODFILLSURFACE);
+    SelectObject(dc, old);
+}
+
+// Tabs rapport draws itself: dark mode's, and a base surface's.
+bool own_tabs(HWND h)
+{
+    return dark_mode() || surface_of(h) == theme_color::base;
+}
+void draw_own_tabs(HWND h, HDC dc)
+{
+    if (dark_mode())
+        draw_dark_tabs(h, dc);
+    else
+        draw_base_tabs(h, dc);
+}
+
+// The tabs drawn whole into a bitmap of their own, then copied to `dc`
+// through whatever clip it has (a paint's update region, a partial print),
+// which is left as it was. False if the bitmap couldn't be made or copied.
+bool render_tabs(HWND h, HDC dc)
+{
+    RECT c;
+    GetClientRect(h, &c);
+    if (c.right <= 0 || c.bottom <= 0) return true;  // nothing to draw
+    HDC mem = CreateCompatibleDC(dc);
+    if (!mem) return false;
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), c.right, -c.bottom, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = bitmap ? SelectObject(mem, bitmap) : nullptr;
+    bool drawn = false;
+    if (old && old != HGDI_ERROR)
+    {
+        draw_own_tabs(h, mem);
+        GdiFlush();
+        drawn = BitBlt(dc, 0, 0, c.right, c.bottom, mem, 0, 0, SRCCOPY) != FALSE;
+        SelectObject(mem, old);
+    }
+    if (bitmap) DeleteObject(bitmap);
+    DeleteDC(mem);
+    return drawn;
+}
+
+// Screen and print (a pane's off-screen copy, tab_body_brush's measure)
+// alike: through render_tabs, else drawn straight onto the DC, so a failure
+// still paints (a light body may keep the style's shade then), and is never
+// retried.
+LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if ((msg != WM_PAINT && msg != WM_ERASEBKGND && msg != WM_PRINTCLIENT) || !own_tabs(h))
+        return DefSubclassProc(h, msg, wp, lp);
+    switch (msg)
+    {
+    case WM_ERASEBKGND: return 1;
+    case WM_PRINTCLIENT:
+    {
+        if (!(lp & PRF_CLIENT)) return 0;
+        HDC dc = reinterpret_cast<HDC>(wp);
+        if (!render_tabs(h, dc)) draw_own_tabs(h, dc);
+        return 0;
+    }
+    default:
+    {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        if (!render_tabs(h, dc)) draw_own_tabs(h, dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    }
 }
 
 class tabs_impl : public leaf<rap::tabs>
@@ -8074,11 +8178,27 @@ private:
         case WM_RBUTTONDOWN:
         case WM_RBUTTONDBLCLK: press(lp, 3); return 0;
         case WM_XBUTTONDOWN:
-        case WM_XBUTTONDBLCLK: press(lp, GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 4 : 5); return TRUE;
+        case WM_XBUTTONDBLCLK:
+        {
+            const int button = GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 4 : 5;
+            x_taken_[button - 4] = press(lp, button);
+            return TRUE;
+        }
         case WM_LBUTTONUP: release(lp, 1); return 0;
         case WM_MBUTTONUP: release(lp, 2); return 0;
         case WM_RBUTTONUP: release(lp, 3); return 0;
-        case WM_XBUTTONUP: release(lp, GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 4 : 5); return TRUE;
+        case WM_XBUTTONUP:
+        {
+            // Taken (its press or this), the button is the canvas's. Else
+            // DefWindowProc makes it a WM_APPCOMMAND, which goes up to the
+            // window as back or forward.
+            // Each button on its own: one may be the canvas's while the
+            // other isn't, held at once and let go in either order.
+            const int button = GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 4 : 5;
+            const bool taken = release(lp, button);
+            if (std::exchange(x_taken_[button - 4], false) || taken) return TRUE;
+            break;
+        }
         case WM_MOUSEMOVE:
             if (!inside_)
             {
@@ -8123,6 +8243,9 @@ private:
         case WM_SYSKEYDOWN:
         case WM_KEYUP:
         case WM_SYSKEYUP:
+            // The Back and Forward keys are the window's: DefWindowProc makes
+            // them WM_APPCOMMAND, which goes up to it.
+            if (wp == VK_BROWSER_BACK || wp == VK_BROWSER_FORWARD) break;
             if (key_ && key_(make_key_event(wp, lp, msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN))) return 0;
             break;
         case WM_SETFOCUS:
@@ -8318,7 +8441,7 @@ private:
         }
         if (FAILED(dc_rt_->BindDC(dc, &c))) return;
         dc_rt_->BeginDraw();
-        dc_rt_->Clear(d2d_color(theme_color_of(theme_color::window)));
+        dc_rt_->Clear(d2d_color(theme_color_of(surface_of(h_))));
         if (!shown_pixels_.empty() && shown_w_ > 0 && shown_h_ > 0)
         {
             if (!shown_bitmap_)
@@ -8358,7 +8481,7 @@ private:
 
     void draw(ID2D1RenderTarget* rt, uint64_t key, ID2D1DeviceContext* gpu = nullptr)
     {
-        rt->Clear(d2d_color(theme_color_of(theme_color::window)));
+        rt->Clear(d2d_color(theme_color_of(surface_of(h_))));
         if (gpu && gpu_frame_) draw_gpu_frame(gpu);
         if (paint_ || frame_)
         {
@@ -8452,6 +8575,7 @@ private:
     SIZE told_{};                // the size the app last heard of
     cursor cursor_ = cursor::default_;
     bool inside_ = false;
+    bool x_taken_[2] = {};  // the app took buttons 4 and 5's last presses
     int clicks_ = 0, last_button_ = 0;
     DWORD last_time_ = 0;
     POINT last_pos_{};
@@ -8535,13 +8659,21 @@ public:
             wc.hIcon = app_icon(SM_CXICON);
             wc.hIconSm = app_icon(SM_CXSMICON);
             RegisterClassExW(&wc);
+            // A base surface window's (surface_of).
+            wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+            wc.lpszClassName = L"rapportWindowBase";
+            RegisterClassExW(&wc);
             registered = true;
         }
+        const bool base = spec.base_surface && base_surface_supported();
         DWORD style = dialog_ ? (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME) : WS_OVERLAPPEDWINDOW;
         if (!spec.resizable) style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
-        hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME : 0), L"rapportWindow",
-                                wide(spec.title).c_str(), style | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
+        hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME : 0),
+                                base ? L"rapportWindowBase" : L"rapportWindow", wide(spec.title).c_str(),
+                                style | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
                                 parent ? parent->hwnd_ : nullptr, nullptr, instance(), this);
+        // Before its content is made: the hosts' classes follow it.
+        if (base) set_base_surface(hwnd_, true);
         // Before it's first shown, or the title bar flashes light.
         theme_top_window(hwnd_);
         frame_top_window(hwnd_, dialog_);
@@ -8564,6 +8696,7 @@ public:
             if (modal_ && parent) EnableWindow(parent->hwnd_, TRUE);
             if (menu_bar_ && GetMenu(hwnd_) != menu_bar_) DestroyMenu(menu_bar_);  // detached: ours to free
             RemovePropW(hwnd_, L"rapport-focus");
+            set_base_surface(hwnd_, false);
             DestroyWindow(hwnd_);
         }
     }
@@ -9081,6 +9214,8 @@ public:
                             !(GetWindowLongPtrW(GetFocus(), GWL_STYLE) & ES_READONLY);
         const bool not_text = m.wParam == VK_ESCAPE || (m.wParam >= VK_F1 && m.wParam <= VK_F12);
         if (typing && !not_text) return false;
+        // The Back and Forward keys come as WM_APPCOMMAND, whatever has focus.
+        if (m.wParam == VK_BROWSER_BACK || m.wParam == VK_BROWSER_FORWARD) return false;
         return on_key_(make_key_event(m.wParam, m.lParam, m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN));
     }
 
@@ -9210,6 +9345,21 @@ private:
                 return 0;
             }
             case WM_CLOSE: self->close_requested(); return 0;
+            // Back and forward: the mouse's side buttons and the keyboard's
+            // keys, from wherever in the window (DefWindowProc passes them up
+            // from the controls). Not taken, they go on to the system's own
+            // handling.
+            case WM_APPCOMMAND:
+            {
+                const int command = GET_APPCOMMAND_LPARAM(lp);
+                if (command != APPCOMMAND_BROWSER_BACKWARD && command != APPCOMMAND_BROWSER_FORWARD) break;
+                if (!self->on_key_) break;
+                key_event e;
+                e.key = command == APPCOMMAND_BROWSER_BACKWARD ? key::back : key::forward;
+                e.modifiers = key_modifiers();
+                if (self->on_key_(e)) return TRUE;
+                break;
+            }
             // ui::set_busy: the app-starting pointer over the window and
             // its controls, which ask their parent first.
             case WM_SETCURSOR:

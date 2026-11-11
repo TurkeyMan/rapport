@@ -33,6 +33,32 @@ DWORD windows_build()
     return build;
 }
 
+// Windows 11's Explorer is white where Windows 10's was the dialog grey:
+// before 11 a base surface would be out of place, so it's the window colour.
+bool base_surface_supported()
+{
+    return windows_build() >= 22000;
+}
+
+void set_base_surface(HWND h, bool on)
+{
+    if (on)
+        SetPropW(h, L"rapport-base-surface", h);
+    else
+        RemovePropW(h, L"rapport-base-surface");
+}
+
+theme_color surface_of(HWND h)
+{
+    HWND root = h ? GetAncestor(h, GA_ROOT) : nullptr;
+    return root && GetPropW(root, L"rapport-base-surface") ? theme_color::base : theme_color::window;
+}
+
+theme_color surface_text_of(HWND h)
+{
+    return surface_of(h) == theme_color::base ? theme_color::text : theme_color::window_text;
+}
+
 namespace
 {
 
@@ -204,7 +230,7 @@ void paint_dark_separator(HWND h, HDC dc)
     RECT w;
     GetWindowRect(h, &w);
     OffsetRect(&w, -w.left, -w.top);
-    FillRect(dc, &w, theme_brush(theme_color::window));
+    FillRect(dc, &w, theme_brush(surface_of(h)));
     const bool vertical = (GetWindowLongPtrW(h, GWL_STYLE) & SS_TYPEMASK) == SS_ETCHEDVERT;
     RECT line = w;
     if (vertical)
@@ -340,7 +366,7 @@ void theme_control(HWND h)
         InvalidateRect(h, nullptr, TRUE);
     }
     else if (class_is(h, TOOLTIPS_CLASSW) || class_is(h, L"rapportHost") ||
-             class_is(h, L"ScrollBar") || class_is(h, UPDOWN_CLASSW))
+             class_is(h, L"rapportHostBase") || class_is(h, L"ScrollBar") || class_is(h, UPDOWN_CLASSW))
         SetWindowTheme(h, explorer, nullptr);
 }
 

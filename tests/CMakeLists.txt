@@ -32,6 +32,11 @@ add_executable(rapport-list-press-test list_press_test.cpp)
 target_include_directories(rapport-list-press-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
 target_link_libraries(rapport-list-press-test PRIVATE rapport::rapport)
 
+# Where a side button's press goes, for gtk4: the pointer's grab's.
+add_executable(rapport-side-buttons-test side_buttons_test.cpp)
+target_include_directories(rapport-side-buttons-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
+target_compile_features(rapport-side-buttons-test PRIVATE cxx_std_23)
+
 # Explorer's view, carried from Windows 11's entry's first GetState to its
 # second: no COM in it, so it runs everywhere.
 if(TARGET rapport_shell)
@@ -57,6 +62,11 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-tree-separator-keys-test-gtk3 gtk3_tree_separator_keys_test.cpp)
         target_link_libraries(rapport-tree-separator-keys-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
         add_dependencies(rapport-tree-separator-keys-test-gtk3 rapport_gtk3)
+        # The side buttons and Back/Forward keys as the window's keys.
+        add_executable(rapport-back-forward-test-gtk3 back_forward_test.cpp)
+        target_compile_definitions(rapport-back-forward-test-gtk3 PRIVATE RAPPORT_TEST_GTK3)
+        target_link_libraries(rapport-back-forward-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
+        add_dependencies(rapport-back-forward-test-gtk3 rapport_gtk3)
     endif()
     # An entry's buttons on GTK 4: named, focusable, Tab order, menus.
     if(TARGET rapport_gtk4)
@@ -75,6 +85,10 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         target_compile_definitions(rapport-list-input-test-qt6 PRIVATE RAPPORT_TEST_QT6)
         target_link_libraries(rapport-list-input-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
         add_dependencies(rapport-list-input-test-qt6 rapport_qt6)
+        add_executable(rapport-back-forward-test-qt6 back_forward_test.cpp)
+        target_compile_definitions(rapport-back-forward-test-qt6 PRIVATE RAPPORT_TEST_QT6)
+        target_link_libraries(rapport-back-forward-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
+        add_dependencies(rapport-back-forward-test-qt6 rapport_qt6)
     endif()
 endif()
 
@@ -83,6 +97,7 @@ add_test(NAME http COMMAND rapport-http-test)
 add_test(NAME launch COMMAND rapport-launch-test)
 add_test(NAME theme-palette COMMAND rapport-theme-palette-test)
 add_test(NAME list-press COMMAND rapport-list-press-test)
+add_test(NAME side-buttons COMMAND rapport-side-buttons-test)
 if(TARGET rapport-explorer-view-test)
     add_test(NAME explorer-view COMMAND rapport-explorer-view-test)
 endif()
@@ -138,6 +153,21 @@ if(TARGET rapport_win32)
     # Light forced: the line's exact colour checked whatever the desktop's theme.
     add_test(NAME win32-tree-separator-light COMMAND rapport-win32-tree-separator-test)
     set_tests_properties(win32-tree-separator-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
+endif()
+
+# The side buttons and Back/Forward keys as the window's keys, on Win32 by
+# messages sent to its controls.
+if(TARGET rapport_win32)
+    add_executable(rapport-back-forward-test-win32 back_forward_test.cpp)
+    target_compile_definitions(rapport-back-forward-test-win32 PRIVATE RAPPORT_TEST_WIN32)
+    target_link_libraries(rapport-back-forward-test-win32 PRIVATE rapport::rapport user32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-back-forward-test-win32 PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-back-forward-test-win32 PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-back-forward-test-win32 rapport_win32)
+    add_test(NAME back-forward-win32 COMMAND rapport-back-forward-test-win32)
+    set_tests_properties(back-forward-win32 PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 60)
 endif()
 
 if(TARGET rapport_win32)
@@ -214,6 +244,26 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-pane-frames PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
     add_test(NAME win32-pane-frames-light COMMAND rapport-win32-pane-frames-test)
     set_tests_properties(win32-pane-frames-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
+
+    add_executable(rapport-win32-base-surface-test win32_base_surface_test.cpp)
+    target_link_libraries(rapport-win32-base-surface-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-base-surface-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-base-surface-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-base-surface-test rapport_win32)
+    add_test(NAME win32-base-surface COMMAND rapport-win32-base-surface-test)
+    set_tests_properties(win32-base-surface PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+    add_test(NAME win32-base-surface-light COMMAND rapport-win32-base-surface-test)
+    set_tests_properties(win32-base-surface-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
+    # Under high contrast, which only a CI runner may turn on: skipped
+    # unless GITHUB_ACTIONS=true and RAPPORT_TEST_SET_HIGH_CONTRAST=1.
+    add_executable(rapport-win32-high-contrast-run win32_high_contrast_run.cpp)
+    target_link_libraries(rapport-win32-high-contrast-run PRIVATE user32)
+    add_test(NAME win32-base-surface-high-contrast
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-base-surface-test>)
+    set_tests_properties(win32-base-surface-high-contrast PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 
     add_executable(rapport-pane-readback-loss-test pane_readback_loss_test.cpp)
     target_compile_definitions(rapport-pane-readback-loss-test PRIVATE RAPPORT_TEST_READBACK)

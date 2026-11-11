@@ -54,6 +54,8 @@ jobs:
           broadwayd :5 & gtk4-broadwayd :7 & sleep 1
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-list-input-test-gtk3
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-list-input-test-qt6
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-back-forward-test-gtk3
+          QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-back-forward-test-qt6
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-entry-buttons-test-gtk4
 
   # MSVC with the static runtime, as the apps ship: as plugins and statically
@@ -97,7 +99,12 @@ jobs:
           $p = Start-Process .\rapport-gallery.exe -PassThru -Wait
           if ($p.ExitCode -ne 0 -or -not (Test-Path $env:RAPPORT_SNAPSHOT)) { throw "rapport-gallery didn't snapshot" }
 
+      # Server 2025's runner also runs the base surface test under high
+      # contrast (win32-base-surface-high-contrast), which changes a system
+      # setting: only on a throwaway runner, and only this job.
       - name: Portable tests
+        env:
+          RAPPORT_TEST_SET_HIGH_CONTRAST: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
         run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
 
       - name: Shell extension
