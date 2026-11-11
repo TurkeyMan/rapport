@@ -120,16 +120,23 @@ struct printed
 // its row's top edge from there is the line's colour.
 struct line_check
 {
+    bool found = false;  // the item's in the tree, showing
+    bool measured = false;  // and its row and label rects came back
     int left = 0;
     double covered = 0;
     bool before_left = false;  // the colour just before where it starts
+    RECT row{}, text{};
 };
 
 line_check line_of(HWND tree, const printed& p, HTREEITEM h, bool has_icon)
 {
     line_check c;
-    RECT row{}, text{};
-    if (!TreeView_GetItemRect(tree, h, &row, FALSE) || !TreeView_GetItemRect(tree, h, &text, TRUE)) return c;
+    c.found = h != nullptr;
+    if (!c.found) return c;
+    RECT& row = c.row;
+    RECT& text = c.text;
+    c.measured = TreeView_GetItemRect(tree, h, &row, FALSE) && TreeView_GetItemRect(tree, h, &text, TRUE);
+    if (!c.measured) return c;
     const COLORREF ink = GetSysColor(COLOR_3DSHADOW);
     const UINT dpi = GetDpiForWindow(tree);
     int cx = 0, cy = 0;
@@ -174,6 +181,16 @@ int main(int argc, char** argv)
         { return line_of(tree, p, item_named(tree, name), icon); };
         const line_check a = has(L"a"), b = has(L"b"), c = has(L"c"), c1 = has(L"c1"), c2 = has(L"c2"),
                          d = has(L"d", true);
+        // Where everything was, for when a check below fails.
+        for (const auto& [name, l] : {std::pair{"a", a}, {"b", b}, {"c", c}, {"c1", c1}, {"c2", c2}, {"d", d}})
+            std::printf("     %s: found %d measured %d row (%ld,%ld)-(%ld,%ld) text (%ld,%ld)-(%ld,%ld) left %d covered %.2f\n",
+                        name, l.found, l.measured, l.row.left, l.row.top, l.row.right, l.row.bottom, l.text.left,
+                        l.text.top, l.text.right, l.text.bottom, l.left, l.covered);
+        const HTREEITEM c_item = item_named(tree, L"c");
+        expect(c_item && (TreeView_GetItemState(tree, c_item, TVIS_EXPANDED) & TVIS_EXPANDED), "c is open");
+        bool all = true;
+        for (const line_check& l : {a, b, c, c1, c2, d}) all &= l.found && l.measured;
+        expect(all, "every item is showing, its rects measured");
         expect(a.covered == 0, "no line over the first row");
         expect(b.covered > 0.95 && !b.before_left, "a line over b, from its label to the row's end");
         expect(c.covered > 0.95, "a line over c");
