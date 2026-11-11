@@ -118,6 +118,25 @@ if(TARGET rapport_win32)
 endif()
 
 if(TARGET rapport_win32)
+    # The lookup on its own, at sizes the test machine's DPI doesn't give.
+    add_executable(rapport-win32-shell-icons-test win32_shell_icons_test.cpp ../backends/win32/win32_shell_icons.cpp)
+    target_include_directories(rapport-win32-shell-icons-test PRIVATE ../backends/win32)
+    target_link_libraries(rapport-win32-shell-icons-test PRIVATE user32 gdi32 shell32 ole32)
+    add_test(NAME win32-shell-icons COMMAND rapport-win32-shell-icons-test)
+
+    # And through a tree, before and after a DPI change.
+    add_executable(rapport-win32-shell-icons-dpi-test win32_shell_icons_dpi_test.cpp)
+    target_link_libraries(rapport-win32-shell-icons-dpi-test PRIVATE rapport::rapport user32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-shell-icons-dpi-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-shell-icons-dpi-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-shell-icons-dpi-test rapport_win32)
+    add_test(NAME win32-shell-icons-dpi COMMAND rapport-win32-shell-icons-dpi-test)
+    set_tests_properties(win32-shell-icons-dpi PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+endif()
+
+if(TARGET rapport_win32)
     add_executable(rapport-win32-frames-test win32_frames_test.cpp)
     target_link_libraries(rapport-win32-frames-test PRIVATE rapport::rapport user32 comctl32)
     if(RAPPORT_STATIC)
