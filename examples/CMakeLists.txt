@@ -69,7 +69,8 @@ if(RAPPORT_STATIC)
     endforeach()
     file(GENERATE OUTPUT ${builtins_cpp} CONTENT "${builtins}")
     foreach(example rapport-demo rapport-gallery rapport-canvas rapport-frame rapport-gpu rapport-print rapport-list-dnd
-                    rapport-theme-roles rapport-split-show rapport-side-pane rapport-lazy-tree rapport-frames)
+                    rapport-theme-roles rapport-split-show rapport-side-pane rapport-lazy-tree rapport-frames
+                    rapport-document-tabs)
         if(NOT TARGET ${example})
             continue()
         endif()

@@ -132,16 +132,18 @@ public:
     {
         if (i < 0 || i >= count() || i == current) return;
         current = i;
-        if (on_select) on_select(std::string(tabs[size_t(i)].id));  // a copy: the app may remove it
+        // Copies, the handler's and the id's: the handler may replace itself
+        // (destroying the closure that's running) or remove the tab.
+        if (auto f = on_select) f(std::string(tabs[size_t(i)].id));
     }
     void close_asked(int i)
     {
         if (i < 0 || i >= count()) return;
-        if (on_close) on_close(std::string(tabs[size_t(i)].id));
+        if (auto f = on_close) f(std::string(tabs[size_t(i)].id));
     }
     void new_asked()
     {
-        if (on_new) on_new();
+        if (auto f = on_new) f();
     }
     // A key, done; true if it was one of the tabs'. `show(i)` makes the
     // native control show tab i as current, without telling the app.

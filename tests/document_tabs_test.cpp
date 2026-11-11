@@ -109,6 +109,30 @@ void handlers()
     s.remove("b");
     expect(s.current_id() == "c" && selected.size() == 1,
            "the app closes it: the next is current, quietly");
+
+    // A handler that replaces itself as it runs keeps its own captures (it
+    // runs as a copy): under ASan, reading them was a use after free.
+    std::string seen;
+    const std::string label(64, 'x');  // on the heap, not in the closure's small buffer
+    s.on_select = [&s, &seen, label](const std::string&)
+    {
+        s.on_select = {};
+        seen = label;
+    };
+    s.on_close = [&s, &seen, label](const std::string&)
+    {
+        s.on_close = {};
+        seen += label;
+    };
+    s.on_new = [&s, &seen, label]
+    {
+        s.on_new = {};
+        seen += label;
+    };
+    s.picked(0);
+    s.close_asked(0);
+    s.new_asked();
+    expect(seen == label + label + label, "handlers that replace themselves as they run");
 }
 
 // The spec through the headless backend: the bar is made with its items,
