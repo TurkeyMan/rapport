@@ -220,6 +220,17 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-frames-test rapport_win32)
     add_test(NAME win32-frames COMMAND rapport-win32-frames-test)
     set_tests_properties(win32-frames PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+
+    # file_view's first-column inset, printed (it shows a window: CI's).
+    add_executable(rapport-win32-file-view-inset-test win32_file_view_inset_test.cpp)
+    target_link_libraries(rapport-win32-file-view-inset-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-file-view-inset-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-file-view-inset-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-file-view-inset-test rapport_win32)
+    add_test(NAME win32-file-view-inset COMMAND rapport-win32-file-view-inset-test)
+    set_tests_properties(win32-file-view-inset PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 endif()
 
 if(TARGET rapport_win32)

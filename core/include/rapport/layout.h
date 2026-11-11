@@ -280,7 +280,8 @@ struct list
     // to Windows list views than the toolkit default.
     bool compact = false;
     // A file manager's details view: rows spaced as the platform's own are,
-    // where that differs from a list's default (Windows 11: Explorer's).
+    // where that differs from a list's default (Windows 11: Explorer's row
+    // height, and the first column's content and title further in).
     // Nothing on Windows 10, or on other toolkits yet.
     bool file_view = false;
     // Selected rows in a light tint of the accent colour with normal text
