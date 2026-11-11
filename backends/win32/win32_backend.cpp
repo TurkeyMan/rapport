@@ -3,6 +3,7 @@
 // has none), per-monitor DPI awareness.
 #include "container_state.h"
 #include "lazy_tree.h"
+#include "menu_dismiss.h"
 #include "win32_common.h"
 #define RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
 #include "win32_trace.h"
@@ -990,26 +991,26 @@ HMENU build_menu(const menu& items, std::vector<std::function<void()>>& actions,
     return m;
 }
 
-// `anchor`: the button the menu drops from, if any. A click outside a popup
-// menu closes it and still reaches the window under it, so clicking the
-// button again would open the menu again; that click is dropped instead, so
-// the second click closes the menu as a combo box's does.
+// `anchor`: the button the menu drops from, if any. The click on it that
+// closes the menu is kept from opening it again (menu_dismiss.h), so the
+// second click closes the menu as a combo box's does.
 void show_popup_menu(HWND owner, const menu& items, POINT screen, HWND anchor = nullptr)
 {
     if (items.empty()) return;
     std::vector<std::function<void()>> actions;
     menu_bitmaps bitmaps{.dpi = dpi_of(owner)};
     HMENU m = build_menu(items, actions, &bitmaps);
-    const UINT id = UINT(TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, owner, nullptr));
-    DestroyMenu(m);
-    if (anchor)
+    UINT id = 0;
+    rap::win32::menu_press press;
     {
-        MSG msg;
-        while (PeekMessageW(&msg, anchor, WM_LBUTTONDOWN, WM_LBUTTONDOWN, PM_REMOVE | PM_NOYIELD) ||
-               PeekMessageW(&msg, anchor, WM_LBUTTONDBLCLK, WM_LBUTTONDBLCLK, PM_REMOVE | PM_NOYIELD))
-        {
-        }
+        rap::win32::menu_press_watch watch;
+        id = UINT(TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, owner, nullptr));
+        press = watch.last();
     }
+    DestroyMenu(m);
+    // Only a menu closed without a choice can have been closed by a click
+    // outside it.
+    if (id == 0) rap::win32::drop_menu_press(anchor, press);
     if (id > 0 && id <= actions.size() && actions[id - 1]) actions[id - 1]();
 }
 

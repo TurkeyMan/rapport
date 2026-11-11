@@ -204,3 +204,12 @@ if(WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/../shell/src/win32)
     add_test(NAME shell-overlay-names COMMAND rapport-shell-overlay-names-test)
 endif()
+
+if(WIN32)
+    add_executable(rapport-win32-menu-dismiss-test win32_menu_dismiss_test.cpp)
+    target_compile_features(rapport-win32-menu-dismiss-test PRIVATE cxx_std_23)
+    target_include_directories(rapport-win32-menu-dismiss-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../backends/win32)
+    target_link_libraries(rapport-win32-menu-dismiss-test PRIVATE user32)
+    add_test(NAME win32-menu-dismiss COMMAND rapport-win32-menu-dismiss-test)
+endif()
