@@ -3546,8 +3546,9 @@ private:
         return lines_.contains(id_of(h));
     }
     // Along the top of the row, from where the item's icon (else its label)
-    // starts, so lines line up with the items at their level; the border
-    // colour, a system one in high contrast.
+    // starts, so lines line up with the items at their level; the divider
+    // colour (a line between items, as a thin splitter's), a system one in
+    // high contrast.
     void draw_line(HDC dc, HTREEITEM h)
     {
         RECT row{}, text{};
@@ -3560,7 +3561,7 @@ private:
         if (icons_ && TreeView_GetItem(h_, &item) && item.iImage > 0 && ImageList_GetIconSize(icons_, &cx, &cy))
             left -= cx + px(3);
         RECT line{std::max(0L, long(left)), row.top, row.right, row.top + std::max(1, px(1))};
-        FillRect(dc, &line, theme_brush(theme_color::border));
+        FillRect(dc, &line, theme_brush(theme_color::divider));
     }
     void add_placeholder(HTREEITEM parent)
     {
