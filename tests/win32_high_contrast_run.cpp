@@ -5,8 +5,9 @@
 // otherwise). It turns on "High Contrast Black", confirms high contrast is
 // reported on and the system colours have changed (Server 2025 gives a
 // Windows 11 contrast theme's, #202020 windows with white text, for it),
-// runs the test, and turns it off again whatever the test did, waiting for
-// the colours to come back.
+// runs the test (ended, and failed, if it doesn't finish), and turns it off
+// again whatever the test did. It fails unless the flag is off and the window
+// and text colours are back as they were within 30 seconds.
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
@@ -93,20 +94,39 @@ int main(int argc, char** argv)
         PROCESS_INFORMATION pi{};
         if (CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
         {
-            WaitForSingleObject(pi.hProcess, 5 * 60 * 1000);
+            const DWORD waited = WaitForSingleObject(pi.hProcess, 5 * 60 * 1000);
             DWORD exit = 1;
-            GetExitCodeProcess(pi.hProcess, &exit);
-            code = int(exit);
+            if (waited == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &exit))
+                code = int(exit);
+            else
+            {
+                // Timed out, or the wait failed: ended, and a failure.
+                std::fprintf(stderr, "%s didn't finish (wait %lu, error %lu): ended\n", argv[1], waited,
+                             GetLastError());
+                TerminateProcess(pi.hProcess, 1);
+                WaitForSingleObject(pi.hProcess, 10 * 1000);
+                code = 1;
+            }
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
         }
         else
             std::fprintf(stderr, "couldn't run %s (%lu)\n", argv[1], GetLastError());
     }
-    set_high_contrast(false);
-    for (int i = 0; i < 300 && (high_contrast_on() || GetSysColor(COLOR_WINDOW) != window); ++i) Sleep(100);
+    // Put back, or the tests after this one run in high contrast: a failure
+    // to, whatever the test did (keeping its failure if it failed).
+    const bool reset = set_high_contrast(false);
+    if (!reset) std::fprintf(stderr, "SPI_SETHIGHCONTRAST (off) failed (%lu)\n", GetLastError());
+    auto restored = [&] {
+        return !high_contrast_on() && GetSysColor(COLOR_WINDOW) == window && GetSysColor(COLOR_WINDOWTEXT) == text;
+    };
+    for (int i = 0; i < 300 && reset && !restored(); ++i) Sleep(100);
     print_colours("turned off");
-    if (high_contrast_on() || GetSysColor(COLOR_WINDOW) != window)
-        std::fprintf(stderr, "note: the desktop's colours didn't come back as they were\n");
+    if (reset && !restored())
+        std::fprintf(stderr, "high contrast wasn't put back: the flag is %s, the window and text colours %s\n",
+                     high_contrast_on() ? "still on" : "off",
+                     GetSysColor(COLOR_WINDOW) == window && GetSysColor(COLOR_WINDOWTEXT) == text ? "as they were"
+                                                                                                    : "not as they were");
+    if ((!reset || !restored()) && code == 0) code = 1;
     return code;
 }
