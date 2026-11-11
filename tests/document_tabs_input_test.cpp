@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #if defined(RAPPORT_TEST_WIN32) && defined(RAPPORT_TEST_BUILTIN_WIN32)
@@ -512,6 +513,8 @@ int main(int argc, char** argv)
                          .bind(inner)
                          .stretch()}}}
             .size(60_ch, 12_lines)
+            // --base: on a base surface (Windows 11 paints the strip anew there)
+            .base_surface(argc > 1 && std::string_view(argv[1]) == "--base")
             .tabs(document_tabs{{{"a", "Alpha", rap::icon::for_file("alpha/"), "/home/me/alpha"},
                                  {"b", "Beta", rap::icon::named("folder"), "/home/me/beta"},
                                  {"c", "Gamma", {}, {}}}}

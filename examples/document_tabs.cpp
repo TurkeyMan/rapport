@@ -99,6 +99,7 @@ int main(int argc, char** argv)
                                    label{}.bind(shown).stretch(),
                                }}}
                             .size(70_ch, 20_lines)
+                            .base_surface()  // a file manager's, as Expedition's (Windows 11)
                             .tabs(document_tabs{}
                                       .on_select(show)
                                       .on_new(
