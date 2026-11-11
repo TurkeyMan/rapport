@@ -60,8 +60,10 @@ void print(const char* what, const std::vector<float>& v)
     std::fprintf(stderr, "\n");
 }
 
-// The root's client width, in device pixels, set by resizing its window.
-void client_width(HWND root, int w)
+// Resizes the root for a client `w` device pixels wide, and gives the width
+// it got: Windows caps a window at about the screen's size, and a CI
+// runner's screen is small.
+int client_width(HWND root, int w)
 {
     RECT c, r;
     GetClientRect(root, &c);
@@ -70,6 +72,8 @@ void client_width(HWND root, int w)
     SetWindowPos(root, nullptr, 0, 0, w + extra, r.bottom - r.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     pump();
+    GetClientRect(root, &c);
+    return c.right;
 }
 }  // namespace
 
@@ -79,13 +83,13 @@ int main(int argc, char** argv)
     if (!ui) return 1;
     using namespace rap::layout;
     rap::splitter *two = nullptr, *three = nullptr;
-    rap::text_view* middle = nullptr;
+    rap::label* middle = nullptr;
     // Never shown: nothing reaches the screen.
     auto win = (*ui)->create(window{
         "Splitter sizes",
         {vbox{
-            splitter{rap::orientation::horizontal, text_view{}.stretch(), text_view{}}.bind(two).stretch(),
-            splitter{rap::orientation::horizontal, text_view{}.stretch(), text_view{}.bind(middle), text_view{}}
+            splitter{rap::orientation::horizontal, label{"a"}.stretch(), label{"b"}}.bind(two).stretch(),
+            splitter{rap::orientation::horizontal, label{"a"}.stretch(), label{"b"}.bind(middle), label{"c"}}
                 .bind(three)
                 .stretch(),
         }}});
@@ -96,30 +100,33 @@ int main(int argc, char** argv)
     char why[200];
 
     // Before any layout: what was asked for.
-    two->set_sizes({600, 300});
+    two->set_sizes({300, 100});
     {
         const auto s = two->sizes();
-        expect(s.size() == 2 && s[0] == 600 && s[1] == 300, "before layout, sizes() is what was asked for");
+        expect(s.size() == 2 && s[0] == 300 && s[1] == 100, "before layout, sizes() is what was asked for");
     }
 
     // Tortilla's forge panel: sizes restored, then the window grows. The
     // pane that stretches takes it, and sizes() says so.
-    client_width(root, int(std::lround(900 * scale)));
-    const auto at900 = two->sizes();
-    client_width(root, int(std::lround(1300 * scale)));
-    const auto at1300 = two->sizes();
-    expect(at900.size() == 2 && at1300.size() == 2, "two panes, two sizes");
-    if (at900.size() == 2 && at1300.size() == 2)
+    const int narrow = client_width(root, int(std::lround(400 * scale)));
+    const auto narrowed = two->sizes();
+    const int wide = client_width(root, int(std::lround(600 * scale)));
+    const auto widened = two->sizes();
+    const float grown = float(wide - narrow) / scale;
+    std::snprintf(why, sizeof why, "the window grows at least 100 (by %.1f, from %d to %d px)", grown, narrow, wide);
+    expect(grown >= 100, why);
+    expect(narrowed.size() == 2 && widened.size() == 2, "two panes, two sizes");
+    if (narrowed.size() == 2 && widened.size() == 2)
     {
-        std::snprintf(why, sizeof why, "the window 400 wider, the sizes add up to 400 more (%.1f, then %.1f)",
-                      sum(at900), sum(at1300));
-        expect(close_to(sum(at1300) - sum(at900), 400, scale), why);
-        expect(close_to(at1300[0] - at900[0], 400, scale), "the stretching pane takes what the window gains");
-        expect(close_to(at1300[1], 300, scale), "the other keeps the size it was given");
+        std::snprintf(why, sizeof why, "the window %.1f wider, the sizes add up to that more (%.1f, then %.1f)",
+                      grown, sum(narrowed), sum(widened));
+        expect(close_to(sum(widened) - sum(narrowed), grown, scale), why);
+        expect(close_to(widened[0] - narrowed[0], grown, scale), "the stretching pane takes what the window gains");
+        expect(close_to(widened[1], 100, scale), "the other keeps the size it was given");
         if (failures)
         {
-            print("at 900", at900);
-            print("at 1300", at1300);
+            print("narrow", narrowed);
+            print("wide", widened);
         }
     }
 
@@ -127,9 +134,9 @@ int main(int argc, char** argv)
     two->set_sizes({0, 200});
     {
         const auto s = two->sizes();
-        std::snprintf(why, sizeof why, "set_sizes 0 keeps the pane's size now (%.1f, not 600)",
+        std::snprintf(why, sizeof why, "set_sizes 0 keeps the pane's size now (%.1f, not 300)",
                       s.empty() ? -1.f : s[0]);
-        expect(s.size() == 2 && close_to(s[0], at1300.empty() ? 0 : at1300[0], scale), why);
+        expect(s.size() == 2 && close_to(s[0], widened.empty() ? 0 : widened[0], scale), why);
         expect(s.size() == 2 && s[1] == 200, "until laid out, the size asked for");
     }
     pump();
@@ -137,8 +144,8 @@ int main(int argc, char** argv)
         const auto s = two->sizes();
         expect(s.size() == 2 && close_to(s[1], 200, scale), "laid out at the size asked for");
         std::snprintf(why, sizeof why, "laid out, the sizes still fill the splitter (%.1f, not %.1f)", sum(s),
-                      sum(at1300));
-        expect(close_to(sum(s), sum(at1300), scale), why);
+                      sum(widened));
+        expect(close_to(sum(s), sum(widened), scale), why);
     }
 
     // A hidden pane reports the size it comes back at, and comes back at it.
