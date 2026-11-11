@@ -3416,7 +3416,7 @@ public:
             {
             case CDDS_PREPAINT: return lines_.empty() ? CDRF_DODEFAULT : CDRF_NOTIFYITEMDRAW;
             case CDDS_ITEMPREPAINT: return draws_line(item) ? CDRF_NOTIFYPOSTPAINT : CDRF_DODEFAULT;
-            case CDDS_ITEMPOSTPAINT: draw_line(*cd); return CDRF_DODEFAULT;
+            case CDDS_ITEMPOSTPAINT: draw_line(cd->nmcd.hdc, item); return CDRF_DODEFAULT;
             default: return CDRF_DODEFAULT;
             }
         }
@@ -3545,28 +3545,22 @@ private:
         if (!h || is_placeholder(h) || !TreeView_GetPrevSibling(h_, h)) return false;
         return lines_.contains(id_of(h));
     }
-    // Along the top of the row being painted (custom draw's own rect, so it
-    // doesn't depend on the control's layout having caught up), from where
-    // the item's icon (else its label) starts, so lines line up with the
-    // items at their level; the border colour, a system one in high contrast.
-    void draw_line(const NMTVCUSTOMDRAW& cd)
+    // Along the top of the row, from where the item's icon (else its label)
+    // starts, so lines line up with the items at their level; the border
+    // colour, a system one in high contrast.
+    void draw_line(HDC dc, HTREEITEM h)
     {
-        const auto h = reinterpret_cast<HTREEITEM>(cd.nmcd.dwItemSpec);
-        const RECT row = cd.nmcd.rc;
-        RECT text{};
-        int left = 0;
-        if (TreeView_GetItemRect(h_, h, &text, TRUE))
-            left = text.left;
-        else  // its level's indent, past the root's expander column
-            left = row.left + int(TreeView_GetIndent(h_)) * (cd.iLevel + 1);
+        RECT row{}, text{};
+        if (!TreeView_GetItemRect(h_, h, &row, FALSE) || !TreeView_GetItemRect(h_, h, &text, TRUE)) return;
+        int left = text.left;
         TVITEMW item{};
         item.mask = TVIF_IMAGE;
         item.hItem = h;
         int cx = 0, cy = 0;
         if (icons_ && TreeView_GetItem(h_, &item) && item.iImage > 0 && ImageList_GetIconSize(icons_, &cx, &cy))
             left -= cx + px(3);
-        RECT line{std::max(row.left, long(left)), row.top, row.right, row.top + std::max(1, px(1))};
-        FillRect(cd.nmcd.hdc, &line, theme_brush(theme_color::border));
+        RECT line{std::max(0L, long(left)), row.top, row.right, row.top + std::max(1, px(1))};
+        FillRect(dc, &line, theme_brush(theme_color::border));
     }
     void add_placeholder(HTREEITEM parent)
     {
