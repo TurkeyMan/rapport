@@ -4496,6 +4496,9 @@ private:
     {
         auto* sp = new QSplitter(s.dir == orientation::vertical ? Qt::Vertical : Qt::Horizontal);
         sp->setChildrenCollapsible(false);
+        // Thin: a 1 px handle, which QSplitter keeps 5 px to drag (it
+        // widens the handle's grab area over the panes).
+        if (s.thin) sp->setHandleWidth(1);
         std::vector<int> stretch;
         for (auto& pane : s.panes)
         {

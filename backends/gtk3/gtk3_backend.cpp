@@ -4733,7 +4733,8 @@ private:
                                    : gtk_widget_get_allocated_width(top);
         int handle = 0;
         gtk_widget_style_get(top, "handle-size", &handle, nullptr);
-        handle = std::max(handle, 5);  // wide handles are drawn a little larger
+        if (gtk_paned_get_wide_handle(GTK_PANED(top)))
+            handle = std::max(handle, 5);  // wide handles are drawn a little larger
 
         int fixed = 0, stretch_sum = 0;
         std::vector<int> natural(split.panes.size());
@@ -4775,7 +4776,9 @@ private:
                                              [](auto& p) { return p.common.stretch > 0; });
         GtkWidget* paned = gtk_paned_new(gtk_orientation(s.dir));
         auto* p = GTK_PANED(paned);
-        gtk_paned_set_wide_handle(p, true);
+        // Thin: the theme's narrow handle, a line (Adwaita's 1 px), which
+        // GTK still lets the pointer take from a few pixels either side.
+        gtk_paned_set_wide_handle(p, !s.thin);
         g_object_set_data(G_OBJECT(paned), "rapport-split-chain", GINT_TO_POINTER(1));
         gtk_paned_pack1(p, first, !any_stretch || s.panes[from].common.stretch > 0, false);
         gtk_paned_pack2(p, panes(s, from + 1), !any_stretch || rest_stretch, false);
