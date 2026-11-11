@@ -8059,7 +8059,12 @@ private:
         case WM_RBUTTONDOWN:
         case WM_RBUTTONDBLCLK: press(lp, 3); return 0;
         case WM_XBUTTONDOWN:
-        case WM_XBUTTONDBLCLK: x_taken_ = press(lp, GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 4 : 5); return TRUE;
+        case WM_XBUTTONDBLCLK:
+        {
+            const int button = GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 4 : 5;
+            x_taken_[button - 4] = press(lp, button);
+            return TRUE;
+        }
         case WM_LBUTTONUP: release(lp, 1); return 0;
         case WM_MBUTTONUP: release(lp, 2); return 0;
         case WM_RBUTTONUP: release(lp, 3); return 0;
@@ -8068,8 +8073,11 @@ private:
             // Taken (its press or this), the button is the canvas's. Else
             // DefWindowProc makes it a WM_APPCOMMAND, which goes up to the
             // window as back or forward.
-            const bool taken = release(lp, GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 4 : 5);
-            if (std::exchange(x_taken_, false) || taken) return TRUE;
+            // Each button on its own: one may be the canvas's while the
+            // other isn't, held at once and let go in either order.
+            const int button = GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 4 : 5;
+            const bool taken = release(lp, button);
+            if (std::exchange(x_taken_[button - 4], false) || taken) return TRUE;
             break;
         }
         case WM_MOUSEMOVE:
@@ -8116,6 +8124,9 @@ private:
         case WM_SYSKEYDOWN:
         case WM_KEYUP:
         case WM_SYSKEYUP:
+            // The Back and Forward keys are the window's: DefWindowProc makes
+            // them WM_APPCOMMAND, which goes up to it.
+            if (wp == VK_BROWSER_BACK || wp == VK_BROWSER_FORWARD) break;
             if (key_ && key_(make_key_event(wp, lp, msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN))) return 0;
             break;
         case WM_SETFOCUS:
@@ -8445,7 +8456,7 @@ private:
     SIZE told_{};                // the size the app last heard of
     cursor cursor_ = cursor::default_;
     bool inside_ = false;
-    bool x_taken_ = false;  // the app took the last side button's press
+    bool x_taken_[2] = {};  // the app took buttons 4 and 5's last presses
     int clicks_ = 0, last_button_ = 0;
     DWORD last_time_ = 0;
     POINT last_pos_{};

@@ -15,6 +15,7 @@
 #include "lazy_tree.h"
 #include "rapport/i18n.h"
 #include "list_press.h"
+#include "side_buttons.h"
 
 #include <memory>
 
@@ -4652,12 +4653,29 @@ public:
         return on_key_(ev);
     }
     // A side button's press as back or forward: on the way down where it
-    // wasn't pressed in a canvas, on the way up (the canvas left it) where it was.
+    // isn't going to a canvas, on the way up (the canvas left it) where it is.
+    // Where it's going is the pointer's grab's, not what's under it: every
+    // press and release passes the way down, so side_ follows the grab.
     bool side_button(GdkEvent* e, bool canvas_turn)
     {
-        if (!on_key_ || gdk_event_get_event_type(e) != GDK_BUTTON_PRESS) return false;
-        const auto k = side_button_key(gdk_button_event_get_button(e));
-        if (!k || pressed_in_canvas(e) != canvas_turn) return false;
+        const GdkEventType type = gdk_event_get_event_type(e);
+        if (type != GDK_BUTTON_PRESS && type != GDK_BUTTON_RELEASE) return false;
+        const guint button = gdk_button_event_get_button(e);
+        if (!canvas_turn)
+        {
+            if (type == GDK_BUTTON_RELEASE)
+            {
+                side_.release(int(button));
+                return false;
+            }
+            constexpr unsigned held_mask = GDK_BUTTON1_MASK | GDK_BUTTON2_MASK | GDK_BUTTON3_MASK |
+                                           GDK_BUTTON4_MASK | GDK_BUTTON5_MASK;
+            const bool held = (gdk_event_get_modifier_state(e) & held_mask) != 0;
+            to_canvas_ = side_.press(int(button), held, [e] { return pressed_in_canvas(e); });
+        }
+        if (!on_key_ || type != GDK_BUTTON_PRESS) return false;
+        const auto k = side_button_key(button);
+        if (!k || to_canvas_ != canvas_turn) return false;
         key_event ev;
         ev.key = *k;
         ev.modifiers = modifiers(gdk_event_get_modifier_state(e));
@@ -4674,6 +4692,8 @@ public:
         return in_canvas(gtk_widget_pick(GTK_WIDGET(native), x - sx, y - sy, GTK_PICK_DEFAULT));
     }
     std::function<bool(const key_event&)> on_key_;
+    side_buttons::router side_;  // where the pointer's presses go
+    bool to_canvas_ = false;     // the last press: to a canvas
     std::function<void(bool)> on_fullscreen;
     bool fullscreen_ = false;
 
