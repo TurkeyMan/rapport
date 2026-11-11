@@ -1,8 +1,11 @@
 // A Win32 file_view list's first column, against a plain list's: on Windows
 // 11 its content starts further in by the list_view's own image slot (the
 // icon 19 px in at 96 DPI, as Explorer's) and its title by its own inset
-// (31 px in), and the header stays as tall. Printed with WM_PRINTCLIENT, not
-// captured. Before Windows 11 the two are the same.
+// (31 px in), and the header stays as tall. The title stays put, with its
+// arrow drawn, sorted either way, with another column sorted and cleared,
+// and the insets are rebuilt at the window's DPI after a WM_DPICHANGED.
+// Printed with WM_PRINTCLIENT, not captured. Before Windows 11 the two are
+// the same.
 //   rapport-win32-file-view-inset-test
 #include <rapport/rapport.h>
 
@@ -217,6 +220,25 @@ measures measure(HWND list)
     return m;
 }
 
+// How many of a header item's pixels differ between two prints of it.
+int differing(const printed& a, const printed& b, RECT item)
+{
+    if (a.w != b.w || a.h != b.h) return -1;
+    int n = 0;
+    for (int y = 0; y < a.h; ++y)
+        for (int x = std::max(0, int(item.left)); x < std::min(a.w, int(item.right)); ++x)
+            n += (a.at(x, y) & 0xFFFFFF) != (b.at(x, y) & 0xFFFFFF);
+    return n;
+}
+
+int header_format(HWND header, int i)
+{
+    HDITEMW hd{};
+    hd.mask = HDI_FORMAT;
+    Header_GetItem(header, i, &hd);
+    return hd.fmt;
+}
+
 std::string str(int v)
 {
     return std::to_string(v);
@@ -236,9 +258,11 @@ int main(int argc, char** argv)
     using namespace rap::layout;
     using namespace rap::literals;
     const std::vector<rap::column> cols{{"Name", 160_px}, {"Notes", 160_px}};
-    auto win = (*ui)->create(window{"t",
-                                    {vbox{list{cols, &model}.frame(false).stretch(),
-                                          list{cols, &model}.frame(false).file_view().stretch()}}});
+    rap::list* fv_list = nullptr;
+    auto win = (*ui)->create(
+        window{"t",
+               {vbox{list{cols, &model}.frame(false).stretch(),
+                     list{cols, &model}.frame(false).file_view().stretch().bind(fv_list)}}});
     win->show();
     const std::vector<HWND> found = lists();
     expect(found.size() == 2, "both lists are there");
@@ -300,30 +324,84 @@ int main(int argc, char** argv)
     };
     check("shown");
 
-    // A new DPI: the inset follows it.
-    const UINT dpi = GetDpiForWindow(top);
-    const UINT to = dpi == 144 ? 120 : 144;
-    RECT r{};
-    GetWindowRect(top, &r);
-    SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&r));
-    // GetDpiForWindow still answers the monitor's: the lists' font says what they're at.
-    const int expect_inset = eleven ? int(std::lround(15.0 * to / 96)) : 0;
-    const int expect_title = eleven ? int(std::lround(24.0 * to / 96)) : 0;
+    // The title's image and the sort arrow: Microsoft documents HDF_IMAGE
+    // and the sort flags as not meant together, but the title stays where it
+    // was, keeps its image, and the arrow is drawn.
+    if (fv_list)
     {
+        HWND header = ListView_GetHeader(found[1]);
+        RECT item0{};
+        Header_GetItemRect(header, 0, &item0);
+        const printed unsorted = print(header);
+        const int unsorted_ink = measure(found[1]).title_ink[0];
+        struct step
+        {
+            const char* what;
+            std::optional<size_t> column;
+            rap::sort_order order;
+            int fmt0, fmt1;  // the sort flags each title should have
+        };
+        const step steps[] = {
+            {"sorted ascending", 0, rap::sort_order::ascending, HDF_SORTUP, 0},
+            {"sorted descending", 0, rap::sort_order::descending, HDF_SORTDOWN, 0},
+            {"another column sorted", 1, rap::sort_order::ascending, 0, HDF_SORTUP},
+            {"sorting cleared", std::nullopt, rap::sort_order::ascending, 0, 0},
+        };
+        for (const step& st : steps)
+        {
+            fv_list->set_sort_indicator(st.column, st.order);
+            const int f0 = header_format(header, 0), f1 = header_format(header, 1);
+            const int ink0 = measure(found[1]).title_ink[0];
+            const int changed = differing(unsorted, print(header), item0);
+            const std::string at = std::string(" (") + st.what + ")";
+            std::printf(
+                "     %s: title ink %d (unsorted %d), formats %x/%x, %d px of the first title "
+                "changed\n",
+                st.what, ink0, unsorted_ink, f0, f1, changed);
+            expect((f0 & (HDF_SORTUP | HDF_SORTDOWN)) == st.fmt0 &&
+                       (f1 & (HDF_SORTUP | HDF_SORTDOWN)) == st.fmt1,
+                   "the sort flags are where they were set" + at);
+            expect(ink0 == unsorted_ink, "the first title stays where it was" + at);
+            if (eleven) expect((f0 & HDF_IMAGE) != 0, "the first title keeps its image" + at);
+            if (st.fmt0)
+                expect(changed > 0, "the first title's arrow is drawn" + at);
+            else
+                expect(changed == 0, "the first title is drawn as unsorted" + at);
+        }
+    }
+
+    // A WM_DPICHANGED sent, not a real move to another monitor: the window's
+    // DPI stays what it was, so this checks the insets are rebuilt from the
+    // window's actual DPI, not that they follow the one sent.
+    {
+        const UINT dpi = GetDpiForWindow(top);
+        const UINT to = dpi == 144 ? 120 : 144;
+        const HIMAGELIST rows_before = ListView_GetImageList(found[1], LVSIL_SMALL);
+        RECT r{};
+        GetWindowRect(top, &r);
+        SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&r));
+        const UINT now = GetDpiForWindow(top);
+        const int expect_inset = eleven ? int(std::lround(15.0 * now / 96)) : 0;
+        const int expect_title = eleven ? int(std::lround(24.0 * now / 96)) : 0;
         RECT icon{};
         ListView_GetItemRect(found[1], 0, &icon, LVIR_ICON);
         HWND header = ListView_GetHeader(found[1]);
         int cx = 0, cy = 0;
         if (auto il = reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0)))
             ImageList_GetIconSize(il, &cx, &cy);
-        std::printf("     after WM_DPICHANGED to %u: slot %ld header image %d margin %u\n", to,
-                    icon.right - icon.left, cx,
-                    UINT(SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0)));
+        const bool rebuilt = ListView_GetImageList(found[1], LVSIL_SMALL) != rows_before;
+        std::printf(
+            "     after WM_DPICHANGED (sent %u, window at %u): rows' list %s, slot %ld, header "
+            "image %d, margin %u\n",
+            to, now, rebuilt ? "rebuilt" : "kept", icon.right - icon.left, cx,
+            UINT(SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0)));
         if (eleven)
-            expect(icon.right - icon.left == expect_inset && cx == expect_title &&
+            expect(rebuilt && icon.right - icon.left == expect_inset && cx == expect_title &&
                        SendMessageW(header, HDM_GETBITMAPMARGIN, 0, 0) == 0,
-                   "after WM_DPICHANGED to " + str(int(to)) + " dpi the slot is " +
-                       str(expect_inset) + " px and the title's blank " + str(expect_title));
+                   "after WM_DPICHANGED the rows' list is rebuilt, at the window's " +
+                       str(int(now)) + " dpi: the slot " + str(expect_inset) +
+                       " px and the title's blank " + str(expect_title));
+        check("after WM_DPICHANGED");
     }
 
     win->close();
