@@ -1,3 +1,4 @@
+#include "win32_shell_icons.h"
 #include "win32_common.h"
 
 #include "builtin_icons.h"
@@ -754,6 +755,21 @@ size_f d2d_painter::measure(const std::string& s, const text_style& style) const
 namespace
 {
 
+// A name Windows has its own icon for (win32_shell_icons.h) drawn from it,
+// `px` pixels square into `dst`; false for any other name.
+bool draw_shell_icon(ID2D1RenderTarget* rt, const std::string& name, D2D1_RECT_F dst, int px)
+{
+    const std::vector<uint32_t>* pixels = shell_icon_pixels(name, px);
+    if (!pixels) return false;
+    com<ID2D1Bitmap> bmp;
+    const D2D1_BITMAP_PROPERTIES props =
+        D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+    if (FAILED(rt->CreateBitmap(D2D1::SizeU(UINT32(px), UINT32(px)), pixels->data(), UINT32(px) * 4, props, bmp.put())))
+        return false;
+    rt->DrawBitmap(bmp.get(), dst, 1.f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+    return true;
+}
+
 // A WIC bitmap render target of `px` square, cleared to transparent, with
 // the icon drawn through a D2DPainter at `scale`.
 com<IWICBitmap> icon_bitmap(const icon& icon, int px, float scale, color ink)
@@ -776,7 +792,7 @@ com<IWICBitmap> icon_bitmap(const icon& icon, int px, float scale, color ink)
         p.override_color(theme_color::text, ink);
         if (icon.draw)
             icon.draw(p, {px / scale, px / scale});
-        else
+        else if (!draw_shell_icon(rt.get(), icon.name, D2D1::RectF(0, 0, px / scale, px / scale), px))
             builtin::draw_builtin_icon(icon.name, p, {px / scale, px / scale});
     }
     rt->EndDraw();
@@ -817,7 +833,7 @@ HBITMAP render_icons(const std::vector<const icon*>& icons, int px, float scale,
             p.push_clip({0, 0, size.w, size.h});
             if (icons[i]->draw)
                 icons[i]->draw(p, size);
-            else
+            else if (!draw_shell_icon(rt.get(), icons[i]->name, D2D1::RectF(0, 0, size.w, size.h), px))
                 builtin::draw_builtin_icon(icons[i]->name, p, size);
             p.pop_clip();
         }
@@ -899,9 +915,10 @@ void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink)
         p.override_color(theme_color::window_text, ink);
         p.override_color(theme_color::text, ink);
         const size_f size{(r.right - r.left) / scale, (r.bottom - r.top) / scale};
+        const int px = std::min(r.right - r.left, r.bottom - r.top);
         if (icon.draw)
             icon.draw(p, size);
-        else
+        else if (!draw_shell_icon(rt.get(), icon.name, D2D1::RectF(0, 0, px / scale, px / scale), px))
             builtin::draw_builtin_icon(icon.name, p, size);
     }
     rt->EndDraw();
