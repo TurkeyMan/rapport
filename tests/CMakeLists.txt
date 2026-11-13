@@ -468,3 +468,18 @@ if(TARGET rapport_win32)
     add_test(NAME win32-list-stretch COMMAND rapport-win32-list-stretch-test)
     set_tests_properties(win32-list-stretch PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 endif()
+
+# UI Automation for drawn elements: a caption tab strip's, through an
+# in-process UIA client on a thread of its own. The provider is compiled in
+# directly, as nothing of rapport's uses it yet; its window is shown without
+# activating and never given input.
+if(TARGET rapport_win32)
+    add_executable(rapport-win32-uia-test win32_uia_test.cpp ../backends/win32/win32_uia.cpp)
+    target_include_directories(rapport-win32-uia-test PRIVATE ../backends/win32)
+    target_compile_features(rapport-win32-uia-test PRIVATE cxx_std_23)
+    target_compile_definitions(rapport-win32-uia-test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
+                                                              _WIN32_WINNT=0x0A00)
+    target_link_libraries(rapport-win32-uia-test PRIVATE user32 ole32 oleaut32 uiautomationcore)
+    add_test(NAME win32-uia COMMAND rapport-win32-uia-test)
+    set_tests_properties(win32-uia PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 90)
+endif()
