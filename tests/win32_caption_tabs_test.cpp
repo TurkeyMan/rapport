@@ -367,20 +367,36 @@ void check_layout(HWND top, HWND strip, const std::string& when)
 }
 
 // rapport's own pixels of the strip, printed: `pal` as expected.
+// The middle of the strip's empty part past "+", which layout may leave as
+// little as 8 logical px: -1 (a failed check) when there's none to sample.
+int past_add(HWND strip, const std::string& when, bool check = true)
+{
+    RECT c;
+    GetClientRect(strip, &c);
+    const RECT add = part(strip, q_add);
+    const int x = int(add.right + c.right) / 2;
+    const bool room = c.right - add.right >= 2 && x > add.right && x < c.right;
+    if (check) expect(room, "an empty part past \"+\" to sample, " + str(long(add.right)) + ".." + str(long(c.right)) + " (" +
+                     when + ")");
+    return room ? x : -1;
+}
+
 void check_pixels(HWND strip, const palette& pal, const std::string& when)
 {
     const UINT dpi = GetDpiForWindow(strip);
     const printed p = print(strip);
     const int current = ask(strip, q_current);
-    const RECT tab = part(strip, q_tab, current), add = part(strip, q_add);
+    const RECT tab = part(strip, q_tab, current);
     const int h = p.h, line = std::max(1, px(1, dpi)), mid = (tab.top + h - line) / 2;
     const std::string at = " (" + when + ")";
     auto colour = [](DWORD v) { return v & 0xffffff; };
     auto alpha = [](DWORD v) { return v >> 24; };
     auto is = [&](DWORD v, DWORD want) { return alpha(v) == 255 && colour(v) == want; };
     // The empty part: above the tabs, and past "+".
-    for (const POINT e : {POINT{tab.left + px(24, dpi), px(3, dpi)}, POINT{add.right + px(12, dpi), h / 2}})
+    const int past = past_add(strip, when);
+    for (const POINT e : {POINT{tab.left + px(24, dpi), px(3, dpi)}, POINT{past, h / 2}})
     {
+        if (e.x < 0) continue;
         const DWORD v = p.at(e.x, e.y);
         if (pal.clear)
             expect(alpha(v) == 0, "the strip's empty part is clear for the backdrop at " + str(e.x) + "," +
@@ -403,9 +419,9 @@ void check_pixels(HWND strip, const palette& pal, const std::string& when)
         expect(is(side, pal.line), "its sides are the divider's, " + hex(pal.line) + at + ": " + hex(colour(side)));
     }
     // The line along the bottom elsewhere: past "+", under another tab.
-    for (const int x : {int(add.right) + px(12, dpi), current == 0 ? int(part(strip, q_tab, 1).left) + px(20, dpi)
-                                                                   : px(16, dpi)})
+    for (const int x : {past, current == 0 ? int(part(strip, q_tab, 1).left) + px(20, dpi) : px(16, dpi)})
     {
+        if (x < 0) continue;
         const DWORD v = p.at(x, h - 1);
         expect(is(v, pal.line), "the line between strip and band, " + hex(pal.line) + ", at " + str(x) + at +
                                     ": " + hex(colour(v)) + " alpha " + str(long(alpha(v))));
@@ -446,9 +462,11 @@ void check_hits(HWND top, HWND strip, const std::string& when)
     const std::string at = " (" + when + ")";
     const RECT add = part(strip, q_add), tab1 = part(strip, q_tab, 1), close0 = part(strip, q_close, 0);
     const RECT tab0 = part(strip, q_tab, 0);
-    const POINT empty{add.right + px(12, dpi), px(20, dpi)}, between{tab1.right, px(20, dpi)};
-    expect(hit(strip, strip, empty) == HTTRANSPARENT && hit(top, strip, empty) == HTCAPTION,
-           "past \"+\": through the strip, the caption" + at);
+    const POINT empty{past_add(strip, when), px(20, dpi)}, between{tab1.right, px(20, dpi)};
+    (void)add;
+    if (empty.x >= 0)
+        expect(hit(strip, strip, empty) == HTTRANSPARENT && hit(top, strip, empty) == HTCAPTION,
+               "past \"+\": through the strip, the caption" + at);
     expect(ask(strip, q_current) != 1 && ask(strip, q_current) != 2, "(neither tab 1 nor 2 current)");
     expect(hit(strip, strip, between) == HTTRANSPARENT && hit(top, strip, between) == HTCAPTION,
            "between two tabs: the caption" + at);
@@ -475,9 +493,51 @@ void check_hits(HWND top, HWND strip, const std::string& when)
         RECT w;
         GetWindowRect(top, &w);
         const int y = w.top + (b.top + b.bottom) / 2;
-        const LRESULT close = SendMessageW(top, WM_NCHITTEST, 0, MAKELPARAM(short(w.left + b.right - px(10, dpi)), short(y)));
-        const LRESULT max = SendMessageW(top, WM_NCHITTEST, 0,
-                                         MAKELPARAM(short(w.left + b.right - (b.right - b.left) / 2), short(y)));
+        const POINT close_at{w.left + b.right - px(10, dpi), y},
+            max_at{w.left + b.right - (b.right - b.left) / 2, y};
+        const LRESULT close = SendMessageW(top, WM_NCHITTEST, 0, MAKELPARAM(short(close_at.x), short(close_at.y)));
+        const LRESULT max = SendMessageW(top, WM_NCHITTEST, 0, MAKELPARAM(short(max_at.x), short(max_at.y)));
+        // What the coordinates were, and what DWM itself says there: whether
+        // the samples or the window's handling is wrong.
+        {
+            POINT origin{0, 0};
+            ClientToScreen(top, &origin);
+            RECT c;
+            GetClientRect(top, &c);
+            HMONITOR mon = MonitorFromWindow(top, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{sizeof mi};
+            GetMonitorInfoW(mon, &mi);
+            auto rect = [](const RECT& v)
+            {
+                return str(long(v.left)) + "," + str(long(v.top)) + ".." + str(long(v.right)) + "," +
+                       str(long(v.bottom));
+            };
+            note("caption buttons" + at + ": zoomed " + str(long(IsZoomed(top))) + ", dpi " + str(long(dpi)) +
+                 ", window " + rect(w) + ", client origin " + str(long(origin.x)) + "," + str(long(origin.y)) +
+                 " size " + str(long(c.right)) + "x" + str(long(c.bottom)) + ", monitor " + rect(mi.rcMonitor) +
+                 " work " + rect(mi.rcWork) + ", DWMWA_CAPTION_BUTTON_BOUNDS " + rect(b));
+            auto dwm = [&](POINT s)
+            {
+                LRESULT r = 0;
+                const BOOL handled = DwmDefWindowProc(top, WM_NCHITTEST, 0, MAKELPARAM(short(s.x), short(s.y)), &r);
+                return "DwmDefWindowProc " + str(long(handled)) + "/" + str(long(r));
+            };
+            note("  close sampled at " + str(long(close_at.x)) + "," + str(long(close_at.y)) + ": " +
+                 str(long(close)) + ", " + dwm(close_at));
+            note("  maximise sampled at " + str(long(max_at.x)) + "," + str(long(max_at.y)) + ": " + str(long(max)) +
+                 ", " + dwm(max_at));
+            // Where DWM answers for the buttons, down the close button's
+            // column from above the window to below the strip.
+            std::string scan;
+            for (int sy = w.top - px(4, dpi); sy < w.top + px(60, dpi); sy += std::max(1, px(2, dpi)))
+            {
+                LRESULT r = 0;
+                const BOOL handled =
+                    DwmDefWindowProc(top, WM_NCHITTEST, 0, MAKELPARAM(short(close_at.x), short(sy)), &r);
+                scan += " " + str(long(sy)) + ":" + (handled ? str(long(r)) : std::string("-"));
+            }
+            note("  DWM down the close column:" + scan);
+        }
         expect(close == HTCLOSE, "the close button is the system's" + at + " (" + str(long(close)) + ")");
         expect(max == HTMAXBUTTON, "and maximise" + at + " (" + str(long(max)) + ")");
     }
@@ -685,7 +745,18 @@ struct dpi_scale_set
     DISPLAYCONFIG_DEVICE_INFO_HEADER header;
     int32_t rel;
 };
-bool primary_source(LUID& adapter, UINT32& id)
+// The DisplayConfig source that is a GDI display device (\\.\DISPLAYn): the
+// one display whose scale is read, changed and put back, the same as the
+// one whose mode is.
+struct display_source
+{
+    LUID adapter{};
+    UINT32 id = 0;
+    bool known = false;
+};
+display_source g_source;
+
+bool source_of(const std::wstring& gdi_name, display_source& out)
 {
     UINT32 paths = 0, modes = 0;
     if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &paths, &modes) != ERROR_SUCCESS || !paths) return false;
@@ -693,24 +764,41 @@ bool primary_source(LUID& adapter, UINT32& id)
     std::vector<DISPLAYCONFIG_MODE_INFO> m(modes);
     if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &paths, p.data(), &modes, m.data(), nullptr) != ERROR_SUCCESS)
         return false;
-    adapter = p[0].sourceInfo.adapterId;
-    id = p[0].sourceInfo.id;
-    return true;
+    for (UINT32 i = 0; i < paths; ++i)
+    {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME name{};
+        name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        name.header.size = sizeof name;
+        name.header.adapterId = p[i].sourceInfo.adapterId;
+        name.header.id = p[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&name.header) == ERROR_SUCCESS && gdi_name == name.viewGdiDeviceName)
+        {
+            out = {p[i].sourceInfo.adapterId, p[i].sourceInfo.id, true};
+            return true;
+        }
+    }
+    return false;
 }
 bool get_scale(dpi_scale_get& g)
 {
     g = {};
+    if (!g_source.known) return false;
     g.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE(-3);
     g.header.size = sizeof g;
-    return primary_source(g.header.adapterId, g.header.id) && DisplayConfigGetDeviceInfo(&g.header) == ERROR_SUCCESS;
+    g.header.adapterId = g_source.adapter;
+    g.header.id = g_source.id;
+    return DisplayConfigGetDeviceInfo(&g.header) == ERROR_SUCCESS;
 }
 bool set_scale(int32_t rel)
 {
+    if (!g_source.known) return false;
     dpi_scale_set s{};
     s.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE(-4);
     s.header.size = sizeof s;
+    s.header.adapterId = g_source.adapter;
+    s.header.id = g_source.id;
     s.rel = rel;
-    return primary_source(s.header.adapterId, s.header.id) && DisplayConfigSetDeviceInfo(&s.header) == ERROR_SUCCESS;
+    return DisplayConfigSetDeviceInfo(&s.header) == ERROR_SUCCESS;
 }
 
 bool set_high_contrast(bool on)
@@ -760,8 +848,11 @@ struct restore
             }
         mode = {};
         mode.dmSize = sizeof mode;
+        // Its DisplayConfig source, by its GDI name: the scale read, set
+        // and put back is this display's, never another active one's.
         dpi_scale_get g{};
-        if (!found || !EnumDisplaySettingsW(dev.DeviceName, ENUM_CURRENT_SETTINGS, &mode) || !get_scale(g))
+        if (!found || !source_of(dev.DeviceName, g_source) ||
+            !EnumDisplaySettingsW(dev.DeviceName, ENUM_CURRENT_SETTINGS, &mode) || !get_scale(g))
             return false;
         device = dev.DeviceName;
         rel = g.cur_rel;
@@ -867,6 +958,9 @@ int dpi_transition(HWND top, HWND strip)
         expect(false, "the display's mode and scale read before changing them");
         return 1;
     }
+    // Armed before anything changes: a mode change may move the scale too,
+    // even if what follows returns early.
+    g_restore.scale = true;
     dpi_scale_get g{};
     if (!get_scale(g))
     {
@@ -898,7 +992,6 @@ int dpi_transition(HWND top, HWND strip)
     expect(to != g.cur_rel, "the display allows another scale");
     if (to == g.cur_rel) return 1;
     const UINT before = GetDpiForWindow(top);
-    g_restore.scale = true;
     expect(set_scale(to), "the display's scale set");
     const bool changed = pump_until([&] { return GetDpiForWindow(top) != before; });
     expect(changed, "the window's DPI changed with it, from " + str(long(before)) + " to " +
@@ -946,8 +1039,9 @@ int contrast_transition(HWND top, HWND strip)
         [&]
         {
             const printed p = print(strip);
-            const RECT add = part(strip, q_add);
-            const DWORD v = p.at(add.right + 12, p.h / 2);
+            const int x = past_add(strip, "waiting for high contrast", false);
+            if (x < 0) return false;
+            const DWORD v = p.at(x, p.h / 2);
             return high_contrast() && (v & 0xffffff) == expected(true).empty && (v >> 24) == 255;
         });
     expect(took, "the strip takes high contrast's colours");
