@@ -260,6 +260,14 @@ if(TARGET rapport_win32)
         target_link_libraries(rapport-win32-shell-icons-paint-test PRIVATE rapport::rapport rapport::backend_win32 user32)
         add_test(NAME win32-shell-icons-paint COMMAND rapport-win32-shell-icons-paint-test)
         set_tests_properties(win32-shell-icons-paint PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+        # Paths' own icons on a tree's and a list's rows, never shown, painted
+        # into memory: painting never enters the shell; found, they show.
+        add_executable(rapport-win32-path-icons-paint-test win32_path_icons_paint_test.cpp)
+        target_include_directories(rapport-win32-path-icons-paint-test PRIVATE ../backends/win32)
+        target_link_libraries(rapport-win32-path-icons-paint-test PRIVATE rapport::rapport rapport::backend_win32 user32
+                                                                          comctl32 shell32)
+        add_test(NAME win32-path-icons-paint COMMAND rapport-win32-path-icons-paint-test)
+        set_tests_properties(win32-path-icons-paint PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
     endif()
 endif()
 

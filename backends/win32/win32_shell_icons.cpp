@@ -364,6 +364,7 @@ struct path_store
     size_t next_listener = 1;
     std::map<path_size, bool> wanted;  // (key, logical px)
     size_t lookups = 0;
+    bool held = false;  // hold_path_icon_finders, for tests
 };
 constexpr int max_finders = 4;
 
@@ -407,7 +408,7 @@ void find_path_icons()
     for (;;)
     {
         ++s.idle;
-        s.work.wait(lock, [&] { return !s.queue.empty(); });
+        s.work.wait(lock, [&] { return !s.queue.empty() && !s.held; });
         --s.idle;
         const path_size job = std::move(s.queue.front());
         s.queue.pop_front();
@@ -518,6 +519,16 @@ void request_wanted_path_icons(UINT dpi)
 }
 
 }  // namespace
+
+void hold_path_icon_finders(bool hold)
+{
+    path_store& s = the_path_store();
+    {
+        std::lock_guard lock(s.m);
+        s.held = hold;
+    }
+    if (!hold) s.work.notify_all();
+}
 
 size_t path_icon_lookups()
 {
