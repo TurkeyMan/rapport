@@ -2057,7 +2057,9 @@ private:
 // its tabs alone over empty pages and no frame, as GNOME's apps had their
 // tabs before libadwaita. Each tab is its icon, its title (cut short with
 // an ellipsis) and a flat close button; a middle click on it closes it too.
-// The notebook never takes the focus: the window's keys work it.
+// The notebook never takes the focus: the window's keys work it. Its tabs
+// are reorderable: dragged, the others make room, and the notebook says so
+// once, as the drag is let go (page-reordered).
 class document_tabs_impl : public widget_base<rap::document_tabs>
 {
 public:
@@ -2076,6 +2078,14 @@ public:
                 if (!self->quiet_) self->state.picked(int(page));
             },
             this);
+        connect(
+            w_, "page-reordered",
+            +[](GtkNotebook*, GtkWidget* page, guint to, gpointer p)
+            {
+                auto* self = static_cast<document_tabs_impl*>(p);
+                if (!self->quiet_) self->page_moved(page, int(to));
+            },
+            this);
         // Narrower tabs as the row fills; set once allocated, not during it.
         connect(
             w_, "size-allocate",
@@ -2092,9 +2102,11 @@ public:
     {
         const int at = state.insert(index, t);
         GtkWidget* page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        g_object_set_data_full(G_OBJECT(page), "rapport-tab", g_strdup(t.id.c_str()), g_free);
         GtkWidget* tab = make_tab(t);
         quiet q(this);
         gtk_notebook_insert_page(GTK_NOTEBOOK(w_), page, tab, at);
+        gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(w_), page, true);
         gtk_widget_show_all(page);
         gtk_widget_show_all(tab);
         gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), state.current);
@@ -2139,21 +2151,41 @@ public:
         state.on_close = std::move(f);
     }
     void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+    void on_reorder(std::function<void(const std::string&, int)> f) override
+    {
+        state.on_reorder = std::move(f);
+    }
 
     bool key(const key_event& e)
     {
-        return state.key(e,
-                         [this](int i)
-                         {
-                             quiet q(this);
-                             gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
-                         });
+        return state.key(
+            e,
+            [this](int i)
+            {
+                quiet q(this);
+                gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
+            },
+            [this](int from, int to)
+            {
+                quiet q(this);
+                auto* nb = GTK_NOTEBOOK(w_);
+                gtk_notebook_reorder_child(nb, gtk_notebook_get_nth_page(nb, from), to);
+            });
     }
 
     GtkWidget* notebook() const { return w_; }
     doc_tabs::state state;
 
 private:
+    // A tab dragged, let go at `to`: the bookkeeping follows the notebook,
+    // and the app's told if it moved.
+    void page_moved(GtkWidget* page, int to)
+    {
+        const auto* id = static_cast<const char*>(g_object_get_data(G_OBJECT(page), "rapport-tab"));
+        const int from = id ? state.index_of(id) : -1;
+        if (state.move(from, to)) state.reordered(to);
+    }
+
     // The notebook's own changes of page (as a tab goes) aren't the user's.
     struct quiet
     {

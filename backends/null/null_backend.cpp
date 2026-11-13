@@ -438,6 +438,11 @@ public:
         state.on_close = std::move(f);
     }
     void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+    // Kept, though nothing here is dragged and no keys come.
+    void on_reorder(std::function<void(const std::string&, int)> f) override
+    {
+        state.on_reorder = std::move(f);
+    }
 
     doc_tabs::state state;
 };

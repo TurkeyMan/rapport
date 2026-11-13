@@ -72,6 +72,12 @@ public:
     // A right click on tab `index` (-1: none), or the menu key; `screen`
     // where the menu goes.
     virtual void caption_menu(int index, POINT screen) = 0;
+    // A tab dragged along the strip has passed another, or gone back as its
+    // drag's cancelled: the strip's moved it from `from` to `to` already,
+    // for the owner to follow, telling no one.
+    virtual void caption_moved(int from, int to) = 0;
+    // The drag let go: the tab now at `index` was moved there from elsewhere.
+    virtual void caption_reordered(int index) = 0;
 
 protected:
     ~caption_tabs_owner() = default;
@@ -103,8 +109,15 @@ public:
     // The strip's height at `dpi`, the line under it included.
     static int height(UINT dpi);
 
+    // Tabs of the same keys in another order are told to UI Automation as
+    // reordered. A tab being dragged stays dragged while it's there.
     void set_tabs(std::vector<caption_tab> tabs, int current);
     void set_current(int current);
+    // A tab pressed and maybe being dragged (see caption_tabs::impl::drag).
+    bool dragging() const;
+    // That drag's tab put back where it was, the owner told of its move
+    // back (caption_moved) and nothing else; the mouse released.
+    void cancel_drag();
     int count() const { return int(tabs_.size()); }
     int current() const { return current_; }
 

@@ -1903,6 +1903,13 @@ class document_tab_bar : public QTabBar
 public:
     using QTabBar::QTabBar;
     std::function<void(int)> middle_clicked;  // cleared when its part goes
+    // The left button pressed on tab i (before the bar's own handling, -1
+    // for none); the press handled (the app told of a new current tab,
+    // which may have changed the tabs); and let go, after the bar's own
+    // handling: a drag's start and end.
+    std::function<void(int)> pressed_on;
+    std::function<void()> press_handled, released;
+    bool pressed = false;  // the left button's down on it
 
 protected:
     QSize tabSizeHint(int i) const override
@@ -1918,6 +1925,18 @@ protected:
         s.setWidth(int(doc_tabs::narrowest_tab));
         return s;
     }
+    void mousePressEvent(QMouseEvent* e) override
+    {
+        const bool left = e->button() == Qt::LeftButton;
+        if (left)
+        {
+            pressed = true;
+            if (pressed_on) pressed_on(tabAt(e->position().toPoint()));
+        }
+        const QPointer<document_tab_bar> alive(this);
+        QTabBar::mousePressEvent(e);  // on_select: the app may change the tabs, or close the window
+        if (left && alive && press_handled) press_handled();
+    }
     void mouseReleaseEvent(QMouseEvent* e) override
     {
         if (e->button() == Qt::MiddleButton)
@@ -1927,12 +1946,17 @@ protected:
             return;
         }
         QTabBar::mouseReleaseEvent(e);
+        if (e->button() == Qt::LeftButton && pressed)
+        {
+            pressed = false;
+            if (released) released();  // last: the app may change the tabs
+        }
     }
 };
 
 // A window's document tabs (window_spec::tabs): a QTabBar across the top in
-// document mode, each tab with its close button, as Dolphin's are. It never
-// takes the focus: the window's keys work it.
+// document mode, each tab with its close button, as Dolphin's are, movable.
+// It never takes the focus: the window's keys work it.
 class document_tabs_impl : public widget_base<rap::document_tabs>
 {
 public:
@@ -1954,14 +1978,65 @@ public:
                          });
         QObject::connect(bar_, &QTabBar::tabCloseRequested, bar_,
                          [this](int i) { state.close_asked(i); });
+        // Dragged along the bar, the tabs move as the dragged one passes
+        // another (tabMoved, live, each time; of the tab it passes, not
+        // necessarily the dragged one): the bookkeeping follows each, and the
+        // app's told once, of the tab pressed and where it ends, as the drag's
+        // let go. The tab's known by its id, and where it starts from is
+        // where it is once the press is handled. As on Windows, the app's own
+        // insert or remove while the button's down (in on_select or after),
+        // or one of the tabs' keys, cancels the drag: its moves so far are
+        // undone, and so are any the bar makes before it's let go, and
+        // nothing's told. A move with no button down (moveTab) is told at once.
+        bar_->setMovable(true);
+        QObject::connect(bar_, &QTabBar::tabMoved, bar_,
+                         [this](int from, int to)
+                         {
+                             if (quiet_ || !state.move(from, to)) return;
+                             if (!bar_->pressed)
+                                 state.reordered(to);
+                             else
+                                 moves_.emplace_back(from, to);
+                         });
+        bar_->pressed_on = [this](int i)
+        {
+            dragged_ = i >= 0 && i < state.count() ? state.tabs[size_t(i)].id : std::string();
+            dragged_from_ = -1;
+            moves_.clear();
+            cancelled_ = false;
+        };
+        bar_->press_handled = [this]
+        {
+            dragged_from_ = dragged_.empty() ? -1 : state.index_of(dragged_);
+            if (dragged_from_ < 0) dragged_.clear();  // closed as it was pressed
+        };
+        bar_->released = [this]
+        {
+            if (std::exchange(cancelled_, false))
+            {
+                undo_moves();  // the bar's own, since the cancel
+                return;
+            }
+            moves_.clear();
+            const std::string id = std::exchange(dragged_, {});
+            const int to = id.empty() ? -1 : state.index_of(id);
+            if (to >= 0 && dragged_from_ >= 0 && to != dragged_from_) state.reordered(to);
+        };
     }
     ~document_tabs_impl() override
     {
-        if (bar_) bar_->middle_clicked = nullptr;
+        if (bar_)
+        {
+            bar_->middle_clicked = nullptr;
+            bar_->pressed_on = nullptr;
+            bar_->press_handled = nullptr;
+            bar_->released = nullptr;
+        }
     }
 
     void insert(int index, const document_tab& t) override
     {
+        cancel_drag();  // the app's index is of the tabs as they were
         const int at = state.insert(index, t);
         quiet q(this);
         bar_->insertTab(at, to_q_icon(t.icon, 16, bar_), title(t));
@@ -1973,6 +2048,7 @@ public:
     }
     void remove(const std::string& id) override
     {
+        cancel_drag();
         const int i = state.remove(id);
         if (i < 0) return;
         quiet q(this);
@@ -2008,15 +2084,30 @@ public:
         state.on_close = std::move(f);
     }
     void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+    void on_reorder(std::function<void(const std::string&, int)> f) override
+    {
+        state.on_reorder = std::move(f);
+    }
 
     bool key(const key_event& e)
     {
-        return state.key(e,
-                         [this](int i)
-                         {
-                             quiet q(this);
-                             bar_->setCurrentIndex(i);
-                         });
+        // One of the tabs' keys while the button's down: the drag cancelled
+        // first, as the app's own changes cancel it.
+        if (bar_ && bar_->pressed && e.press &&
+            doc_tabs::for_key(e, state.current, state.count()).what != doc_tabs::action::none)
+            cancel_drag();
+        return state.key(
+            e,
+            [this](int i)
+            {
+                quiet q(this);
+                bar_->setCurrentIndex(i);
+            },
+            [this](int from, int to)
+            {
+                quiet q(this);
+                bar_->moveTab(from, to);
+            });
     }
 
     doc_tabs::state state;
@@ -2039,8 +2130,33 @@ private:
         bool was_;
     };
 
+    // The press's drag, if there's one, cancelled: the tabs it's moved put
+    // back, quietly, and nothing told as it's let go (when what the bar
+    // moves meanwhile is put back too).
+    void cancel_drag()
+    {
+        if (!bar_ || !bar_->pressed) return;
+        undo_moves();
+        dragged_.clear();
+        dragged_from_ = -1;
+        cancelled_ = true;
+    }
+    void undo_moves()
+    {
+        quiet q(this);
+        for (auto m = moves_.rbegin(); m != moves_.rend(); ++m)
+            if (state.move(m->second, m->first)) bar_->moveTab(m->second, m->first);
+        moves_.clear();
+    }
+
     QPointer<document_tab_bar> bar_;
     bool quiet_ = false;
+    std::string dragged_;    // the tab pressed, maybe dragged
+    int dragged_from_ = -1;  // where it was, the press handled
+    // The bar's moves while the button's down (from, to), in order; and
+    // whether this press's drag's been cancelled.
+    std::vector<std::pair<int, int>> moves_;
+    bool cancelled_ = false;
 };
 
 // -- toolbar, values, canvas --------------------------------------------------
