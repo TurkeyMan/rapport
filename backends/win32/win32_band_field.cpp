@@ -249,7 +249,9 @@ void paint_frame(HWND h, HDC dc)
                     c = mix(c, l.focused && float(y) >= fh - line ? l.accent : l.stroke, std::max(0.f, outer - inner));
                 }
             }
-            pixels[size_t(y) * size_t(w) + size_t(x)] = uint32_t(c.r) << 16 | uint32_t(c.g) << 8 | c.b;
+            // Opaque, alpha and all (on a frame extended into the client
+            // area a pixel at alpha 0 would be the backdrop's).
+            pixels[size_t(y) * size_t(w) + size_t(x)] = 0xFF000000u | uint32_t(c.r) << 16 | uint32_t(c.g) << 8 | c.b;
         }
     GdiFlush();
     const int saved = SaveDC(dc);
