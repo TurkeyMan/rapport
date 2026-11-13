@@ -975,6 +975,60 @@ void set_tooltip_text(HWND h, const std::string& text)
     apply_tooltip(h, text);
 }
 
+// -- paths' own icons in retained images -------------------------------------
+
+// A control that keeps an image made of icons (a button's image list, a
+// label's icon, a toolbar's strip, the window's icon) rather than drawing
+// them as it paints: the invalidation that tells painted controls a path's
+// icon (icon::for_path) was found changes nothing there, so the image is
+// made again. Before making it, add() each icon at the size it's drawn
+// (a path still pending then is waited for); after, arm() with how to make
+// it again, which runs on the UI thread once any of them is found (or found
+// to be none). Unregistered when it goes.
+class path_icon_rebuild
+{
+public:
+    path_icon_rebuild() = default;
+    path_icon_rebuild(const path_icon_rebuild&) = delete;
+    path_icon_rebuild& operator=(const path_icon_rebuild&) = delete;
+    ~path_icon_rebuild() { stop(); }
+
+    // Waiting for nothing: the image is about to be made again in full.
+    void clear() { waiting_.clear(); }
+    // Before `icon` is drawn at `px` into the image.
+    void add(const icon& icon, int px)
+    {
+        if (!icon.path.empty() && request_path_icon(icon.path, px) == path_icon_state::pending)
+            waiting_.emplace(path_icon_key(icon.path), px);
+    }
+    // After: `rebuild` makes the image again (and adds again what it draws).
+    void arm(std::function<void()> rebuild)
+    {
+        rebuild_ = std::move(rebuild);
+        if (waiting_.empty())
+            stop();
+        else if (!listener_)
+            listener_ = add_path_icon_listener([this](const std::string& path, int px) { found(path, px); });
+    }
+    bool waiting() const { return !waiting_.empty(); }
+
+private:
+    void found(const std::string& path, int px)
+    {
+        if (!waiting_.erase({path, px})) return;
+        // A copy: rebuilding arms again, replacing it.
+        if (std::function<void()> f = rebuild_) f();
+    }
+    void stop()
+    {
+        if (listener_) remove_path_icon_listener(listener_);
+        listener_ = 0;
+    }
+    std::set<std::pair<std::string, int>> waiting_;
+    std::function<void()> rebuild_;
+    size_t listener_ = 0;
+};
+
 // -- menus --------------------------------------------------------------------
 
 HBITMAP menu_bitmap(const icon& icon, UINT dpi);
@@ -1977,17 +2031,24 @@ public:
         {
             // Drawn for the window's scale, again if that's changed.
             const int size = px(16);
-            if (size != icon_px_)
-            {
-                if (hicon_) DestroyIcon(hicon_);
-                hicon_ = render_icon_handle(icon_, size, win_.scale());
-                SendMessageW(icon_h_, STM_SETICON, reinterpret_cast<WPARAM>(hicon_), 0);
-                icon_px_ = size;
-            }
+            if (size != icon_px_) make_icon(size);
             s.cx += size + px(4);
             s.cy = std::max<long>(s.cy, size);
         }
         return s;
+    }
+    // The icon's handle the static keeps, at `size`; made again once a
+    // path's own icon pending now is found.
+    void make_icon(int size)
+    {
+        path_icon_.clear();
+        path_icon_.add(icon_, size);
+        HICON old = hicon_;
+        hicon_ = render_icon_handle(icon_, size, win_.scale());
+        SendMessageW(icon_h_, STM_SETICON, reinterpret_cast<WPARAM>(hicon_), 0);
+        if (old) DestroyIcon(old);
+        icon_px_ = size;
+        path_icon_.arm([this, size] { make_icon(size); });
     }
     SIZE measure_text()
     {
@@ -2062,7 +2123,37 @@ private:
     HWND icon_h_ = nullptr;
     HICON hicon_ = nullptr;
     int icon_px_ = 0;
+    path_icon_rebuild path_icon_;
 };
+
+// A push button's icon (BCM_SETIMAGELIST): `images` made again for `icon`,
+// the old one gone; made again once a path's own icon pending now is found.
+void set_button_image(HWND h, win_context& win, const icon& icon, HIMAGELIST& images, path_icon_rebuild& rebuild)
+{
+    rebuild.clear();
+    HIMAGELIST old = images;
+    images = nullptr;
+    if (icon)
+    {
+        const int size = win.px(16);
+        rebuild.add(icon, size);
+        images = g_comctl.create(size, size, ILC_COLOR32, 1, 0);
+        if (HICON hi = render_icon_handle(icon, size, win.scale()))
+        {
+            g_comctl.replace_icon(images, -1, hi);
+            DestroyIcon(hi);
+        }
+    }
+    if (images || old)
+    {
+        // None: the button lets go of the old one before it goes.
+        BUTTON_IMAGELIST bil{images, {win.px(2), 0, win.px(2), 0}, BUTTON_IMAGELIST_ALIGN_LEFT};
+        SendMessageW(h, BCM_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(&bil));
+        InvalidateRect(h, nullptr, TRUE);
+    }
+    if (old) g_comctl.destroy(old);
+    rebuild.arm([h, &win, &icon, &images, &rebuild] { set_button_image(h, win, icon, images, rebuild); });
+}
 
 class button_impl : public leaf<rap::button>
 {
@@ -2084,18 +2175,7 @@ public:
     void set_icon(const icon& icon) override
     {
         icon_ = icon;
-        if (images_) g_comctl.destroy(images_);
-        images_ = nullptr;
-        if (!icon) return;
-        const int size = px(16);
-        images_ = g_comctl.create(size, size, ILC_COLOR32, 1, 0);
-        if (HICON hi = render_icon_handle(icon, size, win_.scale()))
-        {
-            g_comctl.replace_icon(images_, -1, hi);
-            DestroyIcon(hi);
-        }
-        BUTTON_IMAGELIST bil{images_, {px(2), 0, px(2), 0}, BUTTON_IMAGELIST_ALIGN_LEFT};
-        SendMessageW(h_, BCM_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(&bil));
+        set_button_image(h_, win_, icon_, images_, path_icon_);
         win_.relayout();
     }
     void on_click(std::function<void()> f) override { click_ = std::move(f); }
@@ -2119,6 +2199,7 @@ private:
     std::function<void()> click_;
     icon icon_;
     HIMAGELIST images_ = nullptr;
+    path_icon_rebuild path_icon_;
 };
 
 class check_impl : public leaf<rap::check>
@@ -4421,18 +4502,8 @@ public:
     }
     void set_icon(const icon& icon) override
     {
-        if (images_) g_comctl.destroy(images_);
-        images_ = nullptr;
-        if (!icon) return;
-        const int size = px(16);
-        images_ = g_comctl.create(size, size, ILC_COLOR32, 1, 0);
-        if (HICON hi = render_icon_handle(icon, size, win_.scale()))
-        {
-            g_comctl.replace_icon(images_, -1, hi);
-            DestroyIcon(hi);
-        }
-        BUTTON_IMAGELIST bil{images_, {px(2), 0, px(2), 0}, BUTTON_IMAGELIST_ALIGN_LEFT};
-        SendMessageW(h_, BCM_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(&bil));
+        icon_ = icon;
+        set_button_image(h_, win_, icon_, images_, path_icon_);
     }
     void set_pushed(bool p) override
     {
@@ -4460,6 +4531,8 @@ private:
     bool pushed_ = false;
     std::function<menu()> menu_;
     HIMAGELIST images_ = nullptr;
+    icon icon_;
+    path_icon_rebuild path_icon_;
 };
 
 // Flat, owner-drawn toolbar button: icon only, hover and pressed/checked
@@ -4688,6 +4761,7 @@ public:
         int image = 0;
         for (size_t i = 0; i + 1 < size_t(id); ++i) image += entries_[i].button != nullptr;
         if (!images_[0]) return;
+        path_icons_.add(entries_[size_t(id) - 1].button->image(), icon_px_);
         for (int state = 0; state < 2; ++state)
             if (HBITMAP bmp = render_icon(entries_[size_t(id) - 1].button->image(), icon_px_, win_.scale(), ink(state)))
             {
@@ -4695,6 +4769,7 @@ public:
                 DeleteObject(bmp);
             }
         InvalidateRect(h_, nullptr, FALSE);
+        path_icons_.arm([this] { path_icon_found(); });
     }
     void relayout() { win_.relayout(); }
 
@@ -4824,8 +4899,13 @@ private:
         if (images_[0] && size == icon_px_) return;
         icon_px_ = size;
         std::vector<const icon*> icons;
+        path_icons_.clear();
         for (const entry& e : entries_)
-            if (e.button) icons.push_back(&e.button->image());
+            if (e.button)
+            {
+                icons.push_back(&e.button->image());
+                path_icons_.add(e.button->image(), size);
+            }
         for (int state = 0; state < 2; ++state)
         {
             HIMAGELIST old = images_[state];
@@ -4841,6 +4921,15 @@ private:
             if (old) g_comctl.destroy(old);
         }
         size_buttons();
+        path_icons_.arm([this] { path_icon_found(); });
+    }
+    // A button's path's own icon (icon::for_path) found: the strips (the
+    // image lists keep what was drawn) made again with it.
+    void path_icon_found()
+    {
+        icon_px_ = 0;
+        rescale();
+        InvalidateRect(h_, nullptr, FALSE);
     }
     // Square buttons, sized once they're in (adding them resizes them).
     void size_buttons()
@@ -4855,6 +4944,7 @@ private:
     std::vector<bool> shown_;
     HIMAGELIST images_[2] = {};
     int icon_px_ = 0;
+    path_icon_rebuild path_icons_;
 };
 
 void strip_button::set_enabled(bool e) { strip_.set_enabled(id_, e); }
@@ -10192,7 +10282,9 @@ public:
         if (!icon) return;
         // (Not `small`: rpcndr.h defines it as char.)
         HICON big, little;
-        if (!icon.draw)
+        window_icon_ = icon;
+        window_icon_rebuild_.clear();
+        if (!icon.draw && icon.path.empty())
         {
             // Windows has no icon theme: a named window icon is the program's
             // icon resource of that name (e.g. `MYAPP ICON "myapp.ico"`), and
@@ -10209,11 +10301,20 @@ public:
         }
         else
         {
+            // A path's own (icon::for_path) is drawn, its fallback until
+            // it's found, and drawn again then.
+            window_icon_rebuild_.add(icon, GetSystemMetrics(SM_CXICON));
+            window_icon_rebuild_.add(icon, GetSystemMetrics(SM_CXSMICON));
             big = render_icon_handle(icon, GetSystemMetrics(SM_CXICON), scale());
             little = render_icon_handle(icon, GetSystemMetrics(SM_CXSMICON), scale());
         }
-        if (big) SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
-        if (little) SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(little));
+        // The window's icons are its own (made or loaded here): the old go.
+        if (big)
+            if (auto old = HICON(SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big)))) DestroyIcon(old);
+        if (little)
+            if (auto old = HICON(SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(little))))
+                DestroyIcon(old);
+        window_icon_rebuild_.arm([this] { set_icon(rap::icon(window_icon_)); });
     }
     void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
@@ -10630,6 +10731,8 @@ private:
     std::function<bool()> on_close_request_;
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     bool app_id_ = false;  // a taskbar group of its own (set_app_id), cleared before it goes
+    rap::icon window_icon_;
+    path_icon_rebuild window_icon_rebuild_;  // its path's own icon, drawn again once found
 };
 
 // -- builder ------------------------------------------------------------------

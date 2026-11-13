@@ -96,6 +96,9 @@ size_t path_icon_lookups();
 // shell finishes), so what shows before an icon is found can be seen.
 void hold_path_icon_finders(bool hold);
 
+// How many listeners there are, for tests: a control that goes removes its.
+size_t path_icon_listener_count();
+
 // How many shell calls this module has made on the calling thread, for
 // tests: none may be made while painting.
 size_t shell_calls_on_this_thread();

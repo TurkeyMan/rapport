@@ -191,6 +191,9 @@ int main(int argc, char** argv)
     if (!free_drive.empty()) asks.push_back({"a drive letter nothing has", narrow(free_drive), false});
 
     expect(path_icon_lookups() == 0, "the cache starts cold");
+    // Held while the "not yet" is looked at: a local path's icon can
+    // otherwise be found between asking and looking.
+    hold_path_icon_finders(true);
     const int sizes[] = {16, 32};
     for (const ask& a : asks)
         for (const int px : sizes)
@@ -204,6 +207,8 @@ int main(int argc, char** argv)
             expect(ms < 50, what + ": asking returns at once (" + std::to_string(ms) + " ms)");
             expect(!path_icon_pixels(a.path, px), what + ": no pixels yet");
         }
+    expect(path_icon_lookups() == 0, "held: the shell not asked yet");
+    hold_path_icon_finders(false);
 
     const bool all = pump_until(
         [&]

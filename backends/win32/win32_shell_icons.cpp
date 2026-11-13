@@ -537,6 +537,13 @@ size_t path_icon_lookups()
     return s.lookups;
 }
 
+size_t path_icon_listener_count()
+{
+    path_store& s = the_path_store();
+    std::lock_guard lock(s.m);
+    return s.listeners.size();
+}
+
 size_t shell_calls_on_this_thread()
 {
     return shell_calls;

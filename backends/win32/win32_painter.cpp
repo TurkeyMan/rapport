@@ -156,8 +156,19 @@ IWICImagingFactory* wic_factory()
 
 // -- DPI, fonts ---------------------------------------------------------------
 
+namespace
+{
+UINT g_dpi_for_tests = 0;
+}
+
+void set_dpi_for_tests(UINT dpi)
+{
+    g_dpi_for_tests = dpi;
+}
+
 UINT dpi_of(HWND h)
 {
+    if (g_dpi_for_tests) return g_dpi_for_tests;
     using fn_t = UINT(WINAPI*)(HWND);
     static fn_t fn = reinterpret_cast<fn_t>(
         reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow")));
