@@ -12,7 +12,16 @@
 // copy is) and, shown, on screen: the strip's empty part clear (alpha 0) for
 // the backdrop, opaque in high contrast; the current tab the band's colour
 // with its edge the divider's, one with the band under the strip; the line
-// between strip and band elsewhere, under the caption buttons too. UI
+// between strip and band elsewhere, under the caption buttons too. Its
+// text: the titles in the UI font (Segoe UI Variable Text, else Segoe UI),
+// as heavy as that face is, the current one in WinUI's TextFillColorPrimary,
+// the others TextFillColorSecondary; ClearType on the current tab when the
+// runner's own font smoothing is ClearType (read, never changed), grey over
+// the backdrop, a hovered tab too (its fill WinUI's translucent
+// LayerOnMicaBaseAltFillColorSecondary; the hover a WM_MOUSEMOVE sent to
+// the strip, not input); "+" and the close button
+// Segoe Fluent Icons' glyphs in TextFillColorSecondary; the rendering
+// parameters read again on a WM_SETTINGCHANGE. UI
 // Automation, from a client on a thread of its own: the Tab, its TabItems by
 // name, Select, each Close tab and New tab invoked, each handler once; the
 // window's native controls still reached. Light and dark (RAPPORT_THEME),
@@ -41,6 +50,7 @@
 // After windows.h, which they need.
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <dwrite.h>
 #include <ole2.h>
 #include <uiautomation.h>
 
@@ -159,14 +169,44 @@ int px(float logical, UINT dpi)
 
 bool g_dark = false, g_base = false;
 
+// WinUI's colours (#AARRGGBB), as the strip's drawn chrome has them
+// (backends/win32/win32_chrome_palette.h): TextFillColorPrimary,
+// TextFillColorSecondary, ControlStrokeColorSecondary.
+struct argb
+{
+    DWORD rgb;  // 0xRRGGBB
+    int a;
+};
+constexpr argb light_primary{0x000000, 0xE4}, light_secondary{0x000000, 0x9E}, light_stroke{0x000000, 0x29};
+constexpr argb dark_primary{0xFFFFFF, 0xFF}, dark_secondary{0xFFFFFF, 0xC5}, dark_stroke{0xFFFFFF, 0x18};
+// LayerOnMicaBaseAltFillColorSecondary: a tab not current, hovered.
+constexpr argb light_hover{0x000000, 0x0A}, dark_hover{0xFFFFFF, 0x0F};
+
+int channel(DWORD v, int shift)
+{
+    return int((v >> shift) & 0xff);
+}
+// `top` over opaque `under`, 0xRRGGBB.
+DWORD over(argb top, DWORD under)
+{
+    DWORD out = 0;
+    for (int shift : {16, 8, 0})
+        out |= DWORD((channel(top.rgb, shift) * top.a + channel(under, shift) * (255 - top.a) + 127) / 255) << shift;
+    return out;
+}
+
 // The colours rapport's roles give, as win32-base-surface has them:
 // Explorer's dark ones (backends/common/theme_palette.h), else the system
-// colours; high contrast's own.
+// colours; high contrast's own. The strip's line, text and glyphs WinUI's,
+// the line drawn opaque over the band.
 struct palette
 {
     DWORD empty = 0;  // the strip's empty part, where it's opaque
     bool clear = true;
     DWORD band = 0, line = 0, current = 0;
+    // The current tab's title; "+" at rest; the current tab's close button;
+    // another tab's title; a tab not current hovered (none in high contrast).
+    argb title{}, glyph{}, close{}, other{}, hover{};
 };
 palette expected(bool hc)
 {
@@ -178,12 +218,19 @@ palette expected(bool hc)
         p.band = rgb(GetSysColor(g_base ? COLOR_WINDOW : COLOR_BTNFACE));
         p.line = rgb(GetSysColor(COLOR_WINDOWTEXT));
         p.current = rgb(GetSysColor(COLOR_HIGHLIGHT));
+        p.title = {rgb(GetSysColor(COLOR_HIGHLIGHTTEXT)), 255};
+        p.glyph = {rgb(GetSysColor(COLOR_WINDOWTEXT)), 255};
+        p.close = p.title;
+        p.other = {rgb(GetSysColor(COLOR_WINDOWTEXT)), 255};
         return p;
     }
     p.band = g_base ? (g_dark ? 0x191919 : rgb(GetSysColor(COLOR_WINDOW)))
                     : (g_dark ? 0x202020 : rgb(GetSysColor(COLOR_BTNFACE)));
-    p.line = g_dark ? 0x333333 : rgb(GetSysColor(COLOR_3DLIGHT));
+    p.line = over(g_dark ? dark_stroke : light_stroke, p.band);
     p.current = p.band;
+    p.title = g_dark ? dark_primary : light_primary;
+    p.glyph = p.close = p.other = g_dark ? dark_secondary : light_secondary;
+    p.hover = g_dark ? dark_hover : light_hover;
     return p;
 }
 
@@ -248,7 +295,18 @@ enum
     q_focus = 2,
     q_tab = 3,
     q_close = 4,
-    q_add = 5
+    q_add = 5,
+    q_params_made = 6,
+    q_fonts = 7
+};
+// What q_fonts fills (caption_tabs_fonts in win32_caption_tabs.h).
+struct strip_fonts
+{
+    wchar_t text[64];
+    wchar_t glyphs[64];
+    float text_size, glyph_size;
+    int text_weight;
+    int cleartype;
 };
 
 // The title bar's height: the client area's top below the window's.
@@ -446,6 +504,320 @@ void check_pixels(HWND strip, const palette& pal, const std::string& when)
         for (int x = tab.left + px(12, dpi); x < tab.left + px(120, dpi); ++x)
             if (colour(p.at(x, y)) != pal.current) ++ink;
     expect(ink > 10, "the current tab's title is drawn" + at + " (" + str(ink) + " pixels)");
+}
+
+// -- the text ---------------------------------------------------------------
+
+IDWriteFactory* dwrite()
+{
+    static IDWriteFactory* f = []
+    {
+        IDWriteFactory* p = nullptr;
+        DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&p));
+        return p;
+    }();
+    return f;
+}
+// DirectWrite's system fonts have a family of this name.
+bool dwrite_has(const std::wstring& name)
+{
+    IDWriteFontCollection* fonts = nullptr;
+    UINT32 index = 0;
+    BOOL exists = FALSE;
+    if (dwrite() && SUCCEEDED(dwrite()->GetSystemFontCollection(&fonts, FALSE)))
+    {
+        fonts->FindFamilyName(name.c_str(), &index, &exists);
+        fonts->Release();
+    }
+    return exists != FALSE;
+}
+
+// The runner's own font smoothing: ClearType, or not. Read, never changed.
+bool runner_cleartype()
+{
+    BOOL smoothing = FALSE;
+    UINT type = 0;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &smoothing, 0);
+    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &type, 0);
+    return smoothing && type == FE_FONTSMOOTHINGCLEARTYPE;
+}
+
+LOGFONTW message_font(UINT dpi)
+{
+    NONCLIENTMETRICSW ncm{};
+    ncm.cbSize = sizeof ncm;
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, dpi);
+    return ncm.lfMessageFont;
+}
+
+std::string narrow(const std::wstring& w)
+{
+    std::string s;
+    for (wchar_t c : w) s += c < 128 ? char(c) : '?';
+    return s;
+}
+
+// How much ink `s` takes in `face` at `size` px, `weight`: DirectWrite's
+// own coverage of its glyphs (a glyph run's alpha texture, before any
+// gamma), summed in pixels. A yardstick for the strip's, in whichever
+// family it has; 0 if the face can't be had.
+double reference_ink(const std::wstring& face, float size, int weight, const wchar_t* s)
+{
+    IDWriteFontCollection* fonts = nullptr;
+    IDWriteFontFamily* family = nullptr;
+    IDWriteFont* font = nullptr;
+    IDWriteFontFace* ff = nullptr;
+    IDWriteGlyphRunAnalysis* analysis = nullptr;
+    double mass = 0;
+    UINT32 index = 0;
+    BOOL exists = FALSE;
+    if (dwrite() && SUCCEEDED(dwrite()->GetSystemFontCollection(&fonts, FALSE)) &&
+        SUCCEEDED(fonts->FindFamilyName(face.c_str(), &index, &exists)) && exists &&
+        SUCCEEDED(fonts->GetFontFamily(index, &family)) &&
+        SUCCEEDED(family->GetFirstMatchingFont(DWRITE_FONT_WEIGHT(weight), DWRITE_FONT_STRETCH_NORMAL,
+                                               DWRITE_FONT_STYLE_NORMAL, &font)) &&
+        SUCCEEDED(font->CreateFontFace(&ff)))
+    {
+        const UINT32 n = UINT32(wcslen(s));
+        std::vector<UINT32> points(s, s + n);
+        std::vector<UINT16> glyphs(n);
+        std::vector<DWRITE_GLYPH_METRICS> metrics(n);
+        std::vector<float> advances(n);
+        DWRITE_FONT_METRICS fm{};
+        ff->GetMetrics(&fm);
+        ff->GetGlyphIndices(points.data(), n, glyphs.data());
+        ff->GetDesignGlyphMetrics(glyphs.data(), n, metrics.data(), FALSE);
+        for (UINT32 i = 0; i < n; ++i) advances[i] = metrics[i].advanceWidth * size / fm.designUnitsPerEm;
+        DWRITE_GLYPH_RUN run{ff, size, n, glyphs.data(), advances.data(), nullptr, FALSE, 0};
+        if (SUCCEEDED(dwrite()->CreateGlyphRunAnalysis(&run, 1.f, nullptr, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+                                                       DWRITE_MEASURING_MODE_NATURAL, 0.f, 0.f, &analysis)))
+        {
+            RECT b{};
+            analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1, &b);
+            std::vector<BYTE> alpha(size_t(b.right - b.left) * (b.bottom - b.top) * 3);
+            if (!alpha.empty() &&
+                SUCCEEDED(analysis->CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &b, alpha.data(),
+                                                       UINT32(alpha.size()))))
+                for (BYTE v : alpha) mass += v / (255.0 * 3);
+        }
+    }
+    for (IUnknown* u : {static_cast<IUnknown*>(analysis), static_cast<IUnknown*>(ff), static_cast<IUnknown*>(font),
+                        static_cast<IUnknown*>(family), static_cast<IUnknown*>(fonts)})
+        if (u) u->Release();
+    return mass;
+}
+
+// Ink in a rectangle of the printed strip. On an opaque `bg`, each
+// channel's way from bg towards `ink` over it; where the strip is clear
+// (bg < 0), its alpha against ink's.
+struct ink_stats
+{
+    double mass = 0;     // coverage summed, in pixels
+    double peak = 0;     // the most covered pixel's coverage
+    int chroma = 0;      // the most a pixel's channels part from grey ink (levels)
+    bool within = true;  // every channel between the ground and the ink (2 levels' grace)
+    std::string worst;   // the first pixel that wasn't
+};
+ink_stats ink_in(const printed& p, RECT r, argb ink, long long bg)
+{
+    ink_stats s;
+    const DWORD full = bg >= 0 ? over(ink, DWORD(bg)) : ink.rgb;
+    for (int y = r.top; y < r.bottom; ++y)
+        for (int x = r.left; x < r.right; ++x)
+        {
+            const DWORD v = p.at(x, y);
+            if (v == 0xDEADBEEF) continue;
+            const int a = int(v >> 24);
+            double cov = 0;
+            if (bg < 0)
+            {
+                // Premultiplied: grey ink's channels are all ink * alpha.
+                cov = double(a) / ink.a;
+                const int hi = std::max({channel(v, 16), channel(v, 8), channel(v, 0)});
+                const int lo = std::min({channel(v, 16), channel(v, 8), channel(v, 0)});
+                s.chroma = std::max(s.chroma, hi - lo);
+                if (a > ink.a + 2 && s.within)
+                {
+                    s.within = false;
+                    s.worst = str(x) + "," + str(y) + " alpha " + str(a);
+                }
+            }
+            else
+            {
+                double sum = 0, lo = 2, hi = -1;
+                int n = 0;
+                for (int shift : {16, 8, 0})
+                {
+                    const int b = channel(DWORD(bg), shift), f = channel(full, shift), c = channel(v, shift);
+                    if (c < std::min(b, f) - 2 || c > std::max(b, f) + 2)
+                        if (s.within)
+                        {
+                            s.within = false;
+                            s.worst = str(x) + "," + str(y) + " " + hex(v & 0xffffff);
+                        }
+                    if (std::abs(f - b) < 24) continue;
+                    const double k = double(c - b) / (f - b);
+                    sum += k;
+                    lo = std::min(lo, k);
+                    hi = std::max(hi, k);
+                    ++n;
+                }
+                if (n == 0) continue;
+                cov = sum / n;
+                if (n > 1) s.chroma = std::max(s.chroma, int(std::lround((hi - lo) * 255 * 0.5)));
+            }
+            cov = std::clamp(cov, 0.0, 1.5);
+            s.mass += cov;
+            s.peak = std::max(s.peak, cov);
+        }
+    return s;
+}
+
+void check_text(HWND strip, const palette& pal, const std::string& when)
+{
+    const UINT dpi = GetDpiForWindow(strip);
+    const std::string at = " (" + when + ")";
+    // The faces: asked of the strip, checked against DirectWrite's fonts.
+    strip_fonts f{};
+    expect(SendMessageW(strip, query(), MAKEWPARAM(q_fonts, 0), reinterpret_cast<LPARAM>(&f)) != 0,
+           "the strip tells its fonts" + at);
+    const LOGFONTW mf = message_font(dpi);
+    std::wstring want = mf.lfFaceName;
+    if (!_wcsicmp(mf.lfFaceName, L"Segoe UI") && windows_build() >= 22000 && dwrite_has(L"Segoe UI Variable Text"))
+        want = L"Segoe UI Variable Text";
+    if (!dwrite_has(want)) want = L"Segoe UI";
+    expect(f.text == want && dwrite_has(f.text),
+           "the titles in " + narrow(want) + ", a family DirectWrite has" + at + ": " + narrow(f.text));
+    const float size = float(mf.lfHeight < 0 ? -mf.lfHeight : mf.lfHeight);
+    const int weight = mf.lfWeight ? int(mf.lfWeight) : 400;
+    expect(std::fabs(f.text_size - size) < 0.01f && f.text_weight == weight,
+           "at the message font's size and weight, " + str(long(size)) + " px " + str(weight) + at + ": " +
+               str(std::lround(f.text_size)) + " px " + str(f.text_weight));
+    const std::wstring icons = dwrite_has(L"Segoe Fluent Icons") ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets";
+    const float glyph = 12.f * float(dpi) / 96.f;
+    expect(f.glyphs == icons && std::fabs(f.glyph_size - glyph) < 0.01f,
+           "the glyphs in " + narrow(icons) + ", " + str(std::lround(glyph)) + " px (WinUI's 12)" + at + ": " +
+               narrow(f.glyphs) + ", " + str(std::lround(f.glyph_size)));
+    const bool cleartype = runner_cleartype();
+    note(std::string("the runner's font smoothing: ") + (cleartype ? "ClearType" : "not ClearType"));
+    expect((f.cleartype != 0) == cleartype, std::string("ClearType ") + (cleartype ? "on" : "off") +
+                                                " in the strip, as the runner's setting" + at);
+
+    const printed p = print(strip);
+    const int current = ask(strip, q_current), line = std::max(1, px(1, dpi));
+    const RECT tab = part(strip, q_tab, current), close = part(strip, q_close, current), add = part(strip, q_add);
+    // The current tab's title (past its icon, before its close button), on
+    // its fill.
+    const RECT title{tab.left + px(36, dpi), tab.top + px(4, dpi), close.left - px(2, dpi), p.h - line};
+    const ink_stats t = ink_in(p, title, pal.title, pal.current);
+    // Either family's weight: the band spans both (and the user's face, if
+    // that's what it is), with room for gamma and ClearType's contrast.
+    std::vector<double> refs;
+    for (const std::wstring face : {std::wstring(L"Segoe UI"), std::wstring(L"Segoe UI Variable Text"), want})
+        if (const double m = reference_ink(face, size, weight, L"Alpha"); m > 0) refs.push_back(m);
+    if (refs.empty()) refs.push_back(1);
+    const double lo = *std::min_element(refs.begin(), refs.end()) * 0.8,
+                 hi = *std::max_element(refs.begin(), refs.end()) * 1.3;
+    expect(t.mass >= lo && t.mass <= hi, "the title's strokes as heavy as the face's at that weight, " +
+                                             str(std::lround(lo)) + ".." + str(std::lround(hi)) + at + ": " +
+                                             str(std::lround(t.mass)));
+    expect(t.within && t.peak >= 0.6,
+           "the title in " + hex(over(pal.title, pal.current)) + " (TextFillColorPrimary on the tab), never past it" +
+               at + ": peak " + str(std::lround(t.peak * 100)) + "%" + (t.within ? "" : ", past at " + t.worst));
+    // A monitor with no subpixel order (FLAT: a virtual display's, say) has
+    // ClearType drawn without colour.
+    DWRITE_PIXEL_GEOMETRY geometry = DWRITE_PIXEL_GEOMETRY_RGB;
+    IDWriteRenderingParams* params = nullptr;
+    if (dwrite() && SUCCEEDED(dwrite()->CreateMonitorRenderingParams(
+                        MonitorFromWindow(strip, MONITOR_DEFAULTTONEAREST), &params)))
+    {
+        geometry = params->GetPixelGeometry();
+        params->Release();
+    }
+    note(std::string("the monitor's pixel order: ") +
+         (geometry == DWRITE_PIXEL_GEOMETRY_BGR ? "BGR" : geometry == DWRITE_PIXEL_GEOMETRY_RGB ? "RGB" : "flat"));
+    if (cleartype && geometry == DWRITE_PIXEL_GEOMETRY_FLAT)
+        note("ClearType on a flat monitor: no colour to look for" + at);
+    else if (cleartype)
+        expect(t.chroma > 2, "the current tab's title is ClearType (its ink has colour)" + at + ": chroma " +
+                                 str(t.chroma));
+    else
+        expect(t.chroma <= 1, "the current tab's title is grey, the runner's ClearType off" + at + ": chroma " +
+                                  str(t.chroma));
+    // Another tab's title, over the backdrop: grey, ClearType or not, in
+    // TextFillColorSecondary (WinUI's TabViewItemHeaderForeground).
+    const int other_i = current == 0 ? 1 : 0;
+    const RECT other = part(strip, q_tab, other_i);
+    const RECT other_box{other.left + px(12, dpi), other.top + px(4, dpi), other.left + px(120, dpi), p.h - line};
+    if (pal.clear)
+    {
+        const ink_stats o = ink_in(p, other_box, pal.other, -1);
+        expect(o.mass > 10 && o.chroma == 0 && o.within && o.peak >= 0.6,
+               "a title over the backdrop is grey (no chroma) in TextFillColorSecondary, alpha " +
+                   str(pal.other.a) + at + ": chroma " + str(o.chroma) + ", ink " + str(std::lround(o.mass)) +
+                   ", peak " + str(std::lround(o.peak * 100)) + "%" + (o.within ? "" : ", past at " + o.worst));
+        // Hovered (the mouse's move sent to the strip as a message, no
+        // input): WinUI's translucent LayerOnMicaBaseAltFillColorSecondary,
+        // so its title stays grey rather than turning ClearType.
+        const POINT in{other.left + px(60, dpi), (other.top + p.h) / 2};
+        SendMessageW(strip, WM_MOUSEMOVE, 0, MAKELPARAM(in.x, in.y));
+        const printed hp = print(strip);  // before the leave TrackMouseEvent may post
+        SendMessageW(strip, WM_MOUSELEAVE, 0, 0);
+        pump(2);
+        const DWORD fill = hp.at(other.left + px(30, dpi), other.top + px(2, dpi));  // above its title
+        const int fa = int(fill >> 24);
+        const DWORD premultiplied = pal.hover.rgb ? 0x010101u * DWORD(fa) : 0;
+        expect(std::abs(fa - pal.hover.a) <= 1 && (fill & 0xffffff) == premultiplied,
+               "a tab hovered is filled with LayerOnMicaBaseAltFillColorSecondary, " + hex(pal.hover.rgb) +
+                   " at alpha " + str(pal.hover.a) + ", translucent" + at + ": " + hex(fill & 0xffffff) + " alpha " +
+                   str(fa));
+        int chroma = 0;
+        double mass = 0;
+        for (int y = other_box.top; y < other_box.bottom; ++y)
+            for (int x = other_box.left; x < other_box.right; ++x)
+            {
+                const DWORD v = hp.at(x, y);
+                chroma = std::max(chroma, std::max({channel(v, 16), channel(v, 8), channel(v, 0)}) -
+                                              std::min({channel(v, 16), channel(v, 8), channel(v, 0)}));
+                mass += std::max(0, int(v >> 24) - fa) / double(pal.other.a);
+            }
+        expect(mass > 10 && chroma == 0, "and its title stays grey, not ClearType" + at + ": chroma " + str(chroma) +
+                                             ", ink " + str(std::lround(mass)));
+    }
+    else
+        note("no clear area to see grey text over" + at + ": the strip's opaque");
+
+    // The glyphs: "+" and the current tab's close button, Segoe Fluent
+    // Icons' in the secondary text colour.
+    const double plus_ref = reference_ink(icons, glyph, 400, L""),
+                 x_ref = reference_ink(icons, glyph, 400, L"");
+    const ink_stats a = ink_in(p, add, pal.glyph, pal.clear ? -1 : (long long)pal.empty);
+    expect(a.within && a.peak >= 0.6 && (!pal.clear || a.chroma == 0),
+           "\"+\" in " + hex(pal.glyph.rgb) + " at alpha " + str(pal.glyph.a) + at + ": peak "+ str(std::lround(a.peak * 100)) + "%, chroma " + str(a.chroma) +
+               (a.within ? "" : ", past at " + a.worst));
+    expect(a.mass >= plus_ref * 0.8 && a.mass <= plus_ref * 1.5,
+           "\"+\" as light as Segoe Fluent Icons' E710, about " + str(std::lround(plus_ref)) + at + ": " +
+               str(std::lround(a.mass)));
+    const ink_stats x = ink_in(p, close, pal.close, pal.current);
+    expect(x.within && x.peak >= 0.6,
+           "the close button's X in " + hex(over(pal.close, pal.current)) + " on the tab" + at + ": peak " +
+               str(std::lround(x.peak * 100)) + "%" + (x.within ? "" : ", past at " + x.worst));
+    expect(x.mass >= x_ref * 0.8 && x.mass <= x_ref * 1.5,
+           "and as light as E711, about " + str(std::lround(x_ref)) + at + ": " + str(std::lround(x.mass)));
+}
+
+// A WM_SETTINGCHANGE (as the font smoothing's) has the strip read its
+// rendering parameters again: sent to the window, no setting changed.
+void check_rebuild(HWND top, HWND strip)
+{
+    print(strip);  // made, if they weren't
+    const int before = ask(strip, q_params_made);
+    SendMessageW(top, WM_SETTINGCHANGE, SPI_SETFONTSMOOTHING, 0);
+    pump(2);
+    print(strip);
+    const int after = ask(strip, q_params_made);
+    expect(before > 0 && after > before, "a WM_SETTINGCHANGE reads the rendering parameters again (made " +
+                                             str(before) + " times, then " + str(after) + ")");
 }
 
 // The same where they're the window's (the band beside the strip) and on
@@ -1061,12 +1433,14 @@ int contrast_transition(HWND top, HWND strip)
     expect(took, "the strip takes high contrast's colours");
     const palette on = expected(true);
     check_pixels(strip, on, "high contrast turned on");
+    check_text(strip, on, "high contrast turned on");
     check_layout(top, strip, "high contrast turned on");
     if (mica) expect(backdrop() == 1, "no Mica in high contrast (" + str(long(backdrop())) + ")");
     g_restore.undo();
     const bool back = pump_until([&] { return !high_contrast() && (print(strip).at(2, 2) >> 24) == 0; });
     expect(back, "high contrast off: the strip clear again");
     check_pixels(strip, expected(false), "high contrast turned off");
+    check_text(strip, expected(false), "high contrast turned off");
     if (mica) expect(backdrop() == 2, "Mica again (" + str(long(backdrop())) + ")");
     return 0;
 }
@@ -1171,6 +1545,8 @@ int main(int argc, char** argv)
     check_layout(top, strip, "shown");
     check_hits(top, strip, "shown");
     check_pixels(strip, expected(hc), hc ? "high contrast" : g_dark ? "dark" : "light");
+    check_text(strip, expected(hc), hc ? "high contrast" : g_dark ? "dark" : "light");
+    check_rebuild(top, strip);
     if (g_shown)
     {
         check_screen(top, strip, expected(hc));

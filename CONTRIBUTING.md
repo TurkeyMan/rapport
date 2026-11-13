@@ -39,6 +39,15 @@ which makes checking a layout on each backend quick.
   keystroke must keep pace with the display. Measure it.
 - A new API is added to every backend at once; a backend that can't support
   it yet gets a stub that compiles and does nothing harmful.
+- Text rapport draws itself (a canvas, an owner-drawn control, drawn chrome
+  such as Windows 11's caption tabs) is ClearType unless the background is
+  composed by DWM; grayscale everywhere when the system has ClearType off.
+  ClearType blends each colour channel with what's beneath, so it needs an
+  opaque background rapport has drawn: over Mica, or anything else the
+  compositor fills in later, text is grayscale. Use the monitor's rendering
+  parameters (its ClearType level, gamma and pixel order, RGB or BGR) and
+  the system's font smoothing setting, and make them again when the settings,
+  the monitor or the DPI change.
 - Changing a public header (`widgets.h`, `layout.h`, `backend.h`,
   `rapport.h`) bumps `abi_version` in `backend.h`, so mismatched plugins
   refuse to load.
