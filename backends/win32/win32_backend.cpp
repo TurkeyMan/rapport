@@ -5035,37 +5035,33 @@ public:
     // step fails, with nothing left behind. Its mask is made from its colour
     // (all white, all masked): a mask bitmap handed to ImageList_Add was
     // drawn solid on the header of a process without a manifest. The source
-    // is an 8 bpp DIB whose one colour is white, within ImageList_AddMasked's
-    // documented no-more-than-8 bpp: a 1 bpp source drew solid again under
-    // comctl32 5.82 on build 26100. From the comctl32 the controls are, as
-    // the button and toolbar lists are.
+    // is screen-compatible, filled white. ImageList_AddMasked documents source
+    // bitmaps of no more than 8 bpp, but both kept to that drew solid under
+    // comctl32 5.82 on build 26100 (1 bpp, and an 8 bpp DIB of one colour),
+    // where this one is masked on 22621 and 26100 alike, with and without a
+    // manifest (CI; win32-file-view-inset-no-manifest catches it if a
+    // Windows changes that). From the comctl32 the controls are, as the
+    // button and toolbar lists are.
     static HIMAGELIST blank_image_list(int w)
     {
         HIMAGELIST list = g_comctl.create(w, 1, ILC_COLOR32 | ILC_MASK, 1, 0);
-        struct
+        HBITMAP colour = nullptr;
+        if (HDC screen = GetDC(nullptr))
         {
-            BITMAPINFOHEADER header;
-            RGBQUAD colours[1];
-        } info{};
-        info.header.biSize = sizeof info.header;
-        info.header.biWidth = w;
-        info.header.biHeight = 1;
-        info.header.biPlanes = 1;
-        info.header.biBitCount = 8;
-        info.header.biCompression = BI_RGB;
-        info.header.biClrUsed = 1;
-        info.colours[0] = RGBQUAD{255, 255, 255, 0};
-        void* bits = nullptr;
-        HBITMAP colour = CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO*>(&info), DIB_RGB_COLORS, &bits,
-                                          nullptr, 0);
-        bool made = false;
-        if (list && colour && bits)
-        {
-            // Every pixel colour 0, white (rows are 4-byte aligned).
-            std::memset(bits, 0, size_t((w + 3) & ~3));
-            GdiFlush();
-            made = true;
+            colour = CreateCompatibleBitmap(screen, w, 1);
+            ReleaseDC(nullptr, screen);
         }
+        bool made = false;
+        if (list && colour)
+            if (HDC dc = CreateCompatibleDC(nullptr))
+            {
+                if (const HGDIOBJ old = SelectObject(dc, colour))
+                {
+                    made = PatBlt(dc, 0, 0, w, 1, WHITENESS);
+                    SelectObject(dc, old);
+                }
+                DeleteDC(dc);
+            }
         made = made && g_comctl.add_masked(list, colour, RGB(255, 255, 255)) == 0;
         if (colour) DeleteObject(colour);
         if (!made && list)
