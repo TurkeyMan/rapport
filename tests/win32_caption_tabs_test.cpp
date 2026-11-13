@@ -24,7 +24,9 @@
 // parameters read again on a WM_SETTINGCHANGE. UI
 // Automation, from a client on a thread of its own: the Tab, its TabItems by
 // name, Select, each Close tab and New tab invoked, each handler once; the
-// window's native controls still reached. Light and dark (RAPPORT_THEME),
+// window's native controls still reached; a tab dragged to the front (the
+// strip sent the mouse's messages), ChildrenReordered raised on the Tab and
+// its TabItems in the new order, on_reorder once. Light and dark (RAPPORT_THEME),
 // on a base surface (--base); high contrast by running it under
 // rapport-win32-high-contrast-run.
 //
@@ -1211,6 +1213,7 @@ struct handlers
 {
     std::mutex lock;
     std::vector<std::string> selected, closed;
+    std::vector<std::pair<std::string, int>> reordered;
     int added = 0;
     std::atomic<int> events{0};
 };
@@ -1268,6 +1271,57 @@ Pattern* pattern(IUIAutomationElement* e, PATTERNID id)
     Pattern* p = nullptr;
     if (e) e->GetCurrentPatternAs(id, __uuidof(Pattern), reinterpret_cast<void**>(&p));
     return p;
+}
+
+// Counts the ChildrenReordered UIA raises.
+class structure_counter : public IUIAutomationStructureChangedEventHandler
+{
+public:
+    std::atomic<int> reordered{0};
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override { return --refs_; }  // on the stack: never deleted
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override
+    {
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IUIAutomationStructureChangedEventHandler))
+        {
+            *out = static_cast<IUIAutomationStructureChangedEventHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE HandleStructureChangedEvent(IUIAutomationElement*, StructureChangeType change,
+                                                          SAFEARRAY*) override
+    {
+        if (change == StructureChangeType_ChildrenReordered) ++reordered;
+        return S_OK;
+    }
+
+private:
+    std::atomic<ULONG> refs_{1};
+};
+
+// The names of `tabs`' TabItems, in UIA's order.
+std::vector<std::wstring> item_names(IUIAutomation* uia, IUIAutomationElement* tabs)
+{
+    std::vector<std::wstring> out;
+    IUIAutomationTreeWalker* walker = nullptr;
+    uia->get_ControlViewWalker(&walker);
+    IUIAutomationElement* child = nullptr;
+    if (walker && tabs) walker->GetFirstChildElement(tabs, &child);
+    while (child)
+    {
+        CONTROLTYPEID type = 0;
+        child->get_CurrentControlType(&type);
+        if (type == UIA_TabItemControlTypeId) out.push_back(name_of(child));
+        IUIAutomationElement* next = nullptr;
+        walker->GetNextSiblingElement(child, &next);
+        release(child);
+        child = next;
+    }
+    release(walker);
+    return out;
 }
 
 // Waits up to 5 s for `done` to say so, the window's thread handling the
@@ -1380,6 +1434,36 @@ void uia_client(HWND top, std::atomic<bool>* finished)
         expect(H.selected == std::vector<std::string>{"c"}, "on_select(c) once");
         expect(H.closed == std::vector<std::string>{"a"}, "on_close(a) once");
         expect(H.added == 1, "on_new once");
+    }
+    // Gamma (current, last) dragged to the front: the strip's sent the
+    // mouse's messages from here, handled on the window's thread.
+    {
+        structure_counter counter;
+        const bool listening =
+            tabs && SUCCEEDED(uia->AddStructureChangedEventHandler(tabs, TreeScope_Element, nullptr, &counter));
+        expect(listening, "listening for the Tab's structure changes");
+        HWND strip = FindWindowExW(top, nullptr, L"rapportCaptionTabs", nullptr);
+        const RECT from = part(strip, q_tab, 2), to = part(strip, q_tab, 0);
+        const POINT a = centre(from), b = centre(to);
+        SendMessageW(strip, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(a.x, a.y));
+        SendMessageW(strip, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(a.x - 40, a.y));
+        SendMessageW(strip, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(b.x, b.y));
+        SendMessageW(strip, WM_LBUTTONUP, 0, MAKELPARAM(b.x, b.y));
+        expect(wait_until([] { return !H.reordered.empty(); }), "on_reorder heard");
+        bool raised = false;
+        for (int i = 0; i < 300 && !raised; ++i)
+        {
+            raised = counter.reordered > 0;
+            if (!raised) Sleep(10);
+        }
+        expect(raised, "ChildrenReordered raised on the Tab (" + str(long(counter.reordered.load())) + ")");
+        const std::vector<std::wstring> names = item_names(uia, tabs);
+        expect(names == std::vector<std::wstring>{L"Gamma", L"Alpha", L"Beta"}, "the TabItems in the new order");
+        {
+            std::lock_guard g(H.lock);
+            expect(H.reordered == std::vector<std::pair<std::string, int>>{{"c", 0}}, "on_reorder(c, 0) once");
+        }
+        if (listening) uia->RemoveStructureChangedEventHandler(tabs, &counter);
     }
     release(close);
     release(edit);
@@ -1767,6 +1851,12 @@ int main(int argc, char** argv)
                 {
                     std::lock_guard g(H.lock);
                     ++H.added;
+                })
+            .on_reorder(
+                [](const std::string& id, int i)
+                {
+                    std::lock_guard g(H.lock);
+                    H.reordered.emplace_back(id, i);
                 });
     };
     const char* title = "Caption tabs";
@@ -1884,8 +1974,9 @@ int main(int argc, char** argv)
         }
         client.join();
         pump();
-        expect(ask(strip, q_count) == 3 && ask(strip, q_current) == 2,
-               "the strip shows Gamma current, and the app's tabs as they were");
+        expect(ask(strip, q_count) == 3 && ask(strip, q_current) == 0 &&
+                   tabs->ids() == std::vector<std::string>{"c", "a", "b"},
+               "the strip shows Gamma current, first, as dragged; the app's tabs otherwise as they were");
     }
 
     // A toolbar first, across the content: the band, on a base surface.

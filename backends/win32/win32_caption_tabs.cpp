@@ -14,7 +14,8 @@
 // system asks the window under it instead, which on the same thread (it is)
 // is the top-level: that says HTCAPTION there, and dragging, double-clicking
 // and the system menu are the caption's own. Over a tab, its close button or
-// "+", the strip has the mouse itself.
+// "+", the strip has the mouse itself, and while a tab's dragged everywhere
+// (HTCLIENT, the mouse captured).
 //
 // UI Automation. A child window keeps the strip's elements under its own
 // HWND (the provider's root is the strip, not the top-level window), so the
@@ -49,6 +50,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <optional>
 
 namespace rap::win32
 {
@@ -199,6 +201,29 @@ struct caption_tabs::impl
     bool transparent = true;
     int resize_band = 0;
 
+    // A tab dragged along the strip. Pressed, it's current (as a click
+    // makes it) and the mouse is captured; moved past the drag threshold, it
+    // follows the pointer, held where it was grabbed, and moves to the place
+    // in sight nearest to it as it goes, the others making room: the
+    // strip's tabs, the owner's (caption_moved) and UIA's TabItems in their
+    // new order. Let go, the owner's told once (caption_reordered), if it
+    // moved; Escape, or the capture lost, puts it back. Past either end of
+    // the row it stays at that end: it never leaves the strip (a later
+    // tearing off would start from there).
+    struct drag_state
+    {
+        unsigned key = 0;  // the tab's
+        int from = -1;     // where it was
+        POINT press{};
+        int grab = 0;  // the pointer's x in the tab, as pressed
+        int x = 0;     // the pointer's x
+        bool active = false;  // past the threshold
+    };
+    std::optional<drag_state> drag;
+    // The row's places in sight, from layout(): the first's left, their
+    // width, and the first and last tabs there.
+    int slot_left = 0, slot_width = 1, slot_first = 0, slot_last = -1;
+
     // Direct2D, on the CPU: the strip is small, and a GPU target costs more
     // to make than it saves. Made again when lost, or for a new DPI.
     com<ID2D1DCRenderTarget> rt;
@@ -271,6 +296,10 @@ struct caption_tabs::impl
         close_rects.assign(size_t(n), RECT{});
         int last = left;
         const int close = px(caption_metrics::close_size);
+        slot_left = left;
+        slot_width = w;
+        slot_first = first;
+        slot_last = first - 1;
         for (int i = first; i < n; ++i)
         {
             const int x = left + (i - first) * w;
@@ -278,6 +307,7 @@ struct caption_tabs::impl
             RECT r{x, top, std::min(x + w, end), c.bottom};
             tab_rects[size_t(i)] = r;
             last = r.right;
+            slot_last = i;
             // Its close button at its end, centred on the tab's body (above
             // the line); none on a tab cut short before it.
             const int right = x + w - px(caption_metrics::close_inset);
@@ -286,7 +316,98 @@ struct caption_tabs::impl
         }
         const int y = (top + int(c.bottom) - line - add) / 2;
         add_rect = RECT{last + gap, y, last + gap + add, y + add};
+        // The dragged tab under the pointer, as it was grabbed, along the
+        // places in sight.
+        if (const int i = lifted(); i >= 0 && !IsRectEmpty(&tab_rects[size_t(i)]))
+        {
+            const int dx = dragged_left() - tab_rects[size_t(i)].left;
+            OffsetRect(&tab_rects[size_t(i)], dx, 0);
+            if (!IsRectEmpty(&close_rects[size_t(i)])) OffsetRect(&close_rects[size_t(i)], dx, 0);
+        }
         update_tools();
+    }
+
+    // -- dragging --------------------------------------------------------
+
+    int index_of_key(unsigned key) const
+    {
+        for (size_t i = 0; i < self.tabs_.size(); ++i)
+            if (self.tabs_[i].key == key) return int(i);
+        return -1;
+    }
+    // The tab dragged past the threshold, -1 for none.
+    int lifted() const { return drag && drag->active ? index_of_key(drag->key) : -1; }
+    // Where the dragged tab's left is: the pointer's, less where it was
+    // grabbed, kept to the places in sight.
+    int dragged_left() const
+    {
+        const int last = std::max(slot_left, slot_left + (slot_last - slot_first) * slot_width);
+        return std::clamp(drag->x - drag->grab, slot_left, last);
+    }
+    // The tab at `from` moved to `to`: the strip's, and the owner's.
+    void move_tab(int from, int to)
+    {
+        doc_tabs::move_element(self.tabs_, from, to);
+        if (self.current_ >= 0) self.current_ = doc_tabs::index_after_move(self.current_, from, to);
+        if (focus >= 0 && focus < self.count()) focus = doc_tabs::index_after_move(focus, from, to);
+        owner.caption_moved(from, to);
+    }
+    // Laid out and drawn anew, and UIA's tree with it: `reordered` if its
+    // tabs' order changed.
+    void moved(bool reordered)
+    {
+        layout();
+        update_uia();
+        if (reordered && uia) uia->raise_structure_changed(StructureChangeType_ChildrenReordered, tabs_id);
+        InvalidateRect(self.hwnd_, nullptr, FALSE);
+    }
+    void press(POINT p, int i)
+    {
+        cancel();
+        const RECT& r = tab_rects[size_t(i)];
+        drag = drag_state{self.tabs_[size_t(i)].key, i, p, p.x - r.left, p.x};
+        SetCapture(self.hwnd_);
+    }
+    void drag_to(POINT p)
+    {
+        if (!drag->active)
+        {
+            if (std::abs(p.x - drag->press.x) <= GetSystemMetricsForDpi(SM_CXDRAG, dpi()) &&
+                std::abs(p.y - drag->press.y) <= GetSystemMetricsForDpi(SM_CYDRAG, dpi()))
+                return;
+            drag->active = true;
+            hot = {};
+        }
+        drag->x = p.x;
+        const int at = index_of_key(drag->key);
+        if (at < 0 || slot_last < slot_first) return;
+        // The place whose left is nearest the dragged tab's.
+        const int to = std::clamp(slot_first + (dragged_left() - slot_left + slot_width / 2) / slot_width, slot_first,
+                                  slot_last);
+        const bool reordered = to != at;
+        if (reordered) move_tab(at, to);
+        moved(reordered);
+    }
+    // Let go: the owner's told, if the tab moved; nothing's done after.
+    void let_go()
+    {
+        const std::optional<drag_state> d = std::exchange(drag, std::nullopt);
+        if (GetCapture() == self.hwnd_) ReleaseCapture();  // the drag's gone: its WM_CAPTURECHANGED is nothing
+        if (!d || !d->active) return;
+        moved(false);  // into its place
+        const int at = index_of_key(d->key);
+        if (at >= 0 && at != d->from) owner.caption_reordered(at);  // last: it may change the tabs
+    }
+    void cancel()
+    {
+        const std::optional<drag_state> d = std::exchange(drag, std::nullopt);
+        if (!d) return;
+        if (GetCapture() == self.hwnd_) ReleaseCapture();
+        if (!d->active) return;
+        const int at = index_of_key(d->key);
+        const bool back = at >= 0 && at != d->from && d->from < self.count();
+        if (back) move_tab(at, d->from);
+        moved(back);
     }
 
     // The hover's and the hit's shape of tab i: a tab not current leaves
@@ -617,8 +738,11 @@ struct caption_tabs::impl
         fill(RECT{0, c.bottom - line, c.right, c.bottom}, colors.line);
         const RECT clip{0, 0, add_rect.left, c.bottom};
         rt->PushAxisAlignedClip(D2D1::RectF(0, 0, float(clip.right), float(clip.bottom)), D2D1_ANTIALIAS_MODE_ALIASED);
-        for (int i = 0; i < n; ++i)
+        const int up = lifted();
+        for (int k = 0; k < n; ++k)
         {
+            // The dragged tab last, over the others.
+            const int i = up < 0 || k < up ? k : k + 1 < n ? k + 1 : up;
             const RECT& r = tab_rects[size_t(i)];
             if (IsRectEmpty(&r)) continue;
             const bool current = i == self.current_;
@@ -663,6 +787,20 @@ struct caption_tabs::impl
             }
             const RECT& x = close_rects[size_t(i)];
             body.right = IsRectEmpty(&x) ? r.right - px(caption_metrics::close_inset) : x.left - px(4);
+            // A tab the dragged one's over: its title cut short where that
+            // covers it, since ClearType's runs are drawn after all the
+            // tabs, the dragged one's last.
+            if (up >= 0 && i != up)
+            {
+                const RECT& over = tab_rects[size_t(up)];
+                if (over.left < body.right && over.right > body.left)
+                {
+                    if (over.left > body.left)
+                        body.right = over.left;
+                    else
+                        body.left = over.right;
+                }
+            }
             if (body.right > body.left)
             {
                 RECT in{};
@@ -945,6 +1083,8 @@ struct caption_tabs::impl
         {
             POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(h, &p);
+            // A tab being dragged has the mouse wherever it goes.
+            if (d.drag) return HTCLIENT;
             if (p.y < d.resize_band || s->hit_test(p).what == part::none) return HTTRANSPARENT;
             return HTCLIENT;
         }
@@ -954,6 +1094,16 @@ struct caption_tabs::impl
             {
                 TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0};
                 d.tracking = TrackMouseEvent(&t) != FALSE;
+            }
+            if (d.drag)
+            {
+                if (!(wp & MK_LBUTTON))  // let go where it wasn't heard
+                {
+                    d.let_go();
+                    return 0;
+                }
+                d.drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+                if (d.drag->active) return 0;
             }
             d.set_hot(s->hit_test(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}));
             return 0;
@@ -966,9 +1116,11 @@ struct caption_tabs::impl
         // button acts as it's let go over it.
         case WM_LBUTTONDOWN:
         {
-            const hit at = s->hit_test(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+            const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            const hit at = s->hit_test(p);
             if (at.what == part::tab)
             {
+                d.press(p, at.index);  // first: it may be dragged
                 s->d_->owner.caption_select(at.index);  // last: it may change the tabs
                 return 0;
             }
@@ -982,6 +1134,11 @@ struct caption_tabs::impl
         }
         case WM_LBUTTONUP:
         {
+            if (d.drag)
+            {
+                d.let_go();
+                return 0;
+            }
             const hit was = d.pressed;
             if (was.what == part::none) return 0;
             d.pressed = {};
@@ -996,6 +1153,7 @@ struct caption_tabs::impl
             return 0;
         }
         case WM_CAPTURECHANGED:
+            if (d.drag && reinterpret_cast<HWND>(lp) != h) d.cancel();
             if (d.pressed.what != part::none)
             {
                 d.pressed = {};
@@ -1042,6 +1200,11 @@ struct caption_tabs::impl
             return code;
         }
         case WM_KEYDOWN:
+            if (wp == VK_ESCAPE && d.drag)
+            {
+                d.cancel();
+                return 0;
+            }
             if (d.key(wp)) return 0;
             break;
         case WM_CHAR:
@@ -1131,17 +1294,36 @@ caption_tabs::~caption_tabs()
 
 void caption_tabs::set_tabs(std::vector<caption_tab> tabs, int current)
 {
-    const size_t before = tabs_.size();
+    std::vector<unsigned> before;
+    for (const caption_tab& t : tabs_) before.push_back(t.key);
     tabs_ = std::move(tabs);
+    std::vector<unsigned> after;
+    for (const caption_tab& t : tabs_) after.push_back(t.key);
+    const bool reordered = before != after && std::is_permutation(before.begin(), before.end(), after.begin(), after.end());
     current_ = current >= 0 && current < count() ? current : -1;
     d_->icons.clear();  // the caller's handles may be new ones at the old values
     d_->focus = std::clamp(d_->focus, 0, count());
     d_->hot = d_->pressed = {};
+    // A tab pressed or dragged stays so while it's there; gone, so's the drag.
+    if (d_->drag)
+    {
+        const int i = d_->index_of_key(d_->drag->key);
+        if (i < 0)
+        {
+            d_->drag.reset();
+            if (GetCapture() == hwnd_) ReleaseCapture();
+        }
+        else if (!d_->drag->active)
+            d_->drag->from = i;
+    }
     d_->layout();
     d_->update_uia();
     if (d_->uia)
     {
-        if (before != tabs_.size()) d_->uia->raise_structure_changed(StructureChangeType_ChildrenInvalidated, tabs_id);
+        if (before.size() != tabs_.size())
+            d_->uia->raise_structure_changed(StructureChangeType_ChildrenInvalidated, tabs_id);
+        else if (reordered)
+            d_->uia->raise_structure_changed(StructureChangeType_ChildrenReordered, tabs_id);
         if (current_ >= 0)
             d_->uia->raise_event(item_id(tabs_[size_t(current_)].key), UIA_SelectionItem_ElementSelectedEventId);
     }
@@ -1156,6 +1338,16 @@ void caption_tabs::set_current(int current)
     d_->update_uia();
     if (d_->uia) d_->uia->raise_event(item_id(tabs_[size_t(current_)].key), UIA_SelectionItem_ElementSelectedEventId);
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool caption_tabs::dragging() const
+{
+    return d_->drag.has_value();
+}
+
+void caption_tabs::cancel_drag()
+{
+    d_->cancel();
 }
 
 void caption_tabs::set_frame(bool transparent, int resize_band)
