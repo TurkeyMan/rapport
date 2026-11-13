@@ -443,6 +443,14 @@ public:
     {
         state.on_reorder = std::move(f);
     }
+    // Kept too: nothing is torn off, dropped or right-clicked here.
+    void on_detach(detach_fn f) override { state.on_detach = std::move(f); }
+    void on_receive(receive_fn f) override { state.on_receive = std::move(f); }
+    void set_group(const std::string& g) override { state.group = g; }
+    void on_context_menu(std::function<rap::menu(const std::string&)> f) override
+    {
+        state.on_context_menu = std::move(f);
+    }
 
     doc_tabs::state state;
 };

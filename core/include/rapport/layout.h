@@ -379,6 +379,10 @@ struct document_tabs
     std::function<void(const std::string&)> on_select, on_close;
     std::function<void()> on_new;
     std::function<void(const std::string& id, int new_index)> on_reorder;
+    rap::document_tabs::detach_fn on_detach;
+    rap::document_tabs::receive_fn on_receive;
+    std::string group;  // empty: no drops from other windows
+    std::function<rap::menu(const std::string& id)> on_context_menu;
     rap::document_tabs** bind = nullptr;
 };
 
@@ -1406,6 +1410,8 @@ public:
 //     document_tabs{{{"1", "Home", icon::for_file("/home/me/"), "/home/me"}}}
 //         .current("1").on_select(show).on_close(close_tab).on_new(new_tab)
 //         .on_reorder(tab_moved)
+//         .group("files").on_detach(tear_off).on_receive(take)
+//         .on_context_menu(tab_menu)
 class document_tabs
 {
 public:
@@ -1433,6 +1439,30 @@ public:
     document_tabs& on_reorder(std::function<void(const std::string& id, int new_index)> f)
     {
         t_.on_reorder = std::move(f);
+        return *this;
+    }
+    // See rap::document_tabs::detach_fn: the app's window for a torn-off tab.
+    document_tabs& on_detach(rap::document_tabs::detach_fn f)
+    {
+        t_.on_detach = std::move(f);
+        return *this;
+    }
+    // See rap::document_tabs::receive_fn: a tab dropped in from another window.
+    document_tabs& on_receive(rap::document_tabs::receive_fn f)
+    {
+        t_.on_receive = std::move(f);
+        return *this;
+    }
+    // Windows whose tabs share a group trade them by dragging; empty: none.
+    document_tabs& group(std::string g)
+    {
+        t_.group = std::move(g);
+        return *this;
+    }
+    // The right-click menu's own items for a tab, after the fixed ones.
+    document_tabs& on_context_menu(std::function<rap::menu(const std::string& id)> f)
+    {
+        t_.on_context_menu = std::move(f);
         return *this;
     }
     document_tabs& bind(rap::document_tabs*& h)

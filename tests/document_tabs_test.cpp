@@ -205,6 +205,107 @@ void handlers()
     expect(seen == label + label + label, "handlers that replace themselves as they run");
 }
 
+// Tearing off and dropping, as the backends share it: what a drag does
+// where, the tear-off distance, where a dropped tab lands, the handlers'
+// contract (on_detach once, null refusing; on_receive's transfer, false
+// changing nothing; the group), and the right-click menu.
+void tear_off_and_drop()
+{
+    using namespace rap::doc_tabs;
+    expect(step_for({.only_tab = true, .over_other = true, .past_tear = true, .can_detach = true}) ==
+               drag_step::move_window,
+           "the only tab: its window moves, wherever it's dragged");
+    expect(step_for({.over_other = true, .past_tear = true, .can_detach = true}) == drag_step::over_other,
+           "over another window's row: dropped there, not torn off");
+    expect(step_for({.past_tear = true, .can_detach = true}) == drag_step::tear_off, "out past the distance: torn off");
+    expect(step_for({.past_tear = true, .can_detach = false}) == drag_step::reorder,
+           "no on_detach, or refused: along the row still");
+    expect(step_for({.can_detach = true}) == drag_step::reorder, "near the row: along it");
+    expect(!past_tear(50, 10, 0, 40, 0, 500, 24) && !past_tear(50, 63, 0, 40, 0, 500, 24),
+           "in the row, and just under it: not torn");
+    expect(past_tear(50, 64, 0, 40, 0, 500, 24) && past_tear(50, -25, 0, 40, 0, 500, 24),
+           "past the distance below or above: torn");
+    expect(past_tear(-25, 10, 0, 40, 0, 500, 24) && past_tear(524, 10, 0, 40, 0, 500, 24) &&
+               !past_tear(523, 10, 0, 40, 0, 500, 24),
+           "past the window's sides by the distance: torn");
+    const std::vector<int> middles{50, 150, 250};
+    expect(drop_index(middles, 0) == 0 && drop_index(middles, 49) == 0 && drop_index(middles, 50) == 1 &&
+               drop_index(middles, 200) == 2 && drop_index(middles, 900) == 3 && drop_index({}, 10) == 0,
+           "a dropped tab lands before the first tab whose middle is past it");
+
+    state src, dst;
+    for (const char* id : {"a", "b"}) src.insert(-1, {id, std::string("T") + id, rap::icon::named("folder"), "/p"});
+    dst.insert(-1, {"x", "x", {}, {}});
+    expect(!src.same_group(dst), "no group: no drops");
+    src.group = "files";
+    expect(!src.same_group(dst), "one in a group: none");
+    dst.group = "other";
+    expect(!src.same_group(dst), "different groups: none");
+    dst.group = "files";
+    expect(src.same_group(dst) && dst.same_group(src), "the same group: both ways");
+
+    // on_detach: asked with the id and the point, null refusing.
+    std::vector<std::string> asked;
+    std::optional<rap::point_f> where;
+    rap::window* answer = nullptr;
+    expect(src.detach_asked(0, rap::point_f{1, 2}) == nullptr, "no on_detach: nothing");
+    src.on_detach = [&](const std::string& id, std::optional<rap::point_f> at) -> rap::window*
+    {
+        asked.push_back(id);
+        where = at;
+        return answer;
+    };
+    expect(src.detach_asked(1, rap::point_f{10, 20}) == nullptr && asked == std::vector<std::string>{"b"} &&
+               where && where->x == 10 && where->y == 20,
+           "on_detach(b, the point), once; null refuses");
+    expect(src.ids() == std::vector<std::string>{"a", "b"}, "refused: the tabs as they were");
+    src.detach_asked(0, std::nullopt);
+    expect(asked.size() == 2 && !where, "the menu's: no point");
+    state lone;
+    lone.insert(-1, {"z", "z", {}, {}});
+    lone.on_detach = src.on_detach;
+    expect(lone.detach_asked(0, std::nullopt) == nullptr && asked.size() == 2, "a window's only tab: never asked");
+
+    // on_receive: the transfer, and the app's answer.
+    std::vector<rap::document_tabs::transfer> got;
+    bool accept = false;
+    dst.on_receive = [&](const rap::document_tabs::transfer& t)
+    {
+        got.push_back(t);
+        return accept;
+    };
+    auto* source = reinterpret_cast<rap::window*>(&src);  // an address to compare, never used
+    const rap::document_tabs::transfer t = src.transfer_of(1, 1, source);
+    expect(t.id == "b" && t.title == "Tb" && t.icon.name == "folder" && t.tooltip == "/p" && t.index == 1 &&
+               t.source == source,
+           "the transfer: id, title, icon, tooltip, index and source");
+    expect(!dst.received(t) && got.size() == 1 && dst.ids() == std::vector<std::string>{"x"} &&
+               src.ids() == std::vector<std::string>{"a", "b"},
+           "on_receive false: nothing changes");
+    accept = true;
+    expect(dst.received(t) && got.size() == 2, "true: the app's taken it");
+    state none;
+    expect(!none.received(t), "no on_receive: refused");
+
+    // The menu: New tab; Close tab, Move to new window; the app's.
+    rap::menu m = src.context_menu(-1);
+    expect(m.size() == 1 && m[0].label == rap::i18n::tr("rapport", "_New tab"), "the row's empty part: New tab alone");
+    src.on_context_menu = [](const std::string& id) { return rap::menu{{"_Rename " + id, {}}}; };
+    m = src.context_menu(1);
+    expect(m.size() == 6 && m[1].is_separator() && m[2].label == rap::i18n::tr("rapport", "_Close tab") &&
+               m[3].label == rap::i18n::tr("rapport", "_Move to new window") && m[3].enabled && m[4].is_separator() &&
+               m[5].label == "_Rename b",
+           "a tab's: New tab, Close tab, Move to new window, then the app's after a separator");
+    m[3].action();
+    expect(asked.size() == 3 && asked.back() == "b" && !where, "Move to new window: on_detach(b) with no point");
+    src.on_context_menu = [](const std::string&) { return rap::menu{}; };
+    expect(src.context_menu(0).size() == 4, "the app's items empty: no separator for them");
+    src.on_detach = {};
+    expect(src.context_menu(0).size() == 3, "no on_detach: no Move to new window");
+    lone.on_detach = [](const std::string&, std::optional<rap::point_f>) -> rap::window* { return nullptr; };
+    expect(!lone.context_menu(0)[3].enabled, "the only tab: Move to new window disabled");
+}
+
 // The spec through the headless backend: the bar is made with its items,
 // the current one, its handlers and its bind.
 int backend(int argc, char** argv)
@@ -243,6 +344,32 @@ int backend(int argc, char** argv)
            "add, select, remove");
     tabs->on_reorder([&](const std::string&, int) { reordered += 10; });
     expect(reordered == 0 && added == 0, "nothing dragged or pressed: nothing told");
+
+    // Tearing off and dropping: the builder's handlers and group in the spec,
+    // and through the backend (null stores them, as every backend).
+    int detached = 0, received = 0, menus = 0;
+    const rap::spec::document_tabs torn =
+        document_tabs{{{"a", "A", {}, {}}}}
+            .group("files")
+            .on_detach([&](const std::string&, std::optional<rap::point_f>) -> rap::window* { ++detached; return nullptr; })
+            .on_receive([&](const rap::document_tabs::transfer&) { ++received; return false; })
+            .on_context_menu([&](const std::string&) { ++menus; return rap::menu{}; });
+    expect(torn.group == "files" && torn.on_detach && torn.on_receive && torn.on_context_menu,
+           "group, on_detach, on_receive and on_context_menu: in the spec");
+    rap::document_tabs* bound = nullptr;
+    rap::spec::document_tabs with_bind = torn;
+    with_bind.bind = &bound;
+    auto win2 = (*ui)->create(window{"u", {label{"content"}}}.tabs(with_bind));
+    expect(bound != nullptr && detached == 0 && received == 0 && menus == 0,
+           "made with them, none called by the making");
+    if (bound)
+    {
+        bound->set_group("other");
+        bound->on_detach({});
+        bound->on_receive({});
+        bound->on_context_menu({});
+        expect(detached == 0 && received == 0 && menus == 0, "and the setters call nothing");
+    }
     return 0;
 }
 
@@ -254,6 +381,7 @@ int main(int argc, char** argv)
     moving();
     removal_and_widths();
     handlers();
+    tear_off_and_drop();
     if (backend(argc, argv)) ++fails;
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
