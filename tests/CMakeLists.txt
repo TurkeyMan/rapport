@@ -268,6 +268,26 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-frames-test rapport_win32)
     add_test(NAME win32-frames COMMAND rapport-win32-frames-test)
     set_tests_properties(win32-frames PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+
+    # file_view's first-column inset, printed (it shows a window: CI's): with
+    # a Common Controls 6 manifest, and without one, where the controls get
+    # whichever comctl32 is selected after the backend initialises (see
+    # rapport#41).
+    foreach(variant IN ITEMS "" "-no-manifest")
+        set(t rapport-win32-file-view-inset${variant}-test)
+        add_executable(${t} win32_file_view_inset_test.cpp)
+        target_link_libraries(${t} PRIVATE rapport::rapport user32 gdi32 comctl32)
+        if(RAPPORT_STATIC)
+            target_link_libraries(${t} PRIVATE rapport::backend_win32)
+            target_compile_definitions(${t} PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+        endif()
+        if(variant)
+            target_compile_definitions(${t} PRIVATE RAPPORT_TEST_NO_MANIFEST)
+        endif()
+        add_dependencies(${t} rapport_win32)
+        add_test(NAME win32-file-view-inset${variant} COMMAND ${t})
+        set_tests_properties(win32-file-view-inset${variant} PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+    endforeach()
 endif()
 
 if(TARGET rapport_win32)
