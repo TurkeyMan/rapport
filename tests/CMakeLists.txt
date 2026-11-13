@@ -324,6 +324,19 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-base-surface PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
     add_test(NAME win32-base-surface-light COMMAND rapport-win32-base-surface-test)
     set_tests_properties(win32-base-surface-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
+
+    # The document tabs' row beside its tabs: the window's surface, base or not.
+    add_executable(rapport-win32-document-tabs-surface-test win32_document_tabs_surface_test.cpp)
+    target_link_libraries(rapport-win32-document-tabs-surface-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-document-tabs-surface-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-document-tabs-surface-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-document-tabs-surface-test rapport_win32)
+    add_test(NAME win32-document-tabs-surface COMMAND rapport-win32-document-tabs-surface-test)
+    set_tests_properties(win32-document-tabs-surface PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+    add_test(NAME win32-document-tabs-surface-light COMMAND rapport-win32-document-tabs-surface-test)
+    set_tests_properties(win32-document-tabs-surface-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
     # Under high contrast, which only a CI runner may turn on: skipped
     # unless GITHUB_ACTIONS=true and RAPPORT_TEST_SET_HIGH_CONTRAST=1.
     add_executable(rapport-win32-high-contrast-run win32_high_contrast_run.cpp)

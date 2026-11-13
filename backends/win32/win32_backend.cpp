@@ -6823,10 +6823,12 @@ void draw_own_tabs(HWND h, HDC dc)
         draw_base_tabs(h, dc);
 }
 
-// The tabs drawn whole into a bitmap of their own, then copied to `dc`
-// through whatever clip it has (a paint's update region, a partial print),
-// which is left as it was. False if the bitmap couldn't be made or copied.
-bool render_tabs(HWND h, HDC dc)
+// The tabs drawn whole (by `draw`, onto a DC) into a bitmap of their own,
+// then copied to `dc` through whatever clip it has (a paint's update region,
+// a partial print), which is left as it was. False if the bitmap couldn't
+// be made or copied.
+template <class Draw>
+bool render_tabs(HWND h, HDC dc, Draw&& draw)
 {
     RECT c;
     GetClientRect(h, &c);
@@ -6841,7 +6843,7 @@ bool render_tabs(HWND h, HDC dc)
     bool drawn = false;
     if (old && old != HGDI_ERROR)
     {
-        draw_own_tabs(h, mem);
+        draw(mem);
         GdiFlush();
         drawn = BitBlt(dc, 0, 0, c.right, c.bottom, mem, 0, 0, SRCCOPY) != FALSE;
         SelectObject(mem, old);
@@ -6849,6 +6851,10 @@ bool render_tabs(HWND h, HDC dc)
     if (bitmap) DeleteObject(bitmap);
     DeleteDC(mem);
     return drawn;
+}
+bool render_tabs(HWND h, HDC dc)
+{
+    return render_tabs(h, dc, [h](HDC mem) { draw_own_tabs(h, mem); });
 }
 
 // Screen and print (a pane's off-screen copy, tab_body_brush's measure)
@@ -7357,13 +7363,40 @@ private:
             HDC dc = msg == WM_PAINT ? BeginPaint(h, &ps) : reinterpret_cast<HDC>(wp);
             if (dark_mode())
                 self->draw_dark(dc);
-            else if (!render_tabs(h, dc))
-                draw_base_tabs(h, dc);
+            else if (!render_tabs(h, dc, [self](HDC mem) { self->draw_base(mem); }))
+                self->draw_base(dc);
             if (msg == WM_PAINT) EndPaint(h, &ps);
             return 0;
         }
         }
         return DefSubclassProc(h, msg, wp, lp);
+    }
+    // Light, on a base surface: the style's tabs, as the page tabs' are
+    // (draw_base_tabs), and the rest of their row in the surface's colour.
+    // The style fills the row beside and above the tabs in the dialog
+    // colour, on any window; a page's tabs have their body below to match
+    // it, but the strip's row is all there is, across the window's top.
+    void draw_base(HDC dc)
+    {
+        draw_base_tabs(h_, dc);
+        const int n = TabCtrl_GetItemCount(h_), current = TabCtrl_GetCurSel(h_);
+        RECT first{};
+        if (n <= 0 || !TabCtrl_GetItemRect(h_, 0, &first)) return;
+        RECT c;
+        GetClientRect(h_, &c);
+        HRGN row = CreateRectRgn(0, 0, c.right, first.bottom);
+        for (int i = 0; i < n; ++i)
+        {
+            RECT r;
+            if (!TabCtrl_GetItemRect(h_, i, &r)) continue;
+            if (i == current)
+                InflateRect(&r, px(2), px(2));  // the current one stands out of the row
+            HRGN tab = CreateRectRgnIndirect(&r);
+            CombineRgn(row, row, tab, RGN_DIFF);
+            DeleteObject(tab);
+        }
+        FillRgn(dc, row, theme_brush(theme_color::base));
+        DeleteObject(row);
     }
     // New Tab, and Close Tab for the tab clicked (or the current one, from
     // the keyboard), as the keys do.
