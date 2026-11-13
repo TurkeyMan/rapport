@@ -942,6 +942,56 @@ void check_glass(HWND top)
         check_glass_print(c.h, c.layer, c.what, "disabled");
         EnableWindow(c.h, TRUE);
     }
+    // The text field's border, printed with its frame (WM_PRINT): the
+    // theme's edit border drawn off the screen and put over the band's
+    // layer, as on screen. None of it below the layer's alpha (GDI's would
+    // be 0), its edge lines opaque. (That it never touches the window's own
+    // DC on the way can't be watched from here: GDI's calls on another
+    // window's DC can't be counted without hooking GDI itself. paint_border
+    // only ever writes to the DC it's given once, through one buffer.)
+    if (edit)
+    {
+        RECT w;
+        GetWindowRect(edit, &w);
+        const int ww = w.right - w.left, wh = w.bottom - w.top;
+        POINT o{0, 0};
+        ClientToScreen(edit, &o);
+        RECT c;
+        GetClientRect(edit, &c);
+        OffsetRect(&c, o.x - w.left, o.y - w.top);
+        HDC screen = GetDC(nullptr);
+        HDC mem = CreateCompatibleDC(screen);
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), ww, -wh, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+        void* bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ old = SelectObject(mem, bmp);
+        std::fill_n(static_cast<DWORD*>(bits), size_t(ww) * wh, 0x00ABCDEFu);
+        SendMessageW(edit, WM_PRINT, reinterpret_cast<WPARAM>(mem), PRF_NONCLIENT | PRF_CLIENT | PRF_ERASEBKGND);
+        GdiFlush();
+        const auto* px = static_cast<const DWORD*>(bits);
+        const int la = int(band_px(false) >> 24);
+        long ring = 0, below = 0, opaque = 0, translucent = 0;
+        for (int y = 0; y < wh; ++y)
+            for (int x = 0; x < ww; ++x)
+            {
+                if (PtInRect(&c, POINT{x, y})) continue;
+                const int a = int(px[size_t(y) * ww + x] >> 24);
+                ++ring;
+                below += a < la - 1;
+                opaque += a >= 250;
+                translucent += a < 250;
+            }
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+        // (Light, its rounded corners are translucent; dark's DarkMode_CFD
+        // border is square, opaque throughout.)
+        expect(ring > 0 && below == 0 && opaque > 0 && (g_dark || translucent > 0),
+               "the text field's border printed on glass: the theme's, over the layer (" + str(ring) + " pixels: " +
+                   str(below) + " below its alpha, " + str(opaque) + " opaque, " + str(translucent) + " translucent)");
+    }
     // A label's text grey on the layer (CONTRIBUTING.md), not ClearType.
     if (HWND label = child_of(top, L"Static", L"Label"))
     {

@@ -35,13 +35,15 @@
 // the caret blinking), so they're let draw, and after any message they may
 // have drawn on their client area's pixels are read back and written again
 // at alpha 255, the caret's as drawn; their border (the theme's, partly
-// translucent) is printed through the two passes, as a layer control. Their
-// text stays ClearType: the ground is opaque and their own.
+// translucent) is drawn by us, off the screen through the two passes, as a
+// layer control's client area, and written once. Their text stays
+// ClearType: the ground is opaque and their own.
 //
 // Tooltips are top-level windows with their own surface: nothing to do.
 #include "win32_caption_tabs.h"
 
 #include <uxtheme.h>
+#include <vssym32.h>
 
 #include <algorithm>
 #include <cstring>
@@ -273,13 +275,46 @@ void repaint_layer(HWND h)
     if (IsWindowVisible(h)) RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOCHILDREN);
 }
 
+// A field's border: the theme's edit border (EP_EDITBORDER_NOSCROLL) in the
+// state it's in, drawn entirely off the screen, on black and on white, its
+// alpha worked out and put over the band's layer, then written to `dc` (the
+// window's, or a print's, its origin the window's top left) at once,
+// through one buffer, outside the client area. Nothing in between touches
+// `dc`. False if there's no themed border to draw (no client edge, scroll
+// bars in the frame, no theme): the caller lets the control draw its own.
+bool paint_border(HWND h, HDC dc, bool hot)
+{
+    const LONG_PTR style = GetWindowLongPtrW(h, GWL_STYLE);
+    if (!(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_CLIENTEDGE) || (style & (WS_HSCROLL | WS_VSCROLL))) return false;
+    RECT c, w;
+    GetClientRect(h, &c);
+    GetWindowRect(h, &w);
+    POINT origin{0, 0};
+    ClientToScreen(h, &origin);
+    const RECT client{origin.x - w.left, origin.y - w.top, origin.x - w.left + c.right, origin.y - w.top + c.bottom};
+    OffsetRect(&w, -w.left, -w.top);
+    if (IsRectEmpty(&w) || EqualRect(&w, &client)) return false;
+    HTHEME theme = OpenThemeData(h, L"Edit");  // (the window's: dark, DarkMode_CFD's)
+    if (!theme) return false;
+    const int state = !IsWindowEnabled(h) ? EPSN_DISABLED : GetFocus() == h ? EPSN_FOCUSED : hot ? EPSN_HOT : EPSN_NORMAL;
+    const int saved = SaveDC(dc);
+    ExcludeClipRect(dc, client.left, client.top, client.right, client.bottom);
+    paint_glass(h, dc, w,
+                [&](HDC into, const color& matte)
+                {
+                    FillRect(into, &w, static_cast<HBRUSH>(GetStockObject(matte.r ? WHITE_BRUSH : BLACK_BRUSH)));
+                    DrawThemeBackground(theme, into, EP_EDITBORDER_NOSCROLL, state, &w, nullptr);
+                });
+    RestoreDC(dc, saved);
+    CloseThemeData(theme);
+    return true;
+}
+
 // An opaque control made opaque where it drew, within its visible region
 // (not over its children): its client area read back and written again at
-// alpha 255, the caret's pixels as drawn. Its border (a field's edge) goes
-// through the two passes, as a layer control's client area: the theme draws
-// it partly translucent, its bottom and right edges blended over whatever's
-// there, which the band's layer should show through, not black.
-void make_opaque(HWND h)
+// alpha 255, the caret's pixels as drawn; its border drawn again
+// (paint_border), its state may have changed.
+void make_opaque(HWND h, bool hot)
 {
     if (!IsWindowVisible(h)) return;
     RECT c;
@@ -297,34 +332,33 @@ void make_opaque(HWND h)
             }
             ReleaseDC(h, dc);
         }
-    // The border, if it has one: where the window's rectangle is past the
-    // client area's.
-    RECT w;
-    GetWindowRect(h, &w);
-    POINT origin{0, 0};
-    ClientToScreen(h, &origin);
-    const RECT client_in_window{origin.x - w.left, origin.y - w.top, origin.x - w.left + c.right,
-                                origin.y - w.top + c.bottom};
-    OffsetRect(&w, -w.left, -w.top);
-    if (EqualRect(&w, &client_in_window) || IsRectEmpty(&w)) return;
-    HDC dc = GetWindowDC(h);
-    if (!dc) return;
-    ExcludeClipRect(dc, client_in_window.left, client_in_window.top, client_in_window.right,
-                    client_in_window.bottom);
-    // The theme's own border (WM_PRINT's would be the classic sunken edge):
-    // painted on the screen over each matte in turn, read back, and then
-    // what's worked out from the two written over it.
-    paint_glass(h, dc, w,
-                [&](HDC into, const color& matte)
+    if (HDC dc = GetWindowDC(h))
+    {
+        if (!paint_border(h, dc, hot))
+        {
+            // Not a themed edge of ours (a classic one, scroll bars): what
+            // it drew, which is opaque, read back and made so, outside the
+            // client area.
+            RECT w;
+            GetWindowRect(h, &w);
+            POINT origin{0, 0};
+            ClientToScreen(h, &origin);
+            const int cx = origin.x - w.left, cy = origin.y - w.top;
+            OffsetRect(&w, -w.left, -w.top);
+            if (!(cx == 0 && cy == 0 && w.right == c.right && w.bottom == c.bottom))
+            {
+                ExcludeClipRect(dc, cx, cy, cx + c.right, cy + c.bottom);
+                if (HPAINTBUFFER buffer = BeginBufferedPaint(dc, &w, BPBF_TOPDOWNDIB, &params, &mem))
                 {
-                    FillRect(dc, &w, static_cast<HBRUSH>(GetStockObject(matte.r ? WHITE_BRUSH : BLACK_BRUSH)));
-                    SendMessageW(h, WM_NCPAINT, 1, 0);
-                    GdiFlush();
-                    BitBlt(into, 0, 0, w.right, w.bottom, dc, 0, 0, SRCCOPY);
-                });
-    ReleaseDC(h, dc);
+                    BitBlt(mem, 0, 0, w.right, w.bottom, dc, 0, 0, SRCCOPY);
+                    BufferedPaintSetAlpha(buffer, nullptr, 255);
+                    EndBufferedPaint(buffer, TRUE);
+                }
+            }
+        }
+        ReleaseDC(h, dc);
+    }
 }
-
 // A message a control may draw on outside WM_PAINT (or, for an opaque one,
 // in it).
 bool may_draw(UINT msg)
@@ -468,6 +502,33 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
             return r;
         }
     }
+    // Its themed border is ours, drawn off the screen and written once
+    // (paint_border); the theme's own would be GDI's, alpha 0, its
+    // translucent edges blended over whatever's there.
+    if (msg == WM_NCPAINT)
+    {
+        bool done = false;
+        if (HDC dc = GetWindowDC(h))
+        {
+            done = paint_border(h, dc, g->hot);
+            ReleaseDC(h, dc);
+        }
+        if (done) return 0;
+    }
+    // Printed with its frame: the client area as on glass (WM_PRINTCLIENT,
+    // above), the border ours.
+    if (msg == WM_PRINT && (lp & PRF_NONCLIENT))
+    {
+        const bool hot = g->hot;
+        const LRESULT r = DefSubclassProc(h, msg, wp, lp & ~LPARAM(PRF_NONCLIENT));
+        if (g->alive && !paint_border(h, reinterpret_cast<HDC>(wp), hot))
+        {
+            ++t_printing;
+            SendMessageW(h, WM_PRINT, wp, PRF_NONCLIENT | (lp & PRF_CHECKVISIBLE));
+            --t_printing;
+        }
+        return r;
+    }
     // Everything of its state read and set before the message is passed on
     // (it may reach the app and destroy the control); after, only `alive`.
     bool drew = may_draw(msg);
@@ -483,8 +544,9 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
         }
     }
     if (msg == WM_MOUSELEAVE) g->hot = false;
+    const bool hot = g->hot;
     const LRESULT r = DefSubclassProc(h, msg, wp, lp);
-    if (drew && g->alive) make_opaque(h);
+    if (drew && g->alive) make_opaque(h, hot);
     return r;
 }
 
