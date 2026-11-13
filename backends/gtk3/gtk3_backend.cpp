@@ -349,6 +349,37 @@ GtkWidget* icon_widget(const icon& icon, int size)
         gtk_image_set_pixel_size(GTK_IMAGE(img), size);
         return img;
     };
+    // A path's own icon (icon::for_path): in a box, the rest of the icon
+    // meanwhile, swapped for GIO's once it's found.
+    if (!icon.path.empty())
+    {
+        auto image = [size](GIcon* g)
+        {
+            GtkWidget* img = gtk_image_new_from_gicon(g, GTK_ICON_SIZE_BUTTON);
+            gtk_image_set_pixel_size(GTK_IMAGE(img), size);
+            gtk_widget_show(img);
+            return img;
+        };
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
+        GIcon* g = path_g_icon(icon.path, widget_cancellable(box),
+                               [box, image](GIcon* found)
+                               {
+                                   gtk_container_foreach(
+                                       GTK_CONTAINER(box), +[](GtkWidget* w, gpointer) { gtk_widget_destroy(w); },
+                                       nullptr);
+                                   gtk_box_pack_start(GTK_BOX(box), image(found), false, false, 0);
+                               });
+        rap::icon rest = icon;
+        rest.path.clear();
+        if (GtkWidget* child = g ? image(g) : icon_widget(rest, size))
+        {
+            gtk_widget_show(child);
+            gtk_box_pack_start(GTK_BOX(box), child, false, false, 0);
+        }
+        return box;
+    }
     if (!icon.name.empty() &&
         gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), icon.name.c_str()))
         return named(icon.name.c_str());
@@ -1122,7 +1153,7 @@ public:
         const bool found = gtk_tree_model_get_iter(GTK_TREE_MODEL(store_), &it, path);
         gtk_tree_path_free(path);
         if (!found) return;
-        gtk_tree_store_set(store_, &it, 0, label.c_str(), 3, g_icon_of(icon), -1);
+        gtk_tree_store_set(store_, &it, 0, label.c_str(), 3, g_icon_of(icon, id), -1);
         const bool waiting = lazy_.unloaded(id);
         if (!has_children && waiting)
             set_children(id, {});
@@ -1227,7 +1258,7 @@ private:
             first = false;
             GtkTreeIter it;
             gtk_tree_store_insert_with_values(store_, &it, parent, -1, 0, t.label.c_str(), 1, t.id.c_str(), 2,
-                                              t.check ? int(*t.check) : -1, 3, g_icon_of(t.icon), -1);
+                                              t.check ? int(*t.check) : -1, 3, g_icon_of(t.icon, t.id), -1);
             GtkTreePath* path = gtk_tree_model_get_path(GTK_TREE_MODEL(store_), &it);
             by_id_[t.id] = gtk_tree_row_reference_new(GTK_TREE_MODEL(store_), path);
             gtk_tree_path_free(path);
@@ -1265,11 +1296,39 @@ private:
         gtk_tree_store_insert_with_values(store_, &it, parent, -1, 0, rap::i18n::tr("rapport", "Loading…"), 1, "", 2,
                                           -1, -1);
     }
-    GIcon* g_icon_of(const rap::icon& icon)
+    // A path's own icon (icon::for_path) once GIO has found it; its name's
+    // meanwhile, and the row's icon set again when it's found.
+    GIcon* g_icon_of(const rap::icon& icon, const std::string& id)
     {
-        GIcon* g = !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
+        GIcon* g = nullptr;
+        if (!icon.path.empty())
+        {
+            row_paths_[id] = icon.path;
+            g = path_g_icon(icon.path, widget_cancellable(w_),
+                            [this, path = icon.path](GIcon* found) { path_icon_found(path, found); });
+        }
+        else
+            row_paths_.erase(id);
+        if (!g)
+            g = !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
         if (g) g_object_set(icon_cell_, "visible", TRUE, nullptr);
         return g;
+    }
+    void path_icon_found(const std::string& path, GIcon* g)
+    {
+        for (const auto& [id, p] : row_paths_)
+        {
+            if (p != path) continue;
+            GtkTreePath* row = path_of(id);
+            if (!row) continue;
+            GtkTreeIter it;
+            if (gtk_tree_model_get_iter(GTK_TREE_MODEL(store_), &it, row))
+            {
+                gtk_tree_store_set(store_, &it, 3, g, -1);
+                g_object_set(icon_cell_, "visible", TRUE, nullptr);
+            }
+            gtk_tree_path_free(row);
+        }
     }
     std::unordered_map<std::string, bool> open_states() const
     {
@@ -1362,6 +1421,7 @@ private:
     GtkCellRenderer* icon_cell_ = nullptr;
     lazy_tree::tracker lazy_;
     std::unordered_map<std::string, GtkTreeRowReference*> by_id_;
+    std::unordered_map<std::string, std::string> row_paths_;  // rows' path icons, by id
     std::function<void()> changed_;
     std::function<void(const std::string&)> activate_;
     std::function<menu(std::optional<std::string>)> context_;
@@ -2111,7 +2171,7 @@ private:
     {
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         GtkWidget* image = nullptr;
-        if (!t.icon.file.empty())
+        if (!t.icon.file.empty() && t.icon.path.empty())
         {
             image = gtk_image_new_from_gicon(file_type_icon(t.icon.file), GTK_ICON_SIZE_MENU);
             gtk_image_set_pixel_size(GTK_IMAGE(image), 16);
@@ -2813,8 +2873,16 @@ private:
         if (model && ctx->list->alive_ && row_of(iter) < model->row_count())
         {
             icon = model->icon(row_of(iter), ctx->column);
-            if (!icon.file.empty()) gicon = file_type_icon(icon.file);
-            else if (!icon.name.empty()) gicon = named_g_icon(icon.name);
+            // A path's own once GIO has found it (asked here, never waited
+            // for: the list draws again when it comes), its name's meanwhile.
+            if (!icon.path.empty())
+            {
+                GtkWidget* list = ctx->list->w_;
+                gicon = path_g_icon(icon.path, widget_cancellable(list),
+                                    [list](GIcon*) { gtk_widget_queue_draw(list); });
+            }
+            if (!gicon && !icon.file.empty()) gicon = file_type_icon(icon.file);
+            if (!gicon && !icon.name.empty()) gicon = named_g_icon(icon.name);
         }
         // A drawing or an overlay: the icon and its badge drawn together, at
         // the screen's scale.
