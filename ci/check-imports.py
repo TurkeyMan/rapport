@@ -21,7 +21,7 @@ SYSTEM = {
     'd3d11.dll', 'dcomp.dll', 'dnsapi.dll', 'dwmapi.dll', 'dwrite.dll', 'dxgi.dll', 'gdi32.dll', 'gdiplus.dll', 'imm32.dll', 'iphlpapi.dll',
     'kernel32.dll', 'msimg32.dll', 'ncrypt.dll', 'ntdll.dll', 'ole32.dll', 'oleacc.dll',
     'oleaut32.dll', 'propsys.dll', 'rpcrt4.dll', 'secur32.dll', 'setupapi.dll', 'shcore.dll',
-    'shell32.dll', 'shlwapi.dll', 'user32.dll', 'userenv.dll', 'uxtheme.dll', 'version.dll',
+    'shell32.dll', 'shlwapi.dll', 'uiautomationcore.dll', 'user32.dll', 'userenv.dll', 'uxtheme.dll', 'version.dll',
     'windowscodecs.dll', 'winhttp.dll', 'winmm.dll', 'winspool.drv', 'ws2_32.dll',
     # MinGW's C runtime is Windows' own msvcrt.dll.
     'msvcrt.dll',
