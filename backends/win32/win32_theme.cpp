@@ -7,6 +7,7 @@
 // Windows 11's frame too: rounded corners and Mica behind the title bar,
 // left square and plain before it.
 #include "win32_common.h"
+#include "win32_caption_tabs.h"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -52,6 +53,28 @@ theme_color surface_of(HWND h)
 {
     HWND root = h ? GetAncestor(h, GA_ROOT) : nullptr;
     return root && GetPropW(root, L"rapport-base-surface") ? theme_color::base : theme_color::window;
+}
+
+color surface_color_of(HWND h)
+{
+    color band{};
+    return in_toolbar_band(h, band) ? band : theme_color_of(surface_of(h));
+}
+
+HBRUSH surface_brush_of(HWND h)
+{
+    color band{};
+    if (!in_toolbar_band(h, band)) return theme_brush(surface_of(h));
+    // The band's one colour at a time (light, dark), made again as it changes.
+    static HBRUSH brush = nullptr;
+    static color made{};
+    if (!brush || made.r != band.r || made.g != band.g || made.b != band.b)
+    {
+        if (brush) DeleteObject(brush);
+        brush = CreateSolidBrush(color_ref(band));
+        made = band;
+    }
+    return brush;
 }
 
 theme_color surface_text_of(HWND h)

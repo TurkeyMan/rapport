@@ -534,6 +534,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         GetClientRect(wnd, &c);
         const int saved = SaveDC(dc);
         FillRect(dc, &c, theme_brush(surface_of(wnd)));
+        paint_toolbar_band(wnd, dc);  // (a top-level window's, if it has one)
         paint_group_frames(wnd, dc);
         RestoreDC(dc, saved);
         result = 1;
@@ -558,9 +559,8 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
                     reinterpret_cast<HDC>(wp),
                     color_ref(theme_color_of(IsWindowEnabled(c) ? surface_text_of(wnd)
                                                                 : theme_color::disabled_text)));
-                SetBkColor(reinterpret_cast<HDC>(wp),
-                           color_ref(theme_color_of(surface_of(wnd))));
-                result = reinterpret_cast<LRESULT>(theme_brush(surface_of(wnd)));
+                SetBkColor(reinterpret_cast<HDC>(wp), color_ref(surface_color_of(c)));
+                result = reinterpret_cast<LRESULT>(surface_brush_of(c));
                 return true;
             }
             if (!_wcsicmp(cls, L"Edit"))
@@ -584,7 +584,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
                                                                   : surface_text_of(wnd))));
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
         HBRUSH on_tab = dark_mode() ? nullptr : tab_body_under(c);
-        result = reinterpret_cast<LRESULT>(on_tab ? on_tab : theme_brush(surface_of(wnd)));
+        result = reinterpret_cast<LRESULT>(on_tab ? on_tab : surface_brush_of(c));
         return true;
     }
     // Fields and drop-down lists, dark in dark mode (their defaults are
@@ -1658,6 +1658,7 @@ public:
     {
     }
     std::vector<item*> children;
+    orientation direction() const { return dir_; }
 
     bool fills() const override { return true; }
     bool expands_in_form() const override { return true; }
@@ -1845,6 +1846,20 @@ private:
     orientation dir_;
     int spacing_;
     int margin_;
+};
+
+// A toolbar's row: a box that knows it's one, and where it was placed (the
+// toolbar band's, win32_caption_tabs.h).
+class toolbar_item final : public box_item
+{
+public:
+    using box_item::box_item;
+    RECT rect{};
+    void place(RECT r) override
+    {
+        rect = r;
+        box_item::place(r);
+    }
 };
 
 // Labels right-aligned in the first column, fields in the second; an empty
@@ -2321,7 +2336,7 @@ public:
             state += 1;
         HDC dc = cd->hdc;
         const RECT r = cd->rc;
-        FillRect(dc, &r, theme_brush(surface_of(h_)));
+        FillRect(dc, &r, surface_brush_of(h_));
         SIZE box{px(13), px(13)};
         GetThemePartSize(theme, dc, BP_CHECKBOX, state, nullptr, TS_DRAW, &box);
         RECT b{r.left, r.top + (r.bottom - r.top - box.cy) / 2, r.left + box.cx, 0};
@@ -4634,14 +4649,14 @@ public:
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
         RECT r = d->rcItem;
-        FillRect(d->hDC, &r, theme_brush(surface_of(h_)));
+        FillRect(d->hDC, &r, surface_brush_of(h_));
         const bool pressed = d->itemState & ODS_SELECTED;
         const bool disabled = d->itemState & ODS_DISABLED;
         if (pressed || checked_ || hot_)
         {
             const color base = theme_color_of(theme_color::highlight);
             const float a = pressed ? 0.35f : checked_ ? 0.25f : 0.12f;
-            const color face = theme_color_of(surface_of(h_));
+            const color face = surface_color_of(h_);
             auto mix = [a](uint8_t x, uint8_t y) { return uint8_t(x * (1 - a) + y * a); };
             HBRUSH b = CreateSolidBrush(RGB(mix(face.r, base.r), mix(face.g, base.g), mix(face.b, base.b)));
             RECT in = r;
@@ -4836,14 +4851,15 @@ public:
         }
         // Light, it draws its background in the style's (the window colour)
         // whatever is behind it, double buffered or printed: on a base
-        // surface that's filled in the surface's colour first, the buttons'
-        // looks (hot, pressed, checked, disabled) left to it.
+        // surface that's filled in the surface's colour first (the toolbar
+        // band's, in one), the buttons' looks (hot, pressed, checked,
+        // disabled) left to it.
         if (n->code == NM_CUSTOMDRAW && surface_of(h_) == theme_color::base)
         {
             handled = true;
             auto* cd = reinterpret_cast<NMTBCUSTOMDRAW*>(n);
             if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)
-                FillRect(cd->nmcd.hdc, &cd->nmcd.rc, theme_brush(theme_color::base));
+                FillRect(cd->nmcd.hdc, &cd->nmcd.rc, surface_brush_of(h_));
             return CDRF_DODEFAULT;
         }
         handled = n->code == TBN_GETINFOTIPW;
@@ -4866,7 +4882,7 @@ public:
         switch (cd->nmcd.dwDrawStage)
         {
         case CDDS_PREPAINT:
-            FillRect(cd->nmcd.hdc, &cd->nmcd.rc, theme_brush(surface_of(cd->nmcd.hdr.hwndFrom)));
+            FillRect(cd->nmcd.hdc, &cd->nmcd.rc, surface_brush_of(cd->nmcd.hdr.hwndFrom));
             return CDRF_NOTIFYITEMDRAW;
         case CDDS_ITEMPREPAINT:
         {
@@ -9996,6 +10012,7 @@ public:
             if (menu_bar_ && GetMenu(hwnd_) != menu_bar_) DestroyMenu(menu_bar_);  // detached: ours to free
             RemovePropW(hwnd_, L"rapport-focus");
             set_base_surface(hwnd_, false);
+            set_toolbar_band(hwnd_, RECT{});
             DestroyWindow(hwnd_);
         }
     }
@@ -10124,9 +10141,50 @@ public:
                 r.top += h;
             }
         }
+        const LONG content_top = r.top;
         InflateRect(&r, -m, -m);
         root->show_all(true);
         root->place(r);
+        place_band(content_top, r);
+    }
+
+    // Explorer's address row under the tabs in the caption (the toolbar
+    // band, win32_caption_tabs.h): a base surface window's first content
+    // item, a toolbar across the content (`content`: where the root was
+    // placed), from the strip's bottom (`top`) to the toolbar's and a line.
+    void place_band(LONG top, const RECT& content)
+    {
+        RECT band{};
+        if (caption_ && surface_of(hwnd_) == theme_color::base)
+        {
+            item* first = root;
+            if (auto* box = dynamic_cast<box_item*>(root); box && !dynamic_cast<toolbar_item*>(root))
+            {
+                first = nullptr;
+                if (box->direction() == orientation::vertical)
+                    for (item* c : box->children)
+                        if (c->visible)
+                        {
+                            first = c;
+                            break;
+                        }
+            }
+            const auto* bar = dynamic_cast<toolbar_item*>(first);
+            if (bar && bar->visible && bar->rect.left == content.left && bar->rect.right == content.right &&
+                bar->rect.bottom > bar->rect.top)
+            {
+                RECT c;
+                GetClientRect(hwnd_, &c);
+                band = RECT{c.left, top, c.right, bar->rect.bottom + caption_line_px(dpi_of(hwnd_))};
+            }
+        }
+        RECT was{};
+        const bool had = toolbar_band(hwnd_, was);
+        if (had ? EqualRect(&was, &band) : IsRectEmpty(&band)) return;
+        set_toolbar_band(hwnd_, band);
+        // Its fill under the toolbar's controls, the current tab's, and
+        // what was band and isn't.
+        RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
     // Owned parts of the window.
@@ -11217,7 +11275,7 @@ private:
     }
     item* make(const node& n, const spec::toolbar& s, HWND parent, orientation)
     {
-        auto* box = own<box_item>(orientation::horizontal, win_.px(2));
+        auto* box = own<toolbar_item>(orientation::horizontal, win_.px(2));
         // Each run of buttons and separators is one native toolbar.
         tool_strip* strip = nullptr;
         for (const node& c : s.items)

@@ -236,6 +236,15 @@ palette expected(bool hc)
     return p;
 }
 
+// The toolbar band (Explorer's address row): WinUI's LayerFillColorDefault
+// drawn opaque (#F8F8F8, as Explorer's measures; dark #4C3A3A3A over Mica's
+// #202020), high contrast's window colour; its line the strip's.
+DWORD band_fill(bool hc)
+{
+    if (hc) return rgb(GetSysColor(COLOR_WINDOW));
+    return g_dark ? over({0x3A3A3A, 0x4C}, 0x202020) : 0xF8F8F8;
+}
+
 // -- the windows ----------------------------------------------------------
 
 bool g_shown = true;  // shown: the compositor's frame, and the screen's pixels
@@ -299,7 +308,8 @@ enum
     q_close = 4,
     q_add = 5,
     q_params_made = 6,
-    q_fonts = 7
+    q_fonts = 7,
+    q_fail_copy = 8
 };
 // What q_fonts fills (caption_tabs_fonts in win32_caption_tabs.h).
 struct strip_fonts
@@ -506,6 +516,210 @@ void check_pixels(HWND strip, const palette& pal, const std::string& when)
         for (int x = tab.left + px(12, dpi); x < tab.left + px(120, dpi); ++x)
             if (colour(p.at(x, y)) != pal.current) ++ink;
     expect(ink > 10, "the current tab's title is drawn" + at + " (" + str(ink) + " pixels)");
+}
+
+// -- the toolbar band -------------------------------------------------------
+
+void check_text(HWND strip, const palette& pal, const std::string& when);
+
+// The window's background as its erase paints it (WM_ERASEBKGND into a
+// bitmap, under its controls too): the band and its line, or none.
+printed print_erase(HWND top)
+{
+    printed out;
+    RECT c;
+    GetClientRect(top, &c);
+    out.w = c.right;
+    out.h = c.bottom;
+    if (out.w <= 0 || out.h <= 0) return out;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), out.w, -out.h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    std::fill_n(static_cast<DWORD*>(bits), size_t(out.w) * out.h, 0x00ABCDEFu);
+    SendMessageW(top, WM_ERASEBKGND, reinterpret_cast<WPARAM>(mem), 0);
+    GdiFlush();
+    out.px.assign(static_cast<DWORD*>(bits), static_cast<DWORD*>(bits) + size_t(out.w) * out.h);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    return out;
+}
+
+// A child's rectangle in `top`'s client area.
+RECT rect_in(HWND top, HWND child)
+{
+    RECT r{};
+    GetWindowRect(child, &r);
+    MapWindowPoints(nullptr, top, reinterpret_cast<POINT*>(&r), 2);
+    return r;
+}
+
+// A child control's client area printed (WM_PRINTCLIENT, its background
+// too) into a 32-bit bitmap.
+printed print_control(HWND h)
+{
+    printed out;
+    RECT c;
+    GetClientRect(h, &c);
+    out.w = c.right;
+    out.h = c.bottom;
+    if (out.w <= 0 || out.h <= 0) return out;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), out.w, -out.h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    std::fill_n(static_cast<DWORD*>(bits), size_t(out.w) * out.h, 0x00ABCDEFu);
+    SendMessageW(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND);
+    GdiFlush();
+    out.px.assign(static_cast<DWORD*>(bits), static_cast<DWORD*>(bits) + size_t(out.w) * out.h);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    return out;
+}
+
+// Down the window's background from `from` (its client y) near its right
+// edge: with a band, its fill from `from` to the toolbar's bottom (at
+// least), then the line, a pixel scaled, then the surface; without one,
+// the surface all the way, no fill and no line.
+void check_band_rows(HWND top, int from, bool band, const palette& pal, HWND toolbar, const std::string& when)
+{
+    const UINT dpi = GetDpiForWindow(top);
+    const std::string at = " (" + when + ")";
+    const printed p = print_erase(top);
+    const int x = p.w - px(4, dpi), line = std::max(1, px(1, dpi));
+    auto colour = [&](int y) { return p.at(x, y) & 0xffffff; };
+    if (!band)
+    {
+        int y = from, last = std::min(p.h, from + px(120, dpi));
+        while (y < last && colour(y) == pal.band) ++y;
+        expect(y == last, "no band: the window's background is " + hex(pal.band) + " from " + str(from) +
+                              " down, no fill and no line" + at +
+                              (y < last ? ": " + hex(colour(y)) + " at " + str(y) : std::string()));
+        return;
+    }
+    const DWORD fill = band_fill(high_contrast());
+    int y = from;
+    while (y < p.h && colour(y) == fill) ++y;
+    const int fill_end = y;
+    const RECT tb = toolbar ? rect_in(top, toolbar) : RECT{};
+    expect(fill_end > from && (!toolbar || (fill_end >= tb.bottom && fill_end <= tb.bottom + px(4, dpi))),
+           "the band " + hex(fill) + " from the strip's bottom, " + str(from) + ", to the toolbar's, " +
+               str(long(tb.bottom)) + at + ": to " + str(fill_end) + ", then " + hex(colour(fill_end)));
+    while (y < p.h && colour(y) == pal.line) ++y;
+    expect(y - fill_end == line, "and under it the line, " + hex(pal.line) + ", " + str(line) + " px" + at + ": " +
+                                     str(y - fill_end) + " px");
+    expect(colour(y) == pal.band, "then the window's surface, " + hex(pal.band) + at + ": " + hex(colour(y)) +
+                                      " at " + str(y));
+    // Across the window, edge to edge.
+    for (const int across : {0, p.w / 2, p.w - 1})
+        expect((p.at(across, from) & 0xffffff) == fill && (p.at(across, fill_end) & 0xffffff) == pal.line,
+               "the band and its line at x " + str(across) + at);
+}
+
+// The child of `top` with the WS_VISIBLE style whose rectangle holds `p`
+// (client coordinates), null if none: what would cover the window's own
+// pixel there. By style, so it says the same of a window never shown, whose
+// children IsWindowVisible (and ChildWindowFromPointEx's CWP_SKIPINVISIBLE)
+// would all count out.
+HWND covering_child(HWND top, POINT p)
+{
+    for (HWND c = GetWindow(top, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
+    {
+        if (!(GetWindowLongPtrW(c, GWL_STYLE) & WS_VISIBLE)) continue;
+        const RECT r = rect_in(top, c);
+        if (PtInRect(&r, p)) return c;
+    }
+    return nullptr;
+}
+// `p` is the window's own pixel: no child over it, by style and, shown,
+// as the system finds it (ChildWindowFromPointEx).
+bool window_own(HWND top, POINT p, const std::string& what)
+{
+    HWND by_style = covering_child(top, p);
+    HWND found = IsWindowVisible(top) ? ChildWindowFromPointEx(top, p, CWP_SKIPINVISIBLE) : top;
+    const bool own = !by_style && found == top;
+    expect(own, what + " at " + str(p.x) + "," + str(p.y) + " is the window's own pixel, no child over it" +
+                    (own ? std::string() : ": covered"));
+    return own;
+}
+
+// A point in the band's fill that no child covers, as near its right end as
+// there is one (the toolbar's controls fill most of it): between `from`
+// (the strip's bottom) and the line, read from the printed background.
+// {-1, -1} if there's none.
+POINT band_point(HWND top, int from)
+{
+    const printed p = print_erase(top);
+    const DWORD fill = band_fill(high_contrast());
+    for (int y = from; y < p.h && (p.at(0, y) & 0xffffff) == fill; ++y)
+        for (int x = p.w - 1; x >= 0; --x)
+            if ((p.at(x, y) & 0xffffff) == fill && !covering_child(top, POINT{x, y})) return POINT{x, y};
+    return POINT{-1, -1};
+}
+
+// A window whose first content item is a toolbar across it: a band where
+// `band` says so (Windows 11, the tabs in the caption, a base surface),
+// the current tab its fill, the toolbar's own background too.
+void check_band(HWND top, bool band, const std::string& when)
+{
+    const bool hc = high_contrast();
+    const std::string at = " (" + when + ")";
+    HWND strip = strip_of(top);
+    HWND toolbar = FindWindowExW(top, nullptr, TOOLBARCLASSNAMEW, nullptr);
+    expect(toolbar != nullptr, "the toolbar's native control" + at);
+    palette pal = expected(hc);
+    if (band && !hc) pal.current = band_fill(false);
+    const int from = strip ? int(rect_in(top, strip).bottom) : 0;
+    check_band_rows(top, from, band, pal, toolbar, when);
+    if (band)
+    {
+        // Where the band's on screen to be sampled (see main): uncovered.
+        const POINT b = band_point(top, from);
+        expect(b.x >= 0, "a point of the band's fill no child covers" + at + ": " + str(b.x) + "," + str(b.y));
+        if (b.x >= 0) window_own(top, b, "that point" + at);
+    }
+    if (!strip) return;
+    check_pixels(strip, pal, when);
+    check_text(strip, pal, when);
+    // The current tab dragged (the strip sent the mouse's messages, then
+    // Escape: no reorder), drawn under the pointer: still the band's fill.
+    {
+        const UINT dpi = GetDpiForWindow(strip);
+        const int current = ask(strip, q_current);
+        const RECT tab = part(strip, q_tab, current);
+        const POINT a = centre(tab);
+        const int moved = px(40, dpi);
+        SendMessageW(strip, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(a.x, a.y));
+        SendMessageW(strip, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(a.x + moved, a.y));
+        const printed p = print(strip);
+        SendMessageW(strip, WM_KEYDOWN, VK_ESCAPE, 0);
+        pump(2);
+        const int line = std::max(1, px(1, dpi)), mid = (tab.top + p.h - line) / 2;
+        const DWORD inside = p.at(tab.left + moved + px(4, dpi), mid) & 0xffffff,
+                    bottom = p.at(tab.left + moved + px(4, dpi), p.h - 1) & 0xffffff;
+        expect(inside == pal.current && bottom == pal.current,
+               "the current tab dragged " + str(moved) + " px is still " + hex(pal.current) + ", to its bottom row" + at +
+                   ": " + hex(inside) + ", " + hex(bottom));
+        expect(ask(strip, q_current) == current && part(strip, q_tab, current).left == tab.left,
+               "and put back by Escape" + at);
+    }
+    if (band && toolbar)
+    {
+        const printed t = print_control(toolbar);
+        const DWORD v = t.at(1, 1) & 0xffffff;
+        expect(v == band_fill(hc), "the toolbar's background is the band's, " + hex(band_fill(hc)) + at + ": " +
+                                       hex(v));
+    }
 }
 
 // -- the text ---------------------------------------------------------------
@@ -808,6 +1022,57 @@ void check_text(HWND strip, const palette& pal, const std::string& when)
            "and as light as E711, about " + str(std::lround(x_ref)) + at + ": " + str(std::lround(x.mass)));
 }
 
+// The ClearType pass's first copy (from the strip's target into a run's own
+// bitmap) made to fail, through the strip's test hook (query 8), for the
+// first run, the current tab's title: nothing of that bitmap is copied
+// back, its background never filled, and the title is drawn grayscale
+// instead, on the tab's fill as ever.
+void check_copy_failure(HWND strip, const palette& pal)
+{
+    strip_fonts f{};
+    SendMessageW(strip, query(), MAKEWPARAM(q_fonts, 0), reinterpret_cast<LPARAM>(&f));
+    if (!f.cleartype)
+    {
+        note("skipped the ClearType copy's failure: the runner's font smoothing isn't ClearType, so no copies");
+        return;
+    }
+    const UINT dpi = GetDpiForWindow(strip);
+    const printed normal = print(strip);
+    const int before = ask(strip, q_fail_copy, 1);
+    const printed p = print(strip);
+    const int after = ask(strip, q_fail_copy, 0);
+    expect(after == before + 1, "the hook made one ClearType copy fail (" + str(before) + " then " + str(after) + ")");
+    const int current = ask(strip, q_current), line = std::max(1, px(1, dpi));
+    const RECT tab = part(strip, q_tab, current), close = part(strip, q_close, current);
+    // The title's rectangle on the tab, past its icon, before its close
+    // button: what the run's bitmap covered.
+    const RECT title{tab.left + px(36, dpi), tab.top + px(4, dpi), close.left - px(2, dpi), p.h - line};
+    long opaque = 0, pixels = 0;
+    for (int y = title.top; y < title.bottom; ++y)
+        for (int x = title.left; x < title.right; ++x, ++pixels)
+            if ((p.at(x, y) >> 24) == 255) ++opaque;
+    expect(pixels > 0 && opaque == pixels, "the failed run's rectangle still opaque, the tab's fill (" +
+                                               str(opaque) + " of " + str(pixels) + ")");
+    const ink_stats t = ink_in(p, title, pal.title, pal.current);
+    expect(t.within && t.mass > 10 && t.peak >= 0.6,
+           "nothing copied back from the unfilled bitmap: only the tab's fill and the title's ink, " +
+               hex(over(pal.title, pal.current)) + ", there: ink " + str(std::lround(t.mass)) + ", peak " +
+               str(std::lround(t.peak * 100)) + "%" + (t.within ? "" : ", past at " + t.worst));
+    expect(t.chroma <= 2, "the title drawn grayscale instead (chroma " + str(t.chroma) + ")");
+    // Past the title, the rest of the strip as ever.
+    long differ = 0;
+    for (int y = 0; y < p.h; ++y)
+        for (int x = 0; x < p.w; ++x)
+        {
+            const bool in = x >= title.left - px(2, dpi) && x < title.right && y >= tab.top && y < p.h - line;
+            if (!in && p.at(x, y) != normal.at(x, y)) ++differ;
+        }
+    expect(differ == 0, "and everything else as printed without the failure (" + str(differ) + " pixels differ)");
+    const printed again = print(strip);
+    const ink_stats back = ink_in(again, title, pal.title, pal.current);
+    expect(back.within && again.px == normal.px, "the next print, unhooked, ClearType as before");
+}
+
 // The strip printed into a DIB that's all `sentinel`, with `clip` (device
 // coordinates; null: none) selected and the viewport's origin at `origin`:
 // it draws only inside the clip, where the mapping puts it, the pixels
@@ -918,6 +1183,12 @@ void check_screen(HWND top, HWND strip, const palette& pal)
     GetClientRect(top, &c);
     const POINT under{tab.left + px(4, dpi), h - 1}, band{tab.left + px(4, dpi), h + px(2, dpi)},
         right{c.right - px(20, dpi), h - 1};
+    // Each sample what it's said to be: the strip's (the current tab), and
+    // the window's own (above the content's margin; under the caption
+    // buttons), no control over either.
+    expect(ChildWindowFromPointEx(top, under, CWP_SKIPINVISIBLE) == strip, "the tab's sample is the strip's");
+    window_own(top, band, "the band's sample");
+    window_own(top, right, "the line's sample");
     const DWORD u = on_screen(top, under), b = on_screen(top, band), r = on_screen(top, right);
     expect(b == pal.band, "on screen, the band under the strip is " + hex(pal.band) + ": " + hex(b));
     expect(u == pal.current, "the current tab's bottom row, one with it: " + hex(u));
@@ -1665,6 +1936,21 @@ int main(int argc, char** argv)
                 });
     };
     const char* title = "Caption tabs";
+    // A window whose first content item is a toolbar across it (or, with
+    // `first` false, second, under a label).
+    const char* band_title = "Caption tabs, toolbar band";
+    auto band_window = [&](const char* name, bool first, bool margins = false)
+    {
+        auto bar = []
+        {
+            return toolbar{tool_button{rap::icon::named("go-previous"), "Back"},
+                           tool_button{rap::icon::named("go-next"), "Forward"}, separator{}, entry{}.stretch()};
+        };
+        window w = first ? window{name, {bar(), label{"The current tab's content"}}}
+                         : window{name, {label{"Above the toolbar"}, bar()}};
+        w.size(900_px, 300_px).margins(margins).base_surface(g_base).tabs(doc_tabs());
+        return w;
+    };
     auto win = (*ui)->create(window{title, {entry{}, label{"The current tab's content"}}}
                                  .size(1000_px, 300_px)
                                  .base_surface(g_base)
@@ -1688,6 +1974,14 @@ int main(int argc, char** argv)
         expect(tab_control_of(top) != nullptr, "but stage 1's tab control");
         expect(title_bar(top) >= GetSystemMetrics(SM_CYCAPTION),
                "under the title bar (" + str(title_bar(top)) + ")");
+        // A toolbar first: no band, as before.
+        auto banded = (*ui)->create(band_window(band_title, true));
+        show(*banded);
+        pump();
+        if (HWND b = top_of(band_title))
+            check_band_rows(b, 0, false, expected(hc), nullptr, "before Windows 11, a toolbar first");
+        else
+            expect(false, "the toolbar's window");
         std::printf(fails ? "%d failed\n" : "all passed\n", fails.load());
         if (transitions)
         {
@@ -1719,6 +2013,10 @@ int main(int argc, char** argv)
     check_text(strip, expected(hc), hc ? "high contrast" : g_dark ? "dark" : "light");
     check_rebuild(top, strip);
     check_clipped_prints(strip);
+    check_copy_failure(strip, expected(hc));
+    // Its first item a text field, no toolbar: no band, no line, the current
+    // tab the window's surface (check_pixels).
+    check_band_rows(top, int(rect_in(top, strip).bottom), false, expected(hc), nullptr, "no toolbar");
     if (g_shown)
     {
         check_screen(top, strip, expected(hc));
@@ -1757,11 +2055,78 @@ int main(int argc, char** argv)
                "the strip shows Gamma current, first, as dragged; the app's tabs otherwise as they were");
     }
 
+    // A toolbar first, across the content: the band, on a base surface.
+    {
+        auto banded = (*ui)->create(band_window(band_title, true));
+        show(*banded);
+        pump();
+        HWND b = top_of(band_title);
+        expect(b && strip_of(b), "a toolbar's window, its tabs in the caption");
+        if (b && strip_of(b))
+        {
+            check_band(b, g_base, g_base ? "a toolbar first" : "a toolbar first, no base surface");
+            if (g_shown && g_base)
+            {
+                HWND s = strip_of(b);
+                SetWindowPos(b, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+                RedrawWindow(b, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                pump();
+                DwmFlush();
+                const UINT dpi = GetDpiForWindow(b);
+                const int h = int(rect_in(b, s).bottom);
+                const RECT tab = part(s, q_tab, ask(s, q_current));
+                RECT c;
+                GetClientRect(b, &c);
+                // A point of the band no child covers (a toolbar's
+                // controls fill most of it), checked to be the window's own.
+                const POINT at = band_point(b, h), tab_at{tab.left + px(4, dpi), h - 1};
+                expect(at.x >= 0 && window_own(b, at, "on screen, the band's sample"),
+                       "an uncovered point of the band to sample on screen");
+                expect(ChildWindowFromPointEx(b, tab_at, CWP_SKIPINVISIBLE) == s, "the tab's sample is the strip's");
+                const DWORD fill = band_fill(hc), u = on_screen(b, tab_at),
+                            under = at.x >= 0 ? on_screen(b, at) : 0xDEADBEEF;
+                expect(under == fill, "on screen, the band is " + hex(fill) + " at " + str(at.x) + "," + str(at.y) +
+                                          ": " + hex(under));
+                expect(u == (hc ? expected(true).current : fill),
+                       "and the current tab's bottom row one with it: " + hex(u));
+                SetWindowPos(b, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+            }
+        }
+        // The window's margins on: the toolbar still spans the content.
+        const char* margined_title = "Caption tabs, toolbar band, margins";
+        auto margined = (*ui)->create(band_window(margined_title, true, true));
+        show(*margined);
+        pump();
+        if (HWND m = top_of(margined_title); m && strip_of(m))
+            check_band_rows(m, int(rect_in(m, strip_of(m)).bottom), g_base, expected(hc),
+                            FindWindowExW(m, nullptr, TOOLBARCLASSNAMEW, nullptr), "a toolbar first, margins on");
+        else
+            expect(false, "the margined toolbar's window, its tabs in the caption");
+        // Second, under a label: nothing qualifies, no band.
+        const char* second_title = "Caption tabs, toolbar second";
+        auto second = (*ui)->create(band_window(second_title, false));
+        show(*second);
+        pump();
+        if (HWND t = top_of(second_title); t && strip_of(t))
+        {
+            check_band_rows(t, int(rect_in(t, strip_of(t)).bottom), false, expected(hc), nullptr,
+                            "a toolbar second");
+            check_pixels(strip_of(t), expected(hc), "a toolbar second");
+        }
+        else
+            expect(false, "the second toolbar's window, its tabs in the caption");
+    }
+
     // Under a menu bar, and in a dialog: stage 1's, under the title bar.
     {
         const char* menu_title = "Caption tabs, menu bar";
-        auto menued = (*ui)->create(window{menu_title, {label{"Content"}}}
+        // A toolbar first, on a base surface: no band in stage 1.
+        auto menued = (*ui)->create(window{menu_title, {toolbar{tool_button{rap::icon::named("go-previous"), "Back"},
+                                                                entry{}.stretch()},
+                                                        label{"Content"}}}
                                         .size(600_px, 200_px)
+                                        .margins(false)
+                                        .base_surface(g_base)
                                         .menu_bar({{"_File", [] { return rap::menu{}; }}})
                                         .tabs(doc_tabs()));
         show(*menued);
@@ -1769,6 +2134,7 @@ int main(int argc, char** argv)
         HWND m = top_of(menu_title);
         expect(m && !strip_of(m) && tab_control_of(m), "under a menu bar: stage 1's strip");
         expect(m && title_bar(m) >= GetSystemMetrics(SM_CYCAPTION), "and the title bar kept");
+        if (m) check_band_rows(m, 0, false, expected(hc), nullptr, "stage 1, a toolbar first");
         const char* dialog_title = "Caption tabs, dialog";
         auto dlg = (*ui)->create(dialog{dialog_title, {label{"Content"}}}.size(400_px, 200_px).tabs(doc_tabs()));
         show(*dlg);
