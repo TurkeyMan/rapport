@@ -93,9 +93,10 @@ std::vector<HWND> lists()
 }
 
 // The comctl32 the controls are, for reading their image lists: the
-// functions come from the DLL selected after the backend initialises (as
-// the backend's g_comctl takes them), which needn't be the one this process
-// imports; its version is printed. With a manifest, it's the same DLL.
+// functions come from the module that registered a control's window class,
+// which needn't be the one this process imports (the backend creates its
+// controls under its own Common Controls 6 context, and this test runs
+// outside it). Its version and path are printed.
 struct comctl
 {
     struct dll_version
@@ -106,10 +107,20 @@ struct comctl
     decltype(&ImageList_GetImageCount) image_count = nullptr;
     std::string version = "unknown";
 
-    void resolve()  // after rap::ui::load
+    std::string path = "unknown";
+
+    void resolve(HWND control)  // one of the backend's common controls
     {
-        HMODULE m = LoadLibraryW(L"comctl32.dll");
+        HMODULE m = control ? reinterpret_cast<HMODULE>(GetClassLongPtrW(control, GCLP_HMODULE))
+                            : nullptr;
         if (!m) return;
+        wchar_t file[MAX_PATH]{};
+        if (const DWORD n = GetModuleFileNameW(m, file, MAX_PATH); n && n < MAX_PATH)
+        {
+            path.clear();
+            for (const wchar_t* c = file; *c; ++c)
+                path += *c < 128 ? char(*c) : '?';
+        }
         icon_size = reinterpret_cast<decltype(icon_size)>(
             reinterpret_cast<void*>(GetProcAddress(m, "ImageList_GetIconSize")));
         image_count = reinterpret_cast<decltype(image_count)>(
@@ -338,8 +349,9 @@ int main(int argc, char** argv)
     HWND top = GetAncestor(found[1], GA_ROOT);
     expect(top && GetAncestor(found[0], GA_ROOT) == top, "both lists are in one window");
     if (!top) return 1;
-    g_cc.resolve();
-    std::printf("comctl32 %s, %s\n", g_cc.version.c_str(),
+    // The list_view's class module: its header is of the same DLL.
+    g_cc.resolve(found[1]);
+    std::printf("comctl32 %s (%s), %s\n", g_cc.version.c_str(), g_cc.path.c_str(),
 #ifdef RAPPORT_TEST_NO_MANIFEST
                 "no manifest: the arrows aren't checked"
 #else
