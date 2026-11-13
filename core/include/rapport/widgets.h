@@ -1004,6 +1004,34 @@ public:
     virtual void on_changed(std::function<void(int)>) = 0;
 };
 
+struct node;  // layout.h
+
+// Pages in one place, one shown at a time, chosen by the app (layout::stack):
+// a wizard's steps, a view swapped for another. Pages are named by the app's
+// own ids. Hidden pages keep their widgets and state, but take no layout,
+// paint or input, and aren't exposed to accessibility. Unknown ids are
+// ignored.
+class stack : public widget
+{
+public:
+    // Builds `content` now, through the window's build, with its binds and
+    // callbacks set as for the window's first content, and adds it last.
+    // Hidden unless the stack was empty. An id already there is ignored
+    // (nothing is built).
+    virtual void add(const std::string& id, node content) = 0;
+    // Destroys that page's widgets; pointers bound inside it dangle after.
+    // The page is hidden, out of layout and out of ids() at once; its
+    // widgets are destroyed when control is next back in the event loop, so
+    // this may be called from one of the page's own callbacks. Removing the
+    // shown page shows the next, or the previous if it was last.
+    virtual void remove(const std::string& id) = 0;
+    // No callback. The focus, if it was in the page that was shown, moves to
+    // the new page's control that last had it, or else its first.
+    virtual void show(const std::string& id) = 0;
+    virtual std::string shown() const = 0;  // empty when there are no pages
+    virtual std::vector<std::string> ids() const = 0;
+};
+
 // One of a window's document tabs (window_spec::tabs): a folder in a file
 // manager, a file in an editor.
 struct document_tab

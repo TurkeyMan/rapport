@@ -124,6 +124,16 @@ struct tabs
     std::function<void(int)> on_changed;
     rap::tabs** bind = nullptr;
 };
+// Pages in one place, one shown at a time (layout::stack).
+struct stack
+{
+    std::vector<std::string> ids;
+    nodes pages;
+    // Sized to its largest page, so switching never resizes the window;
+    // false: to the page shown.
+    bool homogeneous = true;
+    rap::stack** bind = nullptr;
+};
 struct spacer
 {
 };
@@ -386,10 +396,11 @@ struct document_tabs
 
 using node_spec =
     std::variant<spec::box, spec::form, spec::splitter, spec::group, spec::scroll, spec::tabs,
-                 spec::spacer, spec::separator, spec::label, spec::button, spec::check, spec::entry,
-                 spec::drop_down, spec::combo, spec::text_view, spec::list, spec::canvas,
-                 spec::menu_button, spec::progress_bar, spec::date_picker, spec::toolbar,
-                 spec::tool_button, spec::slider, spec::spin, spec::color_button, spec::buttons, spec::tree>;
+                 spec::stack, spec::spacer, spec::separator, spec::label, spec::button, spec::check,
+                 spec::entry, spec::drop_down, spec::combo, spec::text_view, spec::list,
+                 spec::canvas, spec::menu_button, spec::progress_bar, spec::date_picker,
+                 spec::toolbar, spec::tool_button, spec::slider, spec::spin, spec::color_button,
+                 spec::buttons, spec::tree>;
 
 struct node
 {
@@ -683,6 +694,42 @@ public:
     tabs& bind(rap::tabs*& h)
     {
         s().bind = &h;
+        return *this;
+    }
+};
+
+struct stack_page
+{
+    std::string id;
+    node content;
+};
+
+// Pages in one place, one shown at a time, chosen by the app (rap::stack):
+//     stack{{"intro", label{"Welcome"}}, {"details", form{...}}}.bind(steps)
+// The first is shown. Pages are added (built at once) and removed later
+// through the bind; a repeated id is ignored.
+class stack : public builder<stack, spec::stack>
+{
+public:
+    stack(std::initializer_list<stack_page> pages = {})
+    {
+        for (const stack_page& p : pages)
+        {
+            if (std::ranges::find(s().ids, p.id) != s().ids.end()) continue;
+            s().ids.push_back(p.id);
+            s().pages.push_back(p.content);
+        }
+    }
+    stack& bind(rap::stack*& h)
+    {
+        s().bind = &h;
+        return *this;
+    }
+    // On (the default): sized to its largest page, so switching never
+    // resizes the window. Off: sized to the page shown.
+    stack& homogeneous(bool on = true)
+    {
+        s().homogeneous = on;
         return *this;
     }
 };

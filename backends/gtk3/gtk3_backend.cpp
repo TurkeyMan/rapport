@@ -4976,9 +4976,11 @@ void set_margins(GtkWidget* w, int m)
 class builder
 {
 public:
-    builder(window_impl& win, build_sink& sink)
+    // A part built apart from the window (a stack's page) is `into`'s.
+    builder(window_impl& win, build_sink& sink, std::vector<std::unique_ptr<part>>* into = nullptr)
         : win_(win)
         , sink_(sink)
+        , into_(into)
     {
     }
 
@@ -5003,21 +5005,35 @@ private:
     static bool fills_form_row(const rap::node_spec& s)
     {
         return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
-               std::holds_alternative<spec::text_view>(s) || std::holds_alternative<spec::list>(s) ||
-               std::holds_alternative<spec::tree>(s) ||
+               std::holds_alternative<spec::text_view>(s) ||
+               std::holds_alternative<spec::list>(s) || std::holds_alternative<spec::tree>(s) ||
                std::holds_alternative<spec::canvas>(s) || std::holds_alternative<spec::box>(s) ||
                std::holds_alternative<spec::form>(s) || std::holds_alternative<spec::splitter>(s) ||
                std::holds_alternative<spec::group>(s) || std::holds_alternative<spec::scroll>(s) ||
-               std::holds_alternative<spec::tabs>(s);
+               std::holds_alternative<spec::tabs>(s) || std::holds_alternative<spec::stack>(s);
     }
 
     template <class T, class... Args>
     T& add(const node& n, Args&&... args)
     {
         auto* w = new T(std::forward<Args>(args)...);
-        win_.parts.emplace_back(w);
+        parts().emplace_back(w);
         sink_.created(n, *w);
         return *w;
+    }
+    std::vector<std::unique_ptr<part>>& parts() { return into_ ? *into_ : win_.parts; }
+
+    GtkWidget* make(const node& n, const spec::stack& s, orientation)
+    {
+        GtkWidget* stack = gtk_stack_new();
+        gtk_stack_set_homogeneous(GTK_STACK(stack), s.homogeneous);
+        auto& st = add<stack_impl>(
+            n, stack,
+            [&win = win_, &sink = sink_](const node& page,
+                                         std::vector<std::unique_ptr<part>>& parts)
+            { return builder(win, sink, &parts).build(page, orientation::vertical); });
+        for (size_t i = 0; i < s.pages.size(); ++i) st.add(s.ids[i], s.pages[i]);
+        return stack;
     }
 
     GtkWidget* make(const node& n, const spec::box& s, orientation o)
@@ -5278,7 +5294,8 @@ private:
         auto& tabs = add<tabs_impl>(n, nb);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),
-                         [&win = win_, &sink = sink_](const node& page) { return builder(win, sink).build(page, orientation::vertical); });
+                          [&win = win_, &sink = sink_, into = into_](const node& page)
+                          { return builder(win, sink, into).build(page, orientation::vertical); });
         return nb;
     }
 
@@ -5314,7 +5331,8 @@ private:
         tabs.set_current(0);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),
-                         [&win = win_, &sink = sink_](const node& page) { return builder(win, sink).build(page, orientation::vertical); });
+                          [&win = win_, &sink = sink_, into = into_](const node& page)
+                          { return builder(win, sink, into).build(page, orientation::vertical); });
         return box;
     }
 
@@ -5468,7 +5486,7 @@ private:
                 spaced = true;
             }
             auto* w = new button_impl(b.text.empty() ? stock_label(b.role) : b.text);
-            win_.parts.emplace_back(w);
+            parts().emplace_back(w);
             if (!b.on_click) win_.add_role_button(w->outer(), b.role);
             sink_.created(b, *w);
             gtk_container_add(GTK_CONTAINER(box), w->outer());
@@ -5478,6 +5496,7 @@ private:
 
     window_impl& win_;
     build_sink& sink_;
+    std::vector<std::unique_ptr<part>>* into_;
 };
 
 // -- backend ------------------------------------------------------------------

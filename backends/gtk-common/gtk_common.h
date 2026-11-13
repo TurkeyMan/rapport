@@ -6,6 +6,7 @@
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
 #include "split_handle.h"
+#include "stack_pages.h"
 #include "theme_palette.h"
 
 #include <gtk/gtk.h>
@@ -17,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1089,6 +1091,214 @@ public:
 protected:
     GtkWidget* w_;
     GtkWidget* outer_;
+};
+
+// Runs `f` on the main loop once it's next idle.
+inline void post_idle(std::function<void()> f)
+{
+    g_idle_add_full(
+        G_PRIORITY_DEFAULT,
+        +[](gpointer p) -> gboolean
+        {
+            (*static_cast<std::function<void()>*>(p))();
+            return G_SOURCE_REMOVE;
+        },
+        new std::function<void()>(std::move(f)),
+        +[](gpointer p) { delete static_cast<std::function<void()>*>(p); });
+}
+
+// The window's focus widget, if any.
+inline GtkWidget* window_focus(GtkWidget* w)
+{
+#if GTK_MAJOR_VERSION >= 4
+    GtkRoot* root = gtk_widget_get_root(w);
+    return root ? gtk_root_get_focus(root) : nullptr;
+#else
+    GtkWidget* top = gtk_widget_get_toplevel(w);
+    return GTK_IS_WINDOW(top) ? gtk_window_get_focus(GTK_WINDOW(top)) : nullptr;
+#endif
+}
+
+// Pages in one place, one shown (layout::stack): a GtkStack, whose hidden
+// pages aren't mapped (no layout, paint, input or accessibility), sized to
+// its largest page when homogeneous. A page removed is taken out of the
+// stack at once and destroyed when the main loop is next idle.
+class stack_impl : public widget_base<rap::stack>
+{
+public:
+    // A page's content and what it's made of, which go with it.
+    struct page_parts
+    {
+        GtkWidget* widget = nullptr;  // a reference of ours
+        std::vector<std::unique_ptr<part>> parts;
+        GtkWidget* focus = nullptr;  // where the focus was when it was last hidden (weak)
+
+        page_parts() = default;
+        page_parts(const page_parts&) = delete;
+        page_parts& operator=(const page_parts&) = delete;
+        ~page_parts()
+        {
+            remember(nullptr);
+            for (auto& p : parts) p->disconnect();
+            if (widget)
+            {
+                if (GtkWidget* parent = gtk_widget_get_parent(widget))
+                {
+#if GTK_MAJOR_VERSION >= 4
+                    if (GTK_IS_STACK(parent)) gtk_stack_remove(GTK_STACK(parent), widget);
+#else
+                    gtk_container_remove(GTK_CONTAINER(parent), widget);
+#endif
+                }
+#if GTK_MAJOR_VERSION < 4
+                gtk_widget_destroy(widget);
+#endif
+                g_object_unref(widget);
+            }
+            parts.clear();
+        }
+        void remember(GtkWidget* f)
+        {
+            if (focus)
+                g_object_remove_weak_pointer(G_OBJECT(focus), reinterpret_cast<gpointer*>(&focus));
+            focus = f;
+            if (focus)
+                g_object_add_weak_pointer(G_OBJECT(focus), reinterpret_cast<gpointer*>(&focus));
+        }
+    };
+    using page_ptr = std::unique_ptr<page_parts>;
+    // Builds a page's content, its parts into `parts`.
+    using build_fn =
+        std::function<GtkWidget*(const node&, std::vector<std::unique_ptr<part>>& parts)>;
+
+    stack_impl(GtkWidget* stack, build_fn build)
+        : widget_base(stack)
+        , build_(std::move(build))
+    {
+    }
+    // With the window's parts: its pages' signals too, before its widgets go.
+    void on_disconnect() override
+    {
+        for (auto& e : pages_)
+            for (auto& p : e.page->parts) p->disconnect();
+        grave_.each(
+            [](page_ptr& page)
+            {
+                for (auto& p : page->parts) p->disconnect();
+            });
+    }
+
+    void add(const std::string& id, node content) override
+    {
+        if (pages_.contains(id)) return;
+        auto p = std::make_unique<page_parts>();
+        p->widget = GTK_WIDGET(g_object_ref_sink(build_(content, p->parts)));
+#if GTK_MAJOR_VERSION >= 4
+        gtk_stack_add_child(GTK_STACK(w_), p->widget);
+#else
+        gtk_container_add(GTK_CONTAINER(w_), p->widget);
+        // Shown with the window, if it hasn't been yet; else now.
+        gtk_widget_show_all(p->widget);
+#endif
+        GtkWidget* added = p->widget;
+        pages_.add(id, std::move(p));
+        if (pages_.size() == 1) gtk_stack_set_visible_child(GTK_STACK(w_), added);
+    }
+    void remove(const std::string& id) override
+    {
+        const int i = pages_.index_of(id);
+        if (i < 0) return;
+        page_parts& p = *pages_[size_t(i)].page;
+        const bool had = i == pages_.shown() && holds_focus(p);
+        page_ptr gone = std::move(pages_.take(size_t(i)).page);
+        if (auto* next = pages_.shown_entry())
+            gtk_stack_set_visible_child(GTK_STACK(w_), next->page->widget);
+        // Out of the stack now; destroyed once this has returned, as it may
+        // be the page's own callback calling.
+#if GTK_MAJOR_VERSION >= 4
+        gtk_stack_remove(GTK_STACK(w_), gone->widget);
+#else
+        gtk_container_remove(GTK_CONTAINER(w_), gone->widget);
+#endif
+        grave_.bury(std::move(gone), post_idle);
+        if (had)
+            if (auto* next = pages_.shown_entry()) focus_page(*next->page);
+    }
+    void show(const std::string& id) override
+    {
+        const int i = pages_.index_of(id);
+        if (i < 0 || i == pages_.shown()) return;
+        bool had = false;
+        if (auto* old = pages_.shown_entry()) had = holds_focus(*old->page);
+        pages_.set_shown(i);
+        page_parts& p = *pages_[size_t(i)].page;
+        gtk_stack_set_visible_child(GTK_STACK(w_), p.widget);
+        if (had) focus_page(p);
+    }
+    std::string shown() const override { return pages_.shown_id(); }
+    std::vector<std::string> ids() const override { return pages_.ids(); }
+
+    void focus() override
+    {
+        if (auto* p = pages_.shown_entry()) focus_page(*p->page);
+    }
+
+private:
+    static GtkWidget* first_focusable(GtkWidget* w)
+    {
+        if (!gtk_widget_get_visible(w) || !gtk_widget_is_sensitive(w)) return nullptr;
+#if GTK_MAJOR_VERSION >= 4
+        if (gtk_widget_get_focusable(w) && gtk_widget_get_can_focus(w)) return w;
+        if (!gtk_widget_get_can_focus(w)) return nullptr;  // nor anything in it
+        for (GtkWidget* c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c))
+            if (GtkWidget* f = first_focusable(c)) return f;
+#else
+        if (gtk_widget_get_can_focus(w)) return w;
+        if (!GTK_IS_CONTAINER(w)) return nullptr;
+        GList* kids = gtk_container_get_children(GTK_CONTAINER(w));
+        GtkWidget* found = nullptr;
+        for (GList* k = kids; k && !found; k = k->next) found = first_focusable(GTK_WIDGET(k->data));
+        g_list_free(kids);
+        return found;
+#endif
+        return nullptr;
+    }
+    // The focus is in the page: where, remembered.
+    bool holds_focus(page_parts& p)
+    {
+        GtkWidget* f = window_focus(p.widget);
+        if (!f || (f != p.widget && !gtk_widget_is_ancestor(f, p.widget))) return false;
+        p.remember(f);
+        return true;
+    }
+    // Where the focus was in the page, else its first control.
+    void focus_page(page_parts& p)
+    {
+        if (GtkWidget* f = p.focus; f && gtk_widget_is_ancestor(f, p.widget) &&
+                                    gtk_widget_is_sensitive(f) && gtk_widget_get_visible(f))
+        {
+            gtk_widget_grab_focus(f);
+            if (window_focus(f) == f) return;
+        }
+        // In the order the page was built: GTK's own Tab order is by place,
+        // and a page that wasn't shown hasn't one yet.
+        if (GtkWidget* f = first_focusable(p.widget))
+        {
+            gtk_widget_grab_focus(f);
+            if (window_focus(f) == f) return;
+        }
+        // Nothing in it takes the focus: it isn't left on the page gone.
+#if GTK_MAJOR_VERSION >= 4
+        if (GtkRoot* root = gtk_widget_get_root(w_)) gtk_root_set_focus(root, nullptr);
+#else
+        GtkWidget* top = gtk_widget_get_toplevel(w_);
+        if (GTK_IS_WINDOW(top)) gtk_window_set_focus(GTK_WINDOW(top), nullptr);
+#endif
+    }
+
+    build_fn build_;
+    stack_pages::graveyard<page_ptr> grave_;
+    stack_pages::pages<page_ptr> pages_;
 };
 
 // Text tags cached per style; diffs reuse a handful of styles many times.
