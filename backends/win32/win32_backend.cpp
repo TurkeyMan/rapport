@@ -231,6 +231,7 @@ struct comctl6
     decltype(&ImageList_Create) create = ImageList_Create;
     decltype(&ImageList_Destroy) destroy = ImageList_Destroy;
     decltype(&ImageList_ReplaceIcon) replace_icon = ImageList_ReplaceIcon;
+    decltype(&ImageList_AddMasked) add_masked = ImageList_AddMasked;
     decltype(&ImageList_Add) add = ImageList_Add;
     decltype(&ImageList_Replace) replace = ImageList_Replace;
     decltype(&ImageList_GetImageCount) image_count = ImageList_GetImageCount;
@@ -248,6 +249,7 @@ struct comctl6
         take(m, "ImageList_Destroy", destroy);
         take(m, "ImageList_ReplaceIcon", replace_icon);
         take(m, "ImageList_Add", add);
+        take(m, "ImageList_AddMasked", add_masked);
         take(m, "ImageList_Replace", replace);
         take(m, "ImageList_GetImageCount", image_count);
         take(m, "ImageList_GetIconSize", icon_size);
@@ -5010,13 +5012,31 @@ public:
         SetWindowSubclass(h_, tooltip_proc, 10, reinterpret_cast<DWORD_PTR>(this));
         if (s.file_view && windows_build() >= 22000)
         {
-            // A new DPI comes with a new font: the row height follows it.
+            file_view_ = !columns_.empty();
+            // The header's first item shows image 0 of its image list: a
+            // blank as wide as the title's inset, which moves its text in.
+            if (file_view_)
+            {
+                LVCOLUMNW col{};
+                col.mask = LVCF_FMT;
+                ListView_GetColumn(h_, 0, &col);
+                col.mask = LVCF_FMT | LVCF_IMAGE;
+                col.fmt |= LVCFMT_IMAGE;
+                col.iImage = 0;
+                ListView_SetColumn(h_, 0, &col);
+            }
+            // A new DPI comes with a new font: the row height and the inset
+            // follow it. A new theme can give the header its own margins back.
             SetWindowSubclass(
                 h_,
                 [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
                 {
                     const LRESULT result = DefSubclassProc(h, msg, wp, lp);
-                    if (msg == WM_SETFONT) reinterpret_cast<list_impl*>(data)->apply_file_view_rows();
+                    auto* self = reinterpret_cast<list_impl*>(data);
+                    if (msg == WM_SETFONT)
+                        self->apply_file_view_rows();
+                    else if (msg == WM_THEMECHANGED || msg == WM_SETTINGCHANGE)
+                        self->apply_header_inset();
                     return result;
                 },
                 11, reinterpret_cast<DWORD_PTR>(this));
@@ -5024,16 +5044,100 @@ public:
         }
     }
     // Windows 11 Explorer's row spacing at 96 DPI. A report view takes its row height
-    // from its image list, plus a pixel: this one is a sliver, as the rows
-    // paint their own.
+    // from its image list, plus a pixel. Its width is the image slot at the
+    // start of column 0, which is the first column's inset: the rows paint
+    // their own, so the slot is otherwise empty, and the list_view's own
+    // measures of the column (its label rect, its auto-size) count it.
     void apply_file_view_rows()
     {
-        HIMAGELIST rows = g_comctl.create(1, px(28) - 1, ILC_COLOR32, 1, 0);
+        HIMAGELIST rows = g_comctl.create(std::max(first_inset(), 1), px(28) - 1, ILC_COLOR32, 1, 0);
         if (!rows) return;  // the spacing it has is better than none
         if (HIMAGELIST old = ListView_SetImageList(h_, rows, LVSIL_SMALL)) g_comctl.destroy(old);
+        // The list_view has just given the header that list too, as tall as a
+        // row: the header gets its own instead, one blank as wide as its inset.
+        apply_header_inset();
+    }
+    // Explorer's details view starts its first column's content, and the
+    // header's title over it, further in than a list_view does. Measured on
+    // Windows 11 at 96 DPI, from the list's left edge: the icon at 19 px
+    // (a list_view's, and the rows', at 4), the title's text at 31 (a
+    // list_view's at 7), between the icon and the name, not over either.
+    static constexpr float file_view_first_inset = 15;
+    static constexpr float file_view_title_inset = 24;
+    int first_inset() const { return file_view_ ? px(file_view_first_inset) : 0; }
+    int title_inset() const { return file_view_ ? px(file_view_title_inset) : 0; }
+    // The header puts a bitmap margin either side of an item's image, then
+    // its text margin and the text: with no bitmap margin the text moves by
+    // the image's width alone, at any DPI and font.
+    void apply_header_inset()
+    {
+        if (!file_view_) return;
+        HWND header = ListView_GetHeader(h_);
+        if (!header) return;
+        const int w = std::max(title_inset(), 1);
+        if (!header_images_ || header_images_w_ != w)
+            if (HIMAGELIST fresh = blank_image_list(w))
+            {
+                Header_SetImageList(header, fresh);
+                if (header_images_) g_comctl.destroy(header_images_);
+                header_images_ = fresh;
+                header_images_w_ = w;
+            }
+        // The list the header has (when a new one couldn't be made: the
+        // last, or none rather than the rows' row-tall one).
+        if (reinterpret_cast<HIMAGELIST>(SendMessageW(header, HDM_GETIMAGELIST, 0, 0)) != header_images_)
+            Header_SetImageList(header, header_images_);
+        SendMessageW(header, HDM_SETBITMAPMARGIN, 0, 0);
+        InvalidateRect(header, nullptr, FALSE);
+    }
+    // One w x 1 image, masked out: drawn, it leaves nothing. Null if any
+    // step fails, with nothing left behind. Its mask is made from its colour
+    // (all white, all masked): a mask bitmap handed to ImageList_Add was
+    // drawn solid on the header of a process without a manifest. The source
+    // is screen-compatible, filled white. ImageList_AddMasked documents source
+    // bitmaps of no more than 8 bpp, but both kept to that drew solid under
+    // comctl32 5.82 on build 26100 (1 bpp, and an 8 bpp DIB of one colour),
+    // where this one is masked on 22621 and 26100 alike, with and without a
+    // manifest (CI; win32-file-view-inset-no-manifest catches it if a
+    // Windows changes that). From the comctl32 the controls are, as the
+    // button and toolbar lists are.
+    static HIMAGELIST blank_image_list(int w)
+    {
+        HIMAGELIST list = g_comctl.create(w, 1, ILC_COLOR32 | ILC_MASK, 1, 0);
+        HBITMAP colour = nullptr;
+        if (HDC screen = GetDC(nullptr))
+        {
+            colour = CreateCompatibleBitmap(screen, w, 1);
+            ReleaseDC(nullptr, screen);
+        }
+        bool made = false;
+        if (list && colour)
+            if (HDC dc = CreateCompatibleDC(nullptr))
+            {
+                if (const HGDIOBJ old = SelectObject(dc, colour))
+                {
+                    made = PatBlt(dc, 0, 0, w, 1, WHITENESS);
+                    SelectObject(dc, old);
+                }
+                DeleteDC(dc);
+            }
+        made = made && g_comctl.add_masked(list, colour, RGB(255, 255, 255)) == 0;
+        if (colour) DeleteObject(colour);
+        if (!made && list)
+        {
+            g_comctl.destroy(list);
+            list = nullptr;
+        }
+        return list;
     }
     ~list_impl() override
     {
+        if (header_images_)
+        {
+            // The header doesn't own it: off the header first, as it may paint again.
+            if (HWND header = ListView_GetHeader(h_)) Header_SetImageList(header, nullptr);
+            g_comctl.destroy(header_images_);
+        }
         if (anchor_) DestroyWindow(anchor_);
         if (tip_) DestroyWindow(tip_);
         if (g_dragging == this) g_dragging = nullptr;
@@ -5600,7 +5704,7 @@ private:
                 ListView_GetSubItemRect(h, hit.iItem, 0, LVIR_BOUNDS, &cell);
                 // Column 0's LVIR_BOUNDS is the whole row: its own width is the column's.
                 cell.right = cell.left + ListView_GetColumnWidth(h, 0);
-                const int left = cell.left + self->px(4);
+                const int left = cell.left + self->first_inset() + self->px(4);
                 if (hit.pt.x >= left && hit.pt.x < left + self->check_size() &&
                     hit.pt.x < cell.right)
                 {
@@ -5744,6 +5848,7 @@ private:
                 rt->FillRectangle(D2D1::RectF(dip(r.left), dip(r.top), dip(r.right), dip(r.bottom)), brush.get());
             };
 
+            const long inset = first_inset();
             for (int row = count ? ListView_GetTopIndex(h_) : 0; size_t(row) < count; ++row)
             {
                 RECT rr{};
@@ -5759,9 +5864,12 @@ private:
                 for (const span& sp : spans)
                 {
                     if (sp.right <= clip.left || sp.left >= clip.right) continue;
-                    const RECT cell{sp.left, rr.top, sp.right, rr.bottom};
+                    // Column 0's content starts past the file_view inset; its background doesn't.
+                    const RECT whole{sp.left, rr.top, sp.right, rr.bottom};
+                    const RECT cell{sp.col == 0 ? std::min(sp.left + inset, sp.right) : sp.left, rr.top, sp.right,
+                                    rr.bottom};
                     const text_style st = model_->style(size_t(row), sp.col);
-                    if (st.bg && !selected) fill(cell, painter.resolve(*st.bg));
+                    if (st.bg && !selected) fill(whole, painter.resolve(*st.bg));
                     if (columns_[sp.col].painted)
                     {
                         d2d_painter cell_painter(rt, s);
@@ -6044,11 +6152,13 @@ private:
         POINT pt{};  // pointer, client coordinates
     };
     // A client point in logical px from the top left of the cell at `row`,
-    // `col`, as the model's cell callbacks take it.
+    // `col`, as the model's cell callbacks take it: column 0's from where its
+    // content starts, past the file_view inset, as it's painted.
     point_f in_cell(int row, int col, POINT p) const
     {
         RECT cell{};
         ListView_GetSubItemRect(h_, row, col, LVIR_BOUNDS, &cell);
+        if (col == 0) cell.left += first_inset();
         const float s = win_.scale();
         return {(p.x - cell.left) / s, (p.y - cell.top) / s};
     }
@@ -6569,6 +6679,9 @@ private:
     com<ID2D1DCRenderTarget> row_target_;
     std::map<std::string, com<ID2D1Bitmap>> file_icons_;  // per extension, for row_target_
     bool checks_ = false;                                 // a checkbox at the start of column 0
+    bool file_view_ = false;                              // Windows 11 file_view: column 0's content inset
+    HIMAGELIST header_images_ = nullptr;                  // its one blank, for the header's first title
+    int header_images_w_ = 0;
     std::array<com<ID2D1Bitmap>, 3> check_bitmaps_;       // per check_state, for row_target_
     std::map<int, com<IDWriteTextFormat>> formats_;  // by style and alignment
     bool soft_ = false;
