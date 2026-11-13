@@ -137,6 +137,9 @@ constexpr UINT raise_events = WM_APP + 1;
 constexpr UINT add_tab = WM_APP + 2;
 constexpr UINT remove_tab = WM_APP + 3;
 constexpr UINT destroy = WM_APP + 4;
+constexpr UINT reuse_ids = WM_APP + 5;
+constexpr UINT stale_invoke = WM_APP + 6;
+constexpr UINT nothing = WM_APP + 7;
 
 struct shared
 {
@@ -147,9 +150,33 @@ struct shared
     // unmarshalled, to see a call from the wrong thread refused.
     IRawElementProviderSimple* raw_tab = nullptr;
     HANDLE done = nullptr;      // the window's thread did what was posted
+    // What a node for a removed element answered once its id was another's.
+    HRESULT stale_name = S_OK;
+    HRESULT stale_invoked = E_FAIL;
     HANDLE finished = nullptr;  // the client is through
 };
 shared S;
+
+// On the window's thread: the node for a tab's close button, by walking
+// from the root (the Tab, then its n-th child, then that one's first).
+IRawElementProviderFragment* close_node(uia_provider& p, int n)
+{
+    IRawElementProviderFragment* at = nullptr;
+    if (IRawElementProviderSimple* root = p.root())
+        root->QueryInterface(IID_PPV_ARGS(&at));
+    auto step = [&](NavigateDirection d)
+    {
+        IRawElementProviderFragment* next = nullptr;
+        if (at) at->Navigate(d, &next);
+        if (at) at->Release();
+        at = next;
+    };
+    step(NavigateDirection_FirstChild);  // the Tab
+    step(NavigateDirection_FirstChild);  // the first TabItem
+    for (int i = 0; i < n; ++i) step(NavigateDirection_NextSibling);
+    step(NavigateDirection_FirstChild);  // its Close tab
+    return at;
+}
 
 LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -172,6 +199,41 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case remove_tab:
         p->set_elements(strip({L"First", L"Second", L"Third"}, 1));
         p->raise_child_removed(tabs_id, item_id(3));
+        SetEvent(S.done);
+        return 0;
+    case reuse_ids:
+        // The removed fourth tab's ids listed again: another tab.
+        p->set_elements(strip({L"First", L"Second", L"Third", L"Reborn"}, 1));
+        p->raise_structure_changed(StructureChangeType_ChildAdded, item_id(3));
+        SetEvent(S.done);
+        return 0;
+    case stale_invoke:
+        // Invoked (posted), then its tab removed and its ids listed again
+        // before the invoke is handled: the new close button mustn't get it,
+        // and the node held must stay dead.
+        S.stale_invoked = E_FAIL;
+        S.stale_name = S_OK;
+        if (IRawElementProviderFragment* close = close_node(*p, 3))
+        {
+            IInvokeProvider* invoke = nullptr;
+            close->QueryInterface(IID_PPV_ARGS(&invoke));
+            S.stale_invoked = invoke ? invoke->Invoke() : E_FAIL;
+            p->set_elements(strip({L"First", L"Second", L"Third"}, 1));
+            p->raise_child_removed(tabs_id, item_id(3));
+            p->set_elements(strip({L"First", L"Second", L"Third", L"Again"}, 1));
+            IRawElementProviderSimple* simple = nullptr;
+            close->QueryInterface(IID_PPV_ARGS(&simple));
+            VARIANT v;
+            VariantInit(&v);
+            S.stale_name = simple ? simple->GetPropertyValue(UIA_NamePropertyId, &v) : E_FAIL;
+            VariantClear(&v);
+            if (simple) simple->Release();
+            if (invoke) invoke->Release();
+            close->Release();
+        }
+        SetEvent(S.done);
+        return 0;
+    case nothing:
         SetEvent(S.done);
         return 0;
     case destroy:
@@ -491,6 +553,30 @@ void client()
     }
     expect(count(uia, tabs, UIA_TabItemControlTypeId) == 3, "three TabItems again");
     expect(name_of(second) == L"Second", "the tabs kept are the same elements");
+
+    // Ids are unique only among the elements there now: listed again, an id
+    // is another element. What a client held of the old one stays gone.
+    expect(ask(reuse_ids), "the fourth tab's ids listed again");
+    {
+        IUIAutomationElement* reborn = find(uia, tabs, TreeScope_Children, UIA_TabItemControlTypeId, L"Reborn");
+        expect(reborn != nullptr, "the new tab by its title");
+        release(reborn);
+    }
+    {
+        BSTR b = nullptr;
+        const HRESULT hr = fourth ? fourth->get_CurrentName(&b) : E_FAIL;
+        SysFreeString(b);
+        note("the removed tab's name, its id another's", hr);
+        expect(hr == UIA_E_ELEMENTNOTAVAILABLE, "the removed tab, held, isn't the new one");
+    }
+    // An invoke queued for an element that's gone by the time it's handled
+    // isn't the new element's, under the same id.
+    expect(ask(stale_invoke), "invoked, then removed and its ids listed again");
+    expect(SUCCEEDED(S.stale_invoked), "the invoke was queued");
+    expect(S.stale_name == UIA_E_ELEMENTNOTAVAILABLE, "the node held is still unavailable");
+    expect(ask(nothing), "the queued invoke handled");  // posted after it: handled after
+    expect(owner.invoked[size_t(close_id(3))] == 0, "and the new close button didn't get it");
+    expect(ask(remove_tab), "three tabs again");
     Sleep(300);
     {
         std::lock_guard g(out_lock);

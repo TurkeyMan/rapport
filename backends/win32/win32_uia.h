@@ -44,9 +44,10 @@ enum uia_patterns : unsigned
     uia_selection = 1u << 2,       // ISelectionProvider: a container of selection items
 };
 
-// One drawn element. Ids are the owner's, unique within the provider and
-// above zero: 0 is the window itself, the fragment root, which UIA describes
-// from the HWND. Elements are listed in reading order; an element's children
+// One drawn element. Ids are the owner's, unique among the elements listed
+// and above zero: 0 is the window itself, the fragment root, which UIA
+// describes from the HWND. An id removed may be listed again later: that's
+// another element, and what clients held of the old one stays unavailable. Elements are listed in reading order; an element's children
 // are those naming it as their parent, in the order they're listed.
 struct uia_element
 {
@@ -105,7 +106,8 @@ public:
     bool handle_message(UINT msg, WPARAM wp, LPARAM lp, LRESULT& result);
 
     // Replaces the tree. An element whose id is gone is disconnected from any
-    // client holding it; one whose id stays is the same element to clients.
+    // client holding it, and an invoke of it still queued is dropped; one
+    // whose id stays is the same element to clients.
     // Raise structure (and property) events for what changed.
     void set_elements(std::vector<uia_element> elements);
     // The element by id, to change in place (then raise what changed); null

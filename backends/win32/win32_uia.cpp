@@ -40,8 +40,21 @@ struct uia_provider::state : std::enable_shared_from_this<uia_provider::state>
     std::vector<uia_element> elements;
     // Each holds a reference. Id 0 is the fragment root.
     std::unordered_map<int, node*> nodes;
+    // Each element's incarnation: ids are unique only among the elements
+    // there now, so an id removed and listed again is another element. A
+    // node, a queued invoke and a runtime id carry the serial they were
+    // made for, and are dead once it's gone, never the new element's.
+    // `retired` keeps a removed id's last serial, for its ChildRemoved.
+    unsigned next_serial = 0;
+    std::unordered_map<int, unsigned> serials, retired;
 
     bool connected() const { return owner != nullptr; }
+    // 0 for the root, and for an id with no element now.
+    unsigned serial_of(int id) const
+    {
+        const auto it = serials.find(id);
+        return it != serials.end() ? it->second : 0;
+    }
     const uia_element* find(int id) const
     {
         for (const uia_element& e : elements)
@@ -105,7 +118,10 @@ class node final : public IRawElementProviderSimple,
                    public ISelectionProvider
 {
 public:
-    node(std::shared_ptr<uia_provider::state> s, int id) : s_(std::move(s)), id_(id) {}
+    node(std::shared_ptr<uia_provider::state> s, int id, unsigned serial)
+        : s_(std::move(s)), id_(id), serial_(serial)
+    {
+    }
 
     // IUnknown. AddRef and Release may come from any thread: the count is
     // atomic, and the last release touches only this node and its share of
@@ -255,15 +271,17 @@ public:
         if (!out) return E_POINTER;
         *out = nullptr;
         if (GetCurrentThreadId() != s_->thread) return RPC_E_WRONG_THREAD;
-        // The root's is the window's. An element's depends on its id alone,
-        // so UIA can still find a node by it while disconnecting it.
+        // The root's is the window's. An element's depends on its id and
+        // incarnation alone, so UIA can still find a node by it while
+        // disconnecting it, and an id listed again is another element.
         if (id_ == 0) return S_OK;
-        SAFEARRAY* a = SafeArrayCreateVector(VT_I4, 0, 2);
+        SAFEARRAY* a = SafeArrayCreateVector(VT_I4, 0, 3);
         if (!a) return E_OUTOFMEMORY;
         int* v = nullptr;
         SafeArrayAccessData(a, reinterpret_cast<void**>(&v));
         v[0] = UiaAppendRuntimeId;
         v[1] = id_;
+        v[2] = int(serial_);
         SafeArrayUnaccessData(a);
         *out = a;
         return S_OK;
@@ -364,7 +382,10 @@ public:
         if (const HRESULT hr = acting(&e); FAILED(hr)) return hr;
         if (!e || !(e->patterns & uia_invoke)) return UIA_E_INVALIDOPERATION;
         if (!e->enabled) return UIA_E_ELEMENTNOTENABLED;
-        if (!PostMessageW(s_->hwnd, s_->invoke_message, WPARAM(id_), 0)) return HRESULT_FROM_WIN32(GetLastError());
+        // With its incarnation: removed by then, its id listed again, it's
+        // another element, not invoked.
+        if (!PostMessageW(s_->hwnd, s_->invoke_message, WPARAM(id_), LPARAM(serial_)))
+            return HRESULT_FROM_WIN32(GetLastError());
         return S_OK;
     }
 
@@ -473,7 +494,8 @@ private:
         if (GetCurrentThreadId() != s_->thread) return RPC_E_WRONG_THREAD;
         if (!s_->connected()) return UIA_E_ELEMENTNOTAVAILABLE;
         const uia_element* found = id_ != 0 ? s_->find(id_) : nullptr;
-        if (id_ != 0 && !found) return UIA_E_ELEMENTNOTAVAILABLE;
+        // Gone, or its id now another element's.
+        if (id_ != 0 && (!found || s_->serial_of(id_) != serial_)) return UIA_E_ELEMENTNOTAVAILABLE;
         if (e) *e = found;
         return S_OK;
     }
@@ -494,6 +516,7 @@ private:
     std::atomic<ULONG> refs_{1};
     std::shared_ptr<uia_provider::state> s_;
     int id_;
+    unsigned serial_;  // the incarnation of id_ this is; 0 for the root
 };
 
 }  // namespace
@@ -506,7 +529,7 @@ node* uia_provider::state::get(int id)
     if (id != 0 && !find(id)) return nullptr;
     if (auto it = nodes.find(id); it != nodes.end()) return it->second;
     // Made with one reference, which is the state's.
-    node* n = new node(shared_from_this(), id);
+    node* n = new node(shared_from_this(), id, serial_of(id));
     nodes.emplace(id, n);
     return n;
 }
@@ -534,6 +557,7 @@ void uia_provider::state::disconnect()
     for (const int id : ids) release(id);
     owner = nullptr;
     elements.clear();
+    serials.clear();
     closing = false;
 }
 
@@ -572,7 +596,8 @@ bool uia_provider::handle_message(UINT msg, WPARAM wp, LPARAM lp, LRESULT& resul
         result = 0;
         const int id = int(wp);
         const uia_element* e = s.connected() && !s.closing ? s.find(id) : nullptr;
-        if (!e || !(e->patterns & uia_invoke) || !e->enabled) return true;
+        // The element invoked, not another listed since under its id.
+        if (!e || s.serial_of(id) != unsigned(lp) || !(e->patterns & uia_invoke) || !e->enabled) return true;
         // Raised before the owner acts: what it does may remove the element.
         raise_event(id, UIA_Invoke_InvokedEventId);
         if (s.owner) s.owner->uia_invoke(id);
@@ -586,8 +611,21 @@ void uia_provider::set_elements(std::vector<uia_element> elements)
     state& s = *state_;
     if (!s.connected()) return;
     s.elements = std::move(elements);
+    // An id that stays keeps its incarnation; a new one gets the next.
+    std::unordered_map<int, unsigned> serials;
+    for (const uia_element& e : s.elements)
+    {
+        const auto kept = s.serials.find(e.id);
+        unsigned serial = kept != s.serials.end() ? kept->second : 0;
+        if (!serial)
+            if (!(serial = ++s.next_serial)) serial = ++s.next_serial;  // 0 is no element
+        serials.emplace(e.id, serial);
+    }
+    for (const auto& [id, serial] : s.serials)
+        if (!serials.contains(id)) s.retired[id] = serial;
+    s.serials = std::move(serials);
     std::vector<int> gone;
-    for (const auto& [id, _] : s.nodes)
+    for (const auto& [id, n] : s.nodes)
         if (id != 0 && !s.find(id)) gone.push_back(id);
     for (const int id : gone) s.release(id);
 }
@@ -630,9 +668,9 @@ void uia_provider::raise_structure_changed(StructureChangeType change, int id)
     node* n = state_->get(id);
     if (!n) return;
     // The root's runtime id is the window's, which UIA knows: none given.
-    int runtime_id[2] = {UiaAppendRuntimeId, id};
+    int runtime_id[3] = {UiaAppendRuntimeId, id, int(state_->serial_of(id))};
     UiaRaiseStructureChangedEvent(static_cast<IRawElementProviderSimple*>(n), change, id ? runtime_id : nullptr,
-                                  id ? 2 : 0);
+                                  id ? 3 : 0);
 }
 
 void uia_provider::raise_child_removed(int parent, int child)
@@ -640,9 +678,13 @@ void uia_provider::raise_child_removed(int parent, int child)
     if (!state_->connected() || !UiaClientsAreListening()) return;
     node* n = state_->get(parent);
     if (!n) return;
-    int runtime_id[2] = {UiaAppendRuntimeId, child};
+    // The removed child's incarnation: the last one removed under its id,
+    // even if the id is listed again since.
+    const auto it = state_->retired.find(child);
+    const unsigned serial = it != state_->retired.end() ? it->second : 0;
+    int runtime_id[3] = {UiaAppendRuntimeId, child, int(serial)};
     UiaRaiseStructureChangedEvent(static_cast<IRawElementProviderSimple*>(n), StructureChangeType_ChildRemoved,
-                                  runtime_id, 2);
+                                  runtime_id, 3);
 }
 
 IRawElementProviderSimple* uia_provider::root() const
