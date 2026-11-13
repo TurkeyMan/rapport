@@ -1829,6 +1829,8 @@ public:
 
     // GtkPaned reports a drag no differently from layout, so a drag is a
     // press and release on a divider with the position changed in between.
+    // A press that bubbles up from a pane (one its widget didn't take, held
+    // while the window relaid them out) is no drag (#30).
     void on_moved(std::function<void()> f) override
     {
         const bool first = !moved_;
@@ -1838,10 +1840,13 @@ public:
         {
             connect(
                 w, "button-press-event",
-                +[](GtkWidget*, GdkEventButton*, gpointer p) -> gboolean
+                +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
                 {
                     auto* self = static_cast<splitter_impl*>(p);
-                    self->pressed_ = self->sizes();
+                    if (rap::gtk_split::press_on_handle(self->w_, e))
+                        self->pressed_ = self->sizes();
+                    else
+                        self->pressed_.clear();
                     return false;
                 },
                 this);
