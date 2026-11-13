@@ -126,6 +126,11 @@ HBRUSH theme_brush(theme_color role);
 // the window colour. And the text on it.
 theme_color surface_of(HWND h);
 theme_color surface_text_of(HWND h);
+// The colour itself, and a brush of it (kept until the colours change): the
+// surface's, or the toolbar band's fill for a control wholly in its
+// window's band (win32_caption_tabs.h).
+color surface_color_of(HWND h);
+HBRUSH surface_brush_of(HWND h);
 // Marks top-level `h` as a base surface window (base_surface_supported()
 // checked by the caller).
 void set_base_surface(HWND h, bool on);
