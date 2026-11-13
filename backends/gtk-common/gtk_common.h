@@ -320,6 +320,50 @@ inline GCancellable* widget_cancellable(GtkWidget* w)
     return c;
 }
 
+// The cancellable for path icons whose answers reach a C++ adapter (a
+// tree's, a list's): its widget can outlive it (anyone may hold a ref), so
+// the widget's own isn't enough. Cancelled as the adapter goes, before it's
+// freed, and as its widget is destroyed, whichever comes first;
+// path_g_icon never runs `ready` once it's cancelled.
+class owner_cancellable
+{
+public:
+    owner_cancellable()
+        : c_(g_cancellable_new())
+    {
+    }
+    owner_cancellable(const owner_cancellable&) = delete;
+    owner_cancellable& operator=(const owner_cancellable&) = delete;
+    ~owner_cancellable()
+    {
+        g_cancellable_cancel(c_);
+        if (widget_) g_signal_handler_disconnect(widget_, destroyed_);
+        if (widget_) g_object_remove_weak_pointer(G_OBJECT(widget_), reinterpret_cast<gpointer*>(&widget_));
+        g_object_unref(c_);
+    }
+    // The adapter disconnects (its window is going): no answer reaches it
+    // from now on.
+    void cancel() { g_cancellable_cancel(c_); }
+    // For answers that reach the adapter of `w`.
+    GCancellable* get(GtkWidget* w)
+    {
+        if (!widget_ && w && !g_cancellable_is_cancelled(c_))
+        {
+            widget_ = w;
+            g_object_add_weak_pointer(G_OBJECT(w), reinterpret_cast<gpointer*>(&widget_));
+            destroyed_ = g_signal_connect_data(
+                w, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer data) { g_cancellable_cancel(G_CANCELLABLE(data)); }),
+                g_object_ref(c_), +[](gpointer data, GClosure*) { g_object_unref(data); }, GConnectFlags(0));
+        }
+        return c_;
+    }
+
+private:
+    GCancellable* c_;
+    GtkWidget* widget_ = nullptr;
+    gulong destroyed_ = 0;
+};
+
 inline color mix_colors(color a, color b, float t)
 {
     auto f = [&](uint8_t x, uint8_t y) { return uint8_t(x + (y - x) * t + 0.5f); };
