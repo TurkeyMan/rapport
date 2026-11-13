@@ -404,6 +404,18 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-caption-tabs-transitions PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
 
+    # The document tabs reordered by dragging and by the keys, in both strips:
+    # never-shown windows, given the mouse's messages and the keys.
+    add_executable(rapport-win32-document-tabs-reorder-test win32_document_tabs_reorder_test.cpp)
+    target_link_libraries(rapport-win32-document-tabs-reorder-test PRIVATE rapport::rapport user32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-document-tabs-reorder-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-document-tabs-reorder-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-document-tabs-reorder-test rapport_win32)
+    add_test(NAME win32-document-tabs-reorder COMMAND rapport-win32-document-tabs-reorder-test)
+    set_tests_properties(win32-document-tabs-reorder PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 60)
+
     add_executable(rapport-pane-readback-loss-test pane_readback_loss_test.cpp)
     target_compile_definitions(rapport-pane-readback-loss-test PRIVATE RAPPORT_TEST_READBACK)
     target_include_directories(rapport-pane-readback-loss-test PRIVATE ../core/src)

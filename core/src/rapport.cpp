@@ -114,6 +114,7 @@ public:
         if (s.on_select) t.on_select(s.on_select);
         if (s.on_close) t.on_close(s.on_close);
         if (s.on_new) t.on_new(s.on_new);
+        if (s.on_reorder) t.on_reorder(s.on_reorder);
         if (s.bind) *s.bind = &t;
     }
 
