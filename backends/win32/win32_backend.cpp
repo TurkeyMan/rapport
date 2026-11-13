@@ -3288,6 +3288,7 @@ public:
     }
     ~tree_impl() override
     {
+        if (path_listener_) remove_path_icon_listener(path_listener_);
         if (state_images_) g_comctl.destroy(state_images_);
         if (icons_) g_comctl.destroy(icons_);
     }
@@ -3751,13 +3752,49 @@ private:
         if (!key.empty())
             if (const auto it = image_index_.find(key); it != image_index_.end()) return it->second;
         const int image = g_comctl.image_count(icons_);
-        add_image(icons_, icon);
+        add_path_image(icons_, icon, image);
         image_sources_.push_back(icon);
         if (!key.empty()) image_index_[key] = image;
         return image;
     }
+    // A path's own icon (icon::for_path) is found in the background: its
+    // name's meanwhile, and the image replaced in place once it's found.
+    void add_path_image(HIMAGELIST list, const rap::icon& icon, int image)
+    {
+        if (!icon.path.empty() && request_path_icon(icon.path, px(16)) == path_icon_state::pending)
+        {
+            pending_path_images_.insert(image);
+            if (!path_listener_)
+                path_listener_ = add_path_icon_listener([this](const std::string&, int) { path_icons_found(); });
+        }
+        add_image(list, icon);
+    }
+    void path_icons_found()
+    {
+        if (!icons_) return;
+        bool changed = false;
+        for (auto it = pending_path_images_.begin(); it != pending_path_images_.end();)
+        {
+            const int image = *it;
+            const rap::icon& icon = image_sources_[size_t(image - 1)];
+            if (request_path_icon(icon.path, px(16)) == path_icon_state::pending)
+            {
+                ++it;
+                continue;
+            }
+            if (HICON h = render_icon_handle(icon, px(16), win_.scale()))
+            {
+                g_comctl.replace_icon(icons_, image, h);
+                DestroyIcon(h);
+                changed = true;
+            }
+            it = pending_path_images_.erase(it);
+        }
+        if (changed) InvalidateRect(h_, nullptr, FALSE);
+    }
     static std::string icon_key(const rap::icon& icon)
     {
+        if (!icon.path.empty()) return "p:" + icon.path;
         if (icon.file.empty()) return icon.name.empty() ? std::string() : "n:" + icon.name;
         if (icon.file.back() == '/') return "f:/";
         const size_t slash = icon.file.find_last_of("/\\");
@@ -3808,7 +3845,8 @@ private:
         HIMAGELIST fresh = g_comctl.create(px(16), px(16), ILC_COLOR32 | ILC_MASK, 8, 8);
         if (!fresh) return;
         add_blank(fresh);
-        for (const rap::icon& icon : image_sources_) add_image(fresh, icon);
+        pending_path_images_.clear();
+        for (size_t i = 0; i < image_sources_.size(); ++i) add_path_image(fresh, image_sources_[i], int(i + 1));
         TreeView_SetImageList(h_, fresh, TVSIL_NORMAL);
         g_comctl.destroy(icons_);
         icons_ = fresh;
@@ -3911,6 +3949,8 @@ private:
     HIMAGELIST icons_ = nullptr;
     std::vector<rap::icon> image_sources_;  // image 1 on
     std::unordered_map<std::string, int> image_index_;
+    std::set<int> pending_path_images_;  // showing their names' until found
+    size_t path_listener_ = 0;
     std::unordered_map<std::string, check_state> checks_;  // the items with boxes
     std::function<void(const std::string&)> toggled_;
     HIMAGELIST state_images_ = nullptr;
@@ -10837,6 +10877,27 @@ public:
         wc.lpszClassName = L"rapportMessages";
         RegisterClassExW(&wc);
         messages_ = make_window(0, L"rapportMessages", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance(), this);
+        // Paths' own icons are found in the background (win32_shell_icons.h):
+        // each found is told here, on this thread, and what paints them
+        // (from what was found, never asking) paints again.
+        set_path_icon_post(
+            [messages = messages_](std::function<void()> f)
+            {
+                auto* job = new std::function<void()>(std::move(f));
+                if (!PostMessageW(messages, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job))) delete job;
+            });
+        path_repaint_ = add_path_icon_listener(
+            [](const std::string&, int)
+            {
+                EnumThreadWindows(
+                    GetCurrentThreadId(),
+                    [](HWND h, LPARAM) -> BOOL
+                    {
+                        if (IsWindowVisible(h)) RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+                        return TRUE;
+                    },
+                    0);
+            });
         warm_d2d();
         frames_ = std::make_unique<frame_clock>(messages_);
         g_frames = frames_.get();
@@ -10844,6 +10905,8 @@ public:
     ~win32_backend() override
     {
         trace::remove_message_hooks();
+        set_path_icon_post({});
+        remove_path_icon_listener(path_repaint_);
         g_frames = nullptr;
         frames_.reset();
         DestroyWindow(messages_);
@@ -11656,6 +11719,7 @@ private:
         bool repeat;
     };
     HWND messages_ = nullptr;
+    size_t path_repaint_ = 0;
     std::unique_ptr<frame_clock> frames_;
     std::map<UINT_PTR, timer_entry> timers_;
     UINT_PTR next_timer_ = 0x100;

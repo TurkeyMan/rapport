@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -37,5 +38,48 @@ void prepare_wanted_shell_icons(UINT dpi);
 
 // How many times the shell has been asked, for tests.
 size_t shell_icon_extractions();
+
+// -- a path's own icon (icon::for_path) ---------------------------------------
+//
+// The shell's icon for one path: a drive's (the system drive's with the
+// Windows logo, a removable or optical drive's, its autorun's), a folder's
+// own (desktop.ini), a program's. Finding it reads the path, which can take
+// seconds (a disconnected network drive, an optical drive spinning up), so
+// it's found on a background thread, never the UI thread, once per path and
+// size for the process. Meanwhile, and where there's none, the icon's name is
+// drawn.
+
+enum class path_icon_state
+{
+    pending,  // being found: draw the fallback meanwhile
+    ready,    // path_icon_pixels has it
+    none,     // the shell has none (no such path, or none at that size)
+};
+
+// Where `path`'s icon at exactly `px` square stands; the first ask starts
+// finding it, in the background. Takes a lock and returns: never waits for
+// the path or asks the shell itself, so it's safe from paint.
+path_icon_state request_path_icon(const std::string& path, int px);
+
+// Its pixels once ready (premultiplied BGRA, px square, rows top-down), else
+// null. Safe from paint.
+const std::vector<uint32_t>* path_icon_pixels(const std::string& path, int px);
+
+// How a found icon is told on the UI thread: `post` is given a function to
+// run there (the backend's post). Until it's set, nobody is told (the pixels
+// are kept all the same). Set it on the UI thread.
+void set_path_icon_post(std::function<void(std::function<void()>)> post);
+
+// Run on the UI thread each time an icon is found, or found to be none, with
+// its path (one spelling: "C:\" for "C:" and "C:/") and size. Returns an id for remove_path_icon_listener.
+size_t add_path_icon_listener(std::function<void(const std::string& path, int px)> f);
+void remove_path_icon_listener(size_t id);
+
+// A control that paints `path`'s icon at `logical` px: asked for now at
+// `dpi`, and at each new DPI (prepare_wanted_shell_icons).
+void want_path_icon(const std::string& path, int logical, UINT dpi);
+
+// How many times the shell has been asked for a path's icon, for tests.
+size_t path_icon_lookups();
 
 }  // namespace rap::win32

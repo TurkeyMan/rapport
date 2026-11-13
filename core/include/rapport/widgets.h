@@ -222,14 +222,31 @@ struct icon
     // Drawn over the icon in its square, as a file manager's overlays: a
     // badge on a row's icon in a list (the only place it's drawn).
     std::function<void(rap::painter&, rap::size_f)> overlay;
+    // The desktop's own icon for this very path, as its file manager shows
+    // it (for_path): a drive's (Windows: C: with the Windows logo, a USB
+    // stick's, an optical drive's with its disc's, an autorun's), a folder's
+    // own (desktop.ini, GIO's metadata), a program's. Unlike `file`, the path
+    // is looked at, which can be slow (a disconnected network drive, an
+    // optical drive spinning up): backends never wait for it on the UI
+    // thread. Until it's known, and where the backend or the path has none,
+    // `name` (else `draw`) is shown instead; it changes in place once found.
+    // Found once per path for the process: a drive whose media changes keeps
+    // the icon it was first found with.
+    std::string path;
 
-    static icon named(std::string n) { return {std::move(n), {}, {}, {}}; }
-    static icon for_file(std::string file_name) { return {{}, std::move(file_name), {}, {}}; }
+    static icon named(std::string n) { return {std::move(n), {}, {}, {}, {}}; }
+    static icon for_file(std::string file_name) { return {{}, std::move(file_name), {}, {}, {}}; }
     static icon drawn(std::function<void(rap::painter&, rap::size_f)> f)
     {
-        return {{}, {}, std::move(f), {}};
+        return {{}, {}, std::move(f), {}, {}};
     }
-    explicit operator bool() const { return !name.empty() || !file.empty() || bool(draw); }
+    // `fallback`: a freedesktop name for the meantime and for where there's
+    // none, e.g. for_path("C:\\", "drive-harddisk").
+    static icon for_path(std::string p, std::string fallback = {})
+    {
+        return {std::move(fallback), {}, {}, {}, std::move(p)};
+    }
+    explicit operator bool() const { return !name.empty() || !file.empty() || bool(draw) || !path.empty(); }
 };
 
 struct menu_item

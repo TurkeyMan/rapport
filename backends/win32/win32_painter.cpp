@@ -755,12 +755,10 @@ size_f d2d_painter::measure(const std::string& s, const text_style& style) const
 namespace
 {
 
-// A name Windows has its own icon for (win32_shell_icons.h) drawn from it,
-// `px` pixels square into `dst`, if it was prepared at that size; false for
-// any other name. Only reads what was prepared: safe from paint.
-bool draw_shell_icon(ID2D1RenderTarget* rt, const std::string& name, D2D1_RECT_F dst, int px)
+// Prepared pixels (win32_shell_icons.h), `px` square, drawn into `dst`;
+// false for none. Only reads what was prepared: safe from paint.
+bool draw_pixels(ID2D1RenderTarget* rt, const std::vector<uint32_t>* pixels, D2D1_RECT_F dst, int px)
 {
-    const std::vector<uint32_t>* pixels = shell_icon_pixels(name, px);
     if (!pixels) return false;
     com<ID2D1Bitmap> bmp;
     const D2D1_BITMAP_PROPERTIES props =
@@ -771,11 +769,26 @@ bool draw_shell_icon(ID2D1RenderTarget* rt, const std::string& name, D2D1_RECT_F
     return true;
 }
 
+// A name Windows has its own icon for drawn from it, if it was prepared at
+// that size; false for any other name.
+bool draw_shell_icon(ID2D1RenderTarget* rt, const std::string& name, D2D1_RECT_F dst, int px)
+{
+    return draw_pixels(rt, shell_icon_pixels(name, px), dst, px);
+}
+
+// A path's own icon (icon::for_path), once found at that size; false until
+// then, and where there's none: the rest of the icon stands in.
+bool draw_path_icon(ID2D1RenderTarget* rt, const icon& icon, D2D1_RECT_F dst, int px)
+{
+    return !icon.path.empty() && draw_pixels(rt, path_icon_pixels(icon.path, px), dst, px);
+}
+
 // A WIC bitmap render target of `px` square, cleared to transparent, with
 // the icon drawn through a D2DPainter at `scale`.
 com<IWICBitmap> icon_bitmap(const icon& icon, int px, float scale, color ink)
 {
     if (!icon.draw) prepare_shell_icon(icon.name, px);  // never called from paint
+    request_path_icon(icon.path, px);                   // found in the background
     com<IWICBitmap> wic;
     if (!wic_factory() ||
         FAILED(wic_factory()->CreateBitmap(UINT(px), UINT(px), GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad,
@@ -792,7 +805,11 @@ com<IWICBitmap> icon_bitmap(const icon& icon, int px, float scale, color ink)
         d2d_painter p(rt.get(), scale);
         p.override_color(theme_color::window_text, ink);
         p.override_color(theme_color::text, ink);
-        if (icon.draw)
+        if (draw_path_icon(rt.get(), icon, D2D1::RectF(0, 0, px / scale, px / scale), px))
+        {
+            // the path's own, found
+        }
+        else if (icon.draw)
             icon.draw(p, {px / scale, px / scale});
         else if (!draw_shell_icon(rt.get(), icon.name, D2D1::RectF(0, 0, px / scale, px / scale), px))
             builtin::draw_builtin_icon(icon.name, p, {px / scale, px / scale});
@@ -811,7 +828,10 @@ HBITMAP render_icon(const icon& icon, int px, float scale)
 HBITMAP render_icons(const std::vector<const icon*>& icons, int px, float scale, color ink)
 {
     for (const icon* i : icons)
+    {
         if (!i->draw) prepare_shell_icon(i->name, px);  // never called from paint
+        request_path_icon(i->path, px);                // found in the background
+    }
     const int w = px * int(icons.size());
     if (w <= 0) return nullptr;
     com<IWICBitmap> wic;
@@ -835,7 +855,11 @@ HBITMAP render_icons(const std::vector<const icon*>& icons, int px, float scale,
             const float x = float(i) * px / scale;
             rt->SetTransform(D2D1::Matrix3x2F::Translation(x, 0));
             p.push_clip({0, 0, size.w, size.h});
-            if (icons[i]->draw)
+            if (draw_path_icon(rt.get(), *icons[i], D2D1::RectF(0, 0, size.w, size.h), px))
+            {
+                // the path's own, found
+            }
+            else if (icons[i]->draw)
                 icons[i]->draw(p, size);
             else if (!draw_shell_icon(rt.get(), icons[i]->name, D2D1::RectF(0, 0, size.w, size.h), px))
                 builtin::draw_builtin_icon(icons[i]->name, p, size);
@@ -905,10 +929,11 @@ HICON render_icon_handle(const icon& icon, int px, float scale)
 void want_icon(const icon& icon, int logical, UINT dpi)
 {
     if (!icon.draw && !icon.name.empty()) want_shell_icon(icon.name, logical, dpi);
+    want_path_icon(icon.path, logical, dpi);
 }
 
 // From paint: an icon of Windows' own is drawn only if it was prepared
-// (want_icon), never asked of the shell here.
+// (want_icon), never asked of the shell here; a path's only once found.
 void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink)
 {
     if (!icon) return;
@@ -927,7 +952,11 @@ void draw_icon_on_dc(HDC dc, RECT r, const icon& icon, float scale, color ink)
         p.override_color(theme_color::text, ink);
         const size_f size{(r.right - r.left) / scale, (r.bottom - r.top) / scale};
         const int px = std::min(r.right - r.left, r.bottom - r.top);
-        if (icon.draw)
+        if (draw_path_icon(rt.get(), icon, D2D1::RectF(0, 0, px / scale, px / scale), px))
+        {
+            // the path's own, found
+        }
+        else if (icon.draw)
             icon.draw(p, size);
         else if (!draw_shell_icon(rt.get(), icon.name, D2D1::RectF(0, 0, px / scale, px / scale), px))
             builtin::draw_builtin_icon(icon.name, p, size);

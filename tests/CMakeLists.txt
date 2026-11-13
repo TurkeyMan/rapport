@@ -222,6 +222,13 @@ if(TARGET rapport_win32)
     target_link_libraries(rapport-win32-shell-icons-test PRIVATE user32 gdi32 shell32 ole32)
     add_test(NAME win32-shell-icons COMMAND rapport-win32-shell-icons-test)
 
+    # A path's own icon, found in the background and told on the asking
+    # thread: no window.
+    add_executable(rapport-win32-path-icons-test win32_path_icons_test.cpp ../backends/win32/win32_shell_icons.cpp)
+    target_include_directories(rapport-win32-path-icons-test PRIVATE ../backends/win32)
+    target_link_libraries(rapport-win32-path-icons-test PRIVATE user32 gdi32 shell32 ole32)
+    add_test(NAME win32-path-icons COMMAND rapport-win32-path-icons-test)
+
     # And through a tree, before and after a DPI change.
     add_executable(rapport-win32-shell-icons-dpi-test win32_shell_icons_dpi_test.cpp)
     target_link_libraries(rapport-win32-shell-icons-dpi-test PRIVATE rapport::rapport user32 comctl32)
