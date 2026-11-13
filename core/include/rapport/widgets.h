@@ -1117,7 +1117,8 @@ enum class key
     f12,
     // Navigation: the mouse's side buttons (the X buttons), and the keys
     // some keyboards have. Only presses are reported, and only to the
-    // window's on_key, whatever has focus. A canvas taking a side button
+    // window's on_key, whatever has focus (but an input method composing in
+    // a focused text field: see window::on_key). A canvas taking a side button
     // itself (on_pointer returning true for button 4 or 5) produces none.
     back,
     forward,
@@ -1362,9 +1363,11 @@ public:
     // goes on to the field unchanged, and Alt+letter from there to the menu
     // bar's access keys (on Qt those come first, before this, as its
     // shortcuts). While an input method is composing in the focused field
-    // nothing comes here - no chord, no Escape, no function key: they're
-    // the input method's (Escape cancels, Japanese ones convert with
-    // F6-F10). Once it commits or cancels, the rules above apply again.
+    // nothing comes here - no chord, no Escape, no function key, no back or
+    // forward (key or side button): they're the input method's (Escape
+    // cancels, Japanese ones convert with F6-F10), and a dialog's Escape
+    // doesn't close it then. Once it commits or cancels, the rules above
+    // apply again.
     // Read-only text views don't count as editable.
     virtual void on_key(std::function<bool(const key_event&)>) = 0;
     // Dialogs: fired once with the role of the button that ended it

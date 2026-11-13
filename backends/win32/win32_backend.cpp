@@ -165,6 +165,21 @@ bool ime_composing(HWND h)
     return composing;
 }
 
+// An editable text field: an Edit or a rich edit, not read-only.
+bool editable_field(HWND h)
+{
+    wchar_t cls[32] = {};
+    if (!h || !GetClassNameW(h, cls, 32)) return false;
+    return (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
+           !(GetWindowLongPtrW(h, GWL_STYLE) & ES_READONLY);
+}
+
+// A text field whose IME is composing: every key and navigation is its.
+bool field_composing(HWND h)
+{
+    return editable_field(h) && ime_composing(h);
+}
+
 key_event make_key_event(WPARAM vk, LPARAM lp, bool press)
 {
     key_event e;
@@ -10585,10 +10600,7 @@ public:
         if (doc_tabs && doc_tabs->owns_key(m)) return false;
         if (!on_key_) return false;
         // The control the key is going to (the focus, as it was typed).
-        wchar_t cls[32] = {};
-        GetClassNameW(m.hwnd, cls, 32);
-        const bool typing = (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
-                            !(GetWindowLongPtrW(m.hwnd, GWL_STYLE) & ES_READONLY);
+        const bool typing = editable_field(m.hwnd);
         // While an IME composes in the field every key is its (Escape cancels,
         // the function keys convert): none is the window's.
         if (typing && ime_composing(m.hwnd)) return false;
@@ -10837,6 +10849,11 @@ private:
                 const int command = GET_APPCOMMAND_LPARAM(lp);
                 if (command != APPCOMMAND_BROWSER_BACKWARD && command != APPCOMMAND_BROWSER_FORWARD) break;
                 if (!self->on_key_) break;
+                // Not while an IME composes in the window's focused field (or,
+                // with no focus here, the control it came from).
+                HWND field = GetFocus();
+                if (!field || !IsChild(h, field)) field = reinterpret_cast<HWND>(wp);
+                if (field_composing(field)) break;
                 key_event e;
                 e.key = command == APPCOMMAND_BROWSER_BACKWARD ? key::back : key::forward;
                 e.modifiers = key_modifiers();
@@ -11433,7 +11450,11 @@ public:
                 if (consumed) continue;
             }
             HWND top = GetAncestor(m.hwnd, GA_ROOT);
-            if (top && IsDialogMessageW(top, &m)) continue;
+            // A field whose IME composes has its keys, not the dialog's
+            // handling (Escape closing it, Enter, Tab), as an IME's own keys
+            // never reach it.
+            const bool composing = m.message >= WM_KEYFIRST && m.message <= WM_KEYLAST && field_composing(m.hwnd);
+            if (top && !composing && IsDialogMessageW(top, &m)) continue;
             TranslateMessage(&m);
             DispatchMessageW(&m);
         }

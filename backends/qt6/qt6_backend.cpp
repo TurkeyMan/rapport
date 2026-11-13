@@ -4417,9 +4417,25 @@ public:
 
     // -- from Frame and key_filter --------------------------------------------
 
+    // A dialog's Escape closes it, but not while an input method composes
+    // in its field: Escape cancels that.
     void escape()
     {
-        if (dialog_) close_requested();
+        if (dialog_ && !field_composing()) close_requested();
+    }
+
+    // An editable text field.
+    static bool editable_field(QWidget* w)
+    {
+        auto* plain = qobject_cast<QPlainTextEdit*>(w);
+        return w && (qobject_cast<QLineEdit*>(w) || qobject_cast<QAbstractSpinBox*>(w) || (plain && !plain->isReadOnly()));
+    }
+    // An input method composing in the window's focused field: every key and
+    // navigation is its then, none the window's.
+    bool field_composing() const
+    {
+        QWidget* focus = QApplication::focusWidget();
+        return composing_ && focus && focus->window() == frame_ && editable_field(focus);
     }
 
     void close_requested()
@@ -4489,10 +4505,7 @@ public:
         // While typing, only Escape, the function keys and the shortcut
         // chords (window_chords.h) come here. A QLineEdit takes chords it
         // has no use for too (as typing), so the window has them first.
-        auto* plain = qobject_cast<QPlainTextEdit*>(focus);
-        const bool typing =
-            focus && (qobject_cast<QLineEdit*>(focus) || qobject_cast<QAbstractSpinBox*>(focus) ||
-                      (plain && !plain->isReadOnly()));
+        const bool typing = editable_field(focus);
         // While an input method composes in the field every key is its
         // (Escape cancels, the function keys convert): none is the window's.
         if (typing && composing_) return false;
@@ -4513,6 +4526,7 @@ public:
         if (m->button() != Qt::BackButton && m->button() != Qt::ForwardButton) return false;
         auto* w = qobject_cast<QWidget*>(o);
         if (!on_key_ || !w || w->window() != frame_) return false;
+        if (field_composing()) return false;  // the input method's, while it composes
         if (auto* c = dynamic_cast<canvas_widget*>(w); c && c->owner) return false;
         // Qt passes a press up to each parent until one takes it, as a new
         // event each time, which comes here again: once is enough.

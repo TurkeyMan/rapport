@@ -124,6 +124,9 @@ public:
     // A window-context shortcut of the toolkit's own (Qt's QShortcut) on
     // Ctrl+J, fired from the entry; false where there's none.
     virtual bool add_shortcut(std::function<void()>) { return false; }
+    // The mouse's back side button pressed and let go over the entry (on
+    // Windows, the app command it makes); false where it can't be.
+    virtual bool side_back() { return false; }
     // The presses the entry was given, in order.
     std::vector<std::string> entry_keys;
 };
@@ -183,6 +186,28 @@ public:
     {
         e.focus();
         spin();
+    }
+    bool side_back() override
+    {
+        GdkWindow* top = gtk_widget_get_window(gtk_widget_get_toplevel(entry_));
+        GdkDevice* pointer = gdk_seat_get_pointer(gdk_display_get_default_seat(gdk_display_get_default()));
+        for (GdkEventType type : {GDK_BUTTON_PRESS, GDK_BUTTON_RELEASE})
+        {
+            GdkEvent* e = gdk_event_new(type);
+            e->button.window = GDK_WINDOW(g_object_ref(top));
+            e->button.send_event = true;
+            time_ += type == GDK_BUTTON_PRESS ? 5000 : 1;  // apart: no double click
+            e->button.time = time_;
+            e->button.x = 4;
+            e->button.y = 4;
+            e->button.button = 8;
+            gdk_event_set_device(e, pointer);
+            gdk_event_set_source_device(e, pointer);
+            gtk_main_do_event(e);
+            gdk_event_free(e);
+        }
+        spin();
+        return true;
     }
     void press(k key, unsigned mods) override
     {
@@ -329,7 +354,31 @@ public:
         }
         g_object_unref(controllers);
         if (!handled) entry_keys.push_back(token(key));
+        if (!handled && key == k::escape) window_shortcut(keyval);
         spin();
+    }
+    // Past the entry, the key bubbles to the window's shortcuts (a dialog's
+    // Escape): the first whose trigger is the key, activated as GTK would.
+    void window_shortcut(guint keyval)
+    {
+        GListModel* controllers = gtk_widget_observe_controllers(win_);
+        bool done = false;
+        for (guint i = 0; i < g_list_model_get_n_items(controllers) && !done; ++i)
+        {
+            auto* c = G_OBJECT(g_list_model_get_item(controllers, i));
+            if (GTK_IS_SHORTCUT_CONTROLLER(c))
+                for (guint j = 0; j < g_list_model_get_n_items(G_LIST_MODEL(c)) && !done; ++j)
+                {
+                    auto* sc = GTK_SHORTCUT(g_list_model_get_item(G_LIST_MODEL(c), j));
+                    GtkShortcutTrigger* t = gtk_shortcut_get_trigger(sc);
+                    if (GTK_IS_KEYVAL_TRIGGER(t) && gtk_keyval_trigger_get_keyval(GTK_KEYVAL_TRIGGER(t)) == keyval)
+                        done = gtk_shortcut_action_activate(gtk_shortcut_get_action(sc), GTK_SHORTCUT_ACTION_EXCLUSIVE,
+                                                            win_, nullptr);
+                    g_object_unref(sc);
+                }
+            g_object_unref(c);
+        }
+        g_object_unref(controllers);
     }
     void settle() override { spin(); }
     bool compose(bool on) override
@@ -398,6 +447,19 @@ public:
         QApplication::processEvents();
     }
     void settle() override { QApplication::processEvents(); }
+    bool side_back() override
+    {
+        const QPointF at(4, 4);
+        for (const bool down : {true, false})
+        {
+            QMouseEvent e(down ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease, at, edit_->mapToGlobal(at),
+                          Qt::BackButton, down ? Qt::BackButton : Qt::NoButton, Qt::NoModifier);
+            e.setTimestamp(time_ += down ? 5000 : 1);
+            QApplication::sendEvent(edit_, &e);
+        }
+        QApplication::processEvents();
+        return true;
+    }
     bool compose(bool on) override
     {
         QInputMethodEvent e(on ? QStringLiteral("ka") : QString(), {});
@@ -478,6 +540,7 @@ private:
     QMenuBar* bar_ = nullptr;
     bool hooked_ = false;
     bool saw_alt_ = false;
+    quint64 time_ = 1000;
 };
 constexpr const char* backend_name = "qt6";
 
@@ -538,6 +601,12 @@ public:
         GetKeyboardState(state);
         state[VK_CONTROL] = state[VK_LCONTROL] = state[VK_MENU] = state[VK_LMENU] = 0;
         SetKeyboardState(state);
+    }
+    bool side_back() override
+    {
+        SendMessageW(edit_, WM_APPCOMMAND, reinterpret_cast<WPARAM>(edit_),
+                     MAKELPARAM(0, APPCOMMAND_BROWSER_BACKWARD | FAPPCOMMAND_MOUSE));
+        return true;
     }
     // No IME can be driven without the system's input: the backend's test
     // hook says one is composing in the edit.
@@ -625,15 +694,21 @@ int main(int argc, char** argv)
     rap::entry* field = nullptr;
     int file_menu_built = 0;
     using namespace rap::layout;
-    auto win = (*ui)->create(
-        window{"Chords", {vbox{entry{"hello"}.bind(field)}}}
-            .menu_bar({{"_File",
-                        [&]
-                        {
-                            ++file_menu_built;
-                            return rap::menu{{"_Close", [] {}}};
-                        }}})
-            .size(30_ch, 8_lines));
+    // --dialog: a dialog's Escape, which closes it but not while an input
+    // method composes in its field.
+    const bool dialog_mode = argc > 1 && std::string(argv[argc - 1]) == "--dialog";
+    rap::window_spec spec = window{"Chords", {vbox{entry{"hello"}.bind(field)}}}
+                                .menu_bar({{"_File",
+                                            [&]
+                                            {
+                                                ++file_menu_built;
+                                                return rap::menu{{"_Close", [] {}}};
+                                            }}})
+                                .size(30_ch, 8_lines);
+    if (dialog_mode) spec = dialog{"Chords dialog", {vbox{entry{"hello"}.bind(field)}}}.size(30_ch, 8_lines);
+    auto win = (*ui)->create(spec);
+    std::vector<rap::dialog_role> finished;
+    win->on_finished([&](rap::dialog_role r) { finished.push_back(r); });
     // The window's keys: what it's given, and what it takes. Ctrl+N, Ctrl+,
     // and Alt+D; Ctrl+K, Ctrl+J and Alt+F declined.
     std::vector<std::string> window_keys;
@@ -644,10 +719,11 @@ int main(int argc, char** argv)
             const std::string t = e.key == rap::key::character ? std::string(1, char(e.codepoint))
                                   : e.key == rap::key::f1     ? "f1"
                                   : e.key == rap::key::escape ? "esc"
+                                  : e.key == rap::key::back   ? "back"
                                                               : "other";
             window_keys.push_back(t);
             const unsigned m = e.modifiers & (rap::mod_ctrl | rap::mod_alt | rap::mod_shift);
-            return (m == ctrl && (t == "n" || t == ",")) || (m == alt && t == "d");
+            return (m == ctrl && (t == "n" || t == ",")) || (m == alt && t == "d") || t == "back";
         });
 #if !defined(RAPPORT_TEST_WIN32)
     win->show();  // off the desktop: Broadway, or Qt's offscreen platform
@@ -761,13 +837,13 @@ int main(int argc, char** argv)
     steps.push_back(
         [&]
         {
-#if defined(RAPPORT_TEST_WIN32)
-            // A single-line edit never has Escape: the window's dialog
-            // handling (IsDialogMessage) takes it past the edit, as ever.
-            window_had("Escape while composing: not the window's", {}, {});
-#else
+            // On win32 too: while composing, the field's keys skip the
+            // window's dialog handling (IsDialogMessage), as an IME's would.
             window_had("Escape while composing: the entry's, not the window's", {}, {"esc"});
-#endif
+            window_keys.clear();
+            if (d.side_back())
+                expect(window_keys.empty(),
+                       "the back side button while composing: not the window's (" + show(window_keys) + ")");
             d.compose(false);
             chord(k::n, ctrl);
         });
@@ -776,6 +852,10 @@ int main(int argc, char** argv)
         [&]
         {
             window_had("Ctrl+N once the composition ends: the window's again", {"n"}, {});
+            window_keys.clear();
+            if (d.side_back())
+                expect(window_keys == std::vector<std::string>{"back"},
+                       "the back side button once it ends: the window's again (" + show(window_keys) + ")");
             chord(k::f1, ctrl);
         });
     steps.push_back(
@@ -838,6 +918,38 @@ int main(int argc, char** argv)
 #endif
             d.close_menu();
         });
+
+    // A dialog: Escape while an input method composes is the input method's
+    // (it cancels the composition), and doesn't close the dialog; once the
+    // composition ends, Escape closes it as ever.
+    if (dialog_mode)
+    {
+        steps.clear();
+        steps.push_back(
+            [&]
+            {
+                d.focus(*field);
+                expect(d.compose(true), "an input method's composition, started in the dialog's entry");
+                chord(k::escape, 0);
+            });
+        steps.push_back(
+            [&]
+            {
+                expect(finished.empty(), "Escape while composing: the dialog stays open");
+                // Not the window's, nor the dialog's handling (win32's
+                // IsDialogMessage): on to the field.
+                window_had("and the key goes on to the field", {}, {"esc"});
+                d.compose(false);
+                chord(k::escape, 0);
+            });
+        steps.push_back(
+            [&]
+            {
+                expect(finished == std::vector<rap::dialog_role>{rap::dialog_role::cancel},
+                       "Escape once the composition ends: the dialog closes, cancelled (" +
+                           std::to_string(finished.size()) + " finished)");
+            });
+    }
 
     int waited = 0;
     rap::subscription tick = (*ui)->timer(
