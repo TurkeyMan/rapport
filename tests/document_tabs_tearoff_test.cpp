@@ -291,6 +291,14 @@ void run()
     fixture& t = *a.made;
     GtkWidget* tw = window_titled(t.name);
     expect(tw && gtk_widget_get_visible(tw) && t.tabs->ids() == ids{"b"}, "the app's window shown, with b");
+    // Exactly once anywhere: in the new window, not in A, and GTK's moved no
+    // page of its own into it (create-window gave it no notebook).
+    int pages_b = 0;
+    for (auto& f : fixtures)
+        if (GtkNotebook* n = notebook_of(*f))
+            for (const std::string& id : pages(n)) pages_b += id == "b";
+    expect(pages_b == 1 && pages(notebook_of(t)) == ids{"b"},
+           "b in exactly one notebook, the new window's (" + std::to_string(pages_b) + ")");
 
     // Dropped on B: put back, and B asked.
     GtkNotebook* nt = notebook_of(t);

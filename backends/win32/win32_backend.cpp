@@ -11871,8 +11871,10 @@ void moving_at(POINT screen)
 }
 
 // The move ended: let go over a strip, that window's asked to take the tab;
-// cancelled (Escape), a torn-off tab is offered back to the window it was
-// torn from, at its old place; else it stays where it is.
+// cancelled (Escape), a torn-off tab goes home: the window it was torn from
+// is asked to take it back at its old place, group or none (a group limits
+// drops on other windows' strips, not going back), and the app closes the
+// emptied window.
 void end_window_drag(bool cancelled)
 {
     tab_drags& d = tab_drag();
@@ -11888,9 +11890,8 @@ void end_window_drag(bool cancelled)
     if (i < 0) return;
     if (cancelled)
     {
-        window_tabs* source = m.torn ? tabs_of(m.source) : nullptr;
-        if (source && source->state.same_group(mine->state))
-            source->state.received(mine->state.transfer_of(i, m.from, mw));
+        if (window_tabs* home = m.torn ? tabs_of(m.source) : nullptr)
+            home->state.received(mine->state.transfer_of(i, m.from, mw));
         return;
     }
     window_tabs* target = tabs_of(over);

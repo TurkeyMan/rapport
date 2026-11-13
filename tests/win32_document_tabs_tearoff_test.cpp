@@ -19,7 +19,7 @@
 // a false return changing nothing; a strip of another group neither marked
 // nor asked; a tab dragged straight onto another window's strip (no tearing
 // off) dropped there; Escape mid-drag putting it back and asking nothing,
-// and Escape at a torn-off window's move offering the tab back to where it
+// and Escape at a torn-off window's move sending the tab home (group or none) to where it
 // was; the only tab of a window moving its window, on_detach not asked; the
 // right-click menu with the app's items after the fixed ones, its Move to
 // new window asking on_detach with no point; and in the caption, Shift+F10
@@ -454,6 +454,24 @@ void run(const char* stage)
            "Escape at the torn-off window's move: offered back to A at index 0" + at);
     expect(a.tabs->ids() == ids{"a", "k"} && t3.tabs->ids().empty(), "and taken back" + at + ": " + join(a.tabs->ids()));
 
+    // No group: Escape sends it home all the same (a group limits drops on
+    // other windows' strips, not going back).
+    fixture& e = *make("E" + tag, {"e1", "e2"}, "");
+    p = e.centre(0);
+    e.down(p);
+    e.move(POINT{p.x + th + 1, p.y});
+    e.move(POINT{p.x, below.y});
+    if (!e.made) return expect(false, "torn off with no group" + at);
+    fixture& te = *e.made;
+    expect(e.tabs->ids() == ids{"e2"} && HWND(ask(a.top, 3)) == te.top,
+           "no group: torn off all the same, its window moving" + at);
+    SendMessageW(te.top, WM_EXITSIZEMOVE, 1, 0);  // the move loop ended by Escape
+    expect(e.received.size() == 1 && e.received[0].id == "e1" && e.received[0].index == 0 &&
+               e.received[0].source == te.win.get(),
+           "no group, Escape: sent home, E's on_receive(e1, 0, the torn-off window)" + at);
+    expect(e.tabs->ids() == ids{"e1", "e2"} && te.tabs->ids().empty(),
+           "and back in E, the torn-off window empty (the app's to close)" + at + ": " + join(e.tabs->ids()));
+
     // Straight onto another window's strip, no tearing off.
     a.tabs->add({"m", "Tab m", {}, {}});
     b.received.clear();
@@ -633,11 +651,13 @@ int input_mode(rap::ui& ui)
     fixture& a = *make("Input A", {"a", "b", "c"}, "g");
     fixture& b = *make("Input B", {"x", "y"}, "g");
     fixture& d = *make("Input D", {"solo"}, "g");
+    fixture& u = *make("Input U", {"u1", "u2"}, "");  // no group
     if (!a.strip || !b.strip || !d.strip) return expect(false, "the windows' strips"), 1;
-    for (fixture* f : {&a, &b, &d}) f->win->show();
+    for (fixture* f : {&a, &b, &d, &u}) f->win->show();
     place(a, 80, 80);
     place(b, 80, 520);
     place(d, 840, 80);
+    place(u, 840, 520);
     SetForegroundWindow(a.top);
     pump();
     using ids = std::vector<std::string>;
@@ -678,6 +698,25 @@ int input_mode(rap::ui& ui)
             expect(a.tabs->ids() == ids{"a", "c"}, "and taken back: " + join(a.tabs->ids()));
             if (a.made) a.made->win->close();
             b.received.clear();
+        });
+    // U's u1 (no group) torn off and Escape pressed mid-move: sent home all
+    // the same.
+    const POINT from_u = u.screen(u.centre(0));
+    RECT ur;
+    GetWindowRect(u.top, &ur);
+    const POINT out_u{from_u.x, ur.bottom + 60};
+    drag(from_u, {POINT{from_u.x + 12, from_u.y}}, out_u, false);
+    steps.push_back([] { send_key(VK_ESCAPE, false); });
+    steps.push_back([] { send_key(VK_ESCAPE, true); });
+    steps.push_back([out_u] { send_mouse(out_u, MOUSEEVENTF_LEFTUP); });
+    steps.push_back([] {});
+    steps.push_back(
+        [&]
+        {
+            expect(u.received.size() == 1 && u.received[0].id == "u1" && u.received[0].index == 0,
+                   "no group, Escape mid-move: sent home to U at its index");
+            expect(u.tabs->ids() == ids{"u1", "u2"}, "and taken back: " + join(u.tabs->ids()));
+            if (u.made) u.made->win->close();
         });
     // D's only tab: D itself moves, and it's dropped on B.
     const POINT from3 = d.screen(d.centre(0));

@@ -1046,8 +1046,10 @@ struct document_tab
 //  - Windows: torn off past a short distance out of the row (above, below,
 //    or past the window's sides), the new window is carried by the system's
 //    own move loop until let go, and a window's only tab drags its window
-//    the same way; Escape puts a tab back (or, once torn off, offers it
-//    back to where it was, through that window's on_receive).
+//    the same way; Escape puts a tab back, and once it's torn off sends it
+//    home: the window it came from is asked to take it back at its old
+//    place (its on_receive, the torn-off window the source), whatever the
+//    group, and the app closes the emptied window.
 //  - GTK: GtkNotebook's own drag and drop; torn off as it's let go outside
 //    any notebook, the window shown where it was let go. GTK 4 says nothing
 //    of where: the window goes where the desktop puts it (under Wayland it
@@ -1101,8 +1103,9 @@ public:
     // and the drag goes on along the row. Asked at most once a drag.
     using detach_fn = std::function<rap::window*(const std::string& id, std::optional<point_f> screen)>;
     // A tab let go over this window's row, from another window in the same
-    // group (set_group): `t` says which, where it was dropped, and the
-    // window it's in. Rapport changes neither row. To take it the app
+    // group (set_group), or (on Windows) one torn off from this window and
+    // sent home by Escape, group or none: `t` says which, where it was
+    // dropped (or was before), and the window it's in. Rapport changes neither row. To take it the app
     // removes it from t.source's tabs, inserts it into this window's at
     // t.index (through the binds), and returns true; false leaves both rows
     // as they were, and the drag ends where it was. A source left empty

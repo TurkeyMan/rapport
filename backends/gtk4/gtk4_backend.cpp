@@ -2574,6 +2574,12 @@ public:
                 if (!self->quiet_) self->arrived(child, int(page));
             },
             this);
+        // No notebook back, though the app has made a window for the tab:
+        // given one, GTK would move the dragged page into it itself, on top
+        // of the app's own move through the binds (the new window's spec
+        // holds the tab already), and the tab would be there twice. NULL
+        // tells GTK the drop's been dealt with; the source's page goes once
+        // the drag's done (remove, while dragging_).
         connect(
             w_, "create-window",
             +[](GtkNotebook*, GtkWidget* page, gpointer p) -> GtkNotebook*
