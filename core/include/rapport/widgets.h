@@ -1022,9 +1022,18 @@ struct document_tab
 // the user's clicks and keys do, once each. The keys, wherever the focus is:
 // Ctrl+T on_new, Ctrl+W on_close for the current tab, Ctrl+Tab and
 // Ctrl+Shift+Tab the next and previous (round), Ctrl+1..8 the first eight
-// and Ctrl+9 the last; a middle click closes the tab under it.
+// and Ctrl+9 the last, Ctrl+Shift+PgUp and Ctrl+Shift+PgDn move the current
+// tab left and right; a middle click closes the tab under it.
 // Closing is the app's to do (remove): it may ask first, or keep the last
 // tab. A bar with one tab is still shown; set_visible hides it.
+//
+// Tabs are dragged along the row to reorder them, the others making room as
+// the dragged one passes (Escape puts it back, where the toolkit allows: on
+// Windows). Moved, the tab is already where the user put it: on_reorder
+// tells the app its id and new index, once, as the drag is let go (or for
+// each key), and only if its index changed; ids() says the new order. A
+// drag that leaves the row keeps the tab at its end; it doesn't take the
+// tab out of the window.
 class document_tabs : public widget
 {
 public:
@@ -1042,6 +1051,7 @@ public:
     virtual void on_select(std::function<void(const std::string& id)>) = 0;
     virtual void on_close(std::function<void(const std::string& id)>) = 0;
     virtual void on_new(std::function<void()>) = 0;
+    virtual void on_reorder(std::function<void(const std::string& id, int new_index)>) = 0;
 };
 
 // -- canvas -------------------------------------------------------------------
@@ -1367,6 +1377,28 @@ public:
     // window, as local paths in UTF-8, in the order given. Setting it is
     // what makes the window accept them; other drags are refused.
     virtual void on_files_dropped(std::function<void(const std::vector<std::string>&)>) = 0;
+
+    // The working-in-the-background pointer over this window (the shape
+    // ui::set_busy gives all of them; under Qt a widget with a pointer of
+    // its own keeps it here), counted: from the first begin_busy until as
+    // many end_busy. The count is the window's and goes with it, so a
+    // window closed while it loads leaves nothing busy.
+    void begin_busy()
+    {
+        if (busy_count_++ == 0) busy_changed(true);
+    }
+    void end_busy()
+    {
+        if (busy_count_ > 0 && --busy_count_ == 0) busy_changed(false);
+    }
+    bool busy() const { return busy_count_ > 0; }
+
+protected:
+    // The pointer to show, as the count leaves or comes back to nothing.
+    virtual void busy_changed(bool on) = 0;
+
+private:
+    int busy_count_ = 0;
 };
 
 }  // namespace rap

@@ -2525,7 +2525,7 @@ static void rapport_tab_strip_init(RapportTabStrip*) {}
 // its tabs alone over empty pages and no frame. Each tab is its icon, its
 // title (cut short with an ellipsis) and a flat close button; a middle
 // click on it closes it too. The notebook never takes the focus: the
-// window's keys work it.
+// window's keys work it. Its tabs are reorderable, as GTK 3's.
 class document_tabs_impl : public widget_base<rap::document_tabs>
 {
 public:
@@ -2555,14 +2555,25 @@ public:
                 if (!self->quiet_) self->state.picked(int(page));
             },
             this);
+        // Its tabs dragged along the row: told once, as the drag's let go.
+        connect(
+            w_, "page-reordered",
+            +[](GtkNotebook*, GtkWidget* page, guint to, gpointer p)
+            {
+                auto* self = static_cast<document_tabs_impl*>(p);
+                if (!self->quiet_) self->page_moved(page, int(to));
+            },
+            this);
     }
 
     void insert(int index, const document_tab& t) override
     {
         const int at = state.insert(index, t);
         quiet q(this);
-        gtk_notebook_insert_page(GTK_NOTEBOOK(w_), gtk_box_new(GTK_ORIENTATION_VERTICAL, 0),
-                                 make_tab(t), at);
+        GtkWidget* page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        g_object_set_data_full(G_OBJECT(page), "rapport-tab", g_strdup(t.id.c_str()), g_free);
+        gtk_notebook_insert_page(GTK_NOTEBOOK(w_), page, make_tab(t), at);
+        gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(w_), page, true);
         gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), state.current);
         fit_later();
     }
@@ -2602,21 +2613,41 @@ public:
         state.on_close = std::move(f);
     }
     void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+    void on_reorder(std::function<void(const std::string&, int)> f) override
+    {
+        state.on_reorder = std::move(f);
+    }
 
     bool key(const key_event& e)
     {
-        return state.key(e,
-                         [this](int i)
-                         {
-                             quiet q(this);
-                             gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
-                         });
+        return state.key(
+            e,
+            [this](int i)
+            {
+                quiet q(this);
+                gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
+            },
+            [this](int from, int to)
+            {
+                quiet q(this);
+                auto* nb = GTK_NOTEBOOK(w_);
+                gtk_notebook_reorder_child(nb, gtk_notebook_get_nth_page(nb, from), to);
+            });
     }
 
     GtkWidget* notebook() const { return w_; }
     doc_tabs::state state;
 
 private:
+    // A tab dragged, let go at `to`: the bookkeeping follows the notebook,
+    // and the app's told if it moved.
+    void page_moved(GtkWidget* page, int to)
+    {
+        const auto* id = static_cast<const char*>(g_object_get_data(G_OBJECT(page), "rapport-tab"));
+        const int from = id ? state.index_of(id) : -1;
+        if (state.move(from, to)) state.reordered(to);
+    }
+
     // The notebook's own changes of page (as a tab goes) aren't the user's.
     struct quiet
     {
@@ -4658,6 +4689,9 @@ public:
     {
         auto* win = GTK_WINDOW(win_);
         gtk_window_set_title(win, spec.title.c_str());
+        recent().insert(recent().begin(), win_);
+        // Busy from the start while the app is (ui::set_busy).
+        apply_busy(win_);
         gtk_window_set_default_size(win, px(spec.width), px(spec.height));
         // GNOME's header bar, for dialogs where the app asked for it, or a
         // window that asks itself; the dialog's buttons go into it.
@@ -4727,7 +4761,7 @@ public:
 
     ~window_impl() override
     {
-        if (last_shown() == win_) last_shown() = nullptr;
+        std::erase(recent(), win_);
         for (auto& part : parts) part->disconnect();
         disconnect();
         gtk_window_destroy(GTK_WINDOW(win_));
@@ -4752,10 +4786,30 @@ public:
     // Development aid, as in gtk3: RAPPORT_SNAPSHOT=file.png saves the window
     // shown last RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears,
     // then quits the main loop.
-    static GtkWidget*& last_shown()
+    // The windows there now, the one shown most recently last (a dialog
+    // over the main window, say), then the others shown in turn, then those
+    // never shown, the oldest nearest the shown: the order a snapshot falls
+    // back on them.
+    static std::vector<GtkWidget*>& recent()
     {
-        static GtkWidget* w = nullptr;
-        return w;
+        static std::vector<GtkWidget*> v;
+        return v;
+    }
+    static GtkWidget* last_shown() { return recent().empty() ? nullptr : recent().back(); }
+    // A window not the app's (an alert's own) as shown last, until it goes.
+    static void shown(GtkWidget* w)
+    {
+        std::erase(recent(), w);
+        recent().push_back(w);
+    }
+    static void shown_until_gone(GtkWidget* w)
+    {
+        if (std::ranges::find(recent(), w) == recent().end())
+            g_object_weak_ref(
+                G_OBJECT(w),
+                +[](gpointer, GObject* gone) { std::erase(recent(), GTK_WIDGET(gone)); },
+                nullptr);
+        shown(w);
     }
     static GMainLoop*& main_loop()
     {
@@ -4763,10 +4817,11 @@ public:
         return loop;
     }
     // The window shown last, as GTK last drew it, rendered to a PNG.
-    static bool save_last_shown(const std::string& path)
+    static bool save_last_shown(const std::string& path) { return save(last_shown(), path); }
+    // A window, as GTK last drew it, rendered to a PNG.
+    static bool save(GtkWidget* win, const std::string& path)
     {
-        GtkWidget* win = last_shown();
-        if (!win) return false;
+        if (!win || !gtk_widget_get_realized(win)) return false;
         bool ok = false;
         GdkPaintable* paintable = gtk_widget_paintable_new(win);
         GtkSnapshot* snap = gtk_snapshot_new();
@@ -4784,7 +4839,7 @@ public:
     }
     void snapshot_if_asked()
     {
-        last_shown() = win_;
+        shown(win_);
         static bool taken = false;
         const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (taken || !path || !*path) return;
@@ -5086,6 +5141,29 @@ public:
     GtkWidget* gtk_window() const { return win_; }
 
     std::vector<std::unique_ptr<part>> parts;
+
+    // ui::set_busy's state, which every toplevel's pointer shows.
+    static bool& app_busy()
+    {
+        static bool on = false;
+        return on;
+    }
+    // A toplevel's pointer, which children without a pointer of their own
+    // take: "progress" while the app or the window is busy (kept on it, so
+    // it goes with it).
+    static void apply_busy(GtkWidget* top)
+    {
+        const bool on = app_busy() || g_object_get_data(G_OBJECT(top), "rapport-busy");
+        gtk_widget_set_cursor_from_name(top, on ? "progress" : nullptr);
+    }
+
+protected:
+    // Kept on the GtkWindow, where apply_busy reads it.
+    void busy_changed(bool on) override
+    {
+        g_object_set_data(G_OBJECT(win_), "rapport-busy", on ? GINT_TO_POINTER(1) : nullptr);
+        apply_busy(win_);
+    }
 
 private:
     void close_requested()
@@ -6022,7 +6100,11 @@ public:
     }
 
     // TODO(tortilla): a GdkTexture on the clipboard.
-    bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
+    bool save_snapshot(rap::window* w, const std::string& path) override
+    {
+        return w ? window_impl::save(static_cast<window_impl*>(w)->gtk_window(), path)
+                 : window_impl::save_last_shown(path);
+    }
 
     void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels,
                              size_t stride) override
@@ -6217,14 +6299,16 @@ public:
             });
     }
 
-    // On each window, which children without a pointer of their own take.
+    // On each window, which children without a pointer of their own take;
+    // those busy of their own stay so.
     void set_busy(bool on) override
     {
+        window_impl::app_busy() = on;
         GListModel* windows = gtk_window_get_toplevels();
         for (guint i = 0, n = g_list_model_get_n_items(windows); i < n; ++i)
         {
             auto* w = static_cast<GtkWidget*>(g_list_model_get_item(windows, i));
-            gtk_widget_set_cursor_from_name(w, on ? "progress" : nullptr);
+            window_impl::apply_busy(w);
             g_object_unref(w);
         }
     }
@@ -6283,7 +6367,7 @@ private:
         if (std::getenv("RAPPORT_SNAPSHOT"))
             if (GtkRoot* root = gtk_widget_get_root(dlg);
                 root && GTK_WIDGET(root) != GTK_WIDGET(owner))
-                window_impl::last_shown() = GTK_WIDGET(root);
+                window_impl::shown_until_gone(GTK_WIDGET(root));
     }
 
     static GtkWindow* parent_window(rap::window* w)

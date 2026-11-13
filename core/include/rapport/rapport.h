@@ -101,7 +101,18 @@ public:
     {
         backend_->set_clipboard_image(width, height, format, pixels, stride);
     }
-    bool save_snapshot(const std::string& png_path) { return backend_->save_snapshot(png_path); }
+    // A window as a PNG, as drawn now, for tests: the one shown most recently
+    // that's still there (a dialog over the main window, say), or failing
+    // any shown the oldest there; or the one given. False if there's none or
+    // it couldn't be written.
+    bool save_snapshot(const std::string& png_path)
+    {
+        return backend_->save_snapshot(nullptr, png_path);
+    }
+    bool save_snapshot(window& w, const std::string& png_path)
+    {
+        return backend_->save_snapshot(&w, png_path);
+    }
 
     std::unique_ptr<image> create_image(int width, int height, pixel_format format,
                                        const uint8_t* pixels, size_t stride)
@@ -117,8 +128,9 @@ public:
     // app-starting pointer, IDC_APPSTARTING; Qt's BusyCursor; GTK's
     // "progress"), as while a program it started comes up. Widgets with a
     // pointer of their own (a text field's I-beam) keep it, but under Qt,
-    // whose override cursor covers them too. Not counted:
-    // the last call wins.
+    // whose override cursor covers them too. App-wide and not counted: the
+    // last call wins. An app with several windows, each loading on its own,
+    // wants window::begin_busy instead, counted and gone with its window.
     void set_busy(bool on) { backend_->set_busy(on); }
 
 private:

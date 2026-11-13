@@ -378,6 +378,7 @@ struct document_tabs
     std::string current;  // empty: the first
     std::function<void(const std::string&)> on_select, on_close;
     std::function<void()> on_new;
+    std::function<void(const std::string& id, int new_index)> on_reorder;
     rap::document_tabs** bind = nullptr;
 };
 
@@ -1401,6 +1402,7 @@ public:
 // A window's document tabs, for window::tabs:
 //     document_tabs{{{"1", "Home", icon::for_file("/home/me/"), "/home/me"}}}
 //         .current("1").on_select(show).on_close(close_tab).on_new(new_tab)
+//         .on_reorder(tab_moved)
 class document_tabs
 {
 public:
@@ -1423,6 +1425,11 @@ public:
     document_tabs& on_new(std::function<void()> f)
     {
         t_.on_new = std::move(f);
+        return *this;
+    }
+    document_tabs& on_reorder(std::function<void(const std::string& id, int new_index)> f)
+    {
+        t_.on_reorder = std::move(f);
         return *this;
     }
     document_tabs& bind(rap::document_tabs*& h)

@@ -322,14 +322,38 @@ class window_impl;  // forward
 // ui::set_busy's state, which every window's WM_SETCURSOR reads.
 bool app_busy = false;
 
-// WM_SETCURSOR while the app is busy, over a client area: the app-starting
-// pointer, true if it's set. Windows that give their own pointer (a canvas,
-// a splitter bar) ask this first, as they don't ask their parent.
-bool busy_cursor_here(LPARAM lp)
+// The top-level windows busy of their own (window::begin_busy); each leaves
+// as its count comes back to nothing, or as it goes.
+std::unordered_set<HWND>& busy_windows()
 {
-    if (!app_busy || LOWORD(lp) != HTCLIENT) return false;
+    static std::unordered_set<HWND> set;
+    return set;
+}
+
+// WM_SETCURSOR over a client area of `h` while the app or h's window is
+// busy: the app-starting pointer, true if it's set. Windows that give their
+// own pointer (a canvas, a splitter bar) ask this first, as they don't ask
+// their parent.
+bool busy_cursor_here(HWND h, LPARAM lp)
+{
+    if (LOWORD(lp) != HTCLIENT) return false;
+    if (!app_busy && !busy_windows().contains(GetAncestor(h, GA_ROOT))) return false;
     SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
     return true;
+}
+
+// The window under the pointer, if it's the app's, asked for its pointer
+// again now, so a change shows without waiting for a move.
+void ask_pointer_again()
+{
+    POINT p;
+    if (!GetCursorPos(&p)) return;
+    HWND under = WindowFromPoint(p);
+    DWORD pid = 0;
+    if (!under || !GetWindowThreadProcessId(under, &pid) || pid != GetCurrentProcessId())
+        return;
+    const LRESULT hit = SendMessageW(under, WM_NCHITTEST, 0, MAKELPARAM(short(p.x), short(p.y)));
+    SendMessageW(under, WM_SETCURSOR, WPARAM(under), MAKELPARAM(LOWORD(hit), WM_MOUSEMOVE));
 }
 
 // Messages the containers forward to their children's handlers.
@@ -1942,7 +1966,7 @@ LRESULT CALLBACK link_icon_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
 {
     if (msg == WM_SETCURSOR)
     {
-        if (!busy_cursor_here(lp)) SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        if (!busy_cursor_here(h, lp)) SetCursor(LoadCursorW(nullptr, IDC_HAND));
         return TRUE;
     }
     return DefSubclassProc(h, msg, wp, lp);
@@ -2652,7 +2676,7 @@ private:
             // Over a button the arrow, not the edit's I-beam.
             if (reinterpret_cast<HWND>(wp) != h)
             {
-                if (!busy_cursor_here(lp)) SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+                if (!busy_cursor_here(h, lp)) SetCursor(LoadCursorW(nullptr, IDC_ARROW));
                 return TRUE;
             }
             break;
@@ -7402,6 +7426,8 @@ public:
     // The window moved, maybe onto another monitor.
     virtual void moved() {}
 
+    void on_reorder(std::function<void(const std::string&, int)> f) override { state.on_reorder = std::move(f); }
+
     doc_tabs::state state;
 
 protected:
@@ -7427,6 +7453,22 @@ protected:
                              rap::i18n::shortcut_label("Ctrl+W")});
         }
         show_popup_menu(GetAncestor(h_, GA_ROOT), items, screen);
+    }
+
+    // A key while a tab's dragged: Escape puts it back (true: taken); any
+    // other of the tabs' own ends the drag as cancelled first, so a key's
+    // move starts from the tabs as they were.
+    template <class Cancel>
+    bool drag_key(const key_event& e, bool dragging, Cancel&& cancel)
+    {
+        if (!dragging || !e.press) return false;
+        if (e.key == key::escape)
+        {
+            cancel();
+            return true;
+        }
+        if (doc_tabs::for_key(e, state.current, state.count()).what != doc_tabs::action::none) cancel();
+        return false;
     }
 
 private:
@@ -7465,6 +7507,7 @@ public:
 
     void insert(int index, const document_tab& t) override
     {
+        cancel_drag();  // the app's index is of the tabs as they were
         const int at = state.insert(index, t);
         icons_.insert(icons_.begin() + at, tab_icon_handle(t.icon, px(16), dpi_, win_.scale()));
         const std::wstring title = tab_title(t.title);
@@ -7479,6 +7522,7 @@ public:
     }
     void remove(const std::string& id) override
     {
+        cancel_drag();
         const int i = state.remove(id);
         if (i < 0) return;
         if (icons_[size_t(i)]) DestroyIcon(icons_[size_t(i)]);
@@ -7523,7 +7567,9 @@ public:
 
     bool key(const key_event& e) override
     {
-        return state.key(e, [this](int i) { TabCtrl_SetCurSel(h_, i); });
+        if (drag_key(e, drag_.has_value(), [this] { cancel_drag(); })) return true;
+        return state.key(
+            e, [this](int i) { TabCtrl_SetCurSel(h_, i); }, [this](int from, int to) { move_items(from, to); });
     }
 
     LRESULT notify(NMHDR* n, bool& handled) override
@@ -7561,6 +7607,108 @@ public:
     }
 
 private:
+    // A tab dragged along the row (the control has no dragging of its own):
+    // pressed, it's current, as the control makes it; moved past the drag
+    // threshold with the mouse captured, it moves to the place in sight
+    // nearest the pointer as it goes, the others making room, bookkeeping
+    // and all; let go, the app's told once, if it moved. Escape, or the
+    // capture lost, puts it back. Past either end of the row it stays at
+    // that end.
+    struct drag_state
+    {
+        std::string id;
+        int from = -1;  // where it was
+        POINT press{};
+        bool active = false;  // past the threshold
+    };
+    std::optional<drag_state> drag_;
+
+    void press(POINT at, int i)
+    {
+        cancel_drag();
+        drag_ = drag_state{state.tabs[size_t(i)].id, i, at};
+    }
+    // After the press's own handling (the app told of a new current tab,
+    // which may have changed the tabs): the drag held while its tab's there.
+    void pressed()
+    {
+        if (!drag_) return;
+        const int i = state.index_of(drag_->id);
+        if (i < 0)
+        {
+            drag_.reset();
+            return;
+        }
+        drag_->from = i;
+        SetCapture(h_);
+    }
+    void drag_to(POINT p)
+    {
+        if (!drag_->active)
+        {
+            const UINT dpi = win_.dpi();
+            if (std::abs(p.x - drag_->press.x) <= GetSystemMetricsForDpi(SM_CXDRAG, dpi) &&
+                std::abs(p.y - drag_->press.y) <= GetSystemMetricsForDpi(SM_CYDRAG, dpi))
+                return;
+            drag_->active = true;
+        }
+        const int at = state.index_of(drag_->id);
+        if (at < 0) return;
+        // The place in sight whose middle is nearest the pointer: the tabs
+        // are all as wide, so the one under it, else the end's.
+        RECT c;
+        GetClientRect(h_, &c);
+        int to = -1;
+        long nearest = LONG_MAX;
+        for (int i = 0; i < state.count(); ++i)
+        {
+            RECT r;
+            if (!TabCtrl_GetItemRect(h_, i, &r) || r.right <= c.left || r.left >= c.right) continue;
+            const long d = std::abs((r.left + r.right) / 2 - p.x);
+            if (d < nearest)
+            {
+                nearest = d;
+                to = i;
+            }
+        }
+        if (to >= 0 && state.move(at, to)) move_items(at, to);
+    }
+    // Let go: the app's told, if the tab moved; nothing's done after.
+    void let_go()
+    {
+        const std::optional<drag_state> d = std::exchange(drag_, std::nullopt);
+        if (GetCapture() == h_) ReleaseCapture();  // the drag's gone: its WM_CAPTURECHANGED is nothing
+        if (!d || !d->active) return;
+        const int at = state.index_of(d->id);
+        if (at >= 0 && at != d->from) state.reordered(at);  // last: the app may change the tabs
+    }
+    // The tab back where it was, the app told nothing.
+    void cancel_drag()
+    {
+        const std::optional<drag_state> d = std::exchange(drag_, std::nullopt);
+        if (!d) return;
+        if (GetCapture() == h_) ReleaseCapture();
+        const int at = state.index_of(d->id);
+        if (d->active && at >= 0 && state.move(at, d->from)) move_items(at, d->from);
+    }
+    // The control's tabs (their titles and images) as the bookkeeping has
+    // them, once the tab at `from` has moved to `to` there.
+    void move_items(int from, int to)
+    {
+        doc_tabs::move_element(icons_, from, to);
+        for (int i = std::min(from, to); i <= std::max(from, to); ++i)
+        {
+            const std::wstring title = tab_title(state.tabs[size_t(i)].title);
+            TCITEMW item{};
+            item.mask = TCIF_TEXT;
+            item.pszText = const_cast<wchar_t*>(title.c_str());
+            TabCtrl_SetItem(h_, i, &item);
+        }
+        rebuild_images();
+        TabCtrl_SetCurSel(h_, state.current);  // sends no TCN_SELCHANGE
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+
     // Every tab `w` wide (TCS_FIXEDWIDTH): narrower as tabs are added, down
     // to the narrowest, then the row scrolls (the control's own arrows).
     void fit(int w)
@@ -7628,6 +7776,46 @@ private:
         auto* self = reinterpret_cast<document_tabs_impl*>(data);
         switch (msg)
         {
+        // A tab pressed is made current by the control, then may be dragged.
+        case WM_LBUTTONDOWN:
+        {
+            TCHITTESTINFO hit{{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}, 0};
+            const int i = TabCtrl_HitTest(h, &hit);
+            if (i < 0 || i >= self->state.count()) break;
+            self->press(hit.pt, i);
+            const LRESULT r = DefSubclassProc(h, msg, wp, lp);  // tells the app, which may close the window
+            if (IsWindow(h)) self->pressed();
+            return r;
+        }
+        case WM_MOUSEMOVE:
+            if (!self->drag_) break;
+            if (!(wp & MK_LBUTTON))  // let go where it wasn't heard
+            {
+                self->let_go();
+                return 0;
+            }
+            self->drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+            if (self->drag_->active) return 0;
+            break;
+        case WM_LBUTTONUP:
+            if (!self->drag_) break;
+            if (self->drag_->active)
+            {
+                self->let_go();
+                return 0;
+            }
+            self->let_go();  // a click: nothing moved, nothing told
+            break;
+        case WM_CAPTURECHANGED:
+            if (self->drag_ && reinterpret_cast<HWND>(lp) != h) self->cancel_drag();
+            break;
+        case WM_KEYDOWN:
+            if (wp == VK_ESCAPE && self->drag_)
+            {
+                self->cancel_drag();
+                return 0;
+            }
+            break;
         // A middle click closes the tab under it, as in a browser.
         case WM_MBUTTONDOWN: return 0;
         case WM_MBUTTONUP:
@@ -7820,6 +8008,7 @@ public:
 
     void insert(int index, const document_tab& t) override
     {
+        strip_->cancel_drag();  // the app's index is of the tabs as they were
         const int at = state.insert(index, t);
         icons_.insert(icons_.begin() + at, tab_icon_handle(t.icon, px(16), dpi_, win_.scale()));
         keys_.insert(keys_.begin() + at, next_key_++);
@@ -7827,6 +8016,7 @@ public:
     }
     void remove(const std::string& id) override
     {
+        strip_->cancel_drag();
         const int i = state.remove(id);
         if (i < 0) return;
         if (icons_[size_t(i)]) DestroyIcon(icons_[size_t(i)]);
@@ -7858,7 +8048,14 @@ public:
 
     bool key(const key_event& e) override
     {
-        return state.key(e, [this](int i) { strip_->set_current(i); });
+        if (drag_key(e, strip_->dragging(), [this] { strip_->cancel_drag(); })) return true;
+        return state.key(
+            e, [this](int i) { strip_->set_current(i); },
+            [this](int from, int to)
+            {
+                follow(from, to);
+                push();  // the strip's told the tabs' new order
+            });
     }
     int height() override { return caption_tabs::height(win_.dpi()); }
     SIZE measure() override { return {0, height()}; }
@@ -7940,8 +8137,20 @@ public:
     void caption_close(int i) override { state.close_asked(i); }
     void caption_new() override { state.new_asked(); }
     void caption_menu(int i, POINT screen) override { tab_menu(i, screen); }
+    // A drag's steps: the strip's order already, followed quietly.
+    void caption_moved(int from, int to) override
+    {
+        if (state.move(from, to)) follow(from, to);
+    }
+    void caption_reordered(int i) override { state.reordered(i); }
 
 private:
+    // The tabs' icons and keys after the bookkeeping's move.
+    void follow(int from, int to)
+    {
+        doc_tabs::move_element(icons_, from, to);
+        doc_tabs::move_element(keys_, from, to);
+    }
     void push()
     {
         std::vector<caption_tab> tabs;
@@ -8235,7 +8444,7 @@ private:
         switch (msg)
         {
         case WM_SETCURSOR:
-            if (!busy_cursor_here(lp))
+            if (!busy_cursor_here(h, lp))
                 SetCursor(LoadCursorW(nullptr,
                                       dir_ == orientation::horizontal ? IDC_SIZEWE : IDC_SIZENS));
             return TRUE;
@@ -9303,7 +9512,7 @@ private:
             return 0;
         }
         case WM_SETCURSOR:
-            if (busy_cursor_here(lp)) return TRUE;
+            if (busy_cursor_here(h_, lp)) return TRUE;
             if (LOWORD(lp) == HTCLIENT)
             {
                 apply_cursor();
@@ -9754,12 +9963,14 @@ public:
         initial_w_ = spec.width;
         initial_h_ = spec.height;
         windows().insert(this);
+        recent().insert(recent().begin(), this);
     }
     ~window_impl() override
     {
         windows().erase(this);
         // WM_DESTROY can't see us once GWLP_USERDATA is cleared below.
-        if (last_shown() == this) last_shown() = nullptr;
+        std::erase(recent(), this);
+        if (hwnd_) busy_windows().erase(hwnd_);
         items.clear();
         widgets.clear();
         doc_tabs.reset();
@@ -10037,7 +10248,8 @@ public:
             if (!deferred.empty()) SetTimer(hwnd_, deferred_timer, USER_TIMER_MINIMUM, nullptr);
         }
         if (!snapshot) SetForegroundWindow(hwnd_);
-        last_shown() = this;
+        std::erase(recent(), this);
+        recent().push_back(this);
         snapshot_if_asked();
     }
     void close() override
@@ -10458,12 +10670,28 @@ public:
         if (auto f = on_finished_) f(role);  // may delete this window: last
     }
 
-private:
-    static window_impl*& last_shown()
+protected:
+    // The app-starting pointer, which WM_SETCURSOR gives (busy_cursor_here).
+    void busy_changed(bool on) override
     {
-        static window_impl* w = nullptr;
-        return w;
+        if (!hwnd_) return;
+        if (on)
+            busy_windows().insert(hwnd_);
+        else
+            busy_windows().erase(hwnd_);
+        ask_pointer_again();
     }
+
+private:
+    // The windows there now, the one shown most recently last, then the
+    // others shown in turn, then those never shown, the oldest nearest the
+    // shown: the order a snapshot falls back on them.
+    static std::vector<window_impl*>& recent()
+    {
+        static std::vector<window_impl*> v;
+        return v;
+    }
+    static window_impl* last_shown() { return recent().empty() ? nullptr : recent().back(); }
 
     int margin() const
     {
@@ -10510,10 +10738,11 @@ private:
 
 public:
     // The window shown last, as drawn now, to a PNG.
-    static bool save_last_shown(const std::string& path)
+    static bool save_last_shown(const std::string& path) { return save(last_shown(), path); }
+    // A window, as drawn now, to a PNG.
+    static bool save(window_impl* w, const std::string& path)
     {
-        window_impl* w = last_shown();
-        if (!w) return false;
+        if (!w || !IsWindow(w->hwnd_)) return false;
         bool ok = false;
         RECT r;
         GetWindowRect(w->hwnd_, &r);
@@ -10614,10 +10843,10 @@ private:
                 if (self->on_key_(e)) return TRUE;
                 break;
             }
-            // ui::set_busy: the app-starting pointer over the window and
-            // its controls, which ask their parent first.
+            // ui::set_busy, window::begin_busy: the app-starting pointer
+            // over the window and its controls, which ask their parent first.
             case WM_SETCURSOR:
-                if (busy_cursor_here(lp)) return TRUE;
+                if (busy_cursor_here(h, lp)) return TRUE;
                 break;
             // The desktop's colours (accent, high contrast, the system
             // colours) may have changed: read them again and repaint all.
@@ -10702,7 +10931,8 @@ private:
                 }
                 break;
             case WM_DESTROY:
-                if (last_shown() == self) last_shown() = nullptr;
+                std::erase(recent(), self);
+                busy_windows().erase(h);
                 // Windows asks for a window's own taskbar id back before it goes.
                 if (self->app_id_) self->set_app_id({});
                 break;
@@ -11396,7 +11626,11 @@ public:
         done(std::move(text));
     }
 
-    bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
+    bool save_snapshot(rap::window* w, const std::string& path) override
+    {
+        return w ? window_impl::save(static_cast<window_impl*>(w), path)
+                 : window_impl::save_last_shown(path);
+    }
 
     // -- printing ----------------------------------------------------------------
 
@@ -11858,15 +12092,7 @@ public:
     {
         if (app_busy == on) return;
         app_busy = on;
-        POINT p;
-        if (!GetCursorPos(&p)) return;
-        HWND under = WindowFromPoint(p);
-        DWORD pid = 0;
-        if (!under || !GetWindowThreadProcessId(under, &pid) || pid != GetCurrentProcessId())
-            return;
-        const LRESULT hit =
-            SendMessageW(under, WM_NCHITTEST, 0, MAKELPARAM(short(p.x), short(p.y)));
-        SendMessageW(under, WM_SETCURSOR, WPARAM(under), MAKELPARAM(LOWORD(hit), WM_MOUSEMOVE));
+        ask_pointer_again();
     }
 
 private:

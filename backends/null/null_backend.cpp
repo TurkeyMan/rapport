@@ -438,6 +438,11 @@ public:
         state.on_close = std::move(f);
     }
     void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+    // Kept, though nothing here is dragged and no keys come.
+    void on_reorder(std::function<void(const std::string&, int)> f) override
+    {
+        state.on_reorder = std::move(f);
+    }
 
     doc_tabs::state state;
 };
@@ -468,6 +473,9 @@ public:
     void on_key(std::function<bool(const key_event&)>) override {}
 
     std::vector<std::unique_ptr<widget>> widgets;
+
+protected:
+    void busy_changed(bool) override {}
 
 private:
     size_f size_{640, 480};
@@ -823,7 +831,7 @@ public:
     {
         done(std::nullopt);
     }
-    bool save_snapshot(const std::string&) override { return false; }
+    bool save_snapshot(rap::window*, const std::string&) override { return false; }
 
     std::unique_ptr<rap::image> create_image(int w, int h, pixel_format, const uint8_t*,
                                               size_t) override
