@@ -4370,17 +4370,21 @@ class window_impl : public rap::window, public part
     // RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears, then quits
     // the main loop. For checking layouts and canvases without a screen
     // grabber.
-    // The most recently shown window is the one a snapshot captures (a
-    // dialog over the main window, say).
-    static GtkWidget*& last_shown()
+    // The windows there now, the one shown most recently last (a dialog
+    // over the main window, say), then the others shown in turn, then those
+    // never shown, the oldest nearest the shown: the order a snapshot falls
+    // back on them.
+    static std::vector<GtkWidget*>& recent()
     {
-        static GtkWidget* w = nullptr;
-        return w;
+        static std::vector<GtkWidget*> v;
+        return v;
     }
+    static GtkWidget* last_shown() { return recent().empty() ? nullptr : recent().back(); }
 
     void snapshot_if_asked()
     {
-        last_shown() = win_;
+        std::erase(recent(), win_);
+        recent().push_back(win_);
         static bool taken = false;
         const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (taken || !path || !*path) return;
@@ -4399,10 +4403,32 @@ class window_impl : public rap::window, public part
     }
 
 public:
-    // The window shown last, as drawn now, to a PNG.
-    static bool save_last_shown(const std::string& path)
+    // ui::set_busy's state, which every toplevel's pointer shows.
+    static bool& app_busy()
     {
-        GtkWidget* win = last_shown();
+        static bool on = false;
+        return on;
+    }
+    // The pointer on a toplevel's GdkWindow, which child windows without a
+    // pointer of their own take: "progress" while the app or the window is
+    // busy (kept on it, so it goes with it). Again as it's realized, if it
+    // wasn't.
+    static void apply_busy(GtkWidget* top)
+    {
+        GdkWindow* g = gtk_widget_get_window(top);
+        if (!g) return;
+        const bool on = app_busy() || g_object_get_data(G_OBJECT(top), "rapport-busy");
+        GdkCursor* c =
+            on ? gdk_cursor_new_from_name(gdk_window_get_display(g), "progress") : nullptr;
+        gdk_window_set_cursor(g, c);
+        if (c) g_object_unref(c);
+    }
+
+    // The window shown last, as drawn now, to a PNG.
+    static bool save_last_shown(const std::string& path) { return save(last_shown(), path); }
+    // A window, as drawn now, to a PNG.
+    static bool save(GtkWidget* win, const std::string& path)
+    {
         if (!win) return false;
         const int scale = gtk_widget_get_scale_factor(win);
         const int w = gtk_widget_get_allocated_width(win);
@@ -4424,6 +4450,9 @@ public:
     {
         auto* win = GTK_WINDOW(win_);
         gtk_window_set_title(win, spec.title.c_str());
+        recent().insert(recent().begin(), win_);
+        g_signal_connect(win_, "realize",
+                         G_CALLBACK(+[](GtkWidget* w, gpointer) { apply_busy(w); }), nullptr);
         // Snapshot runs are automated: never take the user's keyboard focus.
         if (const char* snap = std::getenv("RAPPORT_SNAPSHOT"); snap && *snap)
         {
@@ -4568,7 +4597,7 @@ public:
 
     ~window_impl() override
     {
-        if (last_shown() == win_) last_shown() = nullptr;
+        std::erase(recent(), win_);
         for (auto& part : parts) part->disconnect();
         disconnect();
         gtk_widget_destroy(win_);
@@ -4885,6 +4914,14 @@ public:
     GtkWidget* gtk_window() const { return win_; }
 
     std::vector<std::unique_ptr<part>> parts;
+
+protected:
+    // Kept on the GtkWindow, where apply_busy reads it.
+    void busy_changed(bool on) override
+    {
+        g_object_set_data(G_OBJECT(win_), "rapport-busy", on ? GINT_TO_POINTER(1) : nullptr);
+        apply_busy(win_);
+    }
 
 private:
     // Only X11 lets clients place their windows; Wayland's compositor does.
@@ -5557,18 +5594,12 @@ public:
     }
 
     // On each window's GdkWindow, which child windows without a pointer of
-    // their own take.
+    // their own take; those busy of their own stay so.
     void set_busy(bool on) override
     {
+        window_impl::app_busy() = on;
         GList* windows = gtk_window_list_toplevels();
-        for (GList* l = windows; l; l = l->next)
-            if (GdkWindow* g = gtk_widget_get_window(GTK_WIDGET(l->data)))
-            {
-                GdkCursor* c =
-                    on ? gdk_cursor_new_from_name(gdk_window_get_display(g), "progress") : nullptr;
-                gdk_window_set_cursor(g, c);
-                if (c) g_object_unref(c);
-            }
+        for (GList* l = windows; l; l = l->next) window_impl::apply_busy(GTK_WIDGET(l->data));
         g_list_free(windows);
     }
 
@@ -5797,7 +5828,11 @@ public:
             new std::function<void(std::optional<sys::decoded_image>)>(std::move(done)));
     }
 
-    bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
+    bool save_snapshot(rap::window* w, const std::string& path) override
+    {
+        return w ? window_impl::save(static_cast<window_impl*>(w)->gtk_window(), path)
+                 : window_impl::save_last_shown(path);
+    }
 
     void set_clipboard_image(int w, int h, pixel_format format, const uint8_t* pixels,
                            size_t stride) override

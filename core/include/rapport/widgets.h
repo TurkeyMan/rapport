@@ -1366,6 +1366,28 @@ public:
     // window, as local paths in UTF-8, in the order given. Setting it is
     // what makes the window accept them; other drags are refused.
     virtual void on_files_dropped(std::function<void(const std::vector<std::string>&)>) = 0;
+
+    // The working-in-the-background pointer over this window (the shape
+    // ui::set_busy gives all of them; under Qt a widget with a pointer of
+    // its own keeps it here), counted: from the first begin_busy until as
+    // many end_busy. The count is the window's and goes with it, so a
+    // window closed while it loads leaves nothing busy.
+    void begin_busy()
+    {
+        if (busy_count_++ == 0) busy_changed(true);
+    }
+    void end_busy()
+    {
+        if (busy_count_ > 0 && --busy_count_ == 0) busy_changed(false);
+    }
+    bool busy() const { return busy_count_ > 0; }
+
+protected:
+    // The pointer to show, as the count leaves or comes back to nothing.
+    virtual void busy_changed(bool on) = 0;
+
+private:
+    int busy_count_ = 0;
 };
 
 }  // namespace rap

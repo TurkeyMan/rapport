@@ -307,14 +307,38 @@ class window_impl;  // forward
 // ui::set_busy's state, which every window's WM_SETCURSOR reads.
 bool app_busy = false;
 
-// WM_SETCURSOR while the app is busy, over a client area: the app-starting
-// pointer, true if it's set. Windows that give their own pointer (a canvas,
-// a splitter bar) ask this first, as they don't ask their parent.
-bool busy_cursor_here(LPARAM lp)
+// The top-level windows busy of their own (window::begin_busy); each leaves
+// as its count comes back to nothing, or as it goes.
+std::unordered_set<HWND>& busy_windows()
 {
-    if (!app_busy || LOWORD(lp) != HTCLIENT) return false;
+    static std::unordered_set<HWND> set;
+    return set;
+}
+
+// WM_SETCURSOR over a client area of `h` while the app or h's window is
+// busy: the app-starting pointer, true if it's set. Windows that give their
+// own pointer (a canvas, a splitter bar) ask this first, as they don't ask
+// their parent.
+bool busy_cursor_here(HWND h, LPARAM lp)
+{
+    if (LOWORD(lp) != HTCLIENT) return false;
+    if (!app_busy && !busy_windows().contains(GetAncestor(h, GA_ROOT))) return false;
     SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
     return true;
+}
+
+// The window under the pointer, if it's the app's, asked for its pointer
+// again now, so a change shows without waiting for a move.
+void ask_pointer_again()
+{
+    POINT p;
+    if (!GetCursorPos(&p)) return;
+    HWND under = WindowFromPoint(p);
+    DWORD pid = 0;
+    if (!under || !GetWindowThreadProcessId(under, &pid) || pid != GetCurrentProcessId())
+        return;
+    const LRESULT hit = SendMessageW(under, WM_NCHITTEST, 0, MAKELPARAM(short(p.x), short(p.y)));
+    SendMessageW(under, WM_SETCURSOR, WPARAM(under), MAKELPARAM(LOWORD(hit), WM_MOUSEMOVE));
 }
 
 // Messages the containers forward to their children's handlers.
@@ -1927,7 +1951,7 @@ LRESULT CALLBACK link_icon_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
 {
     if (msg == WM_SETCURSOR)
     {
-        if (!busy_cursor_here(lp)) SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        if (!busy_cursor_here(h, lp)) SetCursor(LoadCursorW(nullptr, IDC_HAND));
         return TRUE;
     }
     return DefSubclassProc(h, msg, wp, lp);
@@ -2637,7 +2661,7 @@ private:
             // Over a button the arrow, not the edit's I-beam.
             if (reinterpret_cast<HWND>(wp) != h)
             {
-                if (!busy_cursor_here(lp)) SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+                if (!busy_cursor_here(h, lp)) SetCursor(LoadCursorW(nullptr, IDC_ARROW));
                 return TRUE;
             }
             break;
@@ -8405,7 +8429,7 @@ private:
         switch (msg)
         {
         case WM_SETCURSOR:
-            if (!busy_cursor_here(lp))
+            if (!busy_cursor_here(h, lp))
                 SetCursor(LoadCursorW(nullptr,
                                       dir_ == orientation::horizontal ? IDC_SIZEWE : IDC_SIZENS));
             return TRUE;
@@ -9473,7 +9497,7 @@ private:
             return 0;
         }
         case WM_SETCURSOR:
-            if (busy_cursor_here(lp)) return TRUE;
+            if (busy_cursor_here(h_, lp)) return TRUE;
             if (LOWORD(lp) == HTCLIENT)
             {
                 apply_cursor();
@@ -9924,12 +9948,14 @@ public:
         initial_w_ = spec.width;
         initial_h_ = spec.height;
         windows().insert(this);
+        recent().insert(recent().begin(), this);
     }
     ~window_impl() override
     {
         windows().erase(this);
         // WM_DESTROY can't see us once GWLP_USERDATA is cleared below.
-        if (last_shown() == this) last_shown() = nullptr;
+        std::erase(recent(), this);
+        if (hwnd_) busy_windows().erase(hwnd_);
         items.clear();
         widgets.clear();
         doc_tabs.reset();
@@ -10207,7 +10233,8 @@ public:
             if (!deferred.empty()) SetTimer(hwnd_, deferred_timer, USER_TIMER_MINIMUM, nullptr);
         }
         if (!snapshot) SetForegroundWindow(hwnd_);
-        last_shown() = this;
+        std::erase(recent(), this);
+        recent().push_back(this);
         snapshot_if_asked();
     }
     void close() override
@@ -10619,12 +10646,28 @@ public:
         if (auto f = on_finished_) f(role);  // may delete this window: last
     }
 
-private:
-    static window_impl*& last_shown()
+protected:
+    // The app-starting pointer, which WM_SETCURSOR gives (busy_cursor_here).
+    void busy_changed(bool on) override
     {
-        static window_impl* w = nullptr;
-        return w;
+        if (!hwnd_) return;
+        if (on)
+            busy_windows().insert(hwnd_);
+        else
+            busy_windows().erase(hwnd_);
+        ask_pointer_again();
     }
+
+private:
+    // The windows there now, the one shown most recently last, then the
+    // others shown in turn, then those never shown, the oldest nearest the
+    // shown: the order a snapshot falls back on them.
+    static std::vector<window_impl*>& recent()
+    {
+        static std::vector<window_impl*> v;
+        return v;
+    }
+    static window_impl* last_shown() { return recent().empty() ? nullptr : recent().back(); }
 
     int margin() const
     {
@@ -10671,10 +10714,11 @@ private:
 
 public:
     // The window shown last, as drawn now, to a PNG.
-    static bool save_last_shown(const std::string& path)
+    static bool save_last_shown(const std::string& path) { return save(last_shown(), path); }
+    // A window, as drawn now, to a PNG.
+    static bool save(window_impl* w, const std::string& path)
     {
-        window_impl* w = last_shown();
-        if (!w) return false;
+        if (!w || !IsWindow(w->hwnd_)) return false;
         bool ok = false;
         RECT r;
         GetWindowRect(w->hwnd_, &r);
@@ -10775,10 +10819,10 @@ private:
                 if (self->on_key_(e)) return TRUE;
                 break;
             }
-            // ui::set_busy: the app-starting pointer over the window and
-            // its controls, which ask their parent first.
+            // ui::set_busy, window::begin_busy: the app-starting pointer
+            // over the window and its controls, which ask their parent first.
             case WM_SETCURSOR:
-                if (busy_cursor_here(lp)) return TRUE;
+                if (busy_cursor_here(h, lp)) return TRUE;
                 break;
             // The desktop's colours (accent, high contrast, the system
             // colours) may have changed: read them again and repaint all.
@@ -10863,7 +10907,8 @@ private:
                 }
                 break;
             case WM_DESTROY:
-                if (last_shown() == self) last_shown() = nullptr;
+                std::erase(recent(), self);
+                busy_windows().erase(h);
                 // Windows asks for a window's own taskbar id back before it goes.
                 if (self->app_id_) self->set_app_id({});
                 break;
@@ -11557,7 +11602,11 @@ public:
         done(std::move(text));
     }
 
-    bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
+    bool save_snapshot(rap::window* w, const std::string& path) override
+    {
+        return w ? window_impl::save(static_cast<window_impl*>(w), path)
+                 : window_impl::save_last_shown(path);
+    }
 
     // -- printing ----------------------------------------------------------------
 
@@ -12019,15 +12068,7 @@ public:
     {
         if (app_busy == on) return;
         app_busy = on;
-        POINT p;
-        if (!GetCursorPos(&p)) return;
-        HWND under = WindowFromPoint(p);
-        DWORD pid = 0;
-        if (!under || !GetWindowThreadProcessId(under, &pid) || pid != GetCurrentProcessId())
-            return;
-        const LRESULT hit =
-            SendMessageW(under, WM_NCHITTEST, 0, MAKELPARAM(short(p.x), short(p.y)));
-        SendMessageW(under, WM_SETCURSOR, WPARAM(under), MAKELPARAM(LOWORD(hit), WM_MOUSEMOVE));
+        ask_pointer_again();
     }
 
 private:
