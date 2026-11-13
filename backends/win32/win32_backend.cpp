@@ -7384,19 +7384,23 @@ private:
         if (n <= 0 || !TabCtrl_GetItemRect(h_, 0, &first)) return;
         RECT c;
         GetClientRect(h_, &c);
+        // Whole or not at all: a tab not taken out of the row would be
+        // painted over, and the style's row is better than no tab.
         HRGN row = CreateRectRgn(0, 0, c.right, first.bottom);
-        for (int i = 0; i < n; ++i)
+        bool whole = row != nullptr;
+        for (int i = 0; whole && i < n; ++i)
         {
             RECT r;
-            if (!TabCtrl_GetItemRect(h_, i, &r)) continue;
+            whole = TabCtrl_GetItemRect(h_, i, &r) != FALSE;
+            if (!whole) break;
             if (i == current)
                 InflateRect(&r, px(2), px(2));  // the current one stands out of the row
             HRGN tab = CreateRectRgnIndirect(&r);
-            CombineRgn(row, row, tab, RGN_DIFF);
-            DeleteObject(tab);
+            whole = tab && CombineRgn(row, row, tab, RGN_DIFF) != ERROR;
+            if (tab) DeleteObject(tab);
         }
-        FillRgn(dc, row, theme_brush(theme_color::base));
-        DeleteObject(row);
+        if (whole) FillRgn(dc, row, theme_brush(theme_color::base));
+        if (row) DeleteObject(row);
     }
     // New Tab, and Close Tab for the tab clicked (or the current one, from
     // the keyboard), as the keys do.
