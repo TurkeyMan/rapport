@@ -2680,10 +2680,14 @@ public:
         in_band_ = on;
         apply_band();
     }
+    // High contrast on or off: a band field's frame drawn or native; its
+    // font and height measured again.
     void theme_changed() override
     {
+        if (!is_band_field(h_)) return;
         refresh_band_field(h_);
         place_buttons();
+        win_.relayout();
     }
     void set_placeholder(const std::string& p) override
     {
