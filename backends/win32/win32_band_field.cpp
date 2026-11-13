@@ -3,12 +3,9 @@
 
 #include "win32_chrome_palette.h"
 
-#include <uxtheme.h>
-
 #include <algorithm>
 #include <cmath>
 #include <string>
-#include <vector>
 
 namespace rap::win32
 {
