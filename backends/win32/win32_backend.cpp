@@ -9628,6 +9628,9 @@ public:
             doc_tabs->show_all(true);
             if (const int h = strip_height())
             {
+                // Maximised, in the caption, the client area's top is the
+                // window's, a frame's thickness above the monitor's.
+                if (caption_) r.top += caption_inset(hwnd_);
                 RECT strip{r.left, r.top, r.right, r.top + h};
                 if (caption_)
                 {
@@ -10278,7 +10281,9 @@ private:
                 paint_caption_band(h, reinterpret_cast<HDC>(wp), self->caption_height_, true);
                 return 1;
             }
-            if (msg == WM_ACTIVATE || msg == WM_DWMCOMPOSITIONCHANGED)
+            // Maximise and restore move the strip by the frame's thickness:
+            // the extended frame with it.
+            if (msg == WM_ACTIVATE || msg == WM_DWMCOMPOSITIONCHANGED || msg == WM_SIZE)
                 extend_caption_frame(h, self->caption_height_);
         }
         if (self && forward_child_message(h, msg, wp, lp, r)) return r;

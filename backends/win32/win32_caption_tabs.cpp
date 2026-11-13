@@ -968,7 +968,9 @@ RECT caption_buttons(HWND top)
 
 void extend_caption_frame(HWND top, int height)
 {
-    const MARGINS m{0, 0, height, 0};
+    // Down to the strip's bottom, which maximised is the frame's thickness
+    // further down (caption_inset).
+    const MARGINS m{0, 0, height ? height + caption_inset(top) : 0, 0};
     DwmExtendFrameIntoClientArea(top, &m);
     // Mica behind the strip (22621 on, where it's named): none in high
     // contrast, whose colours are the system's own.
@@ -995,16 +997,20 @@ bool caption_frame_message(HWND top, UINT msg, WPARAM wp, LPARAM lp, int strip_h
     switch (msg)
     {
     // The title bar's area is the client's, from the window's top: the
-    // frame's left, right and bottom as they were. Maximised, the window
-    // hangs past the monitor's edges by the frame's thickness, and the
-    // client area starts that far down, where the monitor does.
+    // frame's left, right and bottom as they were. Maximised too: the
+    // window then hangs past the monitor's edges by the frame's thickness,
+    // and the client area's top with it, above the monitor; the strip and
+    // the content are laid out that far down instead (caption_inset). With
+    // the client area's top moved down to the monitor's, the compositor no
+    // longer answers for its caption buttons (DwmDefWindowProc handled
+    // nothing anywhere over them, maximised, on 22621 and 26100 alike).
     case WM_NCCALCSIZE:
     {
         if (!wp) return false;
         auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
         const LONG top_edge = p->rgrc[0].top;
         result = DefWindowProcW(top, msg, wp, lp);
-        p->rgrc[0].top = top_edge + caption_inset(top);
+        p->rgrc[0].top = top_edge;
         return true;
     }
     // The strip's row where the strip lets the mouse through (its empty
@@ -1017,7 +1023,9 @@ bool caption_frame_message(HWND top, UINT msg, WPARAM wp, LPARAM lp, int strip_h
         ScreenToClient(top, &p);
         RECT c;
         GetClientRect(top, &c);
-        if (p.x < c.left || p.x >= c.right || p.y < c.top || p.y >= c.top + strip_height) return false;
+        // Maximised, the band above the strip is past the monitor's top.
+        if (p.x < c.left || p.x >= c.right || p.y < c.top || p.y >= c.top + caption_inset(top) + strip_height)
+            return false;
         if (!IsZoomed(top) && (GetWindowLongPtrW(top, GWL_STYLE) & WS_THICKFRAME))
         {
             const int band = caption_resize_band(top);
@@ -1038,7 +1046,8 @@ void paint_caption_band(HWND top, HDC dc, int strip_height, bool transparent)
 {
     RECT c;
     GetClientRect(top, &c);
-    const RECT band{0, 0, c.right, std::min<LONG>(strip_height, c.bottom)};
+    const int inset = caption_inset(top);
+    const RECT band{0, inset, c.right, std::min<LONG>(inset + strip_height, c.bottom)};
     if (IsRectEmpty(&band)) return;
     const strip_colors colors = colors_for(top, transparent);
     const RECT line{0, band.bottom - line_px(dpi_of(top)), band.right, band.bottom};

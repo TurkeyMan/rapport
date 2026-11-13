@@ -331,12 +331,26 @@ void check_layout(HWND top, HWND strip, const std::string& when)
     GetWindowRect(strip, &s);
     MapWindowPoints(nullptr, top, reinterpret_cast<POINT*>(&s), 2);
     const int height = px(39, dpi);
-    expect(s.left == 0 && s.top == 0 && s.bottom - s.top == height,
-           "the strip at the client area's top left, " + str(height) + " tall" + at + ": " + str(s.left) + "," +
-               str(s.top) + " " + str(s.bottom - s.top) + " tall");
-    if (!IsZoomed(top))
-        expect(title_bar(top) == 0, "no title bar: the client area from the window's top" + at + " (" +
-                                        str(title_bar(top)) + ")");
+    // Maximised, the client area's top is the window's, past the monitor's
+    // by the frame's thickness: the strip starts that far down, at the
+    // monitor's top.
+    const int down = IsZoomed(top) ? GetSystemMetricsForDpi(SM_CYFRAME, dpi) +
+                                         GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+                                   : 0;
+    expect(s.left == 0 && s.top == down && s.bottom - s.top == height,
+           "the strip at the client area's left, " + str(down) + " down, " + str(height) + " tall" + at + ": " +
+               str(s.left) + "," + str(s.top) + " " + str(s.bottom - s.top) + " tall");
+    expect(title_bar(top) == 0, "no title bar: the client area from the window's top" + at + " (" +
+                                    str(title_bar(top)) + ")");
+    if (IsZoomed(top))
+    {
+        RECT on;
+        GetWindowRect(strip, &on);
+        MONITORINFO mi{sizeof mi};
+        GetMonitorInfoW(MonitorFromWindow(top, MONITOR_DEFAULTTONEAREST), &mi);
+        expect(on.top == mi.rcWork.top, "maximised, the strip at the work area's top" + at + ": " +
+                                            str(long(on.top)) + ", the work area's " + str(long(mi.rcWork.top)));
+    }
     // The caption buttons, from the compositor once shown.
     RECT b{};
     if (SUCCEEDED(DwmGetWindowAttribute(top, DWMWA_CAPTION_BUTTON_BOUNDS, &b, sizeof b)) && b.right > b.left)
@@ -1160,15 +1174,12 @@ int main(int argc, char** argv)
     if (g_shown)
     {
         check_screen(top, strip, expected(hc));
-        // Maximised: the frame's thickness above the client area, the
-        // strip at its top, no edge to resize by.
+        // Maximised: the client area still from the window's top, past the
+        // monitor's; the strip at the work area's top (check_layout), no
+        // edge to resize by, and the caption buttons still the system's.
         ShowWindow(top, SW_MAXIMIZE);
         pump();
-        const UINT dpi = GetDpiForWindow(top);
-        const int frame = GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
         expect(IsZoomed(top), "maximised");
-        expect(title_bar(top) == frame, "the client area below the frame's thickness, " + str(frame) + " (" +
-                                            str(title_bar(top)) + ")");
         check_layout(top, strip, "maximised");
         check_hits(top, strip, "maximised");
         ShowWindow(top, SW_RESTORE);

@@ -151,8 +151,10 @@ private:
 
 // Windows 11: tabs in the caption at all.
 bool caption_tabs_supported();
-// The frame's thickness above a maximised window's client area, which hangs
-// past the monitor's edge by it; 0 when it isn't maximised.
+// How far down a maximised window's strip starts: the frame's thickness,
+// by which its client area's top hangs past the monitor's (the client area
+// stays the window's from its top, so the compositor keeps answering for
+// its caption buttons); 0 when it isn't maximised.
 int caption_inset(HWND top);
 // The band at the top of a window that resizes it (the frame's thickness).
 int caption_resize_band(HWND top);
