@@ -2607,7 +2607,7 @@ private:
         GtkWidget* close = gtk_button_new_from_icon_name("window-close-symbolic");
         gtk_button_set_has_frame(GTK_BUTTON(close), false);
         gtk_widget_set_focus_on_click(close, false);
-        gtk_widget_set_tooltip_text(close, rap::i18n::tr("rapport", "Close Tab"));
+        gtk_widget_set_tooltip_text(close, rap::i18n::tr("rapport", "Close tab"));
         g_object_set_data_full(G_OBJECT(close), "rapport-tab", g_strdup(t.id.c_str()), g_free);
         g_signal_connect(close, "clicked",
                          G_CALLBACK(+[](GtkButton* b, gpointer p)

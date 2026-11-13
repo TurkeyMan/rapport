@@ -708,7 +708,7 @@ struct caption_tabs::impl
             if (at.what == part::tab || at.what == part::close) d.owner.caption_close(at.index);
             return 0;
         }
-        // New Tab, and Close Tab for the tab clicked (or the focused one,
+        // New tab, and Close tab for the tab clicked (or the focused one,
         // from the keyboard), as the keys do.
         case WM_CONTEXTMENU:
         {
