@@ -23,6 +23,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -156,8 +157,11 @@ bool any_native_busy()
     return false;
 }
 #elif defined(RAPPORT_TEST_QT6)
+// Its own pointer, or the app's override (ui::set_busy), over it.
 bool shows_busy(QWidget* w)
 {
+    if (const QCursor* o = QGuiApplication::overrideCursor(); o && o->shape() == Qt::BusyCursor)
+        return true;
     return w->testAttribute(Qt::WA_SetCursor) && w->cursor().shape() == Qt::BusyCursor;
 }
 bool native_busy(const char* title)
@@ -193,6 +197,7 @@ uint32_t png_width(const std::filesystem::path& p)
 struct run_state
 {
     rap::ui* ui = nullptr;
+    std::function<std::unique_ptr<rap::window>(const char*, int)> make;
     std::unique_ptr<rap::window> a, b;
     std::filesystem::path dir;
     rap::subscription poll;
@@ -246,6 +251,20 @@ void busy_checks(run_state& s)
     expect(a.busy() && native_busy("busy a"), "ui::set_busy(false) leaves a window's own busy");
     a.end_busy();
     expect(!any_native_busy(), "and once it ends, nothing busy");
+
+    // A window made while the app is busy: busy from the start.
+    s.ui->set_busy(true);
+    auto c = s.make("busy c", 25);
+    if (shows) c->show();
+    expect(native_busy("busy c"), "ui::set_busy(true), then a new window: it shows busy");
+    c->begin_busy();
+    s.ui->set_busy(false);
+    expect(c->busy() && native_busy("busy c"),
+           "its own begin_busy, then ui::set_busy(false): still busy");
+    expect(native_idle("busy a"), "and the window not busy of its own isn't");
+    c->end_busy();
+    expect(!c->busy() && native_idle("busy c") && !any_native_busy(),
+           "its end_busy: nothing busy");
 }
 
 // Both windows created (and shown, where they may be); b shown last.
@@ -298,6 +317,7 @@ int main(int argc, char** argv)
         const rap::extent width{float(chars), rap::extent::unit::chars};
         return (*ui)->create(window{title, {canvas{}.stretch()}}.size(width, 8_lines));
     };
+    s.make = make;
 
     // The pointer first, on windows of their own.
     s.a = make("busy a", 30);
