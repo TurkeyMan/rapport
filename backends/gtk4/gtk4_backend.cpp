@@ -1120,6 +1120,7 @@ protected:
     void on_disconnect() override
     {
         alive_ = false;
+        path_icons_.cancel();
         if (popover_) gtk_widget_unparent(popover_);
         popover_ = nullptr;
     }
@@ -1182,7 +1183,9 @@ private:
     GIcon* g_icon_of(const rap::icon& icon)
     {
         if (!icon.path.empty())
-            if (GIcon* g = path_g_icon(icon.path, widget_cancellable(w_),
+            // Reaches this tree, not only its widget (which may outlive it):
+            // cancelled as either goes.
+            if (GIcon* g = path_g_icon(icon.path, path_icons_.get(w_),
                                        [this, path = icon.path](GIcon* found) { path_icon_found(path, found); }))
                 return g;
         return !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
@@ -1545,6 +1548,7 @@ private:
     bool quiet_ = false;
     bool alive_ = true;
     bool binding_ = false;  // a box set to the app's state, not clicked
+    owner_cancellable path_icons_;  // its rows' path icons: answers reach this tree
 };
 
 class date_picker_impl : public widget_base<rap::date_picker>
@@ -3219,6 +3223,7 @@ protected:
     {
         alive_ = false;
         *life_ = false;
+        path_icons_.cancel();
         stop_dnd_tick();
         set_line(nullptr, nullptr);
         end_drag_out();
@@ -4103,7 +4108,8 @@ private:
         const icon icon = model_->icon(row, ctx.column);
         // A path's own once GIO has found it (asked here, never waited for:
         // the rows are bound again when it comes), its name's meanwhile.
-        GIcon* gicon = !icon.path.empty() ? path_g_icon(icon.path, widget_cancellable(w_),
+        // Reaches this list, not only its widget (which may outlive it).
+        GIcon* gicon = !icon.path.empty() ? path_g_icon(icon.path, path_icons_.get(w_),
                                                         [this](GIcon*) { rows_changed(0, SIZE_MAX); })
                                           : nullptr;
         if (!gicon)
@@ -4248,6 +4254,7 @@ private:
     std::function<menu(std::optional<size_t>)> context_menu_;
     std::function<menu(size_t)> header_menu_;
     std::function<menu(size_t, size_t, point_f)> cell_menu_;
+    owner_cancellable path_icons_;  // its rows' path icons: answers reach this list
 };
 
 // -- window -------------------------------------------------------------------

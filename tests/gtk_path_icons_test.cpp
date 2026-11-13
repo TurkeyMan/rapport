@@ -5,6 +5,10 @@
 // that goes before its answer comes isn't told. Then through a tree in a
 // window that's never shown: its rows show the fallback first and GIO's
 // icon once it's found (GTK 3's rows are read back from the tree store).
+// And a window destroyed while its tree's and list's answers are still
+// coming, their native widgets kept alive by a ref of their own: the
+// answers reach neither the C++ parts that are gone nor the widgets (run
+// under ASan, a use after free is a failure).
 // Off the desktop:
 //   offscreen.sh gtk3 rapport-path-icons-test-gtk3
 //   offscreen.sh gtk4 rapport-path-icons-test-gtk4
@@ -19,6 +23,7 @@
 #include <cstdlib>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -54,6 +59,58 @@ std::string text_of(GIcon* g)
 }
 
 const char* const fallback = "rapport-test-fallback";
+
+struct files : rap::list_model
+{
+    std::vector<std::string> paths;
+    size_t row_count() const override { return paths.size(); }
+    std::string text(size_t row, size_t) const override { return paths[row]; }
+    rap::icon icon(size_t row, size_t column) const override
+    {
+        return column == 0 ? rap::icon::for_path(paths[row], fallback) : rap::icon{};
+    }
+};
+
+// The window titled `title`'s widgets that `is` picks, in order.
+#ifdef RAPPORT_TEST_GTK3
+void collect(GtkWidget* w, bool (*is)(GtkWidget*), std::vector<GtkWidget*>& out)
+{
+    if (is(w)) out.push_back(w);
+    if (!GTK_IS_CONTAINER(w)) return;
+    GList* kids = gtk_container_get_children(GTK_CONTAINER(w));
+    for (GList* l = kids; l; l = l->next) collect(GTK_WIDGET(l->data), is, out);
+    g_list_free(kids);
+}
+GtkWidget* window_titled(const char* title)
+{
+    GtkWidget* found = nullptr;
+    GList* tops = gtk_window_list_toplevels();
+    for (GList* l = tops; l && !found; l = l->next)
+        if (GTK_IS_WINDOW(l->data) && !g_strcmp0(gtk_window_get_title(GTK_WINDOW(l->data)), title))
+            found = GTK_WIDGET(l->data);
+    g_list_free(tops);
+    return found;
+}
+#else
+void collect(GtkWidget* w, bool (*is)(GtkWidget*), std::vector<GtkWidget*>& out)
+{
+    // Not inside one found (a column view's rows are a list view of its own).
+    if (is(w)) return out.push_back(w);
+    for (GtkWidget* c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c)) collect(c, is, out);
+}
+GtkWidget* window_titled(const char* title)
+{
+    GListModel* tops = gtk_window_get_toplevels();
+    GtkWidget* found = nullptr;
+    for (guint i = 0; i < g_list_model_get_n_items(tops) && !found; ++i)
+    {
+        auto* w = GTK_WIDGET(g_list_model_get_item(tops, i));
+        if (!g_strcmp0(gtk_window_get_title(GTK_WINDOW(w)), title)) found = w;
+        g_object_unref(w);
+    }
+    return found;
+}
+#endif
 
 #ifdef RAPPORT_TEST_GTK3
 GtkWidget* find_tree_view(GtkWidget* w)
@@ -172,6 +229,34 @@ int main(int argc, char** argv)
         return t;
     };
     using namespace rap::layout;
+
+    // -- a window gone while its answers are coming, its widgets kept -------
+    {
+        files model;
+        model.paths = {"/var", "/etc", "/opt"};
+        auto doomed = (*ui)->create(
+            window{"gone", {vbox{tree{{item("var", "/var"), item("etc", "/etc"), item("opt", "/opt")}}.stretch(),
+                                 list{{{.title = "Name", .stretch = true}}, &model}.stretch()}}});
+        GtkWidget* top = window_titled("gone");
+        std::vector<GtkWidget*> kept;
+#ifdef RAPPORT_TEST_GTK3
+        if (top) collect(top, +[](GtkWidget* w) -> bool { return GTK_IS_TREE_VIEW(w); }, kept);
+        const size_t want = 2;  // the tree's view and the list's
+#else
+        if (top)
+            collect(top, +[](GtkWidget* w) -> bool { return GTK_IS_LIST_VIEW(w) || GTK_IS_COLUMN_VIEW(w); }, kept);
+        const size_t want = 2;  // the tree's list view and the list's column view
+#endif
+        expect(kept.size() == want, "the gone window's tree and list widgets are there");
+        for (GtkWidget* w : kept) g_object_ref(w);
+        doomed.reset();  // its parts go; their widgets don't
+        expect(window_titled("gone") == nullptr, "the window's gone");
+        run_until([] { return false; }, 3);  // the answers come meanwhile
+        for (GtkWidget* w : kept) g_object_unref(w);
+        run_until([] { return false; }, 1);
+        expect(true, "its answers came after it went, its widgets kept: nothing touched what's gone");
+    }
+
     // Paths the test's own lookups above haven't asked (the backend's cache
     // is its own, but so the rows start on the fallback either way).
     auto win = (*ui)->create(window{"t", {tree{{item("root", "/"), item("home", home), item("usr", "/usr")}}}});

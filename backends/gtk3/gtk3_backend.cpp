@@ -1230,6 +1230,7 @@ public:
 protected:
     void on_disconnect() override
     {
+        path_icons_.cancel();
         menu_.destroy();
         clear_refs();
     }
@@ -1304,7 +1305,8 @@ private:
         if (!icon.path.empty())
         {
             row_paths_[id] = icon.path;
-            g = path_g_icon(icon.path, widget_cancellable(w_),
+            // Reaches this tree, not only its widget: cancelled as either goes.
+            g = path_g_icon(icon.path, path_icons_.get(w_),
                             [this, path = icon.path](GIcon* found) { path_icon_found(path, found); });
         }
         else
@@ -1429,6 +1431,7 @@ private:
     popup_menu menu_;
     bool quiet_ = false;
     bool focusing_ = false;  // in focus-in: GTK's own cursor placement
+    owner_cancellable path_icons_;  // its rows' path icons: answers reach this tree
 };
 
 class date_picker_impl : public widget_base<rap::date_picker>
