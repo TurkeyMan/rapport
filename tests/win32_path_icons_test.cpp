@@ -8,11 +8,14 @@
 // machine, a CI runner's included). Asking again, or in another spelling,
 // doesn't ask the shell again.
 //   rapport-win32-path-icons-test
+// And by hand, a path that can't answer (never mapped as a drive):
+//   rapport-win32-path-icons-test --slow \\10.255.255.1\share
 #include "win32_shell_icons.h"
 
 #include <windows.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <map>
@@ -85,12 +88,66 @@ bool pump_until(F done, int seconds)
     return true;
 }
 
+// --slow <path>: a manual check, not run by ctest. Asks for `path`'s icon
+// (an unreachable UNC path, say \\10.255.255.1\share) and keeps this thread
+// pumping meanwhile: how long asking took, the longest this thread was ever
+// kept from its messages, how long the shell took to give up, and what it
+// gave.
+int slow_check(const std::string& path)
+{
+    using namespace rap::win32;
+    using clock = std::chrono::steady_clock;
+    const DWORD self = GetCurrentThreadId();
+    MSG m;
+    PeekMessageW(&m, nullptr, 0, 0, PM_NOREMOVE);
+    set_path_icon_post(
+        [self](std::function<void()> f)
+        {
+            auto* job = new std::function<void()>(std::move(f));
+            if (!PostThreadMessageW(self, WM_APP, 0, reinterpret_cast<LPARAM>(job))) delete job;
+        });
+    bool told = false;
+    add_path_icon_listener([&](const std::string&, int) { told = true; });
+    const auto t0 = clock::now();
+    const path_icon_state first = request_path_icon(path, 16);
+    const auto asked = clock::now();
+    auto ms = [](clock::duration d) { return long(std::chrono::duration_cast<std::chrono::milliseconds>(d).count()); };
+    std::printf("asked for %s: %s, returned in %ld ms\n", path.c_str(),
+                first == path_icon_state::pending ? "pending" : "not pending", ms(asked - t0));
+    long longest = 0;
+    auto last = clock::now();
+    while (!told && clock::now() - t0 < std::chrono::minutes(3))
+    {
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLPOSTMESSAGE);
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
+            if (m.message == WM_APP)
+            {
+                auto* job = reinterpret_cast<std::function<void()>*>(m.lParam);
+                (*job)();
+                delete job;
+            }
+        const auto now = clock::now();
+        longest = (std::max)(longest, ms(now - last));
+        last = now;
+    }
+    const path_icon_state end = request_path_icon(path, 16);
+    std::printf("told after %ld ms: %s; this thread's longest wait between messages: %ld ms\n", ms(clock::now() - t0),
+                !told ? "never (gave up waiting after 3 minutes)"
+                : end == path_icon_state::ready ? "ready (an icon)"
+                : end == path_icon_state::none  ? "none (the fallback stays)"
+                                                : "still pending",
+                longest);
+    set_path_icon_post({});
+    return 0;
+}
+
 }  // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (argc == 3 && std::string(argv[1]) == "--slow") return slow_check(argv[2]);
     using namespace rap::win32;
     MSG m;
     PeekMessageW(&m, nullptr, 0, 0, PM_NOREMOVE);  // this thread's queue, for the posts
