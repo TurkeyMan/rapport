@@ -23,7 +23,8 @@
 // then on, and the owner is never called again. Inside a message sent from
 // another thread COM refuses UIA's disconnect: the elements are dead to
 // clients at once all the same, and the disconnect is retried from a thread
-// timer (deferred_disconnects).
+// timer (deferred_disconnects); if the timer can't be set, from the next
+// message the provider handles.
 #pragma once
 
 #include <windows.h>
@@ -139,6 +140,10 @@ public:
     // thread's message loop dispatches. How many wait on this thread. For
     // tests.
     static size_t deferred_disconnects();
+    // Whether the retry's timer is set on this thread; and the next setting
+    // of it made to fail, as SetTimer can. For tests.
+    static bool retry_armed();
+    static void fail_next_retry_arming();
 
     struct state;
 

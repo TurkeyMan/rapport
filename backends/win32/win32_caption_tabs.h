@@ -1,0 +1,175 @@
+// A window's document tabs in its title bar, as Windows 11's Explorer has
+// them (window_spec::tabs, stage 2): the strip drawn where the caption was,
+// the system's own minimise, maximise and close buttons kept beside it.
+//
+// Two parts. caption_tabs is the strip: a child window across the top of the
+// client area, up to the caption buttons, that draws its tabs itself with
+// premultiplied alpha, so what it leaves empty is transparent to the desktop
+// compositor and the window's backdrop (Mica) shows through there, and that
+// serves its tabs to UI Automation (win32_uia). Where it's empty it lets the
+// mouse through to the window (HTTRANSPARENT), which then says it's the
+// caption: dragged, double-clicked and right-clicked as one. The caption_*
+// functions are the window's side: its frame extended into the client area
+// by the strip's height, the title bar's non-client area taken away, its hit
+// tests, and the strip's row beside the caption buttons painted to match.
+//
+// Only on Windows 11 (build 22000 on), where the caption buttons are drawn
+// over an extended frame and Mica is the title bar's; before it, and on a
+// window with a menu bar or a dialog, the tabs are stage 1's strip in the
+// client area (document_tabs_impl).
+#pragma once
+
+#include "win32_common.h"
+#include "win32_uia.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace rap::win32
+{
+
+// Explorer's strip as measured at 100% on Windows 11 (24H2), in logical px.
+// Its colours aren't measured here: they're the theme's roles.
+namespace caption_metrics
+{
+// The strip, from the window's top to the line under it (the line its
+// last row): Explorer's is 39.
+inline constexpr float height = 39;
+// The current tab: 8 in from the left, 8 down from the top, its top corners
+// rounded by 8; each tab about 240 wide where they fit.
+inline constexpr float first_tab = 8, tab_top = 8, corner = 8;
+inline constexpr float widest_tab = 240;
+// "+": a button whose glyph's centre is about 18 after the last tab.
+inline constexpr float add_gap = 4, add_size = 28;
+// What's left before the caption buttons, as Explorer leaves to drag by.
+inline constexpr float end_gap = 8;
+// The close button's box at a tab's end, and the tab's icon.
+inline constexpr float close_size = 24, close_inset = 6, icon = 16, text_inset = 12, text_gap = 8;
+}  // namespace caption_metrics
+
+// One tab as the strip shows it. `key` is the caller's, stable for as long
+// as the tab is there (UI Automation's elements are made from it); the icon
+// is the caller's, kept until it calls set_tabs again.
+struct caption_tab
+{
+    unsigned key = 0;
+    std::wstring title;
+    std::wstring tooltip;  // empty: the title
+    HICON icon = nullptr;
+};
+
+// What the user did to the strip, told to its owner on the window's thread.
+// Each may change the tabs (set_tabs), or destroy the window: the strip does
+// nothing more once it's told.
+class caption_tabs_owner
+{
+public:
+    virtual void caption_select(int index) = 0;  // a click, Enter or Space, UIA's Select
+    virtual void caption_close(int index) = 0;   // its close button, a middle click, Delete
+    virtual void caption_new() = 0;              // "+"
+    // A right click on tab `index` (-1: none), or the menu key; `screen`
+    // where the menu goes.
+    virtual void caption_menu(int index, POINT screen) = 0;
+
+protected:
+    ~caption_tabs_owner() = default;
+};
+
+class caption_tabs final : public uia_owner
+{
+public:
+    // A child of `parent` (a top-level window), hidden until placed.
+    // `tooltip` is a tooltip control for it, which it then owns (null: none).
+    caption_tabs(HWND parent, caption_tabs_owner& owner, HWND tooltip);
+    ~caption_tabs();
+    caption_tabs(const caption_tabs&) = delete;
+    caption_tabs& operator=(const caption_tabs&) = delete;
+
+    HWND hwnd() const { return hwnd_; }
+    // The strip's height at `dpi`, the line under it included.
+    static int height(UINT dpi);
+
+    void set_tabs(std::vector<caption_tab> tabs, int current);
+    void set_current(int current);
+    int count() const { return int(tabs_.size()); }
+    int current() const { return current_; }
+
+    // How it's drawn and hit, from the window's frame: in the caption,
+    // transparent where empty (false: opaque, the window colour there, as
+    // in fullscreen or high contrast), with the top `resize_band` px the
+    // window's to resize by.
+    void set_frame(bool transparent, int resize_band);
+    // The desktop's colours, fonts or DPI changed: made and drawn anew.
+    void refresh();
+
+    // The keyboard focus, as F6 gives it: on the current tab.
+    void take_focus();
+    bool has_focus() const { return GetFocus() == hwnd_; }
+
+    // What's at a point of the strip (its client coordinates).
+    enum class part
+    {
+        none,  // its empty part: the caption's
+        tab,
+        close,
+        add,
+    };
+    struct hit
+    {
+        part what = part::none;
+        int index = -1;
+    };
+    hit hit_test(POINT p) const;
+    // A part's rectangle (client coordinates); false if there's none (a tab
+    // scrolled out of sight).
+    bool part_rect(part what, int index, RECT& out) const;
+
+    // A message the test tools send it (RegisterWindowMessage
+    // "rapport-caption-tabs"): wParam's low word what to tell (0 the tabs'
+    // count, 1 the current one, 2 the one with the focus, 3, 4 and 5 a
+    // tab's, its close button's and "+"'s rectangle into the RECT lParam
+    // points to, in the process), its high word the tab.
+    static UINT query_message();
+
+    // uia_owner
+    void uia_invoke(int id) override;
+    void uia_select(int id) override;
+    void uia_focus(int id) override;
+
+    struct impl;
+
+private:
+    HWND hwnd_ = nullptr;
+    std::unique_ptr<impl> d_;
+    std::vector<caption_tab> tabs_;
+    int current_ = -1;
+    friend struct impl;
+};
+
+// -- the window's side --------------------------------------------------------
+
+// Windows 11: tabs in the caption at all.
+bool caption_tabs_supported();
+// The frame's thickness above a maximised window's client area, which hangs
+// past the monitor's edge by it; 0 when it isn't maximised.
+int caption_inset(HWND top);
+// The band at the top of a window that resizes it (the frame's thickness).
+int caption_resize_band(HWND top);
+// Where the caption buttons are, in the window's client coordinates: from
+// the compositor once it knows them, else where Windows 11 puts them.
+RECT caption_buttons(HWND top);
+// The frame extended down over the strip, `height` px, with Mica behind it
+// (none in high contrast); and back to the plain frame.
+void extend_caption_frame(HWND top, int height);
+void release_caption_frame(HWND top, bool dialog, bool fullscreen);
+// The window's messages while its tabs are in the caption, first: the
+// compositor's (the caption buttons'), the non-client area's size (the title
+// bar's gone) and its hit tests. True if handled, with `result`.
+bool caption_frame_message(HWND top, UINT msg, WPARAM wp, LPARAM lp, int strip_height, LRESULT& result);
+// The strip's row where the strip isn't (it's a child: the window's paint
+// is clipped around it), under the caption buttons: as the strip's empty
+// part (transparent, or opaque) with its line along the bottom.
+void paint_caption_band(HWND top, HDC dc, int strip_height, bool transparent);
+
+}  // namespace rap::win32

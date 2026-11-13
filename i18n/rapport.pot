@@ -250,3 +250,15 @@ msgstr ""
 #: document tabs (Windows): a tab's right-click menu
 msgid "_Close Tab"
 msgstr ""
+
+#: document tabs (Windows 11, in the caption): the tabs' name to UI Automation
+msgid "Tabs"
+msgstr ""
+
+#: document tabs (Windows 11, in the caption): a tab's close button, its tooltip and name
+msgid "Close tab"
+msgstr ""
+
+#: document tabs (Windows 11, in the caption): the button that adds a tab, its tooltip and name
+msgid "New tab"
+msgstr ""

@@ -524,11 +524,15 @@ private:
 // element removed, or a window destroyed, while handling one. The node is
 // dead to clients already (its incarnation is gone); its disconnect waits
 // here, holding the reference, for a thread timer: dispatched by the
-// thread's message loop, not by a window, which may be gone by then.
+// thread's message loop, not by a window, which may be gone by then. If the
+// timer can't be set (SetTimer fails: the desktop's out of timers), the
+// next message any provider of the thread handles sets it again (arm), so
+// the nodes aren't held for good.
 struct deferred_disconnects
 {
     std::vector<IRawElementProviderSimple*> nodes;
     UINT_PTR timer = 0;
+    bool fail_next = false;  // for tests: the next SetTimer as if it failed
 };
 thread_local deferred_disconnects t_deferred;
 
@@ -539,6 +543,14 @@ bool refused_callout(HRESULT hr)
 }
 
 void CALLBACK retry_disconnects(HWND, UINT, UINT_PTR, DWORD);
+
+// The retry's timer, set if nodes wait and it isn't.
+void arm()
+{
+    if (t_deferred.timer || t_deferred.nodes.empty()) return;
+    if (std::exchange(t_deferred.fail_next, false)) return;
+    t_deferred.timer = SetTimer(nullptr, 0, 10, retry_disconnects);
+}
 
 // Disconnects `n` and drops the reference given with it, now if COM allows
 // the call, otherwise once it does.
@@ -552,7 +564,7 @@ void disconnect_node(IRawElementProviderSimple* n)
         return;
     }
     t_deferred.nodes.push_back(n);
-    if (!t_deferred.timer) t_deferred.timer = SetTimer(nullptr, 0, 10, retry_disconnects);
+    arm();
 }
 
 void CALLBACK retry_disconnects(HWND, UINT, UINT_PTR, DWORD)
@@ -578,6 +590,16 @@ void CALLBACK retry_disconnects(HWND, UINT, UINT_PTR, DWORD)
 size_t uia_provider::deferred_disconnects()
 {
     return t_deferred.nodes.size();
+}
+
+bool uia_provider::retry_armed()
+{
+    return t_deferred.timer != 0;
+}
+
+void uia_provider::fail_next_retry_arming()
+{
+    t_deferred.fail_next = true;
 }
 
 node* uia_provider::state::get(int id)
@@ -634,6 +656,9 @@ uia_provider::~uia_provider()
 
 bool uia_provider::handle_message(UINT msg, WPARAM wp, LPARAM lp, LRESULT& result)
 {
+    // Disconnects waiting with no timer to retry them (SetTimer failed):
+    // it's set again now.
+    if (!t_deferred.nodes.empty() && !t_deferred.timer) arm();
     state& s = *state_;
     if (msg == WM_GETOBJECT)
     {
