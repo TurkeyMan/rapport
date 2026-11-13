@@ -2228,6 +2228,8 @@ public:
     // GtkPaned reports a drag no differently from layout, so a drag is a
     // press and release on a divider with the position changed in between,
     // seen in the capture phase before the paned's own gesture takes them.
+    // A press anywhere else in the panes (a button in one, held while the
+    // window relaid them out) is no drag (#30).
     void on_moved(std::function<void()> f) override
     {
         const bool first = !moved_;
@@ -2244,7 +2246,12 @@ public:
                     auto* self = static_cast<splitter_impl*>(p);
                     const GdkEventType type = gdk_event_get_event_type(e);
                     if (type == GDK_BUTTON_PRESS)
-                        self->pressed_ = self->sizes();
+                    {
+                        if (rap::gtk_split::press_on_handle(self->w_, e))
+                            self->pressed_ = self->sizes();
+                        else
+                            self->pressed_.clear();
+                    }
                     else if (type == GDK_BUTTON_RELEASE)
                     {
                         if (!self->pressed_.empty() && self->sizes() != self->pressed_ &&
