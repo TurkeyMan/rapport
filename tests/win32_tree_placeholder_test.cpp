@@ -6,6 +6,7 @@
 #include <commctrl.h>
 
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -75,6 +76,24 @@ DWORD windows_build()
     const auto get_version = reinterpret_cast<get_version_fn>(GetProcAddress(GetModuleHandleW(L"ntdll"), "RtlGetVersion"));
     OSVERSIONINFOW info{sizeof info};
     return get_version && get_version(&info) == 0 ? info.dwBuildNumber : 0;
+}
+
+// Where the tree stands, for a failed paging check: what's selected, how
+// many rows show, which is first, and comctl32's version.
+void where(HWND tree, rap::tree* t)
+{
+    wchar_t first[64] = {};
+    TVITEMW it{TVIF_TEXT};
+    it.hItem = TreeView_GetFirstVisible(tree);
+    it.pszText = first;
+    it.cchTextMax = 64;
+    if (it.hItem) TreeView_GetItem(tree, &it);
+    RECT client{};
+    GetClientRect(tree, &client);
+    std::printf("     selected %s, %d rows visible of height %d in %ld px, first visible %ls, comctl32 %d\n",
+                t->selected().value_or("(none)").c_str(), int(SendMessageW(tree, TVM_GETVISIBLECOUNT, 0, 0)),
+                int(SendMessageW(tree, TVM_GETITEMHEIGHT, 0, 0)), client.bottom, first,
+                int(SendMessageW(tree, CCM_GETVERSION, 0, 0)));
 }
 
 rap::tree_item item(std::string id, bool lazy)
@@ -165,37 +184,92 @@ int main(int argc, char** argv)
         expect(TreeView_GetImageList(tree_hwnd, TVSIL_STATE) != nullptr, "a nested box in an answer has its images");
     }
 
-    // The paging keys, landing exactly on a placeholder.
+    // The paging keys, landing exactly on a placeholder. Where a page key
+    // lands depends on how many rows show, which depends on the scroll bars
+    // (how wide the widest row is, in the theme's font) and on when the tree
+    // works them out. So it's found first on a tree made just as the real
+    // one is (the same rows, the open lazy row with its "Loading…"), with
+    // the lazy row far below the first pages, the same keys pressed the
+    // same way: the row PageDown reaches from the top, and the row PageUp
+    // starts from to come back to that one. The placeholder then goes there.
+    // The window is made wide enough first that no row needs a horizontal
+    // scroll bar: a tree sizes it from the rows it shows, so with the
+    // placeholder's indented "Loading…" the widest, the bar (and the row it
+    // takes) came and went with where the placeholder was.
     {
-        std::vector<rap::tree_item> items;
-        for (int i = 0; i < 200; ++i) items.push_back(item("i" + std::to_string(i), false));
-        t->set_items(items);
-        const int visible = int(SendMessageW(tree_hwnd, TVM_GETVISIBLECOUNT, 0, 0));
-        items.clear();
-        for (int i = 0; i < visible - 2; ++i) items.push_back(item("i" + std::to_string(i), false));
-        items.push_back(item("lazy", true));
-        items.push_back(item("after", false));
-        for (int i = 0; i < 100; ++i) items.push_back(item("tail" + std::to_string(i), false));
-        t->set_items(items);
-        t->set_expanded("lazy", true);
+        HWND top = GetAncestor(tree_hwnd, GA_ROOT);
+        RECT wr{};
+        GetWindowRect(top, &wr);
+        const LONG wide = wr.right - wr.left > 600 ? wr.right - wr.left : 600;
+        SetWindowPos(top, nullptr, 0, 0, wide, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        for (int round = 0; round < 10; ++round)
+        {
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+            Sleep(5);
+        }
+        const auto index_of = [](const std::optional<std::string>& id) {
+            return id && id->size() > 1 && (*id)[0] == 'i' ? std::stoi(id->substr(1)) : -1;
+        };
+        const auto made = [&](int rows_before_lazy) {
+            std::vector<rap::tree_item> items;
+            for (int i = 0; i < rows_before_lazy; ++i) items.push_back(item("i" + std::to_string(i), false));
+            items.push_back(item("lazy", true));
+            items.push_back(item("after", false));
+            for (int i = 0; i < 200; ++i) items.push_back(item("tail" + std::to_string(i), false));
+            t->set_items(items);
+            t->set_expanded("lazy", true);
+            return items;
+        };
+        made(120);
         t->select("i0");
         press(tree_hwnd, VK_NEXT);
-        expect(t->selected() == "after", "PageDown landing on a placeholder goes on to the next row");
+        const int lands = index_of(t->selected());  // PageDown from the top
+        int from = -1;  // where PageUp comes back to `lands` from
+        for (int x = lands + 1; lands > 0 && x < 100 && from < 0; ++x)
+        {
+            t->select("i0");
+            press(tree_hwnd, VK_NEXT);
+            t->select("i" + std::to_string(lands + 1));  // where the real tree's PageDown ends
+            t->select("i" + std::to_string(x));
+            press(tree_hwnd, VK_PRIOR);
+            if (index_of(t->selected()) == lands) from = x;
+        }
+        std::printf("     PageDown from the top lands on row %d; PageUp from row %d comes back to it\n", lands, from);
+        expect(lands > 1 && from > lands, "a page key's landing row is found on the same tree with the placeholder further down");
+        if (lands > 1 && from > lands)
+        {
+            // Row `lands` the placeholder: plain rows, "lazy" (open) before
+            // it, "after" and the tail behind.
+            std::vector<rap::tree_item> items = made(lands - 1);
+            const auto id_at = [&](int row) -> std::string {
+                return row < lands - 1  ? "i" + std::to_string(row)
+                       : row == lands - 1 ? "lazy"
+                       : row == lands + 1 ? "after"
+                                          : "tail" + std::to_string(row - lands - 2);
+            };
+            t->select("i0");
+            press(tree_hwnd, VK_NEXT);
+            expect(t->selected() == "after", "PageDown landing on a placeholder goes on to the next row");
+            if (t->selected() != "after") where(tree_hwnd, t);
 
-        // PageUp moves by a page less one, so this row lands on the placeholder.
-        t->select("tail" + std::to_string(visible - 3));
-        press(tree_hwnd, VK_PRIOR);
-        expect(t->selected() == "lazy", "PageUp landing on one goes on to the row before");
+            t->select("i0");
+            press(tree_hwnd, VK_NEXT);
+            t->select(id_at(from));
+            press(tree_hwnd, VK_PRIOR);
+            expect(t->selected() == "lazy", "PageUp landing on one goes on to the row before");
+            if (t->selected() != "lazy") where(tree_hwnd, t);
 
-        // The placeholder the very last row: nothing beyond, so back the other way.
-        items.resize(size_t(visible - 1));
-        t->set_items(items);
-        t->set_expanded("lazy", true);
-        t->select("i0");
-        press(tree_hwnd, VK_NEXT);
-        expect(t->selected() == "lazy", "PageDown onto a last placeholder stops on the row before it");
-        press(tree_hwnd, VK_NEXT);
-        expect(t->selected() == "lazy", "and pressing it again isn't stuck anywhere new");
+            // The placeholder the very last row: nothing beyond, so back the other way.
+            items.resize(size_t(lands));
+            t->set_items(items);
+            t->set_expanded("lazy", true);
+            t->select("i0");
+            press(tree_hwnd, VK_NEXT);
+            expect(t->selected() == "lazy", "PageDown onto a last placeholder stops on the row before it");
+            press(tree_hwnd, VK_NEXT);
+            expect(t->selected() == "lazy", "and pressing it again isn't stuck anywhere new");
+        }
     }
 
     const LONG plain_style = GetWindowLongW(tree_hwnd, GWL_STYLE);

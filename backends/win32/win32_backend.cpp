@@ -187,25 +187,80 @@ key_event make_key_event(WPARAM vk, LPARAM lp, bool press)
 
 // -- comctl32 v6 --------------------------------------------------------------
 
-// Without an application manifest the process binds comctl32 v5 at load,
-// while our activation context makes the controls themselves v6. Image
-// lists handed to v6 controls must come from v6 too (v5 ones have no alpha),
-// so these functions are resolved from the v6 DLL once it's active.
+// An app whose manifest doesn't ask for common controls 6 (or that has
+// none) binds comctl32 v5 at load. Our context (enable_visual_styles)
+// makes the controls v6: the process's default where it can be, and
+// active on the calling thread around what makes controls (comctl6_scope)
+// and only then, so that nothing of ours is left on a thread's stack of
+// contexts when ui::load returns, over one its caller pushed and will pop.
+HANDLE g_comctl6_context = INVALID_HANDLE_VALUE;
+
+struct comctl6_scope
+{
+    comctl6_scope()
+    {
+        if (g_comctl6_context != INVALID_HANDLE_VALUE) on_ = ActivateActCtx(g_comctl6_context, &cookie_);
+    }
+    ~comctl6_scope()
+    {
+        if (on_) DeactivateActCtx(0, cookie_);
+    }
+    comctl6_scope(const comctl6_scope&) = delete;
+    comctl6_scope& operator=(const comctl6_scope&) = delete;
+
+private:
+    ULONG_PTR cookie_ = 0;
+    BOOL on_ = FALSE;
+};
+
+// Every window we make, under common controls 6: controls (the system's
+// BUTTON, EDIT and STATIC are v6's too) and what holds them.
+HWND make_window(DWORD ex_style, const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w,
+                   int h, HWND parent, HMENU menu, HINSTANCE instance, void* param)
+{
+    comctl6_scope v6;
+    return CreateWindowExW(ex_style, cls, text, style, x, y, w, h, parent, menu, instance, param);
+}
+
+// Image lists handed to v6 controls must come from v6 too (v5 ones have no
+// alpha), so they're made and changed only by these, resolved from the v6
+// DLL once our context is set up, not the import an app without common
+// controls 6 in its manifest binds to v5.
 struct comctl6
 {
     decltype(&ImageList_Create) create = ImageList_Create;
     decltype(&ImageList_Destroy) destroy = ImageList_Destroy;
     decltype(&ImageList_ReplaceIcon) replace_icon = ImageList_ReplaceIcon;
     decltype(&ImageList_AddMasked) add_masked = ImageList_AddMasked;
+    decltype(&ImageList_Add) add = ImageList_Add;
+    decltype(&ImageList_Replace) replace = ImageList_Replace;
+    decltype(&ImageList_GetImageCount) image_count = ImageList_GetImageCount;
+    decltype(&ImageList_GetIconSize) icon_size = ImageList_GetIconSize;
+    // The classes' registration too: activating a context doesn't redirect
+    // the imported one, v5's in an app without common controls 6.
+    decltype(&InitCommonControlsEx) init = InitCommonControlsEx;
 
     void resolve()
     {
-        HMODULE m = LoadLibraryW(L"comctl32.dll");  // under the activation context: v6
+        comctl6_scope v6;
+        HMODULE m = LoadLibraryW(L"comctl32.dll");  // under our context: v6
         if (!m) return;
-        if (auto f = reinterpret_cast<decltype(&ImageList_Create)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_Create")))) create = f;
-        if (auto f = reinterpret_cast<decltype(&ImageList_Destroy)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_Destroy")))) destroy = f;
-        if (auto f = reinterpret_cast<decltype(&ImageList_ReplaceIcon)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_ReplaceIcon")))) replace_icon = f;
-        if (auto f = reinterpret_cast<decltype(&ImageList_AddMasked)>(reinterpret_cast<void*>(GetProcAddress(m, "ImageList_AddMasked")))) add_masked = f;
+        take(m, "ImageList_Create", create);
+        take(m, "ImageList_Destroy", destroy);
+        take(m, "ImageList_ReplaceIcon", replace_icon);
+        take(m, "ImageList_Add", add);
+        take(m, "ImageList_AddMasked", add_masked);
+        take(m, "ImageList_Replace", replace);
+        take(m, "ImageList_GetImageCount", image_count);
+        take(m, "ImageList_GetIconSize", icon_size);
+        take(m, "InitCommonControlsEx", init);
+    }
+
+private:
+    template <class F>
+    static void take(HMODULE m, const char* name, F& f)
+    {
+        if (auto p = reinterpret_cast<F>(reinterpret_cast<void*>(GetProcAddress(m, name)))) f = p;
     }
 };
 comctl6 g_comctl;
@@ -686,7 +741,7 @@ void track_container_control(HWND h);
 HWND make_host(HWND parent, DWORD style = 0)
 {
     register_classes();
-    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT,
+    HWND h = make_window(WS_EX_CONTROLPARENT,
                              surface_of(parent) == theme_color::base ? L"rapportHostBase" : L"rapportHost", L"",
                              WS_CHILD | WS_CLIPCHILDREN | style, 0, 0, 0, 0, parent, nullptr,
                              instance(), nullptr);
@@ -744,7 +799,7 @@ HWND window_tooltip(HWND top)
     HWND tip = static_cast<HWND>(GetPropW(top, L"rapport-tooltip"));
     if (!tip)
     {
-        tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+        tip = make_window(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
                               CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, top, nullptr, instance(),
                               nullptr);
         SendMessageW(tip, TTM_SETMAXTIPWIDTH, 0, 480);
@@ -1268,7 +1323,7 @@ void show_control(HWND h, bool shown)
 HWND create_control(win_context& win, HWND parent, const wchar_t* cls, const std::wstring& text, DWORD style,
                    DWORD ex_style = 0)
 {
-    HWND h = CreateWindowExW(ex_style, cls, text.c_str(), WS_CHILD | style, 0, 0, 0, 0, parent, nullptr,
+    HWND h = make_window(ex_style, cls, text.c_str(), WS_CHILD | style, 0, 0, 0, 0, parent, nullptr,
                              instance(), nullptr);
     track_container_control(h);
     SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font(win.dpi())), FALSE);
@@ -2196,7 +2251,7 @@ public:
         , click_(std::move(click))
     {
         want_icon(icon_, 16, win_.dpi());  // as draw_item paints it
-        h_ = CreateWindowExW(0, L"BUTTON", wide(tip).c_str(), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        h_ = make_window(0, L"BUTTON", wide(tip).c_str(), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                              0, 0, 0, 0, edit, nullptr, instance(), nullptr);
         handlers()[h_] = this;
         track_container_control(h_);
@@ -3232,8 +3287,8 @@ public:
     }
     ~tree_impl() override
     {
-        if (state_images_) ImageList_Destroy(state_images_);
-        if (icons_) ImageList_Destroy(icons_);
+        if (state_images_) g_comctl.destroy(state_images_);
+        if (icons_) g_comctl.destroy(icons_);
     }
 
     void theme_changed() override
@@ -3566,7 +3621,7 @@ private:
         item.mask = TVIF_IMAGE;
         item.hItem = h;
         int cx = 0, cy = 0;
-        if (icons_ && TreeView_GetItem(h_, &item) && item.iImage > 0 && ImageList_GetIconSize(icons_, &cx, &cy))
+        if (icons_ && TreeView_GetItem(h_, &item) && item.iImage > 0 && g_comctl.icon_size(icons_, &cx, &cy))
             left -= cx + px(3);
         RECT line{std::max(0L, long(left)), row.top, row.right, row.top + std::max(1, px(1))};
         FillRect(dc, &line, theme_brush(theme_color::divider));
@@ -3618,9 +3673,13 @@ private:
     {
         auto* self = reinterpret_cast<tree_impl*>(data);
         if (msg == WM_KEYDOWN && self->step_past_placeholder(wp)) return 0;
-        self->refused_ = nullptr;
+        // Cleared as the page key starts only: comctl32 6's tree sends itself
+        // messages while it pages, and clearing on those (as on every one,
+        // once) lost the placeholder it had just refused.
+        const bool page = msg == WM_KEYDOWN && (wp == VK_NEXT || wp == VK_PRIOR);
+        if (page) self->refused_ = nullptr;
         const LRESULT result = DefSubclassProc(h, msg, wp, lp);
-        if (msg == WM_KEYDOWN && (wp == VK_NEXT || wp == VK_PRIOR) && self->refused_) self->page_past_placeholder(wp);
+        if (page && self->refused_) self->page_past_placeholder(wp);
         if (msg == WM_SETFONT) self->rebuild_icons();
         return result;
     }
@@ -3682,7 +3741,7 @@ private:
         if (!icon) return 0;
         if (!icons_)
         {
-            icons_ = ImageList_Create(px(16), px(16), ILC_COLOR32 | ILC_MASK, 8, 8);
+            icons_ = g_comctl.create(px(16), px(16), ILC_COLOR32 | ILC_MASK, 8, 8);
             if (!icons_) return 0;
             add_blank(icons_);
             TreeView_SetImageList(h_, icons_, TVSIL_NORMAL);
@@ -3690,7 +3749,7 @@ private:
         const std::string key = icon_key(icon);
         if (!key.empty())
             if (const auto it = image_index_.find(key); it != image_index_.end()) return it->second;
-        const int image = ImageList_GetImageCount(icons_);
+        const int image = g_comctl.image_count(icons_);
         add_image(icons_, icon);
         image_sources_.push_back(icon);
         if (!key.empty()) image_index_[key] = image;
@@ -3722,7 +3781,7 @@ private:
             h = render_icon_handle(icon, px(16), win_.scale());
         if (h)
         {
-            ImageList_ReplaceIcon(list, -1, h);
+            g_comctl.replace_icon(list, -1, h);
             DestroyIcon(h);
         }
         else
@@ -3737,7 +3796,7 @@ private:
         const std::vector<BYTE> transparent(bytes, 0xFF), colour(bytes, 0);
         if (HICON h = CreateIcon(instance(), size, size, 1, 1, transparent.data(), colour.data()))
         {
-            ImageList_ReplaceIcon(list, -1, h);
+            g_comctl.replace_icon(list, -1, h);
             DestroyIcon(h);
         }
     }
@@ -3745,12 +3804,12 @@ private:
     void rebuild_icons()
     {
         if (!icons_) return;
-        HIMAGELIST fresh = ImageList_Create(px(16), px(16), ILC_COLOR32 | ILC_MASK, 8, 8);
+        HIMAGELIST fresh = g_comctl.create(px(16), px(16), ILC_COLOR32 | ILC_MASK, 8, 8);
         if (!fresh) return;
         add_blank(fresh);
         for (const rap::icon& icon : image_sources_) add_image(fresh, icon);
         TreeView_SetImageList(h_, fresh, TVSIL_NORMAL);
-        ImageList_Destroy(icons_);
+        g_comctl.destroy(icons_);
         icons_ = fresh;
     }
     bool select_quietly(const std::string& id)
@@ -3772,7 +3831,7 @@ private:
     void make_state_images()
     {
         const int n = px(13);
-        state_images_ = ImageList_Create(n, n, ILC_COLOR32, 4, 0);
+        state_images_ = g_comctl.create(n, n, ILC_COLOR32, 4, 0);
         if (!state_images_) return;
         BITMAPINFO bi{};
         bi.bmiHeader = {.biSize = sizeof(BITMAPINFOHEADER),
@@ -3809,7 +3868,7 @@ private:
             }
             GdiFlush();
             SelectObject(dc, old);
-            ImageList_Add(state_images_, bmp, nullptr);
+            g_comctl.add(state_images_, bmp, nullptr);
             DeleteObject(bmp);
         }
         if (theme) CloseThemeData(theme);
@@ -3910,7 +3969,7 @@ public:
         , value_(s.value)
     {
         adopt(create_control(win, parent, L"EDIT", L"", ES_AUTOHSCROLL | ES_RIGHT | WS_TABSTOP, WS_EX_CLIENTEDGE));
-        updown_ = CreateWindowExW(0, UPDOWN_CLASSW, L"", WS_CHILD | UDS_ARROWKEYS | UDS_ALIGNRIGHT, 0, 0, 0, 0, parent,
+        updown_ = make_window(0, UPDOWN_CLASSW, L"", WS_CHILD | UDS_ARROWKEYS | UDS_ALIGNRIGHT, 0, 0, 0, 0, parent,
                                   nullptr, instance(), nullptr);
         track_container_control(updown_);
         SendMessageW(updown_, UDM_SETBUDDY, reinterpret_cast<WPARAM>(h_), 0);
@@ -4486,7 +4545,7 @@ public:
     ~tool_strip() override
     {
         for (HIMAGELIST l : images_)
-            if (l) ImageList_Destroy(l);
+            if (l) g_comctl.destroy(l);
     }
 
     void add_separator(strip_entry* e) { entries_.push_back({e, nullptr, L""}); }
@@ -4533,7 +4592,7 @@ public:
         for (int state = 0; state < 2; ++state)
             if (HBITMAP bmp = render_icon(entries_[size_t(id) - 1].button->image(), icon_px_, win_.scale(), ink(state)))
             {
-                ImageList_Replace(images_[state], image, bmp, nullptr);
+                g_comctl.replace(images_[state], image, bmp, nullptr);
                 DeleteObject(bmp);
             }
         InvalidateRect(h_, nullptr, FALSE);
@@ -4671,16 +4730,16 @@ private:
         for (int state = 0; state < 2; ++state)
         {
             HIMAGELIST old = images_[state];
-            images_[state] = ImageList_Create(size, size, ILC_COLOR32, int(icons.size()), 0);
+            images_[state] = g_comctl.create(size, size, ILC_COLOR32, int(icons.size()), 0);
             // All in one bitmap, drawn at once: a render target apiece cost ~0.5 ms each.
             if (HBITMAP bmp = render_icons(icons, size, win_.scale(), ink(state)))
             {
-                ImageList_Add(images_[state], bmp, nullptr);
+                g_comctl.add(images_[state], bmp, nullptr);
                 DeleteObject(bmp);
             }
             SendMessageW(h_, state ? TB_SETDISABLEDIMAGELIST : TB_SETIMAGELIST, 0,
                          reinterpret_cast<LPARAM>(images_[state]));
-            if (old) ImageList_Destroy(old);
+            if (old) g_comctl.destroy(old);
         }
         size_buttons();
     }
@@ -6126,7 +6185,7 @@ private:
     {
         if (!tip_)
         {
-            tip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+            tip_ = make_window(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
                                    CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, h_, nullptr,
                                    instance(), nullptr);
             SendMessageW(tip_, TTM_SETMAXTIPWIDTH, 0, 480);
@@ -6264,7 +6323,7 @@ private:
                 wc.lpszClassName = L"RapportAutoScrollAnchor";
                 return RegisterClassExW(&wc);
             }();
-            anchor_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            anchor_ = make_window(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                                       MAKEINTATOM(cls), nullptr, WS_POPUP, 0, 0, side, side, GetAncestor(h_, GA_ROOT),
                                       nullptr, instance(), nullptr);
             if (!anchor_) return;
@@ -8387,7 +8446,7 @@ public:
             RegisterClassExW(&wc);
             registered = true;
         }
-        adopt(CreateWindowExW(0, L"rapportCanvas", L"", WS_CHILD | (s.focusable ? WS_TABSTOP : 0), 0, 0, 0, 0, parent,
+        adopt(make_window(0, L"rapportCanvas", L"", WS_CHILD | (s.focusable ? WS_TABSTOP : 0), 0, 0, 0, 0, parent,
                               nullptr, instance(), this));
         track_container_control(h_);
     }
@@ -9177,7 +9236,7 @@ public:
         const bool base = spec.base_surface && base_surface_supported();
         DWORD style = dialog_ ? (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME) : WS_OVERLAPPEDWINDOW;
         if (!spec.resizable) style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
-        hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME : 0),
+        hwnd_ = make_window(WS_EX_CONTROLPARENT | (dialog_ ? WS_EX_DLGMODALFRAME : 0),
                                 base ? L"rapportWindowBase" : L"rapportWindow", wide(spec.title).c_str(),
                                 style | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
                                 parent ? parent->hwnd_ : nullptr, nullptr, instance(), this);
@@ -10424,11 +10483,12 @@ public:
         OleInitialize(nullptr);  // COM, and the system's drag and drop
         enable_visual_styles();
         g_comctl.resolve();
+        comctl6_scope v6;
         INITCOMMONCONTROLSEX icc{sizeof icc,
                                  ICC_WIN95_CLASSES | ICC_DATE_CLASSES | ICC_PROGRESS_CLASS |
                                      ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES |
                                      ICC_UPDOWN_CLASS | ICC_STANDARD_CLASSES | ICC_LINK_CLASS};
-        InitCommonControlsEx(&icc);
+        g_comctl.init(&icc);
         apply_app_mode();
         if (!d2d_factory() || !dwrite_factory()) return nullptr;
         return new win32_backend;
@@ -10442,7 +10502,7 @@ public:
         wc.lpfnWndProc = message_proc;
         wc.lpszClassName = L"rapportMessages";
         RegisterClassExW(&wc);
-        messages_ = CreateWindowExW(0, L"rapportMessages", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance(), this);
+        messages_ = make_window(0, L"rapportMessages", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance(), this);
         warm_d2d();
         frames_ = std::make_unique<frame_clock>(messages_);
         g_frames = frames_.get();
@@ -11167,24 +11227,45 @@ public:
     }
 
 private:
-    // Common controls v6 (themed controls) without an application manifest:
-    // activate the one shell32 carries for itself.
+    // Common controls v6 (themed controls) for an app whose manifest doesn't
+    // ask for them, or that has none (#41): a manifest that depends on them,
+    // made the process's default where nothing else is. Any manifest at all,
+    // MSVC's default one included, already is, and then it's held for
+    // comctl6_scope to make active around what makes controls, never left
+    // active (#43). Windows' own WindowsShell.Manifest is that manifest;
+    // shell32's resource 124, which was, is gone from Windows 11 22H2's
+    // shell32.
     static void enable_visual_styles()
     {
-        wchar_t dir[MAX_PATH];
-        GetSystemDirectoryW(dir, MAX_PATH);
-        const std::wstring shell32 = std::wstring(dir) + L"\\shell32.dll";
-        ACTCTXW ctx{};
-        ctx.cbSize = sizeof ctx;
-        ctx.dwFlags = ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_SET_PROCESS_DEFAULT | ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID;
-        ctx.lpSource = shell32.c_str();
-        ctx.lpAssemblyDirectory = dir;
-        ctx.lpResourceName = MAKEINTRESOURCEW(124);
-        HANDLE h = CreateActCtxW(&ctx);
-        if (h != INVALID_HANDLE_VALUE)
+        wchar_t windows[MAX_PATH], system[MAX_PATH];
+        if (!GetWindowsDirectoryW(windows, MAX_PATH) || !GetSystemDirectoryW(system, MAX_PATH)) return;
+        const std::wstring shell_manifest = std::wstring(windows) + L"\\WindowsShell.Manifest";
+        const std::wstring shell32 = std::wstring(system) + L"\\shell32.dll";
+        auto make = [&](bool from_shell32, bool process_default)
         {
-            ULONG_PTR cookie = 0;
-            ActivateActCtx(h, &cookie);
+            ACTCTXW ctx{};
+            ctx.cbSize = sizeof ctx;
+            if (from_shell32)
+            {
+                ctx.dwFlags = ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID;
+                ctx.lpSource = shell32.c_str();
+                ctx.lpAssemblyDirectory = system;
+                ctx.lpResourceName = MAKEINTRESOURCEW(124);
+            }
+            else
+                ctx.lpSource = shell_manifest.c_str();
+            if (process_default) ctx.dwFlags |= ACTCTX_FLAG_SET_PROCESS_DEFAULT;
+            return CreateActCtxW(&ctx);
+        };
+        // Made active around control making either way: a thread with a
+        // context of its caller's active doesn't fall back to the default.
+        for (bool from_shell32 : {false, true})
+        {
+            HANDLE h = make(from_shell32, true);
+            if (h == INVALID_HANDLE_VALUE) h = make(from_shell32, false);
+            if (h == INVALID_HANDLE_VALUE) continue;
+            g_comctl6_context = h;  // held for the process's life
+            return;
         }
     }
 
