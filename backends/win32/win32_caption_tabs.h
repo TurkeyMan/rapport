@@ -30,7 +30,8 @@ namespace rap::win32
 {
 
 // Explorer's strip as measured at 100% on Windows 11 (24H2), in logical px.
-// Its colours aren't measured here: they're the theme's roles.
+// Its colours aren't measured here: the surfaces are the theme's roles, the
+// text, line and buttons WinUI's (win32_chrome_palette.h).
 namespace caption_metrics
 {
 // The strip, from the window's top to the line under it (the line its
@@ -82,6 +83,18 @@ protected:
     ~caption_tabs_owner() = default;
 };
 
+// What the strip draws its text with (query_message's 7): the DirectWrite
+// families, sizes in device px, the titles' weight, and whether the text on
+// opaque ground is ClearType. The test tools have the same layout.
+struct caption_tabs_fonts
+{
+    wchar_t text[64];
+    wchar_t glyphs[64];
+    float text_size, glyph_size;
+    int text_weight;
+    int cleartype;
+};
+
 class caption_tabs final : public uia_owner
 {
 public:
@@ -113,8 +126,12 @@ public:
     // in fullscreen or high contrast), with the top `resize_band` px the
     // window's to resize by.
     void set_frame(bool transparent, int resize_band);
-    // The desktop's colours, fonts or DPI changed: made and drawn anew.
+    // The desktop's colours, fonts, font smoothing or DPI changed: made and
+    // drawn anew.
     void refresh();
+    // The window moved (WM_WINDOWPOSCHANGED): onto another monitor, its
+    // text is drawn again with that monitor's ClearType parameters.
+    void moved();
 
     // The keyboard focus, as F6 gives it: on the current tab.
     void take_focus();
@@ -142,7 +159,9 @@ public:
     // "rapport-caption-tabs"): wParam's low word what to tell (0 the tabs'
     // count, 1 the current one, 2 the one with the focus, 3, 4 and 5 a
     // tab's, its close button's and "+"'s rectangle into the RECT lParam
-    // points to, in the process), its high word the tab.
+    // points to, in the process; 6 how many times its rendering parameters
+    // have been made; 7 its fonts, into the caption_tabs_fonts lParam
+    // points to), its high word the tab.
     static UINT query_message();
 
     // uia_owner
