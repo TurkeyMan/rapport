@@ -4116,6 +4116,7 @@ public:
     {
         frame_ = new frame_widget(parent ? parent->frame_.data() : nullptr);
         frame_->owner = this;
+        recent().insert(recent().begin(), frame_.data());
         frame_->setWindowTitle(qs(spec.title));
         frame_->setWindowFlags(dialog_ ? Qt::Dialog : Qt::Window);
         if (dialog_)
@@ -4137,10 +4138,12 @@ public:
         filter_->owner = nullptr;
         if (qApp) qApp->removeEventFilter(filter_);
         filter_->deleteLater();
-        if (last_shown() == frame_) last_shown() = nullptr;
+        forget_shown(frame_.data());
         if (frame_)
         {
             frame_->owner = nullptr;
+            // Its busy pointer goes now, not when Qt deletes it.
+            if (busy()) frame_->unsetCursor();
             for (QObject* o : frame_->findChildren<QObject*>())
             {
                 if (auto* h = dynamic_cast<event_hook*>(o)) h->disarm();
@@ -4392,24 +4395,49 @@ public:
     }
 
     // The window shown last, as drawn now, to a PNG.
-    static bool save_last_shown(const std::string& path)
+    static bool save_last_shown(const std::string& path) { return save(last_shown(), path); }
+    // A window, as drawn now, to a PNG.
+    static bool save(QWidget* w, const std::string& path) { return w && w->grab().save(qs(path)); }
+
+protected:
+    // On the frame, which widgets without a pointer of their own take.
+    // (ui::set_busy's override, app-wide, covers them all.)
+    void busy_changed(bool on) override
     {
-        QWidget* w = last_shown();
-        return w && w->grab().save(qs(path));
+        if (!frame_) return;
+        if (on)
+            frame_->setCursor(Qt::BusyCursor);
+        else
+            frame_->unsetCursor();
     }
 
 private:
     // Development aid: RAPPORT_SNAPSHOT=file.png saves the window shown last,
     // RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears, then quits.
-    static QPointer<QWidget>& last_shown()
+    // The windows there now, the one shown most recently last (a dialog
+    // over the main window, say), then the others shown in turn, then those
+    // never shown, the oldest nearest the shown: the order a snapshot falls
+    // back on them.
+    static std::vector<QPointer<QWidget>>& recent()
     {
-        static QPointer<QWidget> w;
-        return w;
+        static std::vector<QPointer<QWidget>> v;
+        return v;
+    }
+    // `w` out of the order, and any gone.
+    static void forget_shown(QWidget* w)
+    {
+        std::erase_if(recent(), [w](const QPointer<QWidget>& p) { return !p || p.data() == w; });
+    }
+    static QWidget* last_shown()
+    {
+        std::erase_if(recent(), [](const QPointer<QWidget>& w) { return !w; });
+        return recent().empty() ? nullptr : recent().back().data();
     }
 
     void snapshot_if_asked()
     {
-        last_shown() = frame_.data();
+        forget_shown(frame_.data());
+        recent().push_back(frame_.data());
         static bool taken = false;
         const char* path = std::getenv("RAPPORT_SNAPSHOT");
         if (taken || !path || !*path) return;
@@ -5319,7 +5347,11 @@ public:
         dlg->show();
     }
 
-    bool save_snapshot(const std::string& path) override { return window_impl::save_last_shown(path); }
+    bool save_snapshot(rap::window* w, const std::string& path) override
+    {
+        return w ? window_impl::save(static_cast<window_impl*>(w)->frame(), path)
+                 : window_impl::save_last_shown(path);
+    }
 
     // Qt's print dialog and QPrinter, once the caller has returned. With
     // RAPPORT_PRINT_TO, a .pdf (QPrinter's own) or .png pages, no dialog.

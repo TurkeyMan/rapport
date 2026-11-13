@@ -469,6 +469,9 @@ public:
 
     std::vector<std::unique_ptr<widget>> widgets;
 
+protected:
+    void busy_changed(bool) override {}
+
 private:
     size_f size_{640, 480};
     bool fullscreen_ = false;
@@ -823,7 +826,7 @@ public:
     {
         done(std::nullopt);
     }
-    bool save_snapshot(const std::string&) override { return false; }
+    bool save_snapshot(rap::window*, const std::string&) override { return false; }
 
     std::unique_ptr<rap::image> create_image(int w, int h, pixel_format, const uint8_t*,
                                               size_t) override
