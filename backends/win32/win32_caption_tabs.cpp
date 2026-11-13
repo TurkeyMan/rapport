@@ -27,15 +27,17 @@
 // fill or none: ClearType blends each colour channel with what's beneath,
 // which a pixel the compositor fills later hasn't got.
 //
-//   where                                       ground              text
-//   another tab, hovered or not; "+"            Mica (Alt)          grayscale
-//   the current tab over the toolbar band       LayerFillColorDefault,
-//                                               translucent, on Mica Alt  grayscale
-//   the current tab, no band                    the window's surface ClearType
-//   the whole strip opaque (high contrast,
-//   not in the caption)                         ours, opaque        ClearType
+//   where                              ground                        text
+//   another tab, hovered or not; "+"   Mica Alt (a translucent       grayscale
+//                                      hover fill)
+//   the current tab over the toolbar   LayerOnMicaBaseAltFill-       grayscale
+//   band                               ColorDefault, translucent,
+//                                      on Mica Alt
+//   the current tab, no band           the window's surface, opaque  ClearType
+//   the whole strip opaque (high       ours, opaque                  ClearType
+//   contrast, not in the caption)
 //
-// The toolbar band's own native controls: see win32_backend.cpp's band glass.
+// The toolbar band's own native controls: see win32_band_glass.cpp.
 // ClearType can't be drawn on a premultiplied target, so it's a second
 // pass: the strip drawn first (with its grayscale text), then each ClearType
 // run drawn in a small bitmap of its own (the opaque rectangle it sits in,
@@ -1502,9 +1504,11 @@ void extend_caption_frame(HWND top, int height)
     // further down (caption_inset), or the toolbar band's, line and all,
     // where the window has one (set_toolbar_band, laid out from the strip's
     // bottom: maximised, inset as well), its layer translucent over Mica Alt.
+    // Not in high contrast, where the band's opaque: its native controls are
+    // then as they were, GDI's, off the extended frame.
     int bottom = height ? height + caption_inset(top) : 0;
     RECT band;
-    if (height && toolbar_band(top, band)) bottom = std::max<int>(bottom, band.bottom);
+    if (height && !high_contrast() && toolbar_band(top, band)) bottom = std::max<int>(bottom, band.bottom);
     const MARGINS m{0, 0, bottom, 0};
     DwmExtendFrameIntoClientArea(top, &m);
     // Mica Alt behind the strip (22621 on, where it's named), as Explorer
@@ -1653,7 +1657,7 @@ toolbar_band_colors band_colors(HWND top)
     const color surface = theme_color_of(surface_of(top));
     if (high_contrast()) return {surface, surface, theme_color_of(theme_color::divider)};
     const winui::chrome_palette& p = dark_mode() ? winui::dark : winui::light;
-    return {p.layer, p.layer_solid, winui::over(p.stroke, surface)};
+    return {p.layer_on_mica_base_alt_default, p.layer_on_mica_base_alt_tertiary, winui::over(p.stroke, surface)};
 }
 
 namespace
@@ -1672,6 +1676,14 @@ void paint_toolbar_band(HWND top, HDC dc)
     if (!toolbar_band(top, band)) return;
     const toolbar_band_colors k = band_colors(top);
     const int line = line_px(dpi_of(top));
+    // Behind a control of it printed onto a matte (win32_band_glass.cpp:
+    // a themed button's corners, from DrawThemeParentBackground): the matte.
+    if (color matte{}; glass_matte(matte))
+    {
+        const RECT fill{band.left, band.top, band.right, band.bottom - line};
+        FillRect(dc, &fill, static_cast<HBRUSH>(GetStockObject(matte.r ? WHITE_BRUSH : BLACK_BRUSH)));
+        return;
+    }
     // GDI's pixels would have no alpha (the frame's extended over the band:
     // they'd be glass), so straight into a 32-bit buffer, premultiplied.
     BP_PAINTPARAMS params{sizeof params, 0, nullptr, nullptr};

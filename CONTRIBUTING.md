@@ -45,7 +45,9 @@ which makes checking a layout on each backend quick.
   ClearType blends each colour channel with what's beneath, so it needs an
   opaque background rapport has drawn: over Mica, through a translucent fill
   too (WinUI's layers, as the caption tabs' current tab on the toolbar band),
-  or anything else the compositor fills in later, text is grayscale. Use the
+  or anything else the compositor fills in later, text is grayscale (a
+  native control's too, over the extended frame: the toolbar band's give
+  theirs a grayscale font). Use the
   monitor's rendering parameters (its ClearType level, gamma and pixel
   order, RGB or BGR) and the system's font smoothing setting, and make them
   again when the settings, the monitor or the DPI change.
