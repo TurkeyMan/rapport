@@ -93,6 +93,7 @@ struct caption_tabs_fonts
     float text_size, glyph_size;
     int text_weight;
     int cleartype;
+    float add_size;  // "+"'s glyphs, in device px
 };
 
 class caption_tabs final : public uia_owner

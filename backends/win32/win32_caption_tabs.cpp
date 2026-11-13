@@ -109,6 +109,7 @@ struct strip_colors
     // "+" and the close buttons: their glyph at rest, hovered and pressed,
     // and what's under it hovered and pressed.
     color glyph, glyph_hover, glyph_pressed, button_hover, button_pressed;
+    color add;  // "+" at rest
 };
 // The strip's window has a toolbar band: its fill.
 bool in_band_window(HWND h, color& fill)
@@ -135,7 +136,7 @@ strip_colors colors_for(HWND h, bool transparent)
         c.text = sys_color(COLOR_WINDOWTEXT);
         c.current = sys_color(COLOR_HIGHLIGHT);
         c.current_text = sys_color(COLOR_HIGHLIGHTTEXT);
-        c.glyph = c.glyph_hover = c.glyph_pressed = c.text;
+        c.glyph = c.glyph_hover = c.glyph_pressed = c.add = c.text;
         c.button_hover = c.hover;
         c.button_pressed = c.pressed;
         return c;
@@ -159,6 +160,9 @@ strip_colors colors_for(HWND h, bool transparent)
     c.glyph = p.text_secondary;
     c.glyph_hover = p.text_primary;
     c.glyph_pressed = p.text_secondary;
+    // "+" is darker in Explorer than WinUI's TabView has it: the primary
+    // text colour at rest (measured about #222427 over its strip).
+    c.add = p.text_primary;
     c.button_hover = p.subtle_secondary;
     c.button_pressed = p.subtle_tertiary;
     return c;
@@ -167,6 +171,10 @@ strip_colors colors_for(HWND h, bool transparent)
 // WinUI's TabView glyphs: "+" (TabViewItemAddButtonFontSize) and a tab's
 // close button (TabViewItemHeaderCloseFontSize), both 12.
 constexpr float glyph_size = 12;
+// Explorer's "+" is bigger and heavier than that: measured at 100%, its
+// strokes span 13 px where E710 at 12 spans 10, with about twice the ink;
+// that's E710 at 16.
+constexpr float add_glyph_size = 16;
 constexpr wchar_t add_glyph[] = L"", close_glyph[] = L"";
 
 bool has_family(const wchar_t* name)
@@ -241,7 +249,7 @@ struct caption_tabs::impl
     com<ID2D1DCRenderTarget> rt;
     com<ID2D1SolidColorBrush> brush;
     com<ID2D1StrokeStyle> dotted;
-    com<IDWriteTextFormat> text, glyphs;
+    com<IDWriteTextFormat> text, glyphs, add_glyphs;
     std::wstring text_family, glyph_family;
     UINT text_dpi = 0;
     std::map<HICON, com<ID2D1Bitmap>> icons;  // the tabs' icons on rt, until set_tabs
@@ -439,6 +447,7 @@ struct caption_tabs::impl
         {
             text.reset();
             glyphs.reset();
+            add_glyphs.reset();
             rt.reset();
             params.reset();
             icons.clear();
@@ -487,17 +496,24 @@ struct caption_tabs::impl
             }
             text_dpi = dpi();
         }
-        if (!glyphs && dwrite_factory())
+        if ((!glyphs || !add_glyphs) && dwrite_factory())
         {
             glyph_family = has_family(L"Segoe Fluent Icons") ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets";
-            if (SUCCEEDED(dwrite_factory()->CreateTextFormat(glyph_family.c_str(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                                             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                                             glyph_size * float(dpi()) / 96.f, L"", glyphs.put())))
+            auto make = [&](float size, com<IDWriteTextFormat>& format)
             {
-                glyphs->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                glyphs->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                glyphs->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            }
+                format.reset();
+                if (SUCCEEDED(dwrite_factory()->CreateTextFormat(glyph_family.c_str(), nullptr,
+                                                                 DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                                                 DWRITE_FONT_STRETCH_NORMAL,
+                                                                 size * float(dpi()) / 96.f, L"", format.put())))
+                {
+                    format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                    format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                }
+            };
+            make(glyph_size, glyphs);
+            make(add_glyph_size, add_glyphs);
         }
         if (cleartype && !opaque_rt)
         {
@@ -711,7 +727,7 @@ struct caption_tabs::impl
     // A button's glyph (Segoe Fluent Icons'), centred in `r`.
     void glyph(const wchar_t* g, const RECT& r, color ink, const RECT* opaque, color under)
     {
-        draw_text(g, 1, glyphs.get(), r, ink, opaque, under);
+        draw_text(g, 1, g == add_glyph ? add_glyphs.get() : glyphs.get(), r, ink, opaque, under);
     }
     void focus_rect(const RECT& r, color c)
     {
@@ -862,7 +878,7 @@ struct caption_tabs::impl
                 fill_round(add_rect, float(px(4)), fill);
                 under = winui::over(fill, under);
             }
-            glyph(add_glyph, add_rect, down ? colors.glyph_pressed : on ? colors.glyph_hover : colors.glyph, everywhere,
+            glyph(add_glyph, add_rect, down ? colors.glyph_pressed : on ? colors.glyph_hover : colors.add, everywhere,
                   under);
         }
         if (focused && focus == n) focus_rect(add_rect, colors.text);
@@ -1078,6 +1094,7 @@ struct caption_tabs::impl
                     f->text_weight = int(d.text->GetFontWeight());
                 }
                 if (d.glyphs) f->glyph_size = d.glyphs->GetFontSize();
+                if (d.add_glyphs) f->add_size = d.add_glyphs->GetFontSize();
                 f->cleartype = d.cleartype;
                 return 1;
             }
@@ -1387,6 +1404,7 @@ void caption_tabs::refresh()
 {
     d_->text.reset();
     d_->glyphs.reset();
+    d_->add_glyphs.reset();
     d_->params.reset();  // the font smoothing may have changed too
     d_->text_dpi = 0;
     d_->layout();

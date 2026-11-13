@@ -21,8 +21,9 @@
 // runner's own font smoothing is ClearType (read, never changed), grey over
 // the backdrop, a hovered tab too (its fill WinUI's translucent
 // LayerOnMicaBaseAltFillColorSecondary; the hover a WM_MOUSEMOVE sent to
-// the strip, not input); "+" and the close button
-// Segoe Fluent Icons' glyphs in TextFillColorSecondary; the rendering
+// the strip, not input); "+" Segoe Fluent Icons' at 16 in
+// TextFillColorPrimary, as Explorer's, the close button its glyph at 12 in
+// TextFillColorSecondary; the rendering
 // parameters read again on a WM_SETTINGCHANGE. The backdrop (22621 on):
 // Mica Alt with the tabs in the caption, as Explorer's, none in high
 // contrast, Mica once they leave it. UI
@@ -217,6 +218,7 @@ struct palette
     // The current tab's title; "+" at rest; the current tab's close button;
     // another tab's title; a tab not current hovered (none in high contrast).
     argb title{}, glyph{}, close{}, other{}, hover{};
+    argb add{};  // "+" at rest
 };
 palette expected(bool hc)
 {
@@ -229,7 +231,7 @@ palette expected(bool hc)
         p.line = rgb(GetSysColor(COLOR_WINDOWTEXT));
         p.current = rgb(GetSysColor(COLOR_HIGHLIGHT));
         p.title = {rgb(GetSysColor(COLOR_HIGHLIGHTTEXT)), 255};
-        p.glyph = {rgb(GetSysColor(COLOR_WINDOWTEXT)), 255};
+        p.glyph = p.add = {rgb(GetSysColor(COLOR_WINDOWTEXT)), 255};
         p.close = p.title;
         p.other = {rgb(GetSysColor(COLOR_WINDOWTEXT)), 255};
         p.current_px = 0xFF000000u | p.current;
@@ -242,6 +244,8 @@ palette expected(bool hc)
     p.current_px = 0xFF000000u | p.current;
     p.title = g_dark ? dark_primary : light_primary;
     p.glyph = p.close = p.other = g_dark ? dark_secondary : light_secondary;
+    // "+", as Explorer's: TextFillColorPrimary.
+    p.add = g_dark ? dark_primary : light_primary;
     p.hover = g_dark ? dark_hover : light_hover;
     return p;
 }
@@ -361,6 +365,7 @@ struct strip_fonts
     float text_size, glyph_size;
     int text_weight;
     int cleartype;
+    float add_size;
 };
 
 // The title bar's height: the client area's top below the window's.
@@ -1288,16 +1293,23 @@ void check_text(HWND strip, const palette& pal, const std::string& when)
     else
         note("no clear area to see grey text over" + at + ": the strip's opaque");
 
-    // The glyphs: "+" and the current tab's close button, Segoe Fluent
-    // Icons' in the secondary text colour.
-    const double plus_ref = reference_ink(icons, glyph, 400, L""),
+    // The glyphs: "+" as Explorer's, Segoe Fluent Icons' E710 at 16 (its
+    // strokes 13 px across at 100%, where WinUI's 12 makes 10) in the
+    // primary text colour; the current tab's close button WinUI's, E711 at
+    // 12 in the secondary.
+    const float add_size = 16.f * float(dpi) / 96.f;
+    expect(std::fabs(f.add_size - add_size) < 0.01f,
+           "\"+\" in " + narrow(icons) + " at " + str(std::lround(add_size)) + " px, Explorer's" + at + ": " +
+               str(std::lround(f.add_size)));
+    const double plus_ref = reference_ink(icons, add_size, 400, L""),
                  x_ref = reference_ink(icons, glyph, 400, L"");
-    const ink_stats a = ink_in(p, add, pal.glyph, pal.clear ? -1 : (long long)pal.empty);
+    const ink_stats a = ink_in(p, add, pal.add, pal.clear ? -1 : (long long)pal.empty);
     expect(a.within && a.peak >= 0.6 && (!pal.clear || a.chroma == 0),
-           "\"+\" in " + hex(pal.glyph.rgb) + " at alpha " + str(pal.glyph.a) + at + ": peak "+ str(std::lround(a.peak * 100)) + "%, chroma " + str(a.chroma) +
+           "\"+\" in " + hex(pal.add.rgb) + " at alpha " + str(pal.add.a) + " (TextFillColorPrimary)" + at +
+               ": peak " + str(std::lround(a.peak * 100)) + "%, chroma " + str(a.chroma) +
                (a.within ? "" : ", past at " + a.worst));
     expect(a.mass >= plus_ref * 0.8 && a.mass <= plus_ref * 1.5,
-           "\"+\" as light as Segoe Fluent Icons' E710, about " + str(std::lround(plus_ref)) + at + ": " +
+           "\"+\" as heavy as Segoe Fluent Icons' E710 at that size, about " + str(std::lround(plus_ref)) + at + ": " +
                str(std::lround(a.mass)));
     const ink_stats x =
         pal.current_opaque ? ink_in(p, close, pal.close, pal.current) : ink_on(p, close, pal.close, pal.current_px);
