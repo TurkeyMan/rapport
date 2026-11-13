@@ -3671,9 +3671,13 @@ private:
     {
         auto* self = reinterpret_cast<tree_impl*>(data);
         if (msg == WM_KEYDOWN && self->step_past_placeholder(wp)) return 0;
-        self->refused_ = nullptr;
+        // Cleared as the page key starts only: comctl32 6's tree sends itself
+        // messages while it pages, and clearing on those (as on every one,
+        // once) lost the placeholder it had just refused.
+        const bool page = msg == WM_KEYDOWN && (wp == VK_NEXT || wp == VK_PRIOR);
+        if (page) self->refused_ = nullptr;
         const LRESULT result = DefSubclassProc(h, msg, wp, lp);
-        if (msg == WM_KEYDOWN && (wp == VK_NEXT || wp == VK_PRIOR) && self->refused_) self->page_past_placeholder(wp);
+        if (page && self->refused_) self->page_past_placeholder(wp);
         if (msg == WM_SETFONT) self->rebuild_icons();
         return result;
     }

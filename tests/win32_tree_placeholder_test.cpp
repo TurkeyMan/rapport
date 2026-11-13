@@ -192,7 +192,22 @@ int main(int argc, char** argv)
     // the lazy row far below the first pages, the same keys pressed the
     // same way: the row PageDown reaches from the top, and the row PageUp
     // starts from to come back to that one. The placeholder then goes there.
+    // The window is made wide enough first that no row needs a horizontal
+    // scroll bar: a tree sizes it from the rows it shows, so with the
+    // placeholder's indented "Loading…" the widest, the bar (and the row it
+    // takes) came and went with where the placeholder was.
     {
+        HWND top = GetAncestor(tree_hwnd, GA_ROOT);
+        RECT wr{};
+        GetWindowRect(top, &wr);
+        const LONG wide = wr.right - wr.left > 600 ? wr.right - wr.left : 600;
+        SetWindowPos(top, nullptr, 0, 0, wide, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        for (int round = 0; round < 10; ++round)
+        {
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+            Sleep(5);
+        }
         const auto index_of = [](const std::optional<std::string>& id) {
             return id && id->size() > 1 && (*id)[0] == 'i' ? std::stoi(id->substr(1)) : -1;
         };
