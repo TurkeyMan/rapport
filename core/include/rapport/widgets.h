@@ -1376,6 +1376,13 @@ public:
     virtual void on_finished(std::function<void(dialog_role)>) = 0;
     // Return false to veto closing (e.g. unsaved commit message).
     virtual void on_close_request(std::function<bool()>) = 0;
+    // Runs once, on the UI thread, at the start of the window's destructor,
+    // before any of its widgets go, so it may still read them. That holds
+    // whoever destroys the window: the app resetting its pointer, or the
+    // backend after a close. It must not destroy this window again or
+    // re-enter its own destruction; making or destroying other windows is
+    // fine. Setting it again replaces it; an empty function clears it.
+    virtual void on_destroyed(std::function<void()>) = 0;
     // Files dragged in (from a file manager) and dropped anywhere on the
     // window, as local paths in UTF-8, in the order given. Setting it is
     // what makes the window accept them; other drags are refused.

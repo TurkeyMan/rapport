@@ -4253,6 +4253,8 @@ public:
     // their signals; until then nothing may reach the parts going now.
     ~window_impl() override
     {
+        // First, while every widget is still there; taken out, so it runs once.
+        if (auto f = std::exchange(on_destroyed_, {})) f();
         filter_->owner = nullptr;
         if (qApp) qApp->removeEventFilter(filter_);
         filter_->deleteLater();
@@ -4324,6 +4326,7 @@ public:
     void close() override { frame_->hide(); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    void on_destroyed(std::function<void()> f) override { on_destroyed_ = std::move(f); }
     // Drops on any widget that doesn't take them itself reach the frame.
     void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
     {
@@ -4675,6 +4678,7 @@ private:
     bool was_maximized_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void()> on_destroyed_;
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     std::function<void(bool)> on_fullscreen_;
     std::function<bool(const key_event&)> on_key_;
