@@ -77,6 +77,24 @@ DWORD windows_build()
     return get_version && get_version(&info) == 0 ? info.dwBuildNumber : 0;
 }
 
+// Where the tree stands, for a failed paging check: what's selected, how
+// many rows show, which is first, and comctl32's version.
+void where(HWND tree, rap::tree* t)
+{
+    wchar_t first[64] = {};
+    TVITEMW it{TVIF_TEXT};
+    it.hItem = TreeView_GetFirstVisible(tree);
+    it.pszText = first;
+    it.cchTextMax = 64;
+    if (it.hItem) TreeView_GetItem(tree, &it);
+    RECT client{};
+    GetClientRect(tree, &client);
+    std::printf("     selected %s, %d rows visible of height %d in %ld px, first visible %ls, comctl32 %d\n",
+                t->selected().c_str(), int(SendMessageW(tree, TVM_GETVISIBLECOUNT, 0, 0)),
+                int(SendMessageW(tree, TVM_GETITEMHEIGHT, 0, 0)), client.bottom, first,
+                int(SendMessageW(tree, CCM_GETVERSION, 0, 0)));
+}
+
 rap::tree_item item(std::string id, bool lazy)
 {
     rap::tree_item t;
@@ -181,11 +199,13 @@ int main(int argc, char** argv)
         t->select("i0");
         press(tree_hwnd, VK_NEXT);
         expect(t->selected() == "after", "PageDown landing on a placeholder goes on to the next row");
+        if (t->selected() != "after") where(tree_hwnd, t);
 
         // PageUp moves by a page less one, so this row lands on the placeholder.
         t->select("tail" + std::to_string(visible - 3));
         press(tree_hwnd, VK_PRIOR);
         expect(t->selected() == "lazy", "PageUp landing on one goes on to the row before");
+        if (t->selected() != "lazy") where(tree_hwnd, t);
 
         // The placeholder the very last row: nothing beyond, so back the other way.
         items.resize(size_t(visible - 1));
