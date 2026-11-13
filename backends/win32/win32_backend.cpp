@@ -7399,6 +7399,8 @@ public:
     // The desktop's settings changed (WM_SETTINGCHANGE and the like): the
     // caption's font may have.
     virtual void settings_changed() {}
+    // The window moved, maybe onto another monitor.
+    virtual void moved() {}
 
     doc_tabs::state state;
 
@@ -7923,6 +7925,7 @@ public:
         strip_->refresh();
     }
     void settings_changed() override { strip_->refresh(); }
+    void moved() override { strip_->moved(); }
     void path_icon_found() override { rebuild_icons(); }
 
     // caption_tabs_owner: the user's clicks, keys and UI Automation's calls.
@@ -10556,6 +10559,8 @@ private:
             // the extended frame with it.
             if (msg == WM_ACTIVATE || msg == WM_DWMCOMPOSITIONCHANGED || msg == WM_SIZE)
                 extend_caption_frame(h, self->caption_height_);
+            // Onto another monitor: the strip's ClearType is that one's.
+            if (msg == WM_WINDOWPOSCHANGED && self->doc_tabs) self->doc_tabs->moved();
         }
         if (self && forward_child_message(h, msg, wp, lp, r)) return r;
         if (self && dark_menu_bar(h, msg, wp, lp, r)) return r;
