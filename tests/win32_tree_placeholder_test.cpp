@@ -185,28 +185,33 @@ int main(int argc, char** argv)
     }
 
     // The paging keys, landing exactly on a placeholder. Where a page key
-    // lands depends on the control's version and where it's scrolled to
-    // (common controls 6 pages a row less than 5 here), so it's found first
-    // on a tree of plain rows, the same keys pressed the same way: the row
-    // PageDown reaches from the top, and the row PageUp starts from to come
-    // back to that one. The placeholder is then put just there.
+    // lands depends on how many rows show, and a horizontal scroll bar (its
+    // widest row, which the theme and font decide) takes one, so it's found
+    // first on a tree of plain rows as wide as the real one's (the same
+    // tail rows, and an open lazy row at the very end with its "Loading…"),
+    // the same keys pressed the same way: the row PageDown reaches from the
+    // top, and the row PageUp starts from to come back to that one. The
+    // placeholder is then put just there.
     {
         const auto index_of = [](const std::optional<std::string>& id) {
-            return id && id->size() > 1 && (*id)[0] == 'm' ? std::stoi(id->substr(1)) : -1;
+            return id && id->rfind("tail", 0) == 0 ? std::stoi(id->substr(4)) : -1;
         };
+        const auto tail = [](int i) { return "tail" + std::to_string(i); };
         std::vector<rap::tree_item> plain;
-        for (int i = 0; i < 200; ++i) plain.push_back(item("m" + std::to_string(i), false));
+        for (int i = 0; i < 200; ++i) plain.push_back(item(tail(i), false));
+        plain.push_back(item("lazy", true));
         t->set_items(plain);
-        t->select("m0");
+        t->set_expanded("lazy", true);
+        t->select(tail(0));
         press(tree_hwnd, VK_NEXT);
         const int lands = index_of(t->selected());  // PageDown from the top
         int from = -1;  // where PageUp comes back to `lands` from
         for (int x = lands + 1; lands > 0 && x < 150 && from < 0; ++x)
         {
-            t->select("m0");
+            t->select(tail(0));
             press(tree_hwnd, VK_NEXT);
-            t->select("m" + std::to_string(lands + 1));  // where the real tree's PageDown ends
-            t->select("m" + std::to_string(x));
+            t->select(tail(lands + 1));  // where the real tree's PageDown ends
+            t->select(tail(x));
             press(tree_hwnd, VK_PRIOR);
             if (index_of(t->selected()) == lands) from = x;
         }
