@@ -806,6 +806,87 @@ void check_text(HWND strip, const palette& pal, const std::string& when)
            "and as light as E711, about " + str(std::lround(x_ref)) + at + ": " + str(std::lround(x.mass)));
 }
 
+// The strip printed into a DIB that's all `sentinel`, with `clip` (device
+// coordinates; null: none) selected and the viewport's origin at `origin`:
+// it draws only inside the clip, where the mapping puts it, the pixels
+// everywhere else kept to the last bit (alpha too, which the ClearType
+// pass mends straight in the bitmap).
+void check_clipped_print(HWND strip, HRGN clip, POINT origin, const std::string& what)
+{
+    constexpr DWORD sentinel = 0x11223344;
+    const printed ref = print(strip);
+    const int w = ref.w, h = ref.h;
+    if (w <= 0 || h <= 0) return;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    std::fill_n(static_cast<DWORD*>(bits), size_t(w) * h, sentinel);
+    if (clip) SelectClipRgn(mem, clip);
+    SetViewportOrgEx(mem, origin.x, origin.y, nullptr);
+    SendMessageW(strip, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT);
+    GdiFlush();
+    const auto* px = static_cast<const DWORD*>(bits);
+    long outside = 0, inside = 0, wrong_outside = 0, wrong_inside = 0;
+    std::string first_out, first_in;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+        {
+            const DWORD v = px[size_t(y) * w + x];
+            const bool drawn = (!clip || PtInRegion(clip, x, y)) && x >= origin.x && y >= origin.y;
+            if (!drawn)
+            {
+                ++outside;
+                if (v != sentinel && wrong_outside++ == 0)
+                    first_out = str(x) + "," + str(y) + " " + hex(v);
+            }
+            else
+            {
+                ++inside;
+                const DWORD want = ref.at(x - origin.x, y - origin.y);
+                if (v != want && wrong_inside++ == 0)
+                    first_in = str(x) + "," + str(y) + " " + hex(v) + " for " + hex(want);
+            }
+        }
+    expect(wrong_outside == 0, "printed with " + what + ", every pixel outside it kept, RGBA (" + str(outside) +
+                                   " pixels" + (wrong_outside ? ", " + str(wrong_outside) + " changed, first " +
+                                                                    first_out
+                                                              : std::string()) +
+                                   ")");
+    expect(inside > 0 && wrong_inside == 0, "and inside it as printed unclipped (" + str(inside) + " pixels" +
+                                                (wrong_inside ? ", " + str(wrong_inside) + " differ, first " +
+                                                                    first_in
+                                                              : std::string()) +
+                                                ")");
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+}
+
+void check_clipped_prints(HWND strip)
+{
+    RECT c;
+    GetClientRect(strip, &c);
+    const RECT tab = part(strip, q_tab, ask(strip, q_current));
+    // Across the current tab's title (ClearType's rectangle) and its edge.
+    HRGN partial = CreateRectRgn(tab.left + 30, 0, tab.left + 90, c.bottom);
+    check_clipped_print(strip, partial, {0, 0}, "a rectangular clip, part of the current tab");
+    // Two pieces apart, one through the title, one through the next tab's.
+    HRGN two = CreateRectRgn(0, 0, tab.left + 50, c.bottom);
+    HRGN second = CreateRectRgn(tab.left + 70, 10, tab.right + 60, c.bottom - 6);
+    CombineRgn(two, two, second, RGN_OR);
+    check_clipped_print(strip, two, {0, 0}, "a clip of two separate rectangles");
+    // The viewport moved, and a clip (device coordinates) across the moved
+    // title.
+    HRGN moved = CreateRectRgn(tab.left + 60, 0, tab.left + 140, c.bottom);
+    check_clipped_print(strip, moved, {40, 3}, "the viewport's origin at 40,3 and a clip");
+    for (HRGN r : {partial, two, second, moved}) DeleteObject(r);
+}
+
 // A WM_SETTINGCHANGE (as the font smoothing's) has the strip read its
 // rendering parameters again: sent to the window, no setting changed.
 void check_rebuild(HWND top, HWND strip)
@@ -1547,6 +1628,7 @@ int main(int argc, char** argv)
     check_pixels(strip, expected(hc), hc ? "high contrast" : g_dark ? "dark" : "light");
     check_text(strip, expected(hc), hc ? "high contrast" : g_dark ? "dark" : "light");
     check_rebuild(top, strip);
+    check_clipped_prints(strip);
     if (g_shown)
     {
         check_screen(top, strip, expected(hc));

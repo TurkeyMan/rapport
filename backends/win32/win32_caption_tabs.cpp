@@ -26,11 +26,13 @@
 // compositor puts Mica under it (other tabs, hovered too: WinUI's hover
 // fill is translucent; "+"): ClearType blends each colour channel with
 // what's beneath, which a pixel the compositor fills later hasn't got.
-// ClearType can't be drawn on a premultiplied target, so it's a
-// second pass: the strip drawn first (with its grayscale text), then each
-// ClearType run through a target that ignores alpha (D2D1_ALPHA_MODE_IGNORE),
-// bound to just the opaque rectangle the run sits in, which is then made
-// opaque again (alpha 255), whatever that target left there. The rendering
+// ClearType can't be drawn on a premultiplied target, so it's a second
+// pass: the strip drawn first (with its grayscale text), then each ClearType
+// run drawn in a small bitmap of its own (the opaque rectangle it sits in,
+// copied from the first pass) through a target that ignores alpha
+// (D2D1_ALPHA_MODE_IGNORE), made opaque (alpha 255) whatever that target
+// left, and copied back with BitBlt, which keeps to the DC's clip and
+// mapping (a WM_PRINTCLIENT's may have both). The rendering
 // parameters are the monitor's (its ClearType level, gamma and pixel order,
 // RGB or BGR, as tuned), with the system's font smoothing: no ClearType, and
 // it's grayscale everywhere.
@@ -160,30 +162,6 @@ bool system_cleartype()
     return smoothing && type == FE_FONTSMOOTHINGCLEARTYPE;
 }
 
-// Pixels of `r` (logical coordinates of `dc`) made opaque: through the
-// paint buffer, or straight into the DIB section `dc` has selected (a
-// WM_PRINTCLIENT's). A DC with neither has no alpha to mend.
-void make_opaque(HDC dc, HPAINTBUFFER buffer, RECT r)
-{
-    if (buffer)
-    {
-        BufferedPaintSetAlpha(buffer, &r, 255);
-        return;
-    }
-    DIBSECTION ds{};
-    auto* bitmap = static_cast<HBITMAP>(GetCurrentObject(dc, OBJ_BITMAP));
-    if (!bitmap || GetObjectW(bitmap, sizeof ds, &ds) != sizeof ds || ds.dsBm.bmBitsPixel != 32 ||
-        !ds.dsBm.bmBits)
-        return;
-    LPtoDP(dc, reinterpret_cast<POINT*>(&r), 2);
-    const int w = ds.dsBm.bmWidth, h = ds.dsBm.bmHeight;
-    const bool bottom_up = ds.dsBmih.biHeight > 0;
-    for (int y = std::max<LONG>(r.top, 0); y < std::min<LONG>(r.bottom, h); ++y)
-    {
-        auto* row = static_cast<uint8_t*>(ds.dsBm.bmBits) + size_t(bottom_up ? h - 1 - y : y) * ds.dsBm.bmWidthBytes;
-        for (int x = std::max<LONG>(r.left, 0); x < std::min<LONG>(r.right, w); ++x) row[x * 4 + 3] = 255;
-    }
-}
 
 const wchar_t* strip_class = L"rapportCaptionTabs";
 
@@ -418,22 +396,54 @@ struct caption_tabs::impl
         rt->DrawText(s, n, format, D2D1::RectF(float(box.left), float(box.top), float(box.right), float(box.bottom)),
                      brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
-    void draw_cleartype(HDC dc, HPAINTBUFFER buffer)
+    // Each ClearType run, in a bitmap of its own: what the first pass left
+    // in its opaque rectangle copied in, the run drawn over it, every pixel
+    // made opaque, then copied back with BitBlt, which keeps to `dc`'s clip
+    // (a complex one too) and its mapping. Nothing of `dc`'s outside its
+    // clip is touched, alpha included.
+    void draw_cleartype(HDC dc)
     {
         for (const cleartype_run& t : runs)
         {
-            if (FAILED(opaque_rt->BindDC(dc, &t.opaque))) continue;
-            opaque_rt->BeginDraw();
-            opaque_rt->SetTransform(D2D1::Matrix3x2F::Translation(-float(t.opaque.left), -float(t.opaque.top)));
-            opaque_rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-            if (params) opaque_rt->SetTextRenderingParams(params.get());
-            opaque_brush->SetColor(d2d_color(t.ink));
-            opaque_rt->DrawText(t.s, t.n, t.format,
-                                D2D1::RectF(float(t.box.left), float(t.box.top), float(t.box.right),
-                                            float(t.box.bottom)),
-                                opaque_brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            if (opaque_rt->EndDraw() == D2DERR_RECREATE_TARGET) opaque_rt.reset();
-            make_opaque(dc, buffer, t.opaque);
+            const int w = t.opaque.right - t.opaque.left, h = t.opaque.bottom - t.opaque.top;
+            if (w <= 0 || h <= 0) continue;
+            BITMAPINFO bi{};
+            bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+            void* bits = nullptr;
+            HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+            HDC mem = bmp ? CreateCompatibleDC(dc) : nullptr;
+            if (!mem)
+            {
+                if (bmp) DeleteObject(bmp);
+                continue;
+            }
+            HGDIOBJ old = SelectObject(mem, bmp);
+            GdiFlush();
+            BitBlt(mem, 0, 0, w, h, dc, t.opaque.left, t.opaque.top, SRCCOPY);
+            const RECT local{0, 0, w, h};
+            if (SUCCEEDED(opaque_rt->BindDC(mem, &local)))
+            {
+                opaque_rt->BeginDraw();
+                opaque_rt->SetTransform(
+                    D2D1::Matrix3x2F::Translation(-float(t.opaque.left), -float(t.opaque.top)));
+                opaque_rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+                if (params) opaque_rt->SetTextRenderingParams(params.get());
+                opaque_brush->SetColor(d2d_color(t.ink));
+                opaque_rt->DrawText(t.s, t.n, t.format,
+                                    D2D1::RectF(float(t.box.left), float(t.box.top), float(t.box.right),
+                                                float(t.box.bottom)),
+                                    opaque_brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                if (opaque_rt->EndDraw() == D2DERR_RECREATE_TARGET) opaque_rt.reset();
+                // GDI's (BitBlt's, the target's) drawing done before the
+                // bits are touched; then opaque, whatever the target left.
+                GdiFlush();
+                auto* px = static_cast<uint8_t*>(bits);
+                for (size_t i = 0; i < size_t(w) * h; ++i) px[i * 4 + 3] = 255;
+                BitBlt(dc, t.opaque.left, t.opaque.top, w, h, mem, 0, 0, SRCCOPY);
+            }
+            SelectObject(mem, old);
+            DeleteDC(mem);
+            DeleteObject(bmp);
             if (!opaque_rt) break;
         }
         runs.clear();
@@ -520,9 +530,9 @@ struct caption_tabs::impl
                           dotted.get());
     }
 
-    // The strip onto `dc` (a 32-bit one: BufferedPaint's, whose `buffer`
-    // it is, or a bitmap's).
-    void render(HDC dc, HPAINTBUFFER buffer)
+    // The strip onto `dc` (a 32-bit one: BufferedPaint's, or a bitmap's),
+    // within its clip and as its mapping places it.
+    void render(HDC dc)
     {
         RECT c;
         GetClientRect(self.hwnd_, &c);
@@ -640,7 +650,7 @@ struct caption_tabs::impl
             InvalidateRect(self.hwnd_, nullptr, FALSE);
             return;
         }
-        draw_cleartype(dc, buffer);
+        draw_cleartype(dc);
     }
 
     void paint()
@@ -654,11 +664,11 @@ struct caption_tabs::impl
         HDC mem = nullptr;
         if (HPAINTBUFFER buffer = BeginBufferedPaint(dc, &c, BPBF_TOPDOWNDIB, &bp, &mem))
         {
-            render(mem, buffer);
+            render(mem);
             EndBufferedPaint(buffer, TRUE);
         }
         else
-            render(dc, nullptr);
+            render(dc);
         EndPaint(self.hwnd_, &ps);
     }
 
@@ -856,7 +866,7 @@ struct caption_tabs::impl
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: d.paint(); return 0;
         case WM_PRINTCLIENT:
-            if (lp & PRF_CLIENT) d.render(reinterpret_cast<HDC>(wp), nullptr);
+            if (lp & PRF_CLIENT) d.render(reinterpret_cast<HDC>(wp));
             return 0;
         case WM_SIZE:
             d.layout();
