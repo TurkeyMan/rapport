@@ -11054,24 +11054,43 @@ public:
     }
 
 private:
-    // Common controls v6 (themed controls) without an application manifest:
-    // activate the one shell32 carries for itself.
+    // Common controls v6 (themed controls) for an app whose manifest doesn't
+    // ask for them, or that has none (#41): a manifest that depends on them,
+    // made the process's default where nothing else is, and active on this
+    // thread (the UI's) either way, since any manifest at all, MSVC's default
+    // one included, is already the process default. Windows' own
+    // WindowsShell.Manifest is that manifest; shell32's resource 124, which
+    // was, is gone from Windows 11 22H2's shell32.
     static void enable_visual_styles()
     {
-        wchar_t dir[MAX_PATH];
-        GetSystemDirectoryW(dir, MAX_PATH);
-        const std::wstring shell32 = std::wstring(dir) + L"\\shell32.dll";
-        ACTCTXW ctx{};
-        ctx.cbSize = sizeof ctx;
-        ctx.dwFlags = ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_SET_PROCESS_DEFAULT | ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID;
-        ctx.lpSource = shell32.c_str();
-        ctx.lpAssemblyDirectory = dir;
-        ctx.lpResourceName = MAKEINTRESOURCEW(124);
-        HANDLE h = CreateActCtxW(&ctx);
-        if (h != INVALID_HANDLE_VALUE)
+        wchar_t windows[MAX_PATH], system[MAX_PATH];
+        if (!GetWindowsDirectoryW(windows, MAX_PATH) || !GetSystemDirectoryW(system, MAX_PATH)) return;
+        const std::wstring shell_manifest = std::wstring(windows) + L"\\WindowsShell.Manifest";
+        const std::wstring shell32 = std::wstring(system) + L"\\shell32.dll";
+        auto make = [&](bool from_shell32, bool process_default)
         {
+            ACTCTXW ctx{};
+            ctx.cbSize = sizeof ctx;
+            if (from_shell32)
+            {
+                ctx.dwFlags = ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID;
+                ctx.lpSource = shell32.c_str();
+                ctx.lpAssemblyDirectory = system;
+                ctx.lpResourceName = MAKEINTRESOURCEW(124);
+            }
+            else
+                ctx.lpSource = shell_manifest.c_str();
+            if (process_default) ctx.dwFlags |= ACTCTX_FLAG_SET_PROCESS_DEFAULT;
+            return CreateActCtxW(&ctx);
+        };
+        for (bool from_shell32 : {false, true})
+        {
+            HANDLE h = make(from_shell32, true);
+            if (h == INVALID_HANDLE_VALUE) h = make(from_shell32, false);
+            if (h == INVALID_HANDLE_VALUE) continue;
             ULONG_PTR cookie = 0;
-            ActivateActCtx(h, &cookie);
+            if (ActivateActCtx(h, &cookie)) return;  // held for the process's life
+            ReleaseActCtx(h);
         }
     }
 
