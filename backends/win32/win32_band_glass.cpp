@@ -68,6 +68,30 @@ struct glass
     bool fonts = false;     // its font shown grayscale while it's on glass
     HFONT given = nullptr;  // the font it was given
     bool hot = false;       // the mouse over it (a button's hover)
+    // Its lifetime. A message passed on (DefSubclassProc, and any message
+    // sent) can reach the app's code, which may destroy the control: then
+    // WM_NCDESTROY comes inside that call and marks it gone, and it's freed
+    // once the last glass_proc on the stack for it returns (`busy`), never
+    // under one. Nothing of it, nor the window, is touched after a call that
+    // could have destroyed it unless `alive` says it's still there.
+    bool alive = true;
+    int busy = 0;
+};
+
+// glass_proc's hold on a control's state for the length of one message.
+class hold
+{
+public:
+    explicit hold(glass* g) : g_(g) { ++g_->busy; }
+    ~hold()
+    {
+        if (--g_->busy == 0 && !g_->alive) delete g_;
+    }
+    hold(const hold&) = delete;
+    hold& operator=(const hold&) = delete;
+
+private:
+    glass* g_;
 };
 
 // While a layer control prints onto a matte: the matte; and the depth of
@@ -180,13 +204,15 @@ bool paint_glass(HWND h, HDC target, const RECT& area, Draw&& draw)
     if (!black || !white) return false;
     static const color mattes[2] = {color{0, 0, 0, 255}, color{255, 255, 255, 255}};
     ++t_printing;
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < 2 && IsWindow(h); ++i)
     {
         t_matte = &mattes[i];
         draw(i ? white.dc : black.dc, mattes[i]);
     }
     t_matte = nullptr;
     --t_printing;
+    // Destroyed meanwhile (a print reaching the app): nothing more to draw.
+    if (!IsWindow(h)) return true;
     GdiFlush();
     BP_PAINTPARAMS params{sizeof params, 0, nullptr, nullptr};
     HDC mem = nullptr;
@@ -359,10 +385,11 @@ bool may_draw(UINT msg)
 LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
 {
     auto* g = reinterpret_cast<glass*>(data);
+    const hold held(g);  // (freed after this returns, if destroyed meanwhile)
     if (msg == WM_NCDESTROY)
     {
+        g->alive = false;
         RemoveWindowSubclass(h, glass_proc, glass_id);
-        delete g;
         return DefSubclassProc(h, msg, wp, lp);
     }
     // Its font: shown grayscale on glass (a layer control's text), as given
@@ -382,12 +409,17 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
         {
             PAINTSTRUCT ps;
             HDC dc = BeginPaint(h, &ps);
-            if (!paint_layer(h, dc))
+            // (Printing sends the control messages, an owner-drawn one's
+            // reaching the app: nothing more if that destroyed it.)
+            const bool done = paint_layer(h, dc);
+            if (!g->alive) return 0;
+            if (!done)
             {
                 // No bitmaps or buffer: drawn as it would be, rather than not.
                 ++t_printing;
                 SendMessageW(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT | PRF_ERASEBKGND);
                 --t_printing;
+                if (!g->alive) return 0;
             }
             EndPaint(h, &ps);
             return 0;
@@ -398,14 +430,17 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
         case WM_MOUSEMOVE:
         {
             // A button's hover, drawn as the mouse comes: again, on glass.
-            const LRESULT r = DefSubclassProc(h, msg, wp, lp);
-            if (!g->hot)
+            // Its state read and set first: the move may reach the app (a
+            // slider's on_changed) and destroy it.
+            const bool came = !g->hot;
+            g->hot = true;
+            if (came)
             {
-                g->hot = true;
                 TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0};
                 TrackMouseEvent(&t);
-                repaint_layer(h);
             }
+            const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+            if (came && g->alive) repaint_layer(h);
             return r;
         }
         default: break;
@@ -413,7 +448,7 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
         if (msg == WM_MOUSELEAVE) g->hot = false;
         if (msg == WM_NCPAINT || !may_draw(msg)) return DefSubclassProc(h, msg, wp, lp);
         const LRESULT r = DefSubclassProc(h, msg, wp, lp);
-        if (IsWindow(h)) repaint_layer(h);
+        if (g->alive) repaint_layer(h);
         return r;
     }
     // Opaque: let it draw, then its pixels opaque.
@@ -429,10 +464,12 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
             const LRESULT r = SendMessageW(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), lp);
             --t_printing;
             BufferedPaintSetAlpha(buffer, nullptr, 255);
-            EndBufferedPaint(buffer, TRUE);
+            EndBufferedPaint(buffer, TRUE);  // (the target's the caller's, the buffer ours)
             return r;
         }
     }
+    // Everything of its state read and set before the message is passed on
+    // (it may reach the app and destroy the control); after, only `alive`.
     bool drew = may_draw(msg);
     if (msg == WM_MOUSEMOVE)
     {
@@ -447,7 +484,7 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
     }
     if (msg == WM_MOUSELEAVE) g->hot = false;
     const LRESULT r = DefSubclassProc(h, msg, wp, lp);
-    if (drew && IsWindow(h)) make_opaque(h);
+    if (drew && g->alive) make_opaque(h);
     return r;
 }
 
