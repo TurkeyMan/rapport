@@ -140,6 +140,11 @@ constexpr UINT destroy = WM_APP + 4;
 constexpr UINT reuse_ids = WM_APP + 5;
 constexpr UINT stale_invoke = WM_APP + 6;
 constexpr UINT nothing = WM_APP + 7;
+// Sent (SendMessage, from the client's thread), not posted: handled inside
+// a cross-thread sent message, where COM refuses UIA's disconnect.
+constexpr UINT add_sent = WM_APP + 8;
+constexpr UINT sent_remove = WM_APP + 9;
+constexpr UINT count_deferred = WM_APP + 10;
 
 struct shared
 {
@@ -153,6 +158,12 @@ struct shared
     // What a node for a removed element answered once its id was another's.
     HRESULT stale_name = S_OK;
     HRESULT stale_invoked = E_FAIL;
+    // Inside the sent messages: whether it was one, and the disconnects
+    // waiting after it.
+    bool in_send = false;
+    bool destroy_in_send = false;
+    size_t deferred = 0;
+    size_t destroy_deferred = 0;
     HANDLE finished = nullptr;  // the client is through
 };
 shared S;
@@ -236,8 +247,25 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case nothing:
         SetEvent(S.done);
         return 0;
+    case add_sent:
+        p->set_elements(strip({L"First", L"Second", L"Third", L"Sent"}, 1));
+        SetEvent(S.done);
+        return 0;
+    case sent_remove:
+        S.in_send = (InSendMessageEx(nullptr) & (ISMEX_SEND | ISMEX_REPLIED)) == ISMEX_SEND;
+        p->set_elements(strip({L"First", L"Second", L"Third"}, 1));
+        p->raise_child_removed(tabs_id, item_id(3));
+        S.deferred = uia_provider::deferred_disconnects();
+        return 0;
+    case count_deferred:
+        S.deferred = uia_provider::deferred_disconnects();
+        SetEvent(S.done);
+        return 0;
     case destroy:
+        // Sent: the window's teardown inside a cross-thread sent message.
+        S.destroy_in_send = (InSendMessageEx(nullptr) & (ISMEX_SEND | ISMEX_REPLIED)) == ISMEX_SEND;
         DestroyWindow(hwnd);
+        S.destroy_deferred = uia_provider::deferred_disconnects();
         SetEvent(S.done);
         return 0;
     case WM_NCDESTROY: SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0); break;
@@ -310,11 +338,36 @@ struct counter : Interface
         return n;
     }
 };
+std::vector<int> ints(SAFEARRAY* a)
+{
+    std::vector<int> out;
+    LONG lo = 0, hi = -1;
+    if (a && SUCCEEDED(SafeArrayGetLBound(a, 1, &lo)) && SUCCEEDED(SafeArrayGetUBound(a, 1, &hi)))
+        for (LONG i = lo; i <= hi; ++i)
+        {
+            int v = 0;
+            SafeArrayGetElement(a, &i, &v);
+            out.push_back(v);
+        }
+    return out;
+}
+// Counts each kind of structure change heard, and keeps the runtime id the
+// first ChildRemoved named.
 struct structure_counter final : counter<IUIAutomationStructureChangedEventHandler>
 {
-    IFACEMETHODIMP HandleStructureChangedEvent(IUIAutomationElement*, StructureChangeType, SAFEARRAY*) override
+    std::array<std::atomic<int>, 8> kinds{};
+    std::mutex lock;
+    std::vector<int> removed;
+    IFACEMETHODIMP HandleStructureChangedEvent(IUIAutomationElement*, StructureChangeType change,
+                                               SAFEARRAY* runtime_id) override
     {
         ++calls;
+        if (change == StructureChangeType_ChildRemoved)
+        {
+            std::lock_guard g(lock);
+            if (removed.empty()) removed = ints(runtime_id);
+        }
+        if (unsigned(change) < kinds.size()) ++kinds[size_t(change)];
         return S_OK;
     }
 };
@@ -537,13 +590,27 @@ void client()
                            SUCCEEDED(uia->AddFocusChangedEventHandler(nullptr, focus));
     expect(listening, "listening for structure and focus changes");
     expect(ask(raise_events), "focus and structure changes raised");
+    expect(wait_for(structure->kinds[StructureChangeType_ChildrenInvalidated], 1), "ChildrenInvalidated heard");
+    expect(wait_for(focus->calls, 1), "a focus change heard");
 
     // A tab added: seen, then removed while the client holds it.
     expect(ask(add_tab), "a fourth tab added");
+    expect(wait_for(structure->kinds[StructureChangeType_ChildAdded], 1), "ChildAdded heard");
     expect(count(uia, tabs, UIA_TabItemControlTypeId) == 4, "four TabItems");
     IUIAutomationElement* fourth = find(uia, tabs, TreeScope_Children, UIA_TabItemControlTypeId, L"Fourth");
     expect(fourth != nullptr, "the fourth by its title");
+    std::vector<int> fourth_id;
+    {
+        SAFEARRAY* a = nullptr;
+        if (fourth && SUCCEEDED(fourth->GetRuntimeId(&a))) fourth_id = ints(a);
+        if (a) SafeArrayDestroy(a);
+    }
     expect(ask(remove_tab), "and removed");
+    expect(wait_for(structure->kinds[StructureChangeType_ChildRemoved], 1), "ChildRemoved heard");
+    {
+        std::lock_guard g(structure->lock);
+        expect(!fourth_id.empty() && structure->removed == fourth_id, "naming the removed tab's runtime id");
+    }
     {
         BSTR b = nullptr;
         const HRESULT hr = fourth ? fourth->get_CurrentName(&b) : E_FAIL;
@@ -577,6 +644,32 @@ void client()
     expect(ask(nothing), "the queued invoke handled");  // posted after it: handled after
     expect(owner.invoked[size_t(close_id(3))] == 0, "and the new close button didn't get it");
     expect(ask(remove_tab), "three tabs again");
+
+    // Removed inside a message sent from another thread, where COM refuses
+    // UIA's disconnect: dead to the client at once, disconnected later.
+    expect(ask(add_sent), "a tab for the sent message");
+    IUIAutomationElement* sent = find(uia, tabs, TreeScope_Children, UIA_TabItemControlTypeId, L"Sent");
+    expect(sent != nullptr, "seen by the client");
+    {
+        DWORD_PTR ignored = 0;
+        expect(SendMessageTimeoutW(S.hwnd, sent_remove, 0, 0, SMTO_NORMAL, 10000, &ignored) != 0,
+               "removed inside a sent message");
+        expect(S.in_send, "which was a cross-thread sent message");
+        note("disconnects waiting after it", long(S.deferred));
+        expect(S.deferred >= 1, "the disconnect waited");
+        BSTR b = nullptr;
+        const HRESULT hr = sent ? sent->get_CurrentName(&b) : E_FAIL;
+        SysFreeString(b);
+        expect(hr == UIA_E_ELEMENTNOTAVAILABLE, "the tab, held, is unavailable meanwhile");
+        bool drained = false;
+        for (int i = 0; i < 200 && !drained; ++i)
+        {
+            drained = ask(count_deferred) && S.deferred == 0;
+            if (!drained) Sleep(10);
+        }
+        expect(drained, "and disconnected once out of it");
+    }
+    release(sent);
     Sleep(300);
     {
         std::lock_guard g(out_lock);
@@ -587,8 +680,16 @@ void client()
     release(structure);
     release(focus);
 
-    // The window gone: what the client holds is no longer available.
-    expect(ask(destroy), "the window destroyed");
+    // The window destroyed inside a message sent from another thread: what
+    // the client holds is unavailable, its disconnects done later.
+    {
+        DWORD_PTR ignored = 0;
+        expect(SendMessageTimeoutW(S.hwnd, destroy, 0, 0, SMTO_NORMAL, 10000, &ignored) != 0,
+               "the window destroyed");
+        expect(S.destroy_in_send, "inside a cross-thread sent message");
+        note("disconnects waiting after the teardown", long(S.destroy_deferred));
+        expect(S.destroy_deferred >= 1, "its disconnects waited");
+    }
     {
         BSTR b = nullptr;
         const HRESULT hr = second ? second->get_CurrentName(&b) : E_FAIL;
@@ -702,6 +803,19 @@ int main()
     worker.join();
 
     expect(!owner.off_thread, "the strip was only ever called on its window's thread");
+    // The teardown's disconnects, from the thread's timer with no window
+    // left: the loop above dispatched it; wait for it a little more.
+    for (int i = 0; i < 200 && uia_provider::deferred_disconnects(); ++i)
+    {
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+        MSG m;
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+    }
+    expect(uia_provider::deferred_disconnects() == 0, "the teardown's disconnects done, the window gone");
     // The window's gone and the provider disconnected: what's held is
     // unavailable, and calling it touches nothing freed.
     {
