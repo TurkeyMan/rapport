@@ -4658,6 +4658,8 @@ public:
         auto* win = GTK_WINDOW(win_);
         gtk_window_set_title(win, spec.title.c_str());
         recent().insert(recent().begin(), win_);
+        // Busy from the start while the app is (ui::set_busy).
+        apply_busy(win_);
         gtk_window_set_default_size(win, px(spec.width), px(spec.height));
         // GNOME's header bar, for dialogs where the app asked for it, or a
         // window that asks itself; the dialog's buttons go into it.
