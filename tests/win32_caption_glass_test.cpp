@@ -284,7 +284,7 @@ int main(int argc, char** argv)
                         combo{{"One", "Two"}, "One"}, hbox{tool_button{rap::icon::named("go-up"), "Tool"}},
                         entry{"Text"}.clearable().stretch()},
                 label{"Content"}}}
-            .size(1300_px, 300_px)
+            .size(900_px, 300_px)
             .base_surface(true)
             .tabs(document_tabs{{{"a", "Alpha", {}, {}}, {"b", "Beta", {}, {}}}}.current("a")));
     win->show();
@@ -294,6 +294,34 @@ int main(int argc, char** argv)
     HWND edit = top ? FindWindowExW(top, nullptr, L"Edit", nullptr) : nullptr;
     expect(top && strip && edit, "the window, its tabs in the caption, its text field");
     if (!top || !strip || !edit) return 1;
+    // Wholly on its monitor, at its work area's top left (a runner's screen
+    // may be 1024 wide): what's off it isn't composed as on it.
+    {
+        MONITORINFO mi{sizeof mi};
+        GetMonitorInfoW(MonitorFromWindow(top, MONITOR_DEFAULTTONEAREST), &mi);
+        RECT w{}, efb{};
+        GetWindowRect(top, &w);
+        DwmGetWindowAttribute(top, DWMWA_EXTENDED_FRAME_BOUNDS, &efb, sizeof efb);
+        SetWindowPos(top, nullptr, mi.rcWork.left + 8 - (efb.left - w.left), mi.rcWork.top + 8 - (efb.top - w.top), 0,
+                     0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        pump(20);
+        GetWindowRect(top, &w);
+        DwmGetWindowAttribute(top, DWMWA_EXTENDED_FRAME_BOUNDS, &efb, sizeof efb);
+        note("window " + str(w.left) + "," + str(w.top) + ".." + str(w.right) + "," + str(w.bottom) + ", its frame " +
+             str(efb.left) + "," + str(efb.top) + ".." + str(efb.right) + "," + str(efb.bottom) + ", the work area " +
+             str(mi.rcWork.left) + "," + str(mi.rcWork.top) + ".." + str(mi.rcWork.right) + "," +
+             str(mi.rcWork.bottom) + (GetForegroundWindow() == top ? ", active" : ", inactive"));
+        // Off the screen the compositor needn't put the backdrop under a
+        // window's extended frame, and its pixels there could come out the
+        // same in both frames, alpha 1 to this test. (The first version's
+        // 1300 px window, on the runner's 1024 px screen, read 1.00 on the
+        // current tab though not on the band: the window's now sized and
+        // placed to fit, and the strip's pixel is read back from its own DC
+        // too, which needs no compositor.)
+        expect(efb.left >= mi.rcMonitor.left && efb.top >= mi.rcMonitor.top && efb.right <= mi.rcMonitor.right &&
+                   efb.bottom <= mi.rcMonitor.bottom,
+               "the window wholly on its monitor, where the compositor composes it");
+    }
 
     capturer cap;
     if (!cap.make()) return skip("no Direct3D 11 device to capture with");
@@ -317,6 +345,20 @@ int main(int argc, char** argv)
     }
     DwmSetWindowAttribute(top, 20, &was, sizeof was);
     if (f[0].px.empty() || f[1].px.empty()) return skip("no frame arrived from Windows.Graphics.Capture");
+    // RAPPORT_GLASS_DUMP=dir: both frames written there, raw BGRA with their
+    // width and height first, to look at.
+    {
+        char dir[MAX_PATH]{};
+        if (GetEnvironmentVariableA("RAPPORT_GLASS_DUMP", dir, sizeof dir))
+            for (int i = 0; i < 2; ++i)
+                if (FILE* out = std::fopen((std::string(dir) + "\\frame" + str(i) + ".bgra").c_str(), "wb"))
+                {
+                    const int32_t size[2] = {f[i].w, f[i].h};
+                    std::fwrite(size, sizeof size, 1, out);
+                    std::fwrite(f[i].px.data(), 4, f[i].px.size(), out);
+                    std::fclose(out);
+                }
+    }
     expect(f[0].w == f[1].w && f[0].h == f[1].h, "both frames the same size, " + str(f[0].w) + "x" + str(f[0].h));
 
     // The backdrop alone: the strip's empty part past "+".
@@ -399,12 +441,72 @@ int main(int argc, char** argv)
                 if (alpha(x, y) < 1 - tolerance) ++under;
         expect(n > 0 && under == 0, "the text field opaque inside (" + str(under) + " of " + str(n) + " not)");
     }
-    // The current tab: the layer, as the band.
+    // The current tab: the layer, as the band. Its fill above its title
+    // (from 2 to 6 px down, past its corners, before its close button),
+    // each pixel's alpha, the median asserted.
     {
-        RECT tab{};
-        SendMessageW(strip, q, MAKEWPARAM(3, 0), reinterpret_cast<LPARAM>(&tab));
-        const double a = alpha(s.left + tab.left + 20, s.top + tab.top + 4);
-        expect(std::fabs(a - layer) < tolerance, "the current tab at the layer's alpha, " + fixed(layer) + ": " + fixed(a));
+        const int current = int(SendMessageW(strip, q, MAKEWPARAM(1, 0), 0));
+        RECT tab{}, close{};
+        SendMessageW(strip, q, MAKEWPARAM(3, current), reinterpret_cast<LPARAM>(&tab));
+        SendMessageW(strip, q, MAKEWPARAM(4, current), reinterpret_cast<LPARAM>(&close));
+        std::vector<double> fill;
+        for (int y = tab.top + 2; y <= tab.top + 6; ++y)
+            for (int x = tab.left + 12; x < (IsRectEmpty(&close) ? tab.right - 12 : close.left); ++x)
+                fill.push_back(alpha(s.left + x, s.top + y));
+        std::sort(fill.begin(), fill.end());
+        const double median = fill.empty() ? -1 : fill[fill.size() / 2];
+        // What's there, to tell why if it isn't: the two frames' pixels, the
+        // strip printed, and the strip's pixel read back from its own DC.
+        auto px = [&](const frame& fr, int x, int y)
+        {
+            char b[16];
+            std::snprintf(b, sizeof b, "%08X", fr.at(x + ox, y + oy));
+            return std::string(b);
+        };
+        const int sx = s.left + tab.left + 20, sy = s.top + tab.top + 4;
+        std::string printed = "?", readback = "?";
+        {
+            RECT c{};
+            GetClientRect(strip, &c);
+            HDC screen = GetDC(nullptr);
+            HDC mem = CreateCompatibleDC(screen);
+            BITMAPINFO bi{};
+            bi.bmiHeader = {sizeof(BITMAPINFOHEADER), c.right, -c.bottom, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+            void* bits = nullptr;
+            HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+            HGDIOBJ old = SelectObject(mem, bmp);
+            auto* p = static_cast<uint32_t*>(bits);
+            std::fill_n(p, size_t(c.right) * c.bottom, 0u);
+            SendMessageW(strip, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT);
+            GdiFlush();
+            char b[16];
+            std::snprintf(b, sizeof b, "%08X", p[size_t(tab.top + 4) * c.right + tab.left + 20]);
+            printed = b;
+            std::fill_n(p, size_t(c.right) * c.bottom, 0x12345678u);
+            HDC dc = GetDC(strip);
+            BitBlt(mem, 0, 0, c.right, c.bottom, dc, 0, 0, SRCCOPY);
+            ReleaseDC(strip, dc);
+            GdiFlush();
+            std::snprintf(b, sizeof b, "%08X", p[size_t(tab.top + 4) * c.right + tab.left + 20]);
+            readback = b;
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            ReleaseDC(nullptr, screen);
+        }
+        note("the current tab, " + str(current) + ", at " + str(tab.left) + "," + str(tab.top) + ".." + str(tab.right) +
+             "," + str(tab.bottom) + " in the strip at " + str(s.left) + "," + str(s.top) + "; at " + str(sx) + "," +
+             str(sy) + " the frames " + px(f[0], sx, sy) + " then " + px(f[1], sx, sy) + ", printed " + printed +
+             ", read back from its DC " + readback + "; its middle " + px(f[0], s.left + (tab.left + tab.right) / 2, s.top + tab.bottom - 3) +
+             " then " + px(f[1], s.left + (tab.left + tab.right) / 2, s.top + tab.bottom - 3) + "; the strip left of it " +
+             px(f[0], s.left + 3, s.top + 20) + " then " + px(f[1], s.left + 3, s.top + 20) + "; least and most " +
+             (fill.empty() ? std::string("-") : fixed(fill.front()) + ", " + fixed(fill.back())));
+        // The strip's own pixel, read back from its DC (the window's
+        // surface, before the compositor): as printed, alpha and all.
+        expect(readback == printed, "the current tab's pixel on the window's surface as printed: " + readback);
+        expect(std::fabs(median - layer) < tolerance, "the current tab at the layer's alpha, " + fixed(layer) +
+                                                          ": " + fixed(median) + " (the median of " +
+                                                          str(long(fill.size())) + " pixels of its fill)");
     }
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
