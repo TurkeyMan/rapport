@@ -213,7 +213,9 @@ struct icon
     std::string name;
     // The desktop's icon for this kind of file, as its file manager shows
     // it (for_file). Only the name matters (its extension or MIME type); the
-    // file needn't exist. A name ending in '/' is a folder.
+    // file needn't exist, and is never read: the disk isn't touched (for a
+    // path's own icon, which is, see `path`). A name ending in '/' is a
+    // folder.
     std::string file;
     // Draws the icon into `size` (logical px) on a Painter with the right
     // device_scale. Draw with theme colours (theme_color::window_text) so it
@@ -225,13 +227,16 @@ struct icon
     // The desktop's own icon for this very path, as its file manager shows
     // it (for_path): a drive's (Windows: C: with the Windows logo, a USB
     // stick's, an optical drive's with its disc's, an autorun's), a folder's
-    // own (desktop.ini, GIO's metadata), a program's. Unlike `file`, the path
-    // is looked at, which can be slow (a disconnected network drive, an
-    // optical drive spinning up): backends never wait for it on the UI
-    // thread. Until it's known, and where the backend or the path has none,
-    // `name` (else `draw`) is shown instead; it changes in place once found.
-    // Found once per path for the process: a drive whose media changes keeps
-    // the icon it was first found with.
+    // own (desktop.ini, GIO's metadata), a program's. This reads the disk
+    // (`file` never does): the path, its drive, its autorun.inf or
+    // desktop.ini, which can be slow (a disconnected network drive, an
+    // optical drive spinning up), so backends find it in the background and
+    // never wait for it on the UI thread. Until it's known, and where the
+    // backend or the path has none, `name` (else `draw`) is shown instead; it
+    // changes in place once found. Found once per path and size for the
+    // process: a drive whose media changes keeps the icon it was first found
+    // with, and a path found to have none isn't asked again. Qt shows `name`
+    // only (as Dolphin, which picks drive icons by device class, not path).
     std::string path;
 
     static icon named(std::string n) { return {std::move(n), {}, {}, {}, {}}; }
