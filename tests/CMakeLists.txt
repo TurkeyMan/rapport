@@ -475,6 +475,27 @@ if(TARGET rapport_win32)
     add_test(NAME win32-caption-tabs-transitions COMMAND rapport-win32-caption-tabs-test --transitions)
     set_tests_properties(win32-caption-tabs-transitions PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    # The toolbar band's controls on screen, captured (Windows.Graphics.
+    # Capture, C++/WinRT: MSVC only): no holes in the extended frame. Shown;
+    # a real skip (77) where there's nothing to capture or tell by, never a
+    # pass.
+    if(MSVC)
+        add_executable(rapport-win32-caption-glass-test win32_caption_glass_test.cpp)
+        target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::rapport user32 gdi32 dwmapi d3d11 dxgi
+                                                                       windowsapp)
+        target_compile_options(rapport-win32-caption-glass-test PRIVATE /bigobj)
+        if(RAPPORT_STATIC)
+            target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::backend_win32)
+            target_compile_definitions(rapport-win32-caption-glass-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+        endif()
+        add_dependencies(rapport-win32-caption-glass-test rapport_win32)
+        add_test(NAME win32-caption-glass COMMAND rapport-win32-caption-glass-test)
+        add_test(NAME win32-caption-glass-light COMMAND rapport-win32-caption-glass-test)
+        set_tests_properties(win32-caption-glass PROPERTIES
+            ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+        set_tests_properties(win32-caption-glass-light PROPERTIES
+            ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+    endif()
 
     # The document tabs reordered by dragging and by the keys, in both strips:
     # never-shown windows, given the mouse's messages and the keys.

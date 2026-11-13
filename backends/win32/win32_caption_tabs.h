@@ -216,9 +216,12 @@ int caption_line_px(UINT dpi);
 // -- the toolbar band ---------------------------------------------------------
 //
 // Explorer's address row: under the tabs in the caption a band in WinUI's
-// LayerFillColorDefault (#80FFFFFF; dark, #4C3A3A3A) at its own alpha, the
-// frame extended over it (extend_caption_frame) so the compositor puts Mica
-// Alt under it, with the stroke as an opaque line under it, and the current
+// LayerOnMicaBaseAltFillColorDefault (#B3FFFFFF; dark, #733A3A3A), as
+// Explorer's measures, at its own alpha, the
+// frame extended over it (extend_caption_frame; not in high contrast, where
+// it's opaque) so the compositor puts Mica Alt under it, its native controls
+// given alpha to match (glass_band_controls), with the stroke as an opaque
+// line under it, and the current
 // tab filled the same, so the tab and the band read as one surface; the
 // panes under it white.
 //
@@ -255,5 +258,16 @@ void paint_toolbar_band(HWND top, HDC dc);
 // `h`, a child, is wholly within its window's band: `fill` its colour drawn
 // opaque (`solid`), for GDI's brushes.
 bool in_toolbar_band(HWND h, color& fill);
+
+// The band's native controls over the extended frame (win32_band_glass.cpp):
+// each child of `top` wholly in its band given correct alpha, a layer
+// control (a toolbar, buttons, labels) its pixels worked out over the band's
+// layer, an opaque one (a field) its pixels made opaque; called as the band
+// is laid out, once the children are where they go.
+void glass_band_controls(HWND top);
+// While a layer control is printed onto a matte for that: the matte, which
+// its background (surface_color_of, surface_brush_of, paint_toolbar_band)
+// is instead of the band's.
+bool glass_matte(color& matte);
 
 }  // namespace rap::win32

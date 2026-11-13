@@ -10423,6 +10423,16 @@ public:
                             std::exchange(layout_cause_, 0));
         relayout_pending_ = false;
         if (!root) return;
+        place_all();
+        // The toolbar band's controls on glass, once they're where they
+        // went (the moves above are made as one, at the end); once more as
+        // the tabs leave the caption, for their own fonts back.
+        if (caption_ || glassed_) glass_band_controls(hwnd_);
+        glassed_ = caption_;
+    }
+    bool glassed_ = false;
+    void place_all()
+    {
         sync_caption();  // first: it may change the client area
         RECT r = client();
         const int m = margin();

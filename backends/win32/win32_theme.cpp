@@ -55,16 +55,22 @@ theme_color surface_of(HWND h)
     return root && GetPropW(root, L"rapport-base-surface") ? theme_color::base : theme_color::window;
 }
 
+// In the toolbar band, its colour; while a control there is printed onto a
+// matte for its alpha (win32_band_glass.cpp), the matte.
 color surface_color_of(HWND h)
 {
     color band{};
-    return in_toolbar_band(h, band) ? band : theme_color_of(surface_of(h));
+    if (!in_toolbar_band(h, band)) return theme_color_of(surface_of(h));
+    color matte{};
+    return glass_matte(matte) ? matte : band;
 }
 
 HBRUSH surface_brush_of(HWND h)
 {
     color band{};
     if (!in_toolbar_band(h, band)) return theme_brush(surface_of(h));
+    if (color matte{}; glass_matte(matte))
+        return static_cast<HBRUSH>(GetStockObject(matte.r ? WHITE_BRUSH : BLACK_BRUSH));
     // The band's one colour at a time (light, dark), made again as it changes.
     static HBRUSH brush = nullptr;
     static color made{};
