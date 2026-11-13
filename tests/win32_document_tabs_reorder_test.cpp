@@ -335,6 +335,52 @@ void reorder(rap::ui& ui, const char* name, bool with_menu)
                        s.current() == 0 && f.tabs->current() == "a",
                    "Ctrl+Shift+PgUp twice: first again, on_reorder once each" + at + ": " + join(f.tabs->ids()));
             expect(f.selected.empty(), "and no on_select from any of it" + at);
+
+            // Between a press and its release (no move), the app changes
+            // the tabs: the press's drag is cancelled, its release tells
+            // nothing.
+            auto& r = f.reordered;
+            auto& t = *f.tabs;
+            strip st = s;
+            r.clear();
+            POINT p = st.centre(1);  // Beta
+            st.down(p);
+            t.insert(0, {"y", "Inserted", {}, {}});
+            st.up(p);
+            expect(r.empty() && t.ids() == ids{"y", "a", "b", "c"},
+                   "a tab added before the pressed one, then let go: no on_reorder" + at);
+            t.remove("y");
+            p = st.centre(1);
+            st.down(p);
+            t.remove("b");
+            st.up(p);
+            expect(r.empty() && t.ids() == ids{"a", "c"}, "the pressed tab removed, then let go: no on_reorder" + at);
+            t.insert(1, {"b", "Beta", {}, {}});
+            p = st.centre(1);
+            st.down(p);
+            t.remove("b");
+            t.insert(2, {"b", "Beta", {}, {}});
+            st.up(p);
+            expect(r.empty() && t.ids() == ids{"a", "c", "b"},
+                   "removed and added again elsewhere, then let go: no on_reorder" + at);
+            t.remove("b");
+            t.insert(1, {"b", "Beta", {}, {}});
+            // A key's move while pressed: the press's drag cancelled, the
+            // key's on_reorder once (the key's taken by the loop, next).
+            st.down(st.centre(1));
+            t.select("b");
+            ctrl_shift_key(f.top, VK_NEXT);
+        });
+    steps.push_back(
+        [&f, s, at]
+        {
+            keys_up();
+            strip st = s;
+            expect(f.reordered.size() == 1 && f.reordered[0].id == "b" && f.reordered[0].index == 2 &&
+                       f.tabs->ids() == ids{"a", "c", "b"},
+                   "Ctrl+Shift+PgDn while pressed: the key's on_reorder, once" + at + ": " + join(f.tabs->ids()));
+            st.up(st.centre(1));
+            expect(f.reordered.size() == 1 && f.tabs->ids() == ids{"a", "c", "b"}, "and let go: nothing more" + at);
         });
 }
 
