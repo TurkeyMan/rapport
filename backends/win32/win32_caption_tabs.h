@@ -148,7 +148,10 @@ public:
     // tab's, its close button's and "+"'s rectangle into the RECT lParam
     // points to, in the process; 6 how many times its rendering parameters
     // have been made; 7 its fonts, into the caption_tabs_fonts lParam
-    // points to), its high word the tab.
+    // points to; 8, a test hook: the first copy of the next `tab` ClearType
+    // runs (from the target into the run's own bitmap) made to fail, and
+    // how many have been made to fail so far returned), its high word the
+    // tab.
     static UINT query_message();
 
     // uia_owner
@@ -192,5 +195,45 @@ bool caption_frame_message(HWND top, UINT msg, WPARAM wp, LPARAM lp, int strip_h
 // is clipped around it), under the caption buttons: as the strip's empty
 // part (transparent, or opaque) with its line along the bottom.
 void paint_caption_band(HWND top, HDC dc, int strip_height, bool transparent);
+
+// A line's width at `dpi` (the strip's, the toolbar band's): a pixel, scaled.
+int caption_line_px(UINT dpi);
+
+// -- the toolbar band ---------------------------------------------------------
+//
+// Explorer's address row: under the tabs in the caption a band in WinUI's
+// LayerFillColorDefault (#F8F8F8 drawn opaque; dark, the dark one) with
+// the stroke as a line under it, and the current tab filled the same, so
+// the tab and the band read as one surface; the panes under it white.
+//
+// Only while all three hold: Windows 11, the tabs in the caption (stage 2),
+// and a base surface window. And only for a toolbar that's the window's
+// first content item (the content itself, or the first shown item of a
+// column) and spans the content's full width; nothing else qualifies. The
+// band is then the client area's width, from the strip's bottom down to
+// the toolbar's, its line the row under the toolbar; the toolbar's
+// controls (wholly in it) painted on its fill wherever rapport paints
+// their background (surface_color_of).
+//
+// No such toolbar: no band and no line, the current tab the base surface,
+// as the window under it. High contrast: the system's colours, no fill
+// apart from the window's, the line the divider's. Before Windows 11, in
+// stage 1 (a menu bar, a dialog, fullscreen) and without a base surface,
+// nothing changes.
+
+// Set by the window's layout: the band's rectangle in its client area, line
+// included (empty: none). Its windows' look follows (repainted by the caller).
+void set_toolbar_band(HWND top, const RECT& band);
+// The band `top` has: false if none.
+bool toolbar_band(HWND top, RECT& band);
+struct toolbar_band_colors
+{
+    color fill, line;
+};
+toolbar_band_colors band_colors(HWND top);
+// The band's fill and line onto `dc` (the window's client area), if it has one.
+void paint_toolbar_band(HWND top, HDC dc);
+// `h`, a child, is wholly within its window's band: `fill` its colour.
+bool in_toolbar_band(HWND h, color& fill);
 
 }  // namespace rap::win32

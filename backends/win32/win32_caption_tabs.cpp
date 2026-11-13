@@ -82,9 +82,10 @@ int line_px(UINT dpi)
 
 // What the strip and the row beside it are drawn in. Its empty part is
 // clear (Mica's) in the caption; opaque, the window colour, in fullscreen;
-// high contrast's window colour there. The current tab is the colour of the
-// band under the strip, which is the window's surface (its base colour on a
-// base surface), so the two are one; in high contrast it's the selection.
+// high contrast's window colour there. The current tab is the colour of
+// what's under the strip, so the two are one: the toolbar band's fill where
+// the window has one (win32_caption_tabs.h), else the window's surface (its
+// base colour on a base surface); in high contrast it's the selection.
 // Its text, line and buttons are WinUI's (winui::chrome_palette), the line
 // drawn opaque, as over the band; high contrast's are the system's.
 struct strip_colors
@@ -95,6 +96,16 @@ struct strip_colors
     // and what's under it hovered and pressed.
     color glyph, glyph_hover, glyph_pressed, button_hover, button_pressed;
 };
+// The strip's window has a toolbar band: its fill.
+bool in_band_window(HWND h, color& fill)
+{
+    HWND top = GetAncestor(h, GA_ROOT);
+    RECT band;
+    if (!top || !toolbar_band(top, band)) return false;
+    fill = band_colors(top).fill;
+    return true;
+}
+
 strip_colors colors_for(HWND h, bool transparent)
 {
     strip_colors c;
@@ -125,7 +136,8 @@ strip_colors colors_for(HWND h, bool transparent)
     // the primary (...ForegroundSelected).
     c.text = p.text_secondary;
     c.hover = p.layer_alt_secondary;
-    c.current = c.band;
+    color band_fill{};
+    c.current = in_band_window(h, band_fill) ? band_fill : c.band;
     c.current_text = p.text_primary;
     // At rest the secondary text colour, as Explorer's; hovered and pressed
     // WinUI's TabView buttons' (TabViewButtonForegroundPointerOver,
@@ -216,6 +228,9 @@ struct caption_tabs::impl
         color ink;
     };
     std::vector<cleartype_run> runs;
+    // The test hook (query_message's 8): how many runs' first copies are
+    // still to be made to fail, and how many have been.
+    unsigned fail_copies = 0, copies_failed = 0;
 
     impl(caption_tabs& s, caption_tabs_owner& o) : self(s), owner(o) {}
 
@@ -401,50 +416,95 @@ struct caption_tabs::impl
     // made opaque, then copied back with BitBlt, which keeps to `dc`'s clip
     // (a complex one too) and its mapping. Nothing of `dc`'s outside its
     // clip is touched, alpha included.
-    void draw_cleartype(HDC dc)
+    //
+    // A run whose bitmap can't be had, selected or filled from `dc` (the
+    // first copy failed: it would hold no background, and its text would be
+    // drawn over nothing) isn't copied back: its text is drawn grayscale
+    // instead, straight onto `dc` as the first pass's (over the opaque
+    // fill, as the rest of the strip's). So is one whose copy back failed,
+    // leaving `dc` as it was. `area`: what the first pass was bound to.
+    void draw_cleartype(HDC dc, const RECT& area)
     {
+        std::vector<const cleartype_run*> grey;
         for (const cleartype_run& t : runs)
         {
             const int w = t.opaque.right - t.opaque.left, h = t.opaque.bottom - t.opaque.top;
             if (w <= 0 || h <= 0) continue;
+            if (!opaque_rt)
+            {
+                grey.push_back(&t);
+                continue;
+            }
             BITMAPINFO bi{};
             bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
             void* bits = nullptr;
             HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
             HDC mem = bmp ? CreateCompatibleDC(dc) : nullptr;
-            if (!mem)
+            HGDIOBJ old = mem ? SelectObject(mem, bmp) : nullptr;
+            bool drawn = false;
+            if (old && old != HGDI_ERROR)
             {
-                if (bmp) DeleteObject(bmp);
-                continue;
-            }
-            HGDIOBJ old = SelectObject(mem, bmp);
-            GdiFlush();
-            BitBlt(mem, 0, 0, w, h, dc, t.opaque.left, t.opaque.top, SRCCOPY);
-            const RECT local{0, 0, w, h};
-            if (SUCCEEDED(opaque_rt->BindDC(mem, &local)))
-            {
-                opaque_rt->BeginDraw();
-                opaque_rt->SetTransform(
-                    D2D1::Matrix3x2F::Translation(-float(t.opaque.left), -float(t.opaque.top)));
-                opaque_rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-                if (params) opaque_rt->SetTextRenderingParams(params.get());
-                opaque_brush->SetColor(d2d_color(t.ink));
-                opaque_rt->DrawText(t.s, t.n, t.format,
-                                    D2D1::RectF(float(t.box.left), float(t.box.top), float(t.box.right),
-                                                float(t.box.bottom)),
-                                    opaque_brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                if (opaque_rt->EndDraw() == D2DERR_RECREATE_TARGET) opaque_rt.reset();
-                // GDI's (BitBlt's, the target's) drawing done before the
-                // bits are touched; then opaque, whatever the target left.
                 GdiFlush();
-                auto* px = static_cast<uint8_t*>(bits);
-                for (size_t i = 0; i < size_t(w) * h; ++i) px[i * 4 + 3] = 255;
-                BitBlt(dc, t.opaque.left, t.opaque.top, w, h, mem, 0, 0, SRCCOPY);
+                // (The hook's failure is a real one: no DC to copy from.)
+                const bool fail = fail_copies > 0;
+                if (fail)
+                {
+                    --fail_copies;
+                    ++copies_failed;
+                }
+                const RECT local{0, 0, w, h};
+                if (BitBlt(mem, 0, 0, w, h, fail ? nullptr : dc, t.opaque.left, t.opaque.top, SRCCOPY) &&
+                    SUCCEEDED(opaque_rt->BindDC(mem, &local)))
+                {
+                    opaque_rt->BeginDraw();
+                    opaque_rt->SetTransform(
+                        D2D1::Matrix3x2F::Translation(-float(t.opaque.left), -float(t.opaque.top)));
+                    opaque_rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+                    if (params) opaque_rt->SetTextRenderingParams(params.get());
+                    opaque_brush->SetColor(d2d_color(t.ink));
+                    opaque_rt->DrawText(t.s, t.n, t.format,
+                                        D2D1::RectF(float(t.box.left), float(t.box.top), float(t.box.right),
+                                                    float(t.box.bottom)),
+                                        opaque_brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    const HRESULT ended = opaque_rt->EndDraw();
+                    if (ended == D2DERR_RECREATE_TARGET) opaque_rt.reset();
+                    if (SUCCEEDED(ended))
+                    {
+                        // GDI's (BitBlt's, the target's) drawing done before
+                        // the bits are touched; then opaque, whatever the
+                        // target left.
+                        GdiFlush();
+                        auto* px = static_cast<uint8_t*>(bits);
+                        for (size_t i = 0; i < size_t(w) * h; ++i) px[i * 4 + 3] = 255;
+                        drawn = BitBlt(dc, t.opaque.left, t.opaque.top, w, h, mem, 0, 0, SRCCOPY) != FALSE;
+                    }
+                }
+                SelectObject(mem, old);
             }
-            SelectObject(mem, old);
-            DeleteDC(mem);
-            DeleteObject(bmp);
-            if (!opaque_rt) break;
+            if (mem) DeleteDC(mem);
+            if (bmp) DeleteObject(bmp);
+            if (!drawn) grey.push_back(&t);
+        }
+        // What ClearType couldn't draw: grayscale, as over the backdrop.
+        if (!grey.empty() && SUCCEEDED(rt->BindDC(dc, &area)))
+        {
+            rt->BeginDraw();
+            rt->SetTransform(D2D1::Matrix3x2F::Identity());
+            rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            if (params) rt->SetTextRenderingParams(params.get());
+            for (const cleartype_run* t : grey)
+            {
+                brush->SetColor(d2d_color(t->ink));
+                rt->DrawText(t->s, t->n, t->format,
+                             D2D1::RectF(float(t->box.left), float(t->box.top), float(t->box.right),
+                                         float(t->box.bottom)),
+                             brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+            if (rt->EndDraw() == D2DERR_RECREATE_TARGET)
+            {
+                rt.reset();
+                InvalidateRect(self.hwnd_, nullptr, FALSE);
+            }
         }
         runs.clear();
     }
@@ -650,7 +710,7 @@ struct caption_tabs::impl
             InvalidateRect(self.hwnd_, nullptr, FALSE);
             return;
         }
-        draw_cleartype(dc);
+        draw_cleartype(dc, c);
     }
 
     void paint()
@@ -858,6 +918,12 @@ struct caption_tabs::impl
                 f->cleartype = d.cleartype;
                 return 1;
             }
+            case 8:
+            {
+                const unsigned failed = d.copies_failed;
+                d.fail_copies = unsigned(i);
+                return LRESULT(failed);
+            }
             default: return 0;
             }
         }
@@ -1017,6 +1083,11 @@ UINT caption_tabs::query_message()
 {
     static const UINT m = RegisterWindowMessageW(L"rapport-caption-tabs");
     return m;
+}
+
+int caption_line_px(UINT dpi)
+{
+    return line_px(dpi);
 }
 
 int caption_tabs::height(UINT dpi)
@@ -1314,6 +1385,78 @@ void paint_caption_band(HWND top, HDC dc, int strip_height, bool transparent)
         BufferedPaintSetAlpha(buffer, colors.clear ? &line : &band, 255);
         EndBufferedPaint(buffer, TRUE);
     }
+}
+
+// -- the toolbar band ---------------------------------------------------------
+
+// On the window, as properties: its top and bottom, each plus one (a
+// property's never zero). It's the client area's width.
+namespace
+{
+const wchar_t band_top_prop[] = L"rapport-band-top", band_bottom_prop[] = L"rapport-band-bottom";
+}
+
+void set_toolbar_band(HWND top, const RECT& band)
+{
+    if (IsRectEmpty(&band))
+    {
+        RemovePropW(top, band_top_prop);
+        RemovePropW(top, band_bottom_prop);
+        return;
+    }
+    SetPropW(top, band_top_prop, reinterpret_cast<HANDLE>(intptr_t(band.top) + 1));
+    SetPropW(top, band_bottom_prop, reinterpret_cast<HANDLE>(intptr_t(band.bottom) + 1));
+}
+
+bool toolbar_band(HWND top, RECT& band)
+{
+    const auto t = reinterpret_cast<intptr_t>(GetPropW(top, band_top_prop)),
+               b = reinterpret_cast<intptr_t>(GetPropW(top, band_bottom_prop));
+    if (!t || !b) return false;
+    RECT c;
+    GetClientRect(top, &c);
+    band = RECT{c.left, LONG(t - 1), c.right, LONG(b - 1)};
+    return !IsRectEmpty(&band);
+}
+
+// WinUI's layer and stroke, the line opaque over the window's surface (the
+// strip's line's colour); high contrast's window and divider.
+toolbar_band_colors band_colors(HWND top)
+{
+    const color surface = theme_color_of(surface_of(top));
+    if (high_contrast()) return {surface, theme_color_of(theme_color::divider)};
+    const winui::chrome_palette& p = dark_mode() ? winui::dark : winui::light;
+    return {p.layer, winui::over(p.stroke, surface)};
+}
+
+void paint_toolbar_band(HWND top, HDC dc)
+{
+    RECT band;
+    if (!toolbar_band(top, band)) return;
+    const toolbar_band_colors k = band_colors(top);
+    const RECT line{band.left, band.bottom - line_px(dpi_of(top)), band.right, band.bottom};
+    const RECT fill{band.left, band.top, band.right, line.top};
+    auto paint = [dc](const RECT& r, color c)
+    {
+        HBRUSH b = CreateSolidBrush(color_ref(c));
+        FillRect(dc, &r, b);
+        DeleteObject(b);
+    };
+    paint(fill, k.fill);
+    paint(line, k.line);
+}
+
+bool in_toolbar_band(HWND h, color& fill)
+{
+    HWND top = h ? GetAncestor(h, GA_ROOT) : nullptr;
+    RECT band;
+    if (!top || top == h || !toolbar_band(top, band)) return false;
+    RECT r;
+    GetWindowRect(h, &r);
+    MapWindowPoints(nullptr, top, reinterpret_cast<POINT*>(&r), 2);
+    if (r.top < band.top || r.bottom > band.bottom - line_px(dpi_of(top))) return false;
+    fill = band_colors(top).fill;
+    return true;
 }
 
 }  // namespace rap::win32
