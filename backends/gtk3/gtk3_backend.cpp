@@ -7,6 +7,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "../common/window_chords.h"
 #include <gtk/gtk.h>
 
 #include "builtin_icons.h"
@@ -4483,7 +4484,11 @@ public:
             if (navigation && e->type != GDK_KEY_PRESS) return false;  // presses only
             const bool not_text = navigation || e->keyval == GDK_KEY_Escape ||
                                  (e->keyval >= GDK_KEY_F1 && e->keyval <= GDK_KEY_F12);
-            if (typing && !not_text) return false;
+            // A shortcut chord is the window's first, as an accelerator (this
+            // runs before the field has the key); none while an input method
+            // is composing.
+            if (typing && !not_text)
+                return !im_composing(focus) && window_chords::to_window(ev) && self->on_key_(ev);
             return self->on_key_(ev);
         };
         connect(win_, "key-press-event", key, this);

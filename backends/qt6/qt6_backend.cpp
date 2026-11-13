@@ -7,6 +7,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "../common/window_chords.h"
 #include "qt_painter.h"
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
@@ -38,6 +39,7 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QIcon>
+#include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QStyle>
@@ -4323,6 +4325,14 @@ public:
     {
         if (e->type() == QEvent::MouseButtonPress || e->type() == QEvent::MouseButtonDblClick)
             return side_button(o, static_cast<QMouseEvent*>(e));
+        // An input method composing in a field of ours: no chord is the
+        // window's until it commits or cancels.
+        if (e->type() == QEvent::InputMethod)
+        {
+            if (auto* w = qobject_cast<QWidget*>(o); w && w->window() == frame_)
+                composing_ = !static_cast<QInputMethodEvent*>(e)->preeditString().isEmpty();
+            return false;
+        }
         if (e->type() != QEvent::KeyPress && e->type() != QEvent::KeyRelease) return false;
         auto* w = qobject_cast<QWidget*>(o);
         QWidget* focus = QApplication::focusWidget();
@@ -4357,7 +4367,9 @@ public:
         }
         if (doc_tabs && !focus_keeps && doc_tabs->key(ev)) return true;
         if (!on_key_) return false;
-        // While typing, only Escape and the function keys come here.
+        // While typing, only Escape, the function keys and the shortcut
+        // chords (window_chords.h) come here. A QLineEdit takes chords it
+        // has no use for too (as typing), so the window has them first.
         auto* plain = qobject_cast<QPlainTextEdit*>(focus);
         const bool typing =
             focus && (qobject_cast<QLineEdit*>(focus) || qobject_cast<QAbstractSpinBox*>(focus) ||
@@ -4366,7 +4378,7 @@ public:
         if (navigation && e->type() != QEvent::KeyPress) return false;  // presses only
         const bool not_text = navigation || k->key() == Qt::Key_Escape ||
                               (k->key() >= Qt::Key_F1 && k->key() <= Qt::Key_F12);
-        if (typing && !not_text) return false;
+        if (typing && !not_text) return window_chords::to_window(ev) && !composing_ && on_key_(ev);
         return on_key_(ev);
     }
 
@@ -4505,6 +4517,7 @@ private:
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     std::function<void(bool)> on_fullscreen_;
     std::function<bool(const key_event&)> on_key_;
+    bool composing_ = false;  // an input method's text not yet committed
     struct side_press
     {
         quint64 time = 0;

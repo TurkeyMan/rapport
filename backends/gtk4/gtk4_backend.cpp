@@ -6,6 +6,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "../common/window_chords.h"
 #include <gtk/gtk.h>
 
 #include "builtin_icons.h"
@@ -4972,7 +4973,9 @@ public:
         const bool navigation = navigation_key(ev.key);
         if (navigation && !press) return false;  // presses only
         const bool not_text = navigation || keyval == GDK_KEY_Escape || (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12);
-        if (typing && !not_text) return false;
+        // A shortcut chord is the window's first, as an accelerator (this is
+        // the capture phase); none while an input method is composing.
+        if (typing && !not_text) return !im_composing(focus) && window_chords::to_window(ev) && on_key_(ev);
         return on_key_(ev);
     }
     document_tabs_impl* doc_tabs = nullptr;  // window_spec::tabs, among the parts
