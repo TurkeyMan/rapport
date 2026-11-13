@@ -90,7 +90,7 @@ void where(HWND tree, rap::tree* t)
     RECT client{};
     GetClientRect(tree, &client);
     std::printf("     selected %s, %d rows visible of height %d in %ld px, first visible %ls, comctl32 %d\n",
-                t->selected().c_str(), int(SendMessageW(tree, TVM_GETVISIBLECOUNT, 0, 0)),
+                t->selected().value_or("(none)").c_str(), int(SendMessageW(tree, TVM_GETVISIBLECOUNT, 0, 0)),
                 int(SendMessageW(tree, TVM_GETITEMHEIGHT, 0, 0)), client.bottom, first,
                 int(SendMessageW(tree, CCM_GETVERSION, 0, 0)));
 }
