@@ -62,7 +62,7 @@ namespace
 // don't name them all.
 constexpr DWORD dwmwa_caption_button_bounds = 5;
 constexpr DWORD dwmwa_systembackdrop_type = 38;
-constexpr DWORD dwmsbt_none = 1, dwmsbt_mainwindow = 2;
+constexpr DWORD dwmsbt_none = 1, dwmsbt_mainwindow = 2, dwmsbt_tabbedwindow = 4;
 
 // UIA's ids for the strip's elements: the Tab, "New tab", then each tab and
 // its close button from its key.
@@ -1479,12 +1479,19 @@ void extend_caption_frame(HWND top, int height)
     // further down (caption_inset).
     const MARGINS m{0, 0, height ? height + caption_inset(top) : 0, 0};
     DwmExtendFrameIntoClientArea(top, &m);
-    // Mica behind the strip (22621 on, where it's named): none in high
-    // contrast, whose colours are the system's own.
+    // Mica Alt behind the strip (22621 on, where it's named), as Explorer
+    // has with its tabs (DWMSBT_TABBEDWINDOW, its window says): the
+    // wallpaper's tint stronger than Mica's, and inactive the same solid
+    // colour as Explorer's (#E8E8E8 light, #202020 dark, where Mica's is
+    // #F3F3F3). Plain Mica if the system won't have it; none in high
+    // contrast, whose colours are the system's own. Put back to Mica when
+    // the tabs leave the caption (release_caption_frame: frame_top_window).
     if (windows_build() >= 22621)
     {
-        const DWORD backdrop = high_contrast() ? dwmsbt_none : dwmsbt_mainwindow;
-        DwmSetWindowAttribute(top, dwmwa_systembackdrop_type, &backdrop, sizeof backdrop);
+        const DWORD backdrop = high_contrast() ? dwmsbt_none : dwmsbt_tabbedwindow;
+        if (FAILED(DwmSetWindowAttribute(top, dwmwa_systembackdrop_type, &backdrop, sizeof backdrop)) &&
+            backdrop == dwmsbt_tabbedwindow)
+            DwmSetWindowAttribute(top, dwmwa_systembackdrop_type, &dwmsbt_mainwindow, sizeof dwmsbt_mainwindow);
     }
 }
 
