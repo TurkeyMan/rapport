@@ -11,14 +11,14 @@ if(NOT TARGET rapport::headers)
 endif()
 
 set(sources win32_backend.cpp win32_caption_tabs.cpp win32_painter.cpp win32_shell_icons.cpp win32_theme.cpp win32_trace.cpp win32_uia.cpp)
-# The toolbar band's metrics and text fields (win32_band_field.h).
-list(APPEND sources win32_band_field.cpp)
 if(RAPPORT_STATIC)
     add_library(rapport_win32 STATIC ${sources})
 else()
     add_library(rapport_win32 MODULE ${sources})
 endif()
 add_library(rapport::backend_win32 ALIAS rapport_win32)
+# The toolbar band's metrics and text fields (win32_band_field.h).
+target_sources(rapport_win32 PRIVATE win32_band_field.cpp)
 # Linked into one executable, a backend needs the core after it on the link
 # line (its strings, from rapport::i18n). A module finds it loaded already,
 # except on Windows, where a DLL resolves every symbol when it's linked.
