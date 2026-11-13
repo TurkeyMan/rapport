@@ -6,6 +6,8 @@
 //   - Ctrl+Tab and Ctrl+Shift+Tab go round them, Ctrl+1..8 to one, Ctrl+9 to
 //     the last; all of them with the path field focused too.
 //   - Open a dozen: the tabs narrow as they're added, then the row scrolls.
+//   - Drag a tab along the row to reorder them (Escape, on Windows, puts it
+//     back), or Ctrl+Shift+PgUp and Ctrl+Shift+PgDn; each move's printed.
 //   - The tab's folder is shown under the tabs: the app swaps the content,
 //     the tabs only say which one is current. "Rename" retitles the current
 //     tab; the path field's Enter takes it to that folder.
@@ -102,6 +104,9 @@ int main(int argc, char** argv)
                             .base_surface()  // a file manager's, as Expedition's (Windows 11)
                             .tabs(document_tabs{}
                                       .on_select(show)
+                                      .on_reorder(
+                                          [&](const std::string& id, int index)
+                                          { std::printf("%s moved to %d\n", paths[id].c_str(), index); })
                                       .on_new(
                                           [&]
                                           {
