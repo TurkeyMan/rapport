@@ -5193,8 +5193,9 @@ private:
     }
 
     // GtkPaned holds two children; more panes nest to the right/bottom.
-    GtkWidget* panes(const spec::splitter& s, size_t from)
+    GtkWidget* panes(const spec::splitter& s, size_t from, gpointer chain = nullptr)
     {
+        if (!chain) chain = ::rap::gtk_split::new_chain();  // this splitter's own
         GtkWidget* first = build(s.panes[from], s.dir);
         if (from + 1 == s.panes.size()) return first;
 
@@ -5209,9 +5210,9 @@ private:
         // Thin: the theme's narrow handle, a line (Adwaita's 1 px), which
         // GTK still lets the pointer take from a few pixels either side.
         gtk_paned_set_wide_handle(p, !s.thin);
-        g_object_set_data(G_OBJECT(paned), "rapport-split-chain", GINT_TO_POINTER(1));
+        ::rap::gtk_split::mark(paned, chain);
         gtk_paned_set_start_child(p, first);
-        gtk_paned_set_end_child(p, panes(s, from + 1));
+        gtk_paned_set_end_child(p, panes(s, from + 1, chain));
         gtk_paned_set_resize_start_child(p, !any_stretch || s.panes[from].common.stretch > 0);
         gtk_paned_set_resize_end_child(p, !any_stretch || rest_stretch);
         gtk_paned_set_shrink_start_child(p, false);

@@ -8,8 +8,22 @@
 namespace rap::gtk_split
 {
 
-// A splitter of n panes is a chain of n-1 nested GtkPaneds (each marked
-// "rapport-split-chain"). The paned after `paned` in its chain, if any.
+// A splitter of n panes is a chain of n-1 nested GtkPaneds, each marked
+// "rapport-split-chain" with its splitter's own id: a splitter that is
+// itself a pane (the last one included) is a chain of its own, not more of
+// this one (#42).
+inline gpointer new_chain()
+{
+    static guint last = 0;
+    return GUINT_TO_POINTER(++last);
+}
+
+inline void mark(GtkWidget* paned, gpointer chain)
+{
+    g_object_set_data(G_OBJECT(paned), "rapport-split-chain", chain);
+}
+
+// The paned after `paned` in its chain, if any.
 inline GtkWidget* next(GtkWidget* paned)
 {
 #if GTK_MAJOR_VERSION >= 4
@@ -17,7 +31,9 @@ inline GtkWidget* next(GtkWidget* paned)
 #else
     GtkWidget* after = gtk_paned_get_child2(GTK_PANED(paned));
 #endif
-    return after && g_object_get_data(G_OBJECT(after), "rapport-split-chain") ? after : nullptr;
+    gpointer chain = g_object_get_data(G_OBJECT(paned), "rapport-split-chain");
+    return after && chain && g_object_get_data(G_OBJECT(after), "rapport-split-chain") == chain ? after
+                                                                                                    : nullptr;
 }
 
 inline bool in_chain(GtkWidget* first, GtkWidget* paned)
