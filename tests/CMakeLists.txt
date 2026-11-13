@@ -424,6 +424,11 @@ if(TARGET rapport_win32)
              COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-band-fields-test>)
     set_tests_properties(win32-band-fields-high-contrast PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    # The display's scale really changed (125%, 150% where the runner
+    # reaches it) and put back: CI only, as win32-caption-tabs-transitions.
+    add_test(NAME win32-band-fields-transitions COMMAND rapport-win32-band-fields-test --transitions)
+    set_tests_properties(win32-band-fields-transitions PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
 
     # The document tabs reordered by dragging and by the keys, in both strips:
     # never-shown windows, given the mouse's messages and the keys.

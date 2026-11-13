@@ -120,9 +120,10 @@ jobs:
       # Server 2025's runner also runs the base surface, caption tabs and
       # band fields tests under high contrast (win32-base-surface-high-contrast,
       # win32-caption-tabs-high-contrast, win32-band-fields-high-contrast),
-      # and the caption tabs with the
-      # display's scale and high contrast changed while they're open
-      # (win32-caption-tabs-transitions): system settings, so only on a
+      # and the caption tabs and band fields with the
+      # display's scale (and the tabs' high contrast) changed while they're
+      # open (win32-caption-tabs-transitions, win32-band-fields-transitions):
+      # system settings, so only on a
       # throwaway runner, and only this job.
       - name: Portable tests
         env:

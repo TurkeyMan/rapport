@@ -655,15 +655,284 @@ void uia_client(HWND edit, HWND plain, std::atomic<bool>* finished)
     *finished = true;
 }
 
+// At a DPI the window has (through the hook or for real): the row's metrics,
+// the fields' text centred, their corners and fill.
+void check_at_dpi(HWND top, const std::vector<HWND>& fields, UINT dpi, const std::string& how)
+{
+    const bool hc = high_contrast();
+    const std::string at = " (" + str(long(dpi)) + " dpi, " + how + ")";
+    check_metrics(top, fields, dpi, (hc ? "high contrast, " : g_dark ? "dark, " : "light, ") + how);
+    if (hc)
+    {
+        check_centred(fields[0], rgb(GetSysColor(COLOR_WINDOW)), at);
+        return;
+    }
+    const DWORD rest = over(colours().rest, band_fill());
+    check_centred(fields[0], rest, at);
+    check_centred(fields[1], rest, " (placeholder," + at.substr(1));
+    const printed p = print_field(fields[0]);
+    expect(p.at(0, 0) == band_fill() && p.at(p.w * 3 / 4, p.h / 2) == rest, "its corners rounded and its fill" + at);
+}
+
+// -- the display's scale, for real (CI only) ----------------------------------
+//
+// As win32-caption-tabs-transitions changes it: the primary display's scale
+// through DisplayConfig's undocumented DPI scale (as Settings sets it, in
+// steps relative to the recommended one), its mode made larger first where a
+// small screen allows only 100%, and both put back exactly as they were,
+// read back to be sure, on every path.
+
+struct dpi_scale_get
+{
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    int32_t min_rel, cur_rel, max_rel;
+};
+struct dpi_scale_set
+{
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    int32_t rel;
+};
+struct display_source
+{
+    LUID adapter{};
+    UINT32 id = 0;
+    bool known = false;
+};
+display_source g_source;
+
+bool source_of(const std::wstring& gdi_name, display_source& out)
+{
+    UINT32 paths = 0, modes = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &paths, &modes) != ERROR_SUCCESS || !paths) return false;
+    std::vector<DISPLAYCONFIG_PATH_INFO> p(paths);
+    std::vector<DISPLAYCONFIG_MODE_INFO> m(modes);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &paths, p.data(), &modes, m.data(), nullptr) != ERROR_SUCCESS)
+        return false;
+    for (UINT32 i = 0; i < paths; ++i)
+    {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME name{};
+        name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        name.header.size = sizeof name;
+        name.header.adapterId = p[i].sourceInfo.adapterId;
+        name.header.id = p[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&name.header) == ERROR_SUCCESS && gdi_name == name.viewGdiDeviceName)
+        {
+            out = {p[i].sourceInfo.adapterId, p[i].sourceInfo.id, true};
+            return true;
+        }
+    }
+    return false;
+}
+bool get_scale(dpi_scale_get& g)
+{
+    g = {};
+    if (!g_source.known) return false;
+    g.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE(-3);
+    g.header.size = sizeof g;
+    g.header.adapterId = g_source.adapter;
+    g.header.id = g_source.id;
+    return DisplayConfigGetDeviceInfo(&g.header) == ERROR_SUCCESS;
+}
+bool set_scale(int32_t rel)
+{
+    if (!g_source.known) return false;
+    dpi_scale_set s{};
+    s.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE(-4);
+    s.header.size = sizeof s;
+    s.header.adapterId = g_source.adapter;
+    s.header.id = g_source.id;
+    s.rel = rel;
+    return DisplayConfigSetDeviceInfo(&s.header) == ERROR_SUCCESS;
+}
+
+template <class F>
+bool pump_until(F&& done, int ms = 10000)
+{
+    for (int waited = 0; waited < ms; waited += 50)
+    {
+        if (done()) return true;
+        pump(5);
+    }
+    return done();
+}
+
+// The display as it was before the first change, put back to exactly that
+// (main undoes it, the destructor if anything returns first); each restore
+// read back, bounded, and one that fails a failure, left marked.
+struct restore
+{
+    bool saved = false;
+    std::wstring device;
+    DEVMODEW mode{};
+    int32_t rel = 0;
+    bool scale = false, mode_changed = false;  // changed and not yet put back
+
+    ~restore() { undo(); }
+
+    bool save()
+    {
+        if (saved) return true;
+        DISPLAY_DEVICEW dev{sizeof dev};
+        bool found = false;
+        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dev, 0); ++i)
+            if (dev.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)
+            {
+                found = true;
+                break;
+            }
+        mode = {};
+        mode.dmSize = sizeof mode;
+        dpi_scale_get g{};
+        if (!found || !source_of(dev.DeviceName, g_source) ||
+            !EnumDisplaySettingsW(dev.DeviceName, ENUM_CURRENT_SETTINGS, &mode) || !get_scale(g))
+            return false;
+        device = dev.DeviceName;
+        rel = g.cur_rel;
+        saved = true;
+        return true;
+    }
+    bool mode_is_saved() const
+    {
+        DEVMODEW now{};
+        now.dmSize = sizeof now;
+        return EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &now) &&
+               now.dmPelsWidth == mode.dmPelsWidth && now.dmPelsHeight == mode.dmPelsHeight &&
+               now.dmBitsPerPel == mode.dmBitsPerPel && now.dmDisplayFrequency == mode.dmDisplayFrequency;
+    }
+    bool scale_is_saved() const
+    {
+        dpi_scale_get now{};
+        return get_scale(now) && now.cur_rel == rel;
+    }
+    template <class F>
+    static bool settles(F&& is)
+    {
+        for (int waited = 0; waited < 5000; waited += 50)
+        {
+            if (is()) return true;
+            pump(5);
+        }
+        return is();
+    }
+    void undo()
+    {
+        // The mode first: the scale saved is the saved mode's.
+        if (mode_changed)
+        {
+            const LONG r = ChangeDisplaySettingsExW(device.c_str(), &mode, nullptr, 0, nullptr);
+            const bool ok = r == DISP_CHANGE_SUCCESSFUL && settles([&] { return mode_is_saved(); });
+            expect(ok, "the display's mode put back to " + str(long(mode.dmPelsWidth)) + "x" +
+                           str(long(mode.dmPelsHeight)) + " (" + str(long(r)) + ")");
+            if (ok) mode_changed = false;
+        }
+        if (scale)
+        {
+            const bool ok = set_scale(rel) && settles([&] { return scale_is_saved(); });
+            expect(ok, "the display's scale put back to step " + str(rel));
+            if (ok) scale = false;
+        }
+    }
+};
+restore g_restore;
+
+// Every scale the display allows, for real, the window's DPI with each: the
+// fields checked at each (125% and 150% where the runner reaches them), then
+// the scale put back. Which ran is noted.
+int scale_transitions(HWND top, const std::vector<HWND>& fields)
+{
+    if (!g_restore.save())
+    {
+        expect(false, "the display's mode and scale read before changing them");
+        return 1;
+    }
+    g_restore.scale = true;  // armed before anything changes
+    dpi_scale_get g{};
+    if (!get_scale(g))
+    {
+        expect(false, "the display's scale read");
+        return 1;
+    }
+    note("display scale steps " + str(g.min_rel) + ".." + str(g.max_rel) + ", now " + str(g.cur_rel));
+    // A small screen (a runner's 1024x768) allows only 100%: its largest
+    // mode first, for the scales it allows.
+    if (g.max_rel <= g.cur_rel + 1)
+    {
+        const wchar_t* device = g_restore.device.c_str();
+        DEVMODEW best{}, mode{};
+        best.dmSize = mode.dmSize = sizeof(DEVMODEW);
+        for (DWORD i = 0; EnumDisplaySettingsW(device, i, &mode); ++i)
+            if (mode.dmPelsWidth * mode.dmPelsHeight > best.dmPelsWidth * best.dmPelsHeight) best = mode;
+        if (best.dmPelsWidth && best.dmPelsWidth * best.dmPelsHeight >
+                                    g_restore.mode.dmPelsWidth * g_restore.mode.dmPelsHeight)
+        {
+            g_restore.mode_changed = true;  // marked before it's tried: half made is put back too
+            if (ChangeDisplaySettingsExW(device, &best, nullptr, CDS_FULLSCREEN, nullptr) == DISP_CHANGE_SUCCESSFUL)
+            {
+                note("display mode " + str(long(best.dmPelsWidth)) + "x" + str(long(best.dmPelsHeight)));
+                pump(50);
+                get_scale(g);
+                note("display scale steps " + str(g.min_rel) + ".." + str(g.max_rel) + ", now " + str(g.cur_rel));
+            }
+        }
+    }
+    const UINT before = GetDpiForWindow(top);
+    std::string ran;
+    bool at_125 = false, at_150 = false;
+    UINT now = before;
+    for (int32_t rel = g.min_rel; rel <= g.max_rel; ++rel)
+    {
+        if (rel == g.cur_rel) continue;
+        if (!set_scale(rel))
+        {
+            expect(false, "the display's scale set to step " + str(rel));
+            continue;
+        }
+        const UINT was = now;
+        pump_until([&] { return GetDpiForWindow(top) != was; });
+        pump();
+        now = GetDpiForWindow(top);
+        if (now == was) continue;
+        ran += (ran.empty() ? "" : ", ") + str(long(now * 100 / 96)) + "%";
+        at_125 = at_125 || now == 120;
+        at_150 = at_150 || now == 144;
+        check_at_dpi(top, fields, now, "the display's scale");
+    }
+    note("scales that ran: " + (ran.empty() ? std::string("none") : ran));
+    expect(!ran.empty(), "the display allows another scale");
+    expect(at_125, "125% among them");
+    if (!at_150) note("150% not reached on this display");
+    g_restore.undo();
+    expect(pump_until([&] { return GetDpiForWindow(top) == before; }), "and back to " + str(long(before)));
+    pump();
+    check_at_dpi(top, fields, before, "the scale back");
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
 {
+    bool transitions = false;
+    for (int i = 1; i < argc; ++i)
+        if (std::string(argv[i]) == "--transitions") transitions = true;
+    const DWORD build = windows_build();
+    // --transitions changes the display's scale: on a CI runner only, and
+    // checked before any window is made.
+    if (transitions && (env("GITHUB_ACTIONS") != "true" || env("RAPPORT_TEST_SET_DPI") != "1"))
+    {
+        note("skipped the scale changes: they change the display's scale, so only on a CI runner "
+             "(GITHUB_ACTIONS=true, RAPPORT_TEST_SET_DPI=1)");
+        return 77;
+    }
+    if (transitions && build < 22000)
+    {
+        note("skipped the scale changes: no band before Windows 11 (build 22000)");
+        return 77;
+    }
     rap::load_options options{.backend = "win32"};
     options.look.color_scheme = rap::color_scheme::dark;
     auto ui = rap::ui::load(argc, argv, options);
     if (!ui) return 2;
-    const DWORD build = windows_build();
     const bool hc = high_contrast();
     g_dark = !hc && build >= 17763 && env("RAPPORT_THEME") != "light";
     std::printf("build %lu, %s\n", build, hc ? "high contrast" : g_dark ? "dark" : "light");
@@ -742,6 +1011,13 @@ int main(int argc, char** argv)
     }
 
     const UINT dpi = GetDpiForWindow(top);
+    if (transitions)
+    {
+        const int r = scale_transitions(top, fields);
+        g_restore.undo();
+        std::printf(fails ? "%d failed\n" : "all passed\n", fails.load());
+        return fails ? 1 : r;
+    }
     check_metrics(top, fields, dpi, hc ? "high contrast" : g_dark ? "dark" : "light");
     if (hc)
         check_high_contrast(fields[0], dpi);
@@ -766,19 +1042,7 @@ int main(int argc, char** argv)
         was = to;
         SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&suggested));
         pump();
-        const std::string at = " (" + str(long(to)) + " dpi)";
-        check_metrics(top, fields, to, hc ? "high contrast" : g_dark ? "dark" : "light");
-        if (hc)
-            check_centred(fields[0], rgb(GetSysColor(COLOR_WINDOW)), at);
-        else
-        {
-            const DWORD rest = over(colours().rest, band_fill());
-            check_centred(fields[0], rest, at);
-            check_centred(fields[1], rest, " (placeholder," + at.substr(1));
-            const printed p = print_field(fields[0]);
-            expect(p.at(0, 0) == band_fill() && p.at(p.w * 3 / 4, p.h / 2) == rest,
-                   "its corners rounded and its fill" + at);
-        }
+        check_at_dpi(top, fields, to, "the DPI hook");
     }
 #else
     note("skipped 125% and 150%: the DPI test hook is the static backend's");
