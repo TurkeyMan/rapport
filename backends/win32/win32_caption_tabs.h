@@ -78,6 +78,22 @@ public:
     virtual void caption_moved(int from, int to) = 0;
     // The drag let go: the tab now at `index` was moved there from elsewhere.
     virtual void caption_reordered(int index) = 0;
+    // A tab dragged past the threshold, the pointer at `screen`: what it does
+    // there, where it may leave the strip (tearing off, dropping in another
+    // window). The strip goes on as it says; `gone` means the owner's ended
+    // the drag (forget_drag) and taken it on: the strip may be destroyed.
+    enum class drag_there
+    {
+        along,  // along the strip, as ever
+        away,   // over another window's strip: put back where it was, and held
+        gone,
+    };
+    virtual drag_there caption_drag_at(int index, POINT screen) = 0;
+    // Let go while away: the owner drops it where it's over (the strip does
+    // nothing more; it may be destroyed).
+    virtual void caption_drop(int index) = 0;
+    // The drag cancelled (Escape, the capture lost, the app's change).
+    virtual void caption_drag_cancelled() = 0;
 
 protected:
     ~caption_tabs_owner() = default;
@@ -118,6 +134,17 @@ public:
     // That drag's tab put back where it was, the owner told of its move
     // back (caption_moved) and nothing else; the mouse released.
     void cancel_drag();
+    // Tearing off and dropping (see caption_drag_at). The dragged tab put
+    // back where it was, the owner told of its move back, the drag held.
+    void put_back_drag();
+    // The drag ended without a word: the mouse released.
+    void forget_drag();
+    // Where the pointer holds the dragged tab, from the tab's top-left.
+    POINT drag_grab() const;
+    // Where a tab dropped at `p` (client) would land: 0 to count().
+    int drop_index_at(POINT p) const;
+    // A mark where a dropped tab would land (-1: none).
+    void show_drop(int index);
     int count() const { return int(tabs_.size()); }
     int current() const { return current_; }
 
@@ -163,8 +190,8 @@ public:
     // have been made; 7 its fonts, into the caption_tabs_fonts lParam
     // points to; 8, a test hook: the first copy of the next `tab` ClearType
     // runs (from the target into the run's own bitmap) made to fail, and
-    // how many have been made to fail so far returned), its high word the
-    // tab.
+    // how many have been made to fail so far returned); 9 the drop mark's
+    // index (-1 none); its high word the tab.
     static UINT query_message();
 
     // uia_owner
