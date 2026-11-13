@@ -4748,6 +4748,9 @@ public:
             gtk_window_set_modal(win, parent != nullptr && spec.modal);
             // Escape closes it, but not while an input method composes:
             // Escape cancels that (the shortcut not taken, the key goes on).
+            // The action can outlive this window (a ref kept on it, or on
+            // the GtkWindow): it holds the owner token, not `this`, and does
+            // nothing once the window has disconnected.
             GtkEventController* keys = gtk_shortcut_controller_new();
             gtk_shortcut_controller_add_shortcut(
                 GTK_SHORTCUT_CONTROLLER(keys),
@@ -4755,11 +4758,12 @@ public:
                                  gtk_callback_action_new(
                                      +[](GtkWidget* w, GVariant*, gpointer p) -> gboolean
                                      {
-                                         if (static_cast<window_impl*>(p)->field_composing()) return false;
+                                         window_impl* self = *static_cast<owner_token*>(p)->get();
+                                         if (!self || self->field_composing()) return false;
                                          gtk_widget_activate_action(w, "window.close", nullptr);
                                          return true;
                                      },
-                                     this, nullptr)));
+                                     new owner_token(owner_), +[](gpointer p) { delete static_cast<owner_token*>(p); })));
             gtk_widget_add_controller(win_, keys);
         }
         connect(
@@ -5061,6 +5065,11 @@ public:
         GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
         return editable_field(focus) && im_composing(focus);
     }
+    // This window for callbacks that can outlive it (GTK objects others may
+    // keep a ref on): null once it has disconnected.
+    using owner_token = std::shared_ptr<window_impl*>;
+    owner_token owner_ = std::make_shared<window_impl*>(this);
+    void on_disconnect() override { *owner_ = nullptr; }
     document_tabs_impl* doc_tabs = nullptr;  // window_spec::tabs, among the parts
     // The document tabs' keys, but Ctrl+Tab where the focus has a use for
     // it: in a page's tabs (layout::tabs) it goes round their pages, as

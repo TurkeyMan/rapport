@@ -361,25 +361,56 @@ public:
     // Escape): the first whose trigger is the key, activated as GTK would.
     void window_shortcut(guint keyval)
     {
+        if (GtkShortcutAction* a = shortcut_action(keyval))
+        {
+            gtk_shortcut_action_activate(a, GTK_SHORTCUT_ACTION_EXCLUSIVE, win_, nullptr);
+            g_object_unref(a);
+        }
+    }
+    // The action of the window's first shortcut on `keyval`, with a ref of
+    // the caller's; null if there's none.
+    GtkShortcutAction* shortcut_action(guint keyval)
+    {
+        GtkShortcutAction* found = nullptr;
         GListModel* controllers = gtk_widget_observe_controllers(win_);
-        bool done = false;
-        for (guint i = 0; i < g_list_model_get_n_items(controllers) && !done; ++i)
+        for (guint i = 0; i < g_list_model_get_n_items(controllers) && !found; ++i)
         {
             auto* c = G_OBJECT(g_list_model_get_item(controllers, i));
             if (GTK_IS_SHORTCUT_CONTROLLER(c))
-                for (guint j = 0; j < g_list_model_get_n_items(G_LIST_MODEL(c)) && !done; ++j)
+                for (guint j = 0; j < g_list_model_get_n_items(G_LIST_MODEL(c)) && !found; ++j)
                 {
                     auto* sc = GTK_SHORTCUT(g_list_model_get_item(G_LIST_MODEL(c), j));
                     GtkShortcutTrigger* t = gtk_shortcut_get_trigger(sc);
                     if (GTK_IS_KEYVAL_TRIGGER(t) && gtk_keyval_trigger_get_keyval(GTK_KEYVAL_TRIGGER(t)) == keyval)
-                        done = gtk_shortcut_action_activate(gtk_shortcut_get_action(sc), GTK_SHORTCUT_ACTION_EXCLUSIVE,
-                                                            win_, nullptr);
+                        found = GTK_SHORTCUT_ACTION(g_object_ref(gtk_shortcut_get_action(sc)));
                     g_object_unref(sc);
                 }
             g_object_unref(c);
         }
         g_object_unref(controllers);
+        return found;
     }
+    // The dialog's Escape action and its GtkWindow, kept past the rapport
+    // window (as anything holding a ref could): then activated, it must do
+    // nothing, and touch nothing of the window that's gone.
+    bool hold_escape()
+    {
+        held_action_ = shortcut_action(GDK_KEY_Escape);
+        held_win_ = GTK_WIDGET(g_object_ref(win_));
+        return held_action_ != nullptr;
+    }
+    bool activate_held()
+    {
+        const bool done = gtk_shortcut_action_activate(held_action_, GTK_SHORTCUT_ACTION_EXCLUSIVE, held_win_, nullptr);
+        spin();
+        g_object_unref(held_action_);
+        g_object_unref(held_win_);
+        held_action_ = nullptr;
+        held_win_ = nullptr;
+        return done;
+    }
+    GtkShortcutAction* held_action_ = nullptr;
+    GtkWidget* held_win_ = nullptr;
     void settle() override { spin(); }
     bool compose(bool on) override
     {
@@ -948,6 +979,16 @@ int main(int argc, char** argv)
                 expect(finished == std::vector<rap::dialog_role>{rap::dialog_role::cancel},
                        "Escape once the composition ends: the dialog closes, cancelled (" +
                            std::to_string(finished.size()) + " finished)");
+#if defined(RAPPORT_TEST_GTK4)
+                // The Escape action and the GtkWindow kept past the rapport
+                // window: activated then, it declines and touches nothing of
+                // it (the window's C++ part is gone; ASan watches).
+                expect(d.hold_escape(), "the dialog's Escape action, held");
+                win.reset();
+                const bool taken = d.activate_held();
+                expect(!taken && finished.size() == 1,
+                       "activated after the rapport window has gone: declined, nothing finished");
+#endif
             });
     }
 
