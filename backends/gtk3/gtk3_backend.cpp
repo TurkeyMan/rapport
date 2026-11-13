@@ -2060,22 +2060,63 @@ private:
 // The notebook never takes the focus: the window's keys work it. Its tabs
 // are reorderable: dragged, the others make room, and the notebook says so
 // once, as the drag is let go (page-reordered).
+//
+// Tearing off and dropping are GtkNotebook's own drag and drop: with
+// on_detach or a group its tabs are detachable, its group name the group's.
+// Let go outside any notebook, GTK asks for a window (create-window): that's
+// on_detach, given the drop's place, and the window it returns is shown
+// there (GTK 4 gives no place; under Wayland the compositor places it).
+// Rapport moves no page itself, so create-window returns no notebook: the
+// app has already moved the tab, through the binds. Dropped on another
+// window's notebook of the group, GTK moves the page there itself
+// (page-added): that's undone at once (the page back in its source, a fresh
+// one, the arrival gone) and the target's on_receive asked, which moves it
+// through the binds, or doesn't. GTK's drag shows where it would land.
 class document_tabs_impl : public widget_base<rap::document_tabs>
 {
 public:
     document_tabs_impl()
         : widget_base(gtk_notebook_new())
     {
+        live().insert(this);
         auto* nb = GTK_NOTEBOOK(w_);
         gtk_notebook_set_show_border(nb, false);
         gtk_notebook_set_scrollable(nb, true);
         gtk_widget_set_can_focus(w_, false);
         connect(
             w_, "switch-page",
-            +[](GtkNotebook*, GtkWidget*, guint page, gpointer p)
+            +[](GtkNotebook*, GtkWidget* child, guint page, gpointer p)
             {
                 auto* self = static_cast<document_tabs_impl*>(p);
-                if (!self->quiet_) self->state.picked(int(page));
+                // Only our own pages where the bookkeeping has them: not one
+                // a drag's brought in or is taking out.
+                if (!self->quiet_ && self->in_place(child, int(page))) self->state.picked(int(page));
+            },
+            this);
+        connect(
+            w_, "page-added",
+            +[](GtkNotebook*, GtkWidget* child, guint page, gpointer p)
+            {
+                auto* self = static_cast<document_tabs_impl*>(p);
+                if (!self->quiet_) self->arrived(child, int(page));
+            },
+            this);
+        connect(
+            w_, "create-window",
+            +[](GtkNotebook*, GtkWidget* page, gint x, gint y, gpointer p) -> GtkNotebook*
+            {
+                static_cast<document_tabs_impl*>(p)->torn_off(page, std::optional<point_f>(point_f{float(x), float(y)}));
+                return nullptr;
+            },
+            this);
+        // Shift+F10 or the Menu key, where the notebook has the focus.
+        connect(
+            w_, "popup-menu",
+            +[](GtkWidget*, gpointer p) -> gboolean
+            {
+                auto* self = static_cast<document_tabs_impl*>(p);
+                self->menu_for(self->state.current, nullptr);
+                return true;
             },
             this);
         connect(
@@ -2098,26 +2139,34 @@ public:
             this);
     }
 
+    ~document_tabs_impl() override
+    {
+        live().erase(this);
+        for (GtkWidget* w : going_) g_object_unref(w);
+        for (arrival& a : arrivals_) g_object_unref(a.page);
+    }
+
     void insert(int index, const document_tab& t) override
     {
         const int at = state.insert(index, t);
-        GtkWidget* page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-        g_object_set_data_full(G_OBJECT(page), "rapport-tab", g_strdup(t.id.c_str()), g_free);
-        GtkWidget* tab = make_tab(t);
-        quiet q(this);
-        gtk_notebook_insert_page(GTK_NOTEBOOK(w_), page, tab, at);
-        gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(w_), page, true);
-        gtk_widget_show_all(page);
-        gtk_widget_show_all(tab);
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), state.current);
-        fit_later();
+        add_page(at, t);
     }
     void remove(const std::string& id) override
     {
         const int i = state.remove(id);
         if (i < 0) return;
+        GtkWidget* page = page_of(id);
+        if (!page) return;
+        // In the middle of GTK's own drag (its create-window): the page's
+        // GTK's until the drag's done.
+        if (dragging_)
+        {
+            going_.push_back(GTK_WIDGET(g_object_ref(page)));
+            settle_later();
+            return;
+        }
         quiet q(this);
-        gtk_notebook_remove_page(GTK_NOTEBOOK(w_), i);
+        gtk_notebook_remove_page(GTK_NOTEBOOK(w_), gtk_notebook_page_num(GTK_NOTEBOOK(w_), page));
         if (state.current >= 0) gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), state.current);
         fit_later();
     }
@@ -2155,6 +2204,22 @@ public:
     {
         state.on_reorder = std::move(f);
     }
+    void on_detach(detach_fn f) override
+    {
+        state.on_detach = std::move(f);
+        set_detachable();
+    }
+    void on_receive(receive_fn f) override { state.on_receive = std::move(f); }
+    void set_group(const std::string& group) override
+    {
+        state.group = group;
+        gtk_notebook_set_group_name(GTK_NOTEBOOK(w_), group.empty() ? nullptr : group.c_str());
+        set_detachable();
+    }
+    void on_context_menu(std::function<rap::menu(const std::string&)> f) override
+    {
+        state.on_context_menu = std::move(f);
+    }
 
     bool key(const key_event& e)
     {
@@ -2175,8 +2240,166 @@ public:
 
     GtkWidget* notebook() const { return w_; }
     doc_tabs::state state;
+    rap::window* window = nullptr;  // the window it's in: a transfer's source
 
 private:
+    static std::set<document_tabs_impl*>& live()
+    {
+        static std::set<document_tabs_impl*> s;
+        return s;
+    }
+    static const char* id_of(GtkWidget* page)
+    {
+        return page ? static_cast<const char*>(g_object_get_data(G_OBJECT(page), "rapport-tab")) : nullptr;
+    }
+    GtkWidget* page_of(const std::string& id) const
+    {
+        auto* nb = GTK_NOTEBOOK(w_);
+        for (int i = 0; i < gtk_notebook_get_n_pages(nb); ++i)
+        {
+            GtkWidget* page = gtk_notebook_get_nth_page(nb, i);
+            const char* p = id_of(page);
+            if (p && id == p && g_object_get_data(G_OBJECT(page), "rapport-tabs") == this) return page;
+        }
+        return nullptr;
+    }
+    // The page at `index` is ours and where the bookkeeping has it.
+    bool in_place(GtkWidget* page, int index) const
+    {
+        const char* id = id_of(page);
+        return id && g_object_get_data(G_OBJECT(page), "rapport-tabs") == this && index < state.count() &&
+               state.tabs[size_t(index)].id == id;
+    }
+    // A page for tab t, made at `at`, quietly.
+    void add_page(int at, const document_tab& t)
+    {
+        GtkWidget* page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        g_object_set_data_full(G_OBJECT(page), "rapport-tab", g_strdup(t.id.c_str()), g_free);
+        g_object_set_data(G_OBJECT(page), "rapport-tabs", this);
+        GtkWidget* tab = make_tab(t);
+        quiet q(this);
+        gtk_notebook_insert_page(GTK_NOTEBOOK(w_), page, tab, at);
+        gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(w_), page, true);
+        gtk_notebook_set_tab_detachable(GTK_NOTEBOOK(w_), page, detachable());
+        gtk_widget_show_all(page);
+        gtk_widget_show_all(tab);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), state.current);
+        fit_later();
+    }
+    bool detachable() const { return bool(state.on_detach) || !state.group.empty(); }
+    void set_detachable()
+    {
+        auto* nb = GTK_NOTEBOOK(w_);
+        for (int i = 0; i < gtk_notebook_get_n_pages(nb); ++i)
+            gtk_notebook_set_tab_detachable(nb, gtk_notebook_get_nth_page(nb, i), detachable());
+    }
+
+    // Let go outside any notebook: the app's window for the tab, shown where
+    // it was let go. Its page is GTK's until the drag's done (remove waits).
+    void torn_off(GtkWidget* page, std::optional<point_f> at)
+    {
+        const char* id = id_of(page);
+        if (!id) return;
+        const std::string tab = id;
+        dragging_ = true;
+        rap::window* made = state.detach_asked(state.index_of(tab), at);
+        dragging_ = false;
+        if (!made) return;
+        if (at) made->move(point_f{std::max(0.f, at->x - 60), std::max(0.f, at->y - 16)});
+        made->show();
+    }
+
+    // A page GTK's drag and drop put here: from this notebook (dropped back
+    // on it), a move along the row; from another, undone and offered to the
+    // app (on_receive), once GTK's done with it.
+    void arrived(GtkWidget* page, int at)
+    {
+        const char* id = id_of(page);
+        if (!id) return;
+        auto* from = static_cast<document_tabs_impl*>(g_object_get_data(G_OBJECT(page), "rapport-tabs"));
+        if (from == this)
+        {
+            const int was = state.index_of(id);
+            settle_later();  // the current tab shown again, as GTK's switched away from it
+            if (state.move(was, at)) state.reordered(at);
+            return;
+        }
+        arrivals_.push_back({GTK_WIDGET(g_object_ref(page)), at, from});
+        settle_later();
+    }
+    struct arrival
+    {
+        GtkWidget* page;
+        int index;
+        document_tabs_impl* from;
+    };
+    void settle_later()
+    {
+        if (settle_source_) return;
+        settle_source_ = g_idle_add(
+            +[](gpointer p) -> gboolean
+            {
+                auto* self = static_cast<document_tabs_impl*>(p);
+                self->settle_source_ = 0;
+                self->settle();
+                return G_SOURCE_REMOVE;
+            },
+            this);
+    }
+    // GTK's drag done: pages the app removed during it go; pages dropped in
+    // from another window go back (a fresh one there), and the app's asked.
+    void settle()
+    {
+        auto* nb = GTK_NOTEBOOK(w_);
+        std::vector<GtkWidget*> going = std::exchange(going_, {});
+        for (GtkWidget* page : going)
+        {
+            const int n = gtk_notebook_page_num(nb, page);
+            if (n >= 0)
+            {
+                quiet q(this);
+                gtk_notebook_remove_page(nb, n);
+            }
+            g_object_unref(page);
+        }
+        std::vector<arrival> arrivals = std::exchange(arrivals_, {});
+        for (arrival& a : arrivals)
+        {
+            const std::string id = id_of(a.page) ? id_of(a.page) : "";
+            const int n = gtk_notebook_page_num(nb, a.page);
+            if (n >= 0)
+            {
+                quiet q(this);
+                gtk_notebook_remove_page(nb, n);
+            }
+            g_object_unref(a.page);
+            document_tabs_impl* from = live().contains(a.from) ? a.from : nullptr;
+            const int i = from ? from->state.index_of(id) : -1;
+            if (i >= 0 && !from->page_of(id)) from->add_page(i, from->state.tabs[size_t(i)]);
+            if (from) from->show_current();
+            show_current();
+            if (i >= 0 && from->state.same_group(state))
+                state.received(from->state.transfer_of(i, std::clamp(a.index, 0, state.count()), from->window));
+        }
+        show_current();
+        fit_later();
+    }
+    void show_current()
+    {
+        quiet q(this);
+        if (state.current >= 0) gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), state.current);
+    }
+
+    // The right-click menu for tab `i`, at the pointer (`event`) or under
+    // the tab (the keys).
+    void menu_for(int i, GdkEvent* event)
+    {
+        GtkWidget* attach = w_;
+        if (i >= 0 && i < state.count())
+            if (GtkWidget* label = gtk_notebook_get_tab_label(GTK_NOTEBOOK(w_), page_of(state.tabs[size_t(i)].id)))
+                attach = label;
+        menu_.show(state.context_menu(i), attach, event, event == nullptr);
+    }
     // A tab dragged, let go at `to`: the bookkeeping follows the notebook,
     // and the app's told if it moved.
     void page_moved(GtkWidget* page, int to)
@@ -2243,6 +2466,20 @@ private:
         gtk_event_box_set_visible_window(GTK_EVENT_BOX(events), false);
         gtk_widget_add_events(events, GDK_BUTTON_RELEASE_MASK);
         g_object_set_data_full(G_OBJECT(events), "rapport-tab", g_strdup(t.id.c_str()), g_free);
+        gtk_widget_add_events(events, GDK_BUTTON_PRESS_MASK);
+        // A right click: the tab's menu.
+        g_signal_connect(events, "button-press-event",
+                         G_CALLBACK(+[](GtkWidget* w, GdkEventButton* e, gpointer p) -> gboolean
+                                    {
+                                        if (e->button != 3 || e->type != GDK_BUTTON_PRESS) return false;
+                                        auto* self = static_cast<document_tabs_impl*>(p);
+                                        const auto* id = static_cast<const char*>(
+                                            g_object_get_data(G_OBJECT(w), "rapport-tab"));
+                                        self->menu_for(id ? self->state.index_of(id) : -1,
+                                                       reinterpret_cast<GdkEvent*>(e));
+                                        return true;
+                                    }),
+                         this);
         g_signal_connect(events, "button-release-event",
                          G_CALLBACK(+[](GtkWidget* w, GdkEventButton* e, gpointer p) -> gboolean
                                     {
@@ -2294,11 +2531,19 @@ private:
     {
         if (fit_source_) g_source_remove(fit_source_);
         fit_source_ = 0;
+        if (settle_source_) g_source_remove(settle_source_);
+        settle_source_ = 0;
+        menu_.destroy();
     }
 
     bool quiet_ = false;
     int available_ = 0, width_ = int(doc_tabs::widest_tab) - 24;
     guint fit_source_ = 0;
+    bool dragging_ = false;              // in GTK's create-window
+    std::vector<GtkWidget*> going_;      // removed during it, to go after (refs)
+    std::vector<arrival> arrivals_;      // dropped in from elsewhere (refs)
+    guint settle_source_ = 0;
+    popup_menu menu_;
 };
 
 // -- list ---------------------------------------------------------------------
@@ -5513,6 +5758,7 @@ public:
         if (spec.tabs)
         {
             auto tabs = std::make_unique<document_tabs_impl>();
+            tabs->window = win.get();
             win->doc_tabs = tabs.get();
             for (const document_tab& t : spec.tabs->items) tabs->insert(-1, t);
             if (!spec.tabs->current.empty()) tabs->select(spec.tabs->current);
