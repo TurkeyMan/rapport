@@ -232,13 +232,10 @@ msgstr "Rechts"
 msgid "Loading…"
 msgstr "Wird geladen…"
 
-msgid "Close Tab"
-msgstr "Tab schließen"
-
-msgid "_New Tab"
+msgid "_New tab"
 msgstr "_Neuer Tab"
 
-msgid "_Close Tab"
+msgid "_Close tab"
 msgstr "Tab _schließen"
 
 msgid "Tabs"

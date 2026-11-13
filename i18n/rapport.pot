@@ -239,23 +239,19 @@ msgstr ""
 msgid "Loading…"
 msgstr ""
 
-#: document tabs: a tab's close button, its tooltip and name
-msgid "Close Tab"
+#: document tabs (Windows): a tab's right-click menu
+msgid "_New tab"
 msgstr ""
 
 #: document tabs (Windows): a tab's right-click menu
-msgid "_New Tab"
-msgstr ""
-
-#: document tabs (Windows): a tab's right-click menu
-msgid "_Close Tab"
+msgid "_Close tab"
 msgstr ""
 
 #: document tabs (Windows 11, in the caption): the tabs' name to UI Automation
 msgid "Tabs"
 msgstr ""
 
-#: document tabs (Windows 11, in the caption): a tab's close button, its tooltip and name
+#: document tabs: a tab's close button, its tooltip and name (on Windows 11, in the caption)
 msgid "Close tab"
 msgstr ""
 

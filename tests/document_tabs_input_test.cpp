@@ -73,8 +73,8 @@ public:
     // The tab's close button; false where tabs have none (Windows').
     virtual bool close_button(int i) = 0;
     // Windows' tabs only: a right click on tab i opens its menu (false
-    // elsewhere); then, from the menu's own loop, item `item` (0 New Tab,
-    // 1 Close Tab) chosen with the keys.
+    // elsewhere); then, from the menu's own loop, item `item` (0 New tab,
+    // 1 Close tab) chosen with the keys.
     virtual bool open_menu(int) { return false; }
     virtual void choose_in_menu(int) {}
     // Before focusing a control: the window active where the toolkit only
@@ -703,7 +703,7 @@ int main(int argc, char** argv)
 #if defined(RAPPORT_TEST_WIN32)
             expect(!native::close_menu(), "the menu took its keys");
 #endif
-            once(closed, {"a"}, "the right-click menu's Close Tab: on_close(a) once");
+            once(closed, {"a"}, "the right-click menu's Close tab: on_close(a) once");
             if (d.open_menu(0)) return;
             step += 1;
         });
@@ -713,7 +713,7 @@ int main(int argc, char** argv)
         {
 #if defined(RAPPORT_TEST_WIN32)
             native::close_menu();
-            expect(added == 1 && closed.size() == 1, "the right-click menu's New Tab: on_new once");
+            expect(added == 1 && closed.size() == 1, "the right-click menu's New tab: on_new once");
 #endif
         });
 #if defined(RAPPORT_TEST_WIN32)

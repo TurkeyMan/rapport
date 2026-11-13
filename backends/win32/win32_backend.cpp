@@ -7160,12 +7160,12 @@ public:
     doc_tabs::state state;
 
 protected:
-    // A right click's menu: New Tab, and Close Tab for tab `i` (none: -1),
+    // A right click's menu: New tab, and Close tab for tab `i` (none: -1),
     // as the keys do.
     void tab_menu(int i, POINT screen)
     {
         menu items;
-        items.push_back({rap::i18n::tr("rapport", "_New Tab"),
+        items.push_back({rap::i18n::tr("rapport", "_New tab"),
                          [this] { state.new_asked(); },
                          {},
                          rap::i18n::shortcut_label("Ctrl+T")});
@@ -7173,7 +7173,7 @@ protected:
         {
             const std::string id = state.tabs[size_t(i)].id;
             items.push_back(menu_item::separator());
-            items.push_back({rap::i18n::tr("rapport", "_Close Tab"),
+            items.push_back({rap::i18n::tr("rapport", "_Close tab"),
                              [this, id] { state.close_asked(state.index_of(id)); },
                              {},
                              rap::i18n::shortcut_label("Ctrl+W")});
@@ -7448,7 +7448,7 @@ private:
         if (whole) FillRgn(dc, row, theme_brush(theme_color::base));
         if (row) DeleteObject(row);
     }
-    // New Tab, and Close Tab for the tab clicked (or the current one, from
+    // New tab, and Close tab for the tab clicked (or the current one, from
     // the keyboard), as the keys do.
     void context_menu(POINT screen)
     {

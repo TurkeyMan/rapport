@@ -45,6 +45,7 @@
 #include <uiautomation.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -721,19 +722,122 @@ bool set_high_contrast(bool on)
     return SystemParametersInfoW(SPI_SETHIGHCONTRAST, sizeof hc, &hc, SPIF_SENDCHANGE) != FALSE;
 }
 
-// Put back whatever happens.
+// What the transitions change, as it was before the first change, and put
+// back to exactly that on every path (main undoes it after the
+// transitions, the destructor if anything returns first). Each restore is
+// checked by reading it back, bounded; one that fails is a failure, as the
+// base surface's high-contrast harness has it, and stays marked to put
+// back: the runner would be left changed for the tests after.
 struct restore
 {
-    bool scale = false, mode = false, contrast = false;
-    int32_t rel = 0;
+    // The primary display, its mode and scale step, before any change.
+    bool display_saved = false;
     std::wstring device;
+    DEVMODEW mode{};
+    int32_t rel = 0;
+    // High contrast and the system colours it changes, before any change.
+    bool contrast_saved = false;
+    DWORD contrast_flags = 0;
+    std::array<COLORREF, 5> colours{};
+    static constexpr int colour_ids[5] = {COLOR_WINDOW, COLOR_WINDOWTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
+                                          COLOR_BTNFACE};
+    // What's been changed and not yet put back.
+    bool scale = false, mode_changed = false, contrast = false;
+
     ~restore() { undo(); }
+
+    // Before the display's first change: its device, current mode and scale.
+    bool save_display()
+    {
+        if (display_saved) return true;
+        DISPLAY_DEVICEW dev{sizeof dev};
+        bool found = false;
+        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dev, 0); ++i)
+            if (dev.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)
+            {
+                found = true;
+                break;
+            }
+        mode = {};
+        mode.dmSize = sizeof mode;
+        dpi_scale_get g{};
+        if (!found || !EnumDisplaySettingsW(dev.DeviceName, ENUM_CURRENT_SETTINGS, &mode) || !get_scale(g))
+            return false;
+        device = dev.DeviceName;
+        rel = g.cur_rel;
+        display_saved = true;
+        return true;
+    }
+    bool save_contrast()
+    {
+        if (contrast_saved) return true;
+        HIGHCONTRASTW hc{sizeof hc};
+        if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof hc, &hc, 0)) return false;
+        contrast_flags = hc.dwFlags & HCF_HIGHCONTRASTON;
+        for (size_t i = 0; i < colours.size(); ++i) colours[i] = GetSysColor(colour_ids[i]);
+        contrast_saved = true;
+        return true;
+    }
+
+    bool mode_is_saved() const
+    {
+        DEVMODEW now{};
+        now.dmSize = sizeof now;
+        return EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &now) &&
+               now.dmPelsWidth == mode.dmPelsWidth && now.dmPelsHeight == mode.dmPelsHeight &&
+               now.dmBitsPerPel == mode.dmBitsPerPel && now.dmDisplayFrequency == mode.dmDisplayFrequency;
+    }
+    bool scale_is_saved() const
+    {
+        dpi_scale_get now{};
+        return get_scale(now) && now.cur_rel == rel;
+    }
+    bool contrast_is_saved() const
+    {
+        HIGHCONTRASTW hc{sizeof hc};
+        if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof hc, &hc, 0) ||
+            (hc.dwFlags & HCF_HIGHCONTRASTON) != contrast_flags)
+            return false;
+        for (size_t i = 0; i < colours.size(); ++i)
+            if (GetSysColor(colour_ids[i]) != colours[i]) return false;
+        return true;
+    }
+    // Read back until it is, for a few seconds: the system applies these
+    // asynchronously.
+    template <class F>
+    static bool settles(F&& is)
+    {
+        for (int waited = 0; waited < 5000; waited += 50)
+        {
+            if (is()) return true;
+            pump(5);  // 50 ms
+        }
+        return is();
+    }
+
     void undo()
     {
-        if (scale) set_scale(rel);
-        if (mode) ChangeDisplaySettingsExW(device.c_str(), nullptr, nullptr, 0, nullptr);
-        if (contrast) set_high_contrast(false);
-        scale = mode = contrast = false;
+        // The mode first: the scale saved is the saved mode's.
+        if (mode_changed)
+        {
+            const LONG r = ChangeDisplaySettingsExW(device.c_str(), &mode, nullptr, 0, nullptr);
+            const bool ok = r == DISP_CHANGE_SUCCESSFUL && settles([&] { return mode_is_saved(); });
+            expect(ok, "the display's mode put back to " + str(long(mode.dmPelsWidth)) + "x" +
+                           str(long(mode.dmPelsHeight)) + " (" + str(long(r)) + ")");
+            if (ok) mode_changed = false;
+        }
+        if (scale)
+        {
+            const bool ok = set_scale(rel) && settles([&] { return scale_is_saved(); });
+            expect(ok, "the display's scale put back to step " + str(rel));
+            if (ok) scale = false;
+        }
+        if (contrast)
+        {
+            const bool ok = set_high_contrast(contrast_flags != 0) && settles([&] { return contrast_is_saved(); });
+            expect(ok, "high contrast and the system colours put back");
+            if (ok) contrast = false;
+        }
     }
 };
 restore g_restore;
@@ -758,6 +862,11 @@ int dpi_transition(HWND top, HWND strip)
              "(GITHUB_ACTIONS=true, RAPPORT_TEST_SET_DPI=1)");
         return 77;
     }
+    if (!g_restore.save_display())
+    {
+        expect(false, "the display's mode and scale read before changing them");
+        return 1;
+    }
     dpi_scale_get g{};
     if (!get_scale(g))
     {
@@ -769,18 +878,16 @@ int dpi_transition(HWND top, HWND strip)
     // mode first, for the scales it allows.
     if (g.max_rel <= g.cur_rel && g.min_rel >= g.cur_rel)
     {
-        DISPLAY_DEVICEW dev{sizeof dev};
+        const wchar_t* device = g_restore.device.c_str();
         DEVMODEW best{}, mode{};
         best.dmSize = mode.dmSize = sizeof(DEVMODEW);
-        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dev, 0); ++i)
-            if (dev.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) break;
-        for (DWORD i = 0; EnumDisplaySettingsW(dev.DeviceName, i, &mode); ++i)
+        for (DWORD i = 0; EnumDisplaySettingsW(device, i, &mode); ++i)
             if (mode.dmPelsWidth * mode.dmPelsHeight > best.dmPelsWidth * best.dmPelsHeight) best = mode;
-        if (best.dmPelsWidth && ChangeDisplaySettingsExW(dev.DeviceName, &best, nullptr, CDS_FULLSCREEN, nullptr) ==
-                                    DISP_CHANGE_SUCCESSFUL)
+        // Marked before it's tried: a change half made is put back too.
+        if (best.dmPelsWidth) g_restore.mode_changed = true;
+        if (best.dmPelsWidth &&
+            ChangeDisplaySettingsExW(device, &best, nullptr, CDS_FULLSCREEN, nullptr) == DISP_CHANGE_SUCCESSFUL)
         {
-            g_restore.mode = true;
-            g_restore.device = dev.DeviceName;
             note("display mode " + str(long(best.dmPelsWidth)) + "x" + str(long(best.dmPelsHeight)));
             pump(50);
             get_scale(g);
@@ -791,7 +898,6 @@ int dpi_transition(HWND top, HWND strip)
     expect(to != g.cur_rel, "the display allows another scale");
     if (to == g.cur_rel) return 1;
     const UINT before = GetDpiForWindow(top);
-    g_restore.rel = g.cur_rel;
     g_restore.scale = true;
     expect(set_scale(to), "the display's scale set");
     const bool changed = pump_until([&] { return GetDpiForWindow(top) != before; });
@@ -829,6 +935,11 @@ int contrast_transition(HWND top, HWND strip)
         DwmGetWindowAttribute(top, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &b, sizeof b);
         return b;
     };
+    if (!g_restore.save_contrast())
+    {
+        expect(false, "high contrast and the system colours read before changing them");
+        return 1;
+    }
     g_restore.contrast = true;
     expect(set_high_contrast(true), "high contrast on");
     const bool took = pump_until(
