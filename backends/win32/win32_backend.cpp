@@ -153,9 +153,11 @@ unsigned key_modifiers()
 }
 
 // An IME composing in `h` (its candidate text not yet committed): keys are
-// its until then.
+// its until then. A test, with no IME to drive, says one is composing with
+// the control's "rapport-test-composing" property.
 bool ime_composing(HWND h)
 {
+    if (GetPropW(h, L"rapport-test-composing")) return true;
     HIMC imc = ImmGetContext(h);
     if (!imc) return false;
     const bool composing = ImmGetCompositionStringW(imc, GCS_COMPSTR, nullptr, 0) > 0;
@@ -10372,13 +10374,15 @@ public:
         GetClassNameW(m.hwnd, cls, 32);
         const bool typing = (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
                             !(GetWindowLongPtrW(m.hwnd, GWL_STYLE) & ES_READONLY);
+        // While an IME composes in the field every key is its (Escape cancels,
+        // the function keys convert): none is the window's.
+        if (typing && ime_composing(m.hwnd)) return false;
         const bool not_text = m.wParam == VK_ESCAPE || (m.wParam >= VK_F1 && m.wParam <= VK_F12);
-        // A shortcut chord is the window's first, as an accelerator; none
-        // while an IME is composing.
+        // A shortcut chord is the window's first, as an accelerator.
         if (typing && !not_text)
         {
             const key_event e = make_key_event(m.wParam, m.lParam, m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN);
-            return window_chords::to_window(e) && !ime_composing(m.hwnd) && on_key_(e);
+            return window_chords::to_window(e) && on_key_(e);
         }
         // The Back and Forward keys come as WM_APPCOMMAND, whatever has focus.
         if (m.wParam == VK_BROWSER_BACK || m.wParam == VK_BROWSER_FORWARD) return false;

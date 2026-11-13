@@ -4480,15 +4480,16 @@ public:
                 focus &&
                 (GTK_IS_EDITABLE(focus) ||
                  (GTK_IS_TEXT_VIEW(focus) && gtk_text_view_get_editable(GTK_TEXT_VIEW(focus))));
+            // While an input method composes in the field every key is its
+            // (Escape cancels, the function keys convert): none is the window's.
+            if (typing && im_composing(focus)) return false;
             const bool navigation = navigation_key(key_for(e->keyval));
             if (navigation && e->type != GDK_KEY_PRESS) return false;  // presses only
             const bool not_text = navigation || e->keyval == GDK_KEY_Escape ||
                                  (e->keyval >= GDK_KEY_F1 && e->keyval <= GDK_KEY_F12);
             // A shortcut chord is the window's first, as an accelerator (this
-            // runs before the field has the key); none while an input method
-            // is composing.
-            if (typing && !not_text)
-                return !im_composing(focus) && window_chords::to_window(ev) && self->on_key_(ev);
+            // runs before the field has the key).
+            if (typing && !not_text) return window_chords::to_window(ev) && self->on_key_(ev);
             return self->on_key_(ev);
         };
         connect(win_, "key-press-event", key, this);

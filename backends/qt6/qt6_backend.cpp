@@ -4374,11 +4374,14 @@ public:
         const bool typing =
             focus && (qobject_cast<QLineEdit*>(focus) || qobject_cast<QAbstractSpinBox*>(focus) ||
                       (plain && !plain->isReadOnly()));
+        // While an input method composes in the field every key is its
+        // (Escape cancels, the function keys convert): none is the window's.
+        if (typing && composing_) return false;
         const bool navigation = k->key() == Qt::Key_Back || k->key() == Qt::Key_Forward;
         if (navigation && e->type() != QEvent::KeyPress) return false;  // presses only
         const bool not_text = navigation || k->key() == Qt::Key_Escape ||
                               (k->key() >= Qt::Key_F1 && k->key() <= Qt::Key_F12);
-        if (typing && !not_text) return window_chords::to_window(ev) && !composing_ && on_key_(ev);
+        if (typing && !not_text) return window_chords::to_window(ev) && on_key_(ev);
         return on_key_(ev);
     }
 

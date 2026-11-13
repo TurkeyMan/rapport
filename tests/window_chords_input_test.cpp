@@ -3,8 +3,10 @@
 // settings, as Explorer's work from its address bar), Ctrl+A and Ctrl+V
 // stay the entry's editing keys, a chord the handler declines goes on to
 // the entry, Alt+D taken stays from it, plain Alt and Ctrl+Alt with a
-// character (AltGr) are never the window's, none while an input method is
-// composing, and Alt+F, declined, reaches the menu bar.
+// character (AltGr) are never the window's, nothing at all (no chord, no
+// Escape, no function key) while an input method is composing - on win32 the
+// backend's test hook says one is - and Alt+F, declined, reaches the menu
+// bar.
 //   rapport-window-chords-test-win32  (a window never shown: messages posted
 //                                      to its edit, taken by the backend's
 //                                      message loop, as typing is)
@@ -69,6 +71,8 @@ enum class k
     f,
     q,
     alt,  // Alt alone
+    f1,
+    escape,
 };
 
 // What a key is, as both sides record it.
@@ -86,6 +90,8 @@ std::string token(k key)
     case k::f: return "f";
     case k::q: return "q";
     case k::alt: return "alt";
+    case k::f1: return "f1";
+    case k::escape: return "esc";
     }
     return "?";
 }
@@ -138,6 +144,8 @@ guint keyval_of(k key)
     case k::f: return GDK_KEY_f;
     case k::q: return GDK_KEY_q;
     case k::alt: return GDK_KEY_Alt_L;
+    case k::f1: return GDK_KEY_F1;
+    case k::escape: return GDK_KEY_Escape;
     }
     return GDK_KEY_VoidSymbol;
 }
@@ -145,6 +153,8 @@ guint keyval_of(k key)
 std::string token_of(guint keyval)
 {
     if (keyval == GDK_KEY_Alt_L) return "alt";
+    if (keyval == GDK_KEY_F1) return "f1";
+    if (keyval == GDK_KEY_Escape) return "esc";
     const gunichar c = gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval));
     return c ? std::string(1, char(c)) : "other";
 }
@@ -267,6 +277,8 @@ guint keyval_of(k key)
     case k::f: return GDK_KEY_f;
     case k::q: return GDK_KEY_q;
     case k::alt: return GDK_KEY_Alt_L;
+    case k::f1: return GDK_KEY_F1;
+    case k::escape: return GDK_KEY_Escape;
     }
     return GDK_KEY_VoidSymbol;
 }
@@ -432,6 +444,10 @@ protected:
             const int key = static_cast<QKeyEvent*>(e)->key();
             if (key == Qt::Key_Alt)
                 saw_alt_ = true;
+            else if (key == Qt::Key_F1)
+                entry_keys.push_back("f1");
+            else if (key == Qt::Key_Escape)
+                entry_keys.push_back("esc");
             else if (key != Qt::Key_Control && key != Qt::Key_Shift && key != Qt::Key_Meta)
                 entry_keys.push_back(std::string(1, char(QChar::toLower(char32_t(key)))));
         }
@@ -453,6 +469,8 @@ private:
         case k::f: return Qt::Key_F;
         case k::q: return Qt::Key_Q;
         case k::alt: return Qt::Key_Alt;
+        case k::f1: return Qt::Key_F1;
+        case k::escape: return Qt::Key_Escape;
         }
         return Qt::Key_unknown;
     }
@@ -493,6 +511,8 @@ public:
         case k::f: vk = 'F'; break;
         case k::q: vk = 'Q'; break;
         case k::alt: vk = VK_MENU; break;
+        case k::f1: vk = VK_F1; break;
+        case k::escape: vk = VK_ESCAPE; break;
         }
         const bool with_alt = (mods & alt) || key == k::alt;
         BYTE state[256] = {};
@@ -518,6 +538,16 @@ public:
         GetKeyboardState(state);
         state[VK_CONTROL] = state[VK_LCONTROL] = state[VK_MENU] = state[VK_LMENU] = 0;
         SetKeyboardState(state);
+    }
+    // No IME can be driven without the system's input: the backend's test
+    // hook says one is composing in the edit.
+    bool compose(bool on) override
+    {
+        if (on)
+            SetPropW(edit_, L"rapport-test-composing", HANDLE(1));
+        else
+            RemovePropW(edit_, L"rapport-test-composing");
+        return true;
     }
     std::optional<bool> all_selected() override
     {
@@ -545,6 +575,8 @@ private:
     static std::string token_of(WPARAM vk)
     {
         if (vk == VK_MENU) return "alt";
+        if (vk == VK_F1) return "f1";
+        if (vk == VK_ESCAPE) return "esc";
         if (vk == VK_OEM_COMMA) return ",";
         if (vk >= 'A' && vk <= 'Z') return std::string(1, char(vk - 'A' + 'a'));
         return "other";
@@ -609,7 +641,10 @@ int main(int argc, char** argv)
         [&](const rap::key_event& e)
         {
             if (!e.press) return false;
-            const std::string t = e.key == rap::key::character ? std::string(1, char(e.codepoint)) : "other";
+            const std::string t = e.key == rap::key::character ? std::string(1, char(e.codepoint))
+                                  : e.key == rap::key::f1     ? "f1"
+                                  : e.key == rap::key::escape ? "esc"
+                                                              : "other";
             window_keys.push_back(t);
             const unsigned m = e.modifiers & (rap::mod_ctrl | rap::mod_alt | rap::mod_shift);
             return (m == ctrl && (t == "n" || t == ",")) || (m == alt && t == "d");
@@ -699,24 +734,70 @@ int main(int argc, char** argv)
         {
             window_had("Ctrl+Alt+Q (AltGr+Q): typing, the entry's", {}, {"q"});
             composing = d.compose(true);
+            expect(composing, "an input method's composition, started in the entry");
             chord(k::n, ctrl);
+        });
+    // While it composes nothing is the window's: no chord, no Escape, no
+    // function key. They're the input method's (Escape cancels, Japanese
+    // ones convert with F6-F10), so they go on to the entry.
+    steps.push_back(
+        [&]
+        {
+            window_had("Ctrl+N while an input method composes: the entry's, not the window's", {}, {"n"});
+            chord(k::f1, ctrl);
         });
     steps.push_back(
         [&]
         {
-            if (composing)
-            {
-                expect(window_keys.empty(), "Ctrl+N while an input method composes: not the window's (" +
-                                                show(window_keys) + ")");
-                d.compose(false);
-            }
-            chord(k::n, ctrl);
+            window_had("Ctrl+F1 while composing: the entry's, not the window's", {}, {"f1"});
+            chord(k::f1, 0);
         });
     steps.push_back(
         [&]
         {
-            window_had(composing ? "Ctrl+N once the composition ends: the window's again" : "Ctrl+N again: the window's",
-                       {"n"}, {});
+            window_had("F1 while composing: the entry's, not the window's", {}, {"f1"});
+            chord(k::escape, 0);
+        });
+    steps.push_back(
+        [&]
+        {
+#if defined(RAPPORT_TEST_WIN32)
+            // A single-line edit never has Escape: the window's dialog
+            // handling (IsDialogMessage) takes it past the edit, as ever.
+            window_had("Escape while composing: not the window's", {}, {});
+#else
+            window_had("Escape while composing: the entry's, not the window's", {}, {"esc"});
+#endif
+            d.compose(false);
+            chord(k::n, ctrl);
+        });
+    // Once it commits or cancels, the rules as before.
+    steps.push_back(
+        [&]
+        {
+            window_had("Ctrl+N once the composition ends: the window's again", {"n"}, {});
+            chord(k::f1, ctrl);
+        });
+    steps.push_back(
+        [&]
+        {
+            window_had("Ctrl+F1 once it ends: the window's first, declined, then the entry's", {"f1"}, {"f1"});
+            chord(k::f1, 0);
+        });
+    steps.push_back(
+        [&]
+        {
+            window_had("F1 once it ends: the window's first, declined, then the entry's", {"f1"}, {"f1"});
+            chord(k::escape, 0);
+        });
+    steps.push_back(
+        [&]
+        {
+#if defined(RAPPORT_TEST_WIN32)
+            window_had("Escape once it ends: the window's again", {"esc"}, {});
+#else
+            window_had("Escape once it ends: the window's first, declined, then the entry's", {"esc"}, {"esc"});
+#endif
             if (shortcut)
                 chord(k::j, ctrl);
             else
