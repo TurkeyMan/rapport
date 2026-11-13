@@ -626,6 +626,47 @@ void check_band_rows(HWND top, int from, bool band, const palette& pal, HWND too
                "the band and its line at x " + str(across) + at);
 }
 
+// The child of `top` with the WS_VISIBLE style whose rectangle holds `p`
+// (client coordinates), null if none: what would cover the window's own
+// pixel there. By style, so it says the same of a window never shown, whose
+// children IsWindowVisible (and ChildWindowFromPointEx's CWP_SKIPINVISIBLE)
+// would all count out.
+HWND covering_child(HWND top, POINT p)
+{
+    for (HWND c = GetWindow(top, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
+    {
+        if (!(GetWindowLongPtrW(c, GWL_STYLE) & WS_VISIBLE)) continue;
+        const RECT r = rect_in(top, c);
+        if (PtInRect(&r, p)) return c;
+    }
+    return nullptr;
+}
+// `p` is the window's own pixel: no child over it, by style and, shown,
+// as the system finds it (ChildWindowFromPointEx).
+bool window_own(HWND top, POINT p, const std::string& what)
+{
+    HWND by_style = covering_child(top, p);
+    HWND found = IsWindowVisible(top) ? ChildWindowFromPointEx(top, p, CWP_SKIPINVISIBLE) : top;
+    const bool own = !by_style && found == top;
+    expect(own, what + " at " + str(p.x) + "," + str(p.y) + " is the window's own pixel, no child over it" +
+                    (own ? std::string() : ": covered"));
+    return own;
+}
+
+// A point in the band's fill that no child covers, as near its right end as
+// there is one (the toolbar's controls fill most of it): between `from`
+// (the strip's bottom) and the line, read from the printed background.
+// {-1, -1} if there's none.
+POINT band_point(HWND top, int from)
+{
+    const printed p = print_erase(top);
+    const DWORD fill = band_fill(high_contrast());
+    for (int y = from; y < p.h && (p.at(0, y) & 0xffffff) == fill; ++y)
+        for (int x = p.w - 1; x >= 0; --x)
+            if ((p.at(x, y) & 0xffffff) == fill && !covering_child(top, POINT{x, y})) return POINT{x, y};
+    return POINT{-1, -1};
+}
+
 // A window whose first content item is a toolbar across it: a band where
 // `band` says so (Windows 11, the tabs in the caption, a base surface),
 // the current tab its fill, the toolbar's own background too.
@@ -640,6 +681,13 @@ void check_band(HWND top, bool band, const std::string& when)
     if (band && !hc) pal.current = band_fill(false);
     const int from = strip ? int(rect_in(top, strip).bottom) : 0;
     check_band_rows(top, from, band, pal, toolbar, when);
+    if (band)
+    {
+        // Where the band's on screen to be sampled (see main): uncovered.
+        const POINT b = band_point(top, from);
+        expect(b.x >= 0, "a point of the band's fill no child covers" + at + ": " + str(b.x) + "," + str(b.y));
+        if (b.x >= 0) window_own(top, b, "that point" + at);
+    }
     if (!strip) return;
     check_pixels(strip, pal, when);
     check_text(strip, pal, when);
@@ -1135,6 +1183,12 @@ void check_screen(HWND top, HWND strip, const palette& pal)
     GetClientRect(top, &c);
     const POINT under{tab.left + px(4, dpi), h - 1}, band{tab.left + px(4, dpi), h + px(2, dpi)},
         right{c.right - px(20, dpi), h - 1};
+    // Each sample what it's said to be: the strip's (the current tab), and
+    // the window's own (above the content's margin; under the caption
+    // buttons), no control over either.
+    expect(ChildWindowFromPointEx(top, under, CWP_SKIPINVISIBLE) == strip, "the tab's sample is the strip's");
+    window_own(top, band, "the band's sample");
+    window_own(top, right, "the line's sample");
     const DWORD u = on_screen(top, under), b = on_screen(top, band), r = on_screen(top, right);
     expect(b == pal.band, "on screen, the band under the strip is " + hex(pal.band) + ": " + hex(b));
     expect(u == pal.current, "the current tab's bottom row, one with it: " + hex(u));
@@ -2023,9 +2077,16 @@ int main(int argc, char** argv)
                 const RECT tab = part(s, q_tab, ask(s, q_current));
                 RECT c;
                 GetClientRect(b, &c);
-                const DWORD fill = band_fill(hc), u = on_screen(b, {tab.left + px(4, dpi), h - 1}),
-                            under = on_screen(b, {c.right - px(4, dpi), h + px(2, dpi)});
-                expect(under == fill, "on screen, the band is " + hex(fill) + ": " + hex(under));
+                // A point of the band no child covers (a toolbar's
+                // controls fill most of it), checked to be the window's own.
+                const POINT at = band_point(b, h), tab_at{tab.left + px(4, dpi), h - 1};
+                expect(at.x >= 0 && window_own(b, at, "on screen, the band's sample"),
+                       "an uncovered point of the band to sample on screen");
+                expect(ChildWindowFromPointEx(b, tab_at, CWP_SKIPINVISIBLE) == s, "the tab's sample is the strip's");
+                const DWORD fill = band_fill(hc), u = on_screen(b, tab_at),
+                            under = at.x >= 0 ? on_screen(b, at) : 0xDEADBEEF;
+                expect(under == fill, "on screen, the band is " + hex(fill) + " at " + str(at.x) + "," + str(at.y) +
+                                          ": " + hex(under));
                 expect(u == (hc ? expected(true).current : fill),
                        "and the current tab's bottom row one with it: " + hex(u));
                 SetWindowPos(b, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
