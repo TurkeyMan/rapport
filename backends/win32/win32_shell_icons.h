@@ -92,6 +92,10 @@ void want_path_icon(const std::string& path, int logical, UINT dpi);
 // How many times the shell has been asked for a path's icon, for tests.
 size_t path_icon_lookups();
 
+// For tests: finders take no new job while held (one already asking the
+// shell finishes), so what shows before an icon is found can be seen.
+void hold_path_icon_finders(bool hold);
+
 // How many shell calls this module has made on the calling thread, for
 // tests: none may be made while painting.
 size_t shell_calls_on_this_thread();
