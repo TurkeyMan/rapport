@@ -154,6 +154,172 @@ inline GIcon* named_g_icon(const std::string& name)
     return icon;
 }
 
+// -- a path's own icon (icon::for_path) ---------------------------------------
+//
+// GIO's icon for one path, as Files and GTK's sidebar show it: a mount
+// root's own (g_mount_get_icon: a USB stick's, a disc's, a network share's),
+// else its standard::icon (the home folder's, a folder's own). Found
+// asynchronously: GIO reads the disk on its own threads, and the answers
+// come on the main context, so the UI thread never waits for a slow or gone
+// drive. Kept per path for the process; a path found to have none isn't
+// asked again (not in v1).
+
+struct path_icon_waiter
+{
+    GCancellable* cancellable;  // the asking widget's (a ref)
+    std::function<void(GIcon*)> ready;
+};
+
+struct path_icon_store
+{
+    std::unordered_map<std::string, GIcon*> found;  // owned
+    std::unordered_map<std::string, bool> none;
+    // Being found: who's waiting. The lookup runs with the first one's
+    // cancellable; if that widget goes first, the others ask again.
+    std::unordered_map<std::string, std::vector<path_icon_waiter>> waiting;
+    size_t lookups = 0;  // for tests
+};
+
+// Never destroyed: a lookup still running at exit has it.
+inline path_icon_store& path_icons()
+{
+    static path_icon_store* s = new path_icon_store;
+    return *s;
+}
+
+inline void start_path_icon_lookup(const std::string& path, GCancellable* cancellable);
+
+// A lookup's end: `icon` (a ref, or null for none), or cancelled.
+inline void path_icon_done(const std::string& path, GIcon* icon, bool cancelled)
+{
+    path_icon_store& s = path_icons();
+    std::vector<path_icon_waiter> waiters;
+    if (auto it = s.waiting.find(path); it != s.waiting.end())
+    {
+        waiters = std::move(it->second);
+        s.waiting.erase(it);
+    }
+    if (cancelled)
+    {
+        // Its asker went: anyone still waiting asks again, with their own.
+        std::vector<path_icon_waiter> live;
+        for (path_icon_waiter& w : waiters)
+            if (g_cancellable_is_cancelled(w.cancellable))
+                g_object_unref(w.cancellable);
+            else
+                live.push_back(std::move(w));
+        if (live.empty()) return;
+        GCancellable* first = live.front().cancellable;
+        s.waiting[path] = std::move(live);
+        start_path_icon_lookup(path, first);
+        return;
+    }
+    if (icon)
+        s.found[path] = icon;
+    else
+        s.none[path] = true;
+    for (path_icon_waiter& w : waiters)
+    {
+        if (icon && !g_cancellable_is_cancelled(w.cancellable) && w.ready) w.ready(icon);
+        g_object_unref(w.cancellable);
+    }
+}
+
+inline void start_path_icon_lookup(const std::string& path, GCancellable* cancellable)
+{
+    struct lookup
+    {
+        std::string path;
+        GFile* file;
+        GCancellable* cancellable;
+        static void finish(lookup* l, GIcon* icon, bool cancelled)
+        {
+            const std::string path = l->path;
+            g_object_unref(l->file);
+            g_object_unref(l->cancellable);
+            delete l;
+            path_icon_done(path, icon, cancelled);
+        }
+        static void on_info(GObject* source, GAsyncResult* result, gpointer p)
+        {
+            auto* l = static_cast<lookup*>(p);
+            GError* error = nullptr;
+            GFileInfo* info = g_file_query_info_finish(G_FILE(source), result, &error);
+            const bool cancelled = error && g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+            if (error) g_error_free(error);
+            GIcon* icon = nullptr;
+            if (info)
+            {
+                if (GIcon* i = g_file_info_get_icon(info)) icon = G_ICON(g_object_ref(i));
+                g_object_unref(info);
+            }
+            finish(l, icon, cancelled);
+        }
+        static void on_mount(GObject* source, GAsyncResult* result, gpointer p)
+        {
+            auto* l = static_cast<lookup*>(p);
+            GError* error = nullptr;
+            GMount* mount = g_file_find_enclosing_mount_finish(G_FILE(source), result, &error);
+            const bool cancelled = error && g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+            if (error) g_error_free(error);
+            if (cancelled) return finish(l, nullptr, true);
+            GIcon* icon = nullptr;
+            if (mount)
+            {
+                // Only the mount's own root takes its icon; a folder inside
+                // it is a folder.
+                GFile* root = g_mount_get_root(mount);
+                if (g_file_equal(root, l->file)) icon = g_mount_get_icon(mount);
+                g_object_unref(root);
+                g_object_unref(mount);
+            }
+            if (icon) return finish(l, icon, false);
+            g_file_query_info_async(l->file, G_FILE_ATTRIBUTE_STANDARD_ICON, G_FILE_QUERY_INFO_NONE,
+                                    G_PRIORITY_DEFAULT, l->cancellable, on_info, l);
+        }
+    };
+    ++path_icons().lookups;
+    auto* l = new lookup{path, g_file_new_for_path(path.c_str()), G_CANCELLABLE(g_object_ref(cancellable))};
+    g_file_find_enclosing_mount_async(l->file, G_PRIORITY_DEFAULT, l->cancellable, lookup::on_mount, l);
+}
+
+// `path`'s icon if it's been found (owned by the cache), else null: then
+// it's being found, and `ready` runs on the main context with it once it
+// is, unless `cancellable` (the asking widget's, cancelled as it goes) is
+// cancelled first, or the path has none. Never waits.
+inline GIcon* path_g_icon(const std::string& path, GCancellable* cancellable, std::function<void(GIcon*)> ready)
+{
+    if (path.empty()) return nullptr;
+    path_icon_store& s = path_icons();
+    if (const auto it = s.found.find(path); it != s.found.end()) return it->second;
+    if (s.none.contains(path)) return nullptr;
+    auto [it, first] = s.waiting.try_emplace(path);
+    it->second.push_back({G_CANCELLABLE(g_object_ref(cancellable)), std::move(ready)});
+    if (first) start_path_icon_lookup(path, cancellable);
+    return nullptr;
+}
+
+// A widget's cancellable for its path icons: made with it, cancelled as it's
+// destroyed (and at the latest as it's finalized), so no answer reaches a
+// widget that's gone.
+inline GCancellable* widget_cancellable(GtkWidget* w)
+{
+    if (auto* c = static_cast<GCancellable*>(g_object_get_data(G_OBJECT(w), "rapport-path-icons"))) return c;
+    GCancellable* c = g_cancellable_new();
+    g_object_set_data(G_OBJECT(w), "rapport-path-icons", c);
+    g_signal_connect(w, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer data) { g_cancellable_cancel(G_CANCELLABLE(data)); }),
+                     c);
+    g_object_weak_ref(
+        G_OBJECT(w),
+        +[](gpointer data, GObject*)
+        {
+            g_cancellable_cancel(G_CANCELLABLE(data));
+            g_object_unref(data);
+        },
+        c);
+    return c;
+}
+
 inline color mix_colors(color a, color b, float t)
 {
     auto f = [&](uint8_t x, uint8_t y) { return uint8_t(x + (y - x) * t + 0.5f); };

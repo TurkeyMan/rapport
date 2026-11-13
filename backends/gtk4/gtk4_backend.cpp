@@ -370,6 +370,31 @@ GtkWidget* icon_widget(const icon& icon, int size)
         gtk_image_set_pixel_size(GTK_IMAGE(img), size);
         return img;
     };
+    // A path's own icon (icon::for_path): in a box, the rest of the icon
+    // meanwhile, swapped for GIO's once it's found.
+    if (!icon.path.empty())
+    {
+        auto image = [size](GIcon* g)
+        {
+            GtkWidget* img = gtk_image_new_from_gicon(g);
+            gtk_image_set_pixel_size(GTK_IMAGE(img), size);
+            return img;
+        };
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
+        GIcon* g = path_g_icon(icon.path, widget_cancellable(box),
+                               [box, image](GIcon* found)
+                               {
+                                   while (GtkWidget* old = gtk_widget_get_first_child(box))
+                                       gtk_box_remove(GTK_BOX(box), old);
+                                   gtk_box_append(GTK_BOX(box), image(found));
+                               });
+        rap::icon rest = icon;
+        rest.path.clear();
+        if (GtkWidget* child = g ? image(g) : icon_widget(rest, size)) gtk_box_append(GTK_BOX(box), child);
+        return box;
+    }
     if (!icon.name.empty() && gtk_icon_theme_has_icon(theme, icon.name.c_str()))
         return named(icon.name.c_str());
     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
@@ -986,6 +1011,7 @@ public:
         if (found == nodes_.end()) return;
         lazy_tree::tracker::batch b(lazy_);
         found->second.label = label;
+        found->second.icon_path = icon.path;
         found->second.icon = g_icon_of(icon);
         const bool waiting = lazy_.unloaded(id);
         if (!has_children && waiting)
@@ -1106,6 +1132,7 @@ private:
         bool expanded = false;
         std::optional<check_state> check;
         GIcon* icon = nullptr;  // owned by the cache it came from
+        std::string icon_path;  // its icon::for_path, till GIO has found it
         bool loading = false;   // children not loaded yet: shows a placeholder
         bool separator_before = false;
         bool after_sibling = false;  // has a sibling before it: where a line can go
@@ -1126,6 +1153,7 @@ private:
     void add(const tree_item& t, const std::string& parent, bool after_sibling)
     {
         node n{t.label, {}, t.expanded, t.check, g_icon_of(t.icon)};
+        n.icon_path = t.icon.path;
         n.separator_before = t.separator_before;
         n.after_sibling = after_sibling;
         for (const tree_item& c : t.children)
@@ -1149,9 +1177,24 @@ private:
         if (o) g_object_unref(o);
         return placeholder;
     }
-    static GIcon* g_icon_of(const rap::icon& icon)
+    // A path's own icon (icon::for_path) once GIO has found it; its name's
+    // meanwhile, and its rows bound again when it's found.
+    GIcon* g_icon_of(const rap::icon& icon)
     {
+        if (!icon.path.empty())
+            if (GIcon* g = path_g_icon(icon.path, widget_cancellable(w_),
+                                       [this, path = icon.path](GIcon* found) { path_icon_found(path, found); }))
+                return g;
         return !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
+    }
+    void path_icon_found(const std::string& path, GIcon* g)
+    {
+        for (auto& [id, n] : nodes_)
+            if (n.icon_path == path)
+            {
+                n.icon = g;
+                rebind(id);
+            }
     }
     void forget_subtree(const std::string& id)
     {
@@ -2590,7 +2633,7 @@ private:
     {
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         GtkWidget* image = nullptr;
-        if (!t.icon.file.empty())
+        if (!t.icon.file.empty() && t.icon.path.empty())
         {
             image = gtk_image_new_from_gicon(file_type_icon(t.icon.file));
             gtk_image_set_pixel_size(GTK_IMAGE(image), 16);
@@ -4058,7 +4101,13 @@ private:
             g_object_set_data(G_OBJECT(check), "rapport-binding", nullptr);
         }
         const icon icon = model_->icon(row, ctx.column);
-        GIcon* gicon = !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
+        // A path's own once GIO has found it (asked here, never waited for:
+        // the rows are bound again when it comes), its name's meanwhile.
+        GIcon* gicon = !icon.path.empty() ? path_g_icon(icon.path, widget_cancellable(w_),
+                                                        [this](GIcon*) { rows_changed(0, SIZE_MAX); })
+                                          : nullptr;
+        if (!gicon)
+            gicon = !icon.file.empty() ? file_type_icon(icon.file) : !icon.name.empty() ? named_g_icon(icon.name) : nullptr;
         gtk_image_set_from_gicon(image, gicon);
         const bool drawn = !gicon && icon.draw;
         gtk_widget_set_visible(gtk_widget_get_parent(GTK_WIDGET(image)), gicon || drawn);
