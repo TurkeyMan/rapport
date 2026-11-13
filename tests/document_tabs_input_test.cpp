@@ -1,7 +1,9 @@
 // A window's document tabs driven through a real backend: the keys (with a
 // text field focused, where they still work), a tab chosen in the native
 // control, a middle click and a close button, each handler firing once,
-// and the app's own calls firing none.
+// and the app's own calls firing none; a tab moved by Ctrl+Shift+PgDn and
+// PgUp, and dragged (GTK: the notebook's own reorder, as its drag ends;
+// Qt: the mouse's events; Windows: its messages), on_reorder once each.
 //   rapport-document-tabs-test-gtk3   (GDK_BACKEND=broadway, broadwayd running)
 //   rapport-document-tabs-test-gtk4   (GDK_BACKEND=broadway, gtk4-broadwayd running)
 //   rapport-document-tabs-test-qt6    (QT_QPA_PLATFORM=offscreen)
@@ -26,6 +28,7 @@
 #include <commctrl.h>
 #endif
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <string>
@@ -55,6 +58,8 @@ enum class k
     tab,
     one,
     nine,
+    page_up,
+    page_down,
 };
 
 // The native tab control: found, read back, and given input.
@@ -82,6 +87,11 @@ public:
     virtual void activate() {}
     // Tab i's title shows literally, with no access key in it.
     virtual bool literal_title(int, const std::string&) { return true; }
+    // Tab `from` dragged to `to` and let go, as the user does.
+    virtual void drag(int from, int to) = 0;
+    // Tab i pressed (made current, as a press does), dragged a little way
+    // and back, let go where it was pressed: it isn't moved.
+    virtual void drag_back(int i) = 0;
 };
 
 #if defined(RAPPORT_TEST_GTK3)
@@ -108,6 +118,8 @@ public:
         case k::tab: keyval = shift ? GDK_KEY_ISO_Left_Tab : GDK_KEY_Tab; break;
         case k::one: keyval = GDK_KEY_1; break;
         case k::nine: keyval = GDK_KEY_9; break;
+        case k::page_up: keyval = GDK_KEY_Page_Up; break;
+        case k::page_down: keyval = GDK_KEY_Page_Down; break;
         }
         GdkWindow* top = gtk_widget_get_window(gtk_widget_get_toplevel(nb_));
         for (GdkEventType type : {GDK_KEY_PRESS, GDK_KEY_RELEASE})
@@ -136,6 +148,23 @@ public:
     void choose(int i) override
     {
         gtk_notebook_set_current_page(GTK_NOTEBOOK(nb_), i);
+        spin();
+    }
+    // As the notebook's own drag ends: the page moved, page-reordered.
+    void drag(int from, int to) override
+    {
+        gtk_notebook_reorder_child(GTK_NOTEBOOK(nb_), gtk_notebook_get_nth_page(GTK_NOTEBOOK(nb_), from), to);
+        spin();
+    }
+    // Pressed: current (on_select, which may change the tabs); its drag
+    // ending where the page is now, as page-reordered says when the
+    // notebook's scrolled with no move.
+    void drag_back(int i) override
+    {
+        GtkWidget* page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(nb_), i);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(nb_), i);
+        spin();
+        g_signal_emit_by_name(nb_, "page-reordered", page, guint(gtk_notebook_page_num(GTK_NOTEBOOK(nb_), page)));
         spin();
     }
     void middle_click(int i) override
@@ -221,6 +250,8 @@ public:
         case k::tab: keyval = shift ? GDK_KEY_ISO_Left_Tab : GDK_KEY_Tab; break;
         case k::one: keyval = GDK_KEY_1; break;
         case k::nine: keyval = GDK_KEY_9; break;
+        case k::page_up: keyval = GDK_KEY_Page_Up; break;
+        case k::page_down: keyval = GDK_KEY_Page_Down; break;
         }
         const auto state = GdkModifierType(GDK_CONTROL_MASK | (shift ? GDK_SHIFT_MASK : 0));
         // The window's capture-phase key controllers, the last added first
@@ -246,6 +277,23 @@ public:
     void choose(int i) override
     {
         gtk_notebook_set_current_page(GTK_NOTEBOOK(nb_), i);
+        spin();
+    }
+    // As the notebook's own drag ends: the page moved, page-reordered.
+    void drag(int from, int to) override
+    {
+        gtk_notebook_reorder_child(GTK_NOTEBOOK(nb_), gtk_notebook_get_nth_page(GTK_NOTEBOOK(nb_), from), to);
+        spin();
+    }
+    // Pressed: current (on_select, which may change the tabs); its drag
+    // ending where the page is now, as page-reordered says when the
+    // notebook's scrolled with no move.
+    void drag_back(int i) override
+    {
+        GtkWidget* page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(nb_), i);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(nb_), i);
+        spin();
+        g_signal_emit_by_name(nb_, "page-reordered", page, guint(gtk_notebook_page_num(GTK_NOTEBOOK(nb_), page)));
         spin();
     }
     void middle_click(int i) override
@@ -320,6 +368,8 @@ public:
         case k::tab: code = shift ? Qt::Key_Backtab : Qt::Key_Tab; break;
         case k::one: code = Qt::Key_1; break;
         case k::nine: code = Qt::Key_9; break;
+        case k::page_up: code = Qt::Key_PageUp; break;
+        case k::page_down: code = Qt::Key_PageDown; break;
         }
         Qt::KeyboardModifiers mods = Qt::ControlModifier;
         if (shift) mods |= Qt::ShiftModifier;
@@ -335,6 +385,40 @@ public:
         bar_->setCurrentIndex(i);
         QApplication::processEvents();
     }
+    // Pressed on tab `from`, moved along in steps to tab `to`'s middle (the
+    // bar moving it live as it passes each), let go there.
+    void drag(int from, int to) override
+    {
+        const QPoint start = bar_->tabRect(from).center(), end = bar_->tabRect(to).center();
+        auto send = [this](QEvent::Type type, QPoint at, Qt::MouseButton button, Qt::MouseButtons buttons)
+        {
+            QMouseEvent e(type, at, bar_->mapToGlobal(at), button, buttons, Qt::NoModifier);
+            QApplication::sendEvent(bar_, &e);
+            QApplication::processEvents();
+        };
+        send(QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+        const int steps = 12;
+        for (int i = 1; i <= steps; ++i)
+            send(QEvent::MouseMove, start + (end - start) * i / steps, Qt::NoButton, Qt::LeftButton);
+        reordered_mid_drag = told ? told() : 0;
+        send(QEvent::MouseButtonRelease, end, Qt::LeftButton, Qt::NoButton);
+    }
+    std::function<size_t()> told;  // how many on_reorder so far
+    void drag_back(int i) override
+    {
+        const QPoint start = bar_->tabRect(i).center();
+        auto send = [this](QEvent::Type type, QPoint at, Qt::MouseButton button, Qt::MouseButtons buttons)
+        {
+            QMouseEvent e(type, at, bar_->mapToGlobal(at), button, buttons, Qt::NoModifier);
+            QApplication::sendEvent(bar_, &e);
+            QApplication::processEvents();
+        };
+        send(QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+        for (int dx : {10, 20, 30, 20, 10, 0})
+            send(QEvent::MouseMove, start + QPoint(dx, 0), Qt::NoButton, Qt::LeftButton);
+        send(QEvent::MouseButtonRelease, start, Qt::LeftButton, Qt::NoButton);
+    }
+    size_t reordered_mid_drag = 0;
     void middle_click(int i) override
     {
         const QPoint at = bar_->tabRect(i).center();
@@ -401,6 +485,8 @@ public:
         case k::tab: vk = VK_TAB; break;
         case k::one: vk = '1'; break;
         case k::nine: vk = '9'; break;
+        case k::page_up: vk = VK_PRIOR; break;
+        case k::page_down: vk = VK_NEXT; break;
         }
         post_key(vk, true, shift);
     }
@@ -436,6 +522,44 @@ public:
         SendMessageW(control(), WM_MBUTTONDOWN, MK_MBUTTON, at);
         SendMessageW(control(), WM_MBUTTONUP, 0, at);
     }
+    // Pressed, moved past the drag threshold and on to tab `to`'s middle,
+    // let go there: sent to the strip, as the mouse's captured by it.
+    void drag(int from, int to) override
+    {
+        RECT a{}, b{};
+        if (strip_)
+        {
+            a = rect(3, from);
+            b = rect(3, to);
+        }
+        else
+        {
+            TabCtrl_GetItemRect(tab_, from, &a);
+            TabCtrl_GetItemRect(tab_, to, &b);
+        }
+        const LPARAM start = centre(a), end = centre(b);
+        SendMessageW(control(), WM_LBUTTONDOWN, MK_LBUTTON, start);
+        const int x = GET_X(start), y = GET_Y(start);
+        SendMessageW(control(), WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + (GET_X(end) > x ? 20 : -20), y));
+        SendMessageW(control(), WM_MOUSEMOVE, MK_LBUTTON, end);
+        SendMessageW(control(), WM_LBUTTONUP, 0, end);
+    }
+    void drag_back(int i) override
+    {
+        RECT r{};
+        if (strip_)
+            r = rect(3, i);
+        else
+            TabCtrl_GetItemRect(tab_, i, &r);
+        const LPARAM start = centre(r);
+        const int x = GET_X(start), y = GET_Y(start);
+        SendMessageW(control(), WM_LBUTTONDOWN, MK_LBUTTON, start);
+        SendMessageW(control(), WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + 30, y));
+        SendMessageW(control(), WM_MOUSEMOVE, MK_LBUTTON, start);
+        SendMessageW(control(), WM_LBUTTONUP, 0, start);
+    }
+    static int GET_X(LPARAM p) { return short(LOWORD(p)); }
+    static int GET_Y(LPARAM p) { return short(HIWORD(p)); }
     // Stage 1's tabs have none; the caption's have.
     bool close_button(int i) override
     {
@@ -553,7 +677,9 @@ int main(int argc, char** argv)
     rap::tabs* inner = nullptr;
     std::vector<int> inner_changed;
     std::vector<std::string> selected, closed;
+    std::vector<std::pair<std::string, int>> reordered;
     int added = 0, next_id = 0;
+    bool insert_on_select = false;  // the next on_select adds a tab before the one chosen
     using namespace rap::layout;
     auto win = (*ui)->create(
         window{"Document tabs",
@@ -573,8 +699,18 @@ int main(int argc, char** argv)
                                  {"b", "Beta", rap::icon::named("folder"), "/home/me/beta"},
                                  {"c", "Gamma", {}, {}}}}
                       .current("b")
-                      .on_select([&](const std::string& id) { selected.push_back(id); })
+                      .on_select(
+                          [&](const std::string& id)
+                          {
+                              selected.push_back(id);
+                              if (!std::exchange(insert_on_select, false)) return;
+                              // As an app might: a tab opened beside the one chosen, before it.
+                              const std::vector<std::string> now = tabs->ids();
+                              const auto at = std::find(now.begin(), now.end(), id);
+                              tabs->insert(int(at - now.begin()), {"x", "Inserted", {}, {}});
+                          })
                       .on_close([&](const std::string& id) { closed.push_back(id); })
+                      .on_reorder([&](const std::string& id, int i) { reordered.emplace_back(id, i); })
                       .on_new(
                           [&]
                           {
@@ -587,6 +723,9 @@ int main(int argc, char** argv)
                       .bind(tabs)));
     win->show();
     native d;
+#if defined(RAPPORT_TEST_QT6)
+    d.told = [&] { return reordered.size(); };
+#endif
 
     // One step a tick, so each step's input has been through the backend's
     // own loop (win32 takes posted keys there) before the next looks.
@@ -715,6 +854,96 @@ int main(int argc, char** argv)
             native::close_menu();
             expect(added == 1 && closed.size() == 1, "the right-click menu's New tab: on_new once");
 #endif
+        });
+    // Reordering: the current tab moved right and back by the keys, then
+    // dragged two places right; on_reorder once each, the bind's ids()
+    // following.
+    std::vector<std::string> before;
+    auto moved = [](std::vector<std::string> v, int from, int to)
+    {
+        const std::string t = v[size_t(from)];
+        v.erase(v.begin() + from);
+        v.insert(v.begin() + to, t);
+        return v;
+    };
+    steps.push_back(
+        [&]
+        {
+            before = tabs->ids();
+            expect(before.size() >= 3, "three tabs or more to reorder");
+            tabs->select(before[0]);
+            reordered.clear();
+            selected.clear();
+            if (field) field->focus();
+            d.key(k::page_down, true);
+        });
+    steps.push_back(
+        [&]
+        {
+            using r = std::vector<std::pair<std::string, int>>;
+            expect(reordered == r{{before[0], 1}} && tabs->ids() == moved(before, 0, 1) && d.current() == 1 &&
+                       tabs->current() == before[0],
+                   "Ctrl+Shift+PgDn: the current tab one right, on_reorder once (" +
+                       std::to_string(reordered.size()) + ")");
+            d.key(k::page_up, true);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(reordered.size() == 2 && reordered[1] == std::pair<std::string, int>{before[0], 0} &&
+                       tabs->ids() == before && d.current() == 0,
+                   "Ctrl+Shift+PgUp: back, on_reorder once");
+            d.key(k::page_up, true);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(reordered.size() == 2 && tabs->ids() == before, "Ctrl+Shift+PgUp at the start: nothing");
+            reordered.clear();
+            d.drag(0, 2);
+        });
+    steps.push_back(
+        [&]
+        {
+            using r = std::vector<std::pair<std::string, int>>;
+            expect(reordered == r{{before[0], 2}} && tabs->ids() == moved(before, 0, 2) && d.count() == int(before.size()),
+                   "dragged two places right: on_reorder once, the bind in the new order (" +
+                       std::to_string(reordered.size()) + " told" +
+                       (reordered.empty() ? std::string()
+                                          : ", " + reordered[0].first + " to " + std::to_string(reordered[0].second)) +
+                       "; " + std::to_string(tabs->ids().size()) + " tabs, the moved one at " +
+                       std::to_string(
+                           [&]
+                           {
+                               const std::vector<std::string> now = tabs->ids();
+                               return int(std::find(now.begin(), now.end(), before[0]) - now.begin());
+                           }()) +
+                       ", " + std::to_string(d.count()) + " shown)");
+#if defined(RAPPORT_TEST_QT6)
+            expect(d.reordered_mid_drag == 0, "and none of it before the drag was let go");
+#endif
+            expect(selected.empty() || selected == std::vector<std::string>{before[0]},
+                   "no on_select but the press's, if it wasn't current");
+            // A tab not current pressed, whose on_select adds a tab before it
+            // (moving it one on), dragged a little and back: not reordered.
+            reordered.clear();
+            selected.clear();
+            before = tabs->ids();
+            tabs->select(before[0]);
+            insert_on_select = true;
+            d.drag_back(1);
+        });
+    steps.push_back(
+        [&]
+        {
+            std::vector<std::string> want = before;
+            want.insert(want.begin() + 1, "x");
+            expect(selected == std::vector<std::string>{before[1]} && tabs->ids() == want,
+                   "a press whose on_select adds a tab before it: the tab one on");
+            expect(reordered.empty(), "and dragged back where it was, no on_reorder (" +
+                                          std::to_string(reordered.size()) + ")");
+            insert_on_select = false;
+            tabs->remove("x");
         });
 #if defined(RAPPORT_TEST_WIN32)
     // Windows 11's tabs in the caption take the focus, from F6: the arrows
