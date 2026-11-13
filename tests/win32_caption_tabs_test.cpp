@@ -643,6 +643,28 @@ void check_band(HWND top, bool band, const std::string& when)
     if (!strip) return;
     check_pixels(strip, pal, when);
     check_text(strip, pal, when);
+    // The current tab dragged (the strip sent the mouse's messages, then
+    // Escape: no reorder), drawn under the pointer: still the band's fill.
+    {
+        const UINT dpi = GetDpiForWindow(strip);
+        const int current = ask(strip, q_current);
+        const RECT tab = part(strip, q_tab, current);
+        const POINT a = centre(tab);
+        const int moved = px(40, dpi);
+        SendMessageW(strip, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(a.x, a.y));
+        SendMessageW(strip, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(a.x + moved, a.y));
+        const printed p = print(strip);
+        SendMessageW(strip, WM_KEYDOWN, VK_ESCAPE, 0);
+        pump(2);
+        const int line = std::max(1, px(1, dpi)), mid = (tab.top + p.h - line) / 2;
+        const DWORD inside = p.at(tab.left + moved + px(4, dpi), mid) & 0xffffff,
+                    bottom = p.at(tab.left + moved + px(4, dpi), p.h - 1) & 0xffffff;
+        expect(inside == pal.current && bottom == pal.current,
+               "the current tab dragged " + str(moved) + " px is still " + hex(pal.current) + ", to its bottom row" + at +
+                   ": " + hex(inside) + ", " + hex(bottom));
+        expect(ask(strip, q_current) == current && part(strip, q_tab, current).left == tab.left,
+               "and put back by Escape" + at);
+    }
     if (band && toolbar)
     {
         const printed t = print_control(toolbar);
