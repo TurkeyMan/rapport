@@ -145,6 +145,8 @@ constexpr UINT nothing = WM_APP + 7;
 constexpr UINT add_sent = WM_APP + 8;
 constexpr UINT sent_remove = WM_APP + 9;
 constexpr UINT count_deferred = WM_APP + 10;
+// The next arming of the disconnects' retry timer fails, as SetTimer can.
+constexpr UINT fail_arming = WM_APP + 11;
 
 struct shared
 {
@@ -164,6 +166,9 @@ struct shared
     bool destroy_in_send = false;
     size_t deferred = 0;
     size_t destroy_deferred = 0;
+    // The retry's timer: after the sent removal, and at the next message.
+    bool armed_after_remove = false;
+    bool armed_at_next = false;
     HANDLE finished = nullptr;  // the client is through
 };
 shared S;
@@ -256,9 +261,16 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         p->set_elements(strip({L"First", L"Second", L"Third"}, 1));
         p->raise_child_removed(tabs_id, item_id(3));
         S.deferred = uia_provider::deferred_disconnects();
+        S.armed_after_remove = uia_provider::retry_armed();
         return 0;
     case count_deferred:
+        // handle_message has seen this message already, above.
         S.deferred = uia_provider::deferred_disconnects();
+        S.armed_at_next = uia_provider::retry_armed();
+        SetEvent(S.done);
+        return 0;
+    case fail_arming:
+        uia_provider::fail_next_retry_arming();
         SetEvent(S.done);
         return 0;
     case destroy:
@@ -668,6 +680,30 @@ void client()
             if (!drained) Sleep(10);
         }
         expect(drained, "and disconnected once out of it");
+    }
+    release(sent);
+
+    // The same, but the retry's timer can't be set: the nodes wait, and the
+    // provider's next message sets it, so they're still let go.
+    expect(ask(add_sent), "a tab for the sent message again");
+    sent = find(uia, tabs, TreeScope_Children, UIA_TabItemControlTypeId, L"Sent");
+    expect(sent != nullptr, "seen by the client again");
+    expect(ask(fail_arming), "the next timer to fail");
+    {
+        DWORD_PTR ignored = 0;
+        expect(SendMessageTimeoutW(S.hwnd, sent_remove, 0, 0, SMTO_NORMAL, 10000, &ignored) != 0,
+               "removed inside a sent message, the timer failing");
+        expect(S.deferred >= 1, "the disconnect waited");
+        expect(!S.armed_after_remove, "with no timer to retry it");
+        expect(ask(count_deferred), "the provider's next message");
+        expect(S.armed_at_next, "set the timer again");
+        bool drained = S.deferred == 0;
+        for (int i = 0; i < 200 && !drained; ++i)
+        {
+            drained = ask(count_deferred) && S.deferred == 0;
+            if (!drained) Sleep(10);
+        }
+        expect(drained, "and the disconnect was retried and done");
     }
     release(sent);
     Sleep(300);

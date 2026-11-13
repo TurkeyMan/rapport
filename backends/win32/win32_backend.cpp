@@ -5,6 +5,7 @@
 #include "document_tabs.h"
 #include "lazy_tree.h"
 #include "menu_dismiss.h"
+#include "win32_caption_tabs.h"
 #include "win32_common.h"
 #include "win32_shell_icons.h"
 #define RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
@@ -7132,16 +7133,65 @@ HICON tab_icon_handle(const rap::icon& icon, int size, UINT dpi, float scale)
     return render_icon_handle(icon, size, scale);
 }
 
+// A window's document tabs, as the window lays them out and gives them its
+// keys: stage 1's strip in the client area (document_tabs_impl), or Windows
+// 11's in the caption (caption_tabs_impl).
+class window_tabs : public leaf<rap::document_tabs>
+{
+public:
+    using leaf::leaf;
+    // A key from the window, before the focused control has it: the
+    // browser's keys (Ctrl+T, Ctrl+W, Ctrl+Tab...).
+    virtual bool key(const key_event& e) = 0;
+    // The strip's height: its row of tabs and the line under it.
+    virtual int height() = 0;
+    // In the caption: how it's drawn and hit (see caption_tabs::set_frame).
+    virtual void set_frame(bool /*transparent*/, int /*resize_band*/) {}
+    // F6: the focus to the strip, or back to where it was. False if the
+    // strip takes no focus (stage 1's).
+    virtual bool cycle_focus() { return false; }
+    // While the strip has the focus, its own keys (arrows, Enter, Delete)
+    // are the strip's, not the window's on_key.
+    virtual bool owns_key(const MSG&) const { return false; }
+    // The desktop's settings changed (WM_SETTINGCHANGE and the like): the
+    // caption's font may have.
+    virtual void settings_changed() {}
+
+    doc_tabs::state state;
+
+protected:
+    // A right click's menu: New Tab, and Close Tab for tab `i` (none: -1),
+    // as the keys do.
+    void tab_menu(int i, POINT screen)
+    {
+        menu items;
+        items.push_back({rap::i18n::tr("rapport", "_New Tab"),
+                         [this] { state.new_asked(); },
+                         {},
+                         rap::i18n::shortcut_label("Ctrl+T")});
+        if (i >= 0 && i < state.count())
+        {
+            const std::string id = state.tabs[size_t(i)].id;
+            items.push_back(menu_item::separator());
+            items.push_back({rap::i18n::tr("rapport", "_Close Tab"),
+                             [this, id] { state.close_asked(state.index_of(id)); },
+                             {},
+                             rap::i18n::shortcut_label("Ctrl+W")});
+        }
+        show_popup_menu(GetAncestor(h_, GA_ROOT), items, screen);
+    }
+};
+
 // A window's document tabs (window_spec::tabs): the tab control as a strip,
 // its row of tabs alone and no page under it, across the top of the client
 // area. Its tab and tab item roles in UI Automation, and their selection,
 // are the control's own. It never takes the focus (as a browser's tabs):
 // the window's keys work it, wherever the focus is.
-class document_tabs_impl : public leaf<rap::document_tabs>
+class document_tabs_impl : public window_tabs
 {
 public:
     explicit document_tabs_impl(win_context& win)
-        : leaf(win)
+        : window_tabs(win)
     {
         adopt(create_control(win, win.hwnd(), WC_TABCONTROLW, L"",
                              WS_CLIPSIBLINGS | TCS_FIXEDWIDTH | TCS_FORCELABELLEFT |
@@ -7220,8 +7270,7 @@ public:
     }
     void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
 
-    // A key from the window, before the focused control has it.
-    bool key(const key_event& e)
+    bool key(const key_event& e) override
     {
         return state.key(e, [this](int i) { TabCtrl_SetCurSel(h_, i); });
     }
@@ -7239,8 +7288,7 @@ public:
     }
     void theme_changed() override { rebuild_icons(); }  // drawn ones are in the text colour
 
-    // The strip's height: its row of tabs and the line under it.
-    int height()
+    int height() override
     {
         fit(width_);
         RECT r{};
@@ -7259,8 +7307,6 @@ public:
                                 px(doc_tabs::widest_tab)));
         leaf::place(r);
     }
-
-    doc_tabs::state state;
 
 private:
     // Every tab `w` wide (TCS_FIXEDWIDTH): narrower as tabs are added, down
@@ -7421,21 +7467,7 @@ private:
             ScreenToClient(h_, &hit.pt);
             i = TabCtrl_HitTest(h_, &hit);
         }
-        menu items;
-        items.push_back({rap::i18n::tr("rapport", "_New Tab"),
-                         [this] { state.new_asked(); },
-                         {},
-                         rap::i18n::shortcut_label("Ctrl+T")});
-        if (i >= 0)
-        {
-            const std::string id = state.tabs[size_t(i)].id;
-            items.push_back(menu_item::separator());
-            items.push_back({rap::i18n::tr("rapport", "_Close Tab"),
-                             [this, id] { state.close_asked(state.index_of(id)); },
-                             {},
-                             rap::i18n::shortcut_label("Ctrl+W")});
-        }
-        show_popup_menu(GetAncestor(h_, GA_ROOT), items, screen);
+        tab_menu(i, screen);
     }
     // The tab control has no dark style: painted here as the page tabs are
     // (draw_dark_tabs), on the surface's colour: each tab its icon and
@@ -7499,6 +7531,187 @@ private:
     int width_ = 0, item_h_ = 0;  // as last given to the control
     UINT line_dpi_ = 0;
     int line_h_ = 0;
+};
+
+// A window's document tabs in its caption, on Windows 11 (see
+// win32_caption_tabs.h): stage 1's bookkeeping and keys, the tabs drawn by
+// the strip. Unlike stage 1's, the strip takes the keyboard focus, from F6
+// (as Explorer's does): Left and Right move along the tabs to "+", Enter or
+// Space makes the focused one current (or adds one), Delete closes it.
+class caption_tabs_impl : public window_tabs, public caption_tabs_owner
+{
+public:
+    explicit caption_tabs_impl(win_context& win)
+        : window_tabs(win)
+    {
+        HWND tip = make_window(WS_EX_TRANSPARENT, TOOLTIPS_CLASSW, nullptr,
+                               WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
+                               CW_USEDEFAULT, CW_USEDEFAULT, win.hwnd(), nullptr, instance(), nullptr);
+        if (tip && dark_mode()) theme_control(tip);
+        strip_ = std::make_unique<caption_tabs>(win.hwnd(), *this, tip);
+        adopt(strip_->hwnd());
+        // Its tooltips ask for their text (TTN_GETDISPINFO): from the strip,
+        // or from the window, as from the tooltip control.
+        tip_ = tip;
+        if (tip_) handlers()[tip_] = this;
+        dpi_ = win.dpi();
+    }
+    ~caption_tabs_impl() override
+    {
+        if (tip_) handlers().erase(tip_);
+        handlers().erase(h_);
+        h_ = nullptr;  // the strip's, which destroys it (and its tooltips)
+        strip_.reset();
+        for (HICON i : icons_)
+            if (i) DestroyIcon(i);
+    }
+
+    void insert(int index, const document_tab& t) override
+    {
+        const int at = state.insert(index, t);
+        icons_.insert(icons_.begin() + at, tab_icon_handle(t.icon, px(16), dpi_, win_.scale()));
+        keys_.insert(keys_.begin() + at, next_key_++);
+        push();
+    }
+    void remove(const std::string& id) override
+    {
+        const int i = state.remove(id);
+        if (i < 0) return;
+        if (icons_[size_t(i)]) DestroyIcon(icons_[size_t(i)]);
+        icons_.erase(icons_.begin() + i);
+        keys_.erase(keys_.begin() + i);
+        push();
+    }
+    void update(const document_tab& t) override
+    {
+        const int i = state.index_of(t.id);
+        if (i < 0) return;
+        state.tabs[size_t(i)] = t;
+        if (icons_[size_t(i)]) DestroyIcon(icons_[size_t(i)]);
+        icons_[size_t(i)] = tab_icon_handle(t.icon, px(16), dpi_, win_.scale());
+        push();
+    }
+    void select(const std::string& id) override
+    {
+        const int i = state.index_of(id);
+        if (i < 0) return;
+        state.current = i;
+        strip_->set_current(i);  // tells the app nothing
+    }
+    std::string current() const override { return state.current_id(); }
+    std::vector<std::string> ids() const override { return state.ids(); }
+    void on_select(std::function<void(const std::string&)> f) override { state.on_select = std::move(f); }
+    void on_close(std::function<void(const std::string&)> f) override { state.on_close = std::move(f); }
+    void on_new(std::function<void()> f) override { state.on_new = std::move(f); }
+
+    bool key(const key_event& e) override
+    {
+        return state.key(e, [this](int i) { strip_->set_current(i); });
+    }
+    int height() override { return caption_tabs::height(win_.dpi()); }
+    SIZE measure() override { return {0, height()}; }
+    void place(RECT r) override
+    {
+        if (win_.dpi() != dpi_)
+        {
+            dpi_ = win_.dpi();
+            rebuild_icons();
+            strip_->refresh();
+        }
+        leaf::place(r);
+    }
+    void set_frame(bool transparent, int resize_band) override { strip_->set_frame(transparent, resize_band); }
+    bool cycle_focus() override
+    {
+        HWND top = GetAncestor(h_, GA_ROOT);
+        if (strip_->has_focus())
+        {
+            // Back where it was, else to the first control, as the window's
+            // activation gives it.
+            HWND back = back_ && IsWindow(back_) && IsChild(top, back_) && IsWindowVisible(back_) &&
+                                IsWindowEnabled(back_)
+                            ? back_
+                            : GetNextDlgTabItem(top, nullptr, FALSE);
+            if (back) SetFocus(back);
+            return true;
+        }
+        if (!IsWindowVisible(h_)) return false;
+        const HWND f = GetFocus();
+        back_ = f && IsChild(top, f) ? f : nullptr;
+        // From the keyboard: its focus shown.
+        SendMessageW(top, WM_CHANGEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), 0);
+        strip_->take_focus();
+        return true;
+    }
+    bool owns_key(const MSG& m) const override
+    {
+        if (!strip_->has_focus() || (m.message != WM_KEYDOWN && m.message != WM_KEYUP)) return false;
+        switch (m.wParam)
+        {
+        case VK_LEFT:
+        case VK_RIGHT:
+        case VK_HOME:
+        case VK_END:
+        case VK_RETURN:
+        case VK_SPACE:
+        case VK_DELETE:
+        case VK_APPS: return true;
+        case VK_F10: return (GetKeyState(VK_SHIFT) & 0x8000) != 0;  // the menu
+        default: return false;
+        }
+    }
+    LRESULT notify(NMHDR* n, bool& handled) override
+    {
+        if (n->code == TTN_GETDISPINFOW && tip_ && n->hwndFrom == tip_)
+            return SendMessageW(h_, WM_NOTIFY, n->idFrom, reinterpret_cast<LPARAM>(n));
+        handled = false;
+        return 0;
+    }
+    void theme_changed() override
+    {
+        rebuild_icons();  // drawn ones are in the text colour
+        strip_->refresh();
+    }
+    void settings_changed() override { strip_->refresh(); }
+
+    // caption_tabs_owner: the user's clicks, keys and UI Automation's calls.
+    // The strip shows a tab current before the app hears of it, as stage
+    // 1's control does; the app's handler is last, as it may remove tabs.
+    void caption_select(int i) override
+    {
+        if (i == state.current || i < 0 || i >= state.count()) return;
+        strip_->set_current(i);
+        state.picked(i);
+    }
+    void caption_close(int i) override { state.close_asked(i); }
+    void caption_new() override { state.new_asked(); }
+    void caption_menu(int i, POINT screen) override { tab_menu(i, screen); }
+
+private:
+    void push()
+    {
+        std::vector<caption_tab> tabs;
+        for (size_t i = 0; i < state.tabs.size(); ++i)
+            tabs.push_back({keys_[i], wide(state.tabs[i].title), wide(state.tabs[i].tooltip), icons_[i]});
+        strip_->set_tabs(std::move(tabs), state.current);
+    }
+    void rebuild_icons()
+    {
+        for (size_t i = 0; i < icons_.size(); ++i)
+        {
+            if (icons_[i]) DestroyIcon(icons_[i]);
+            icons_[i] = tab_icon_handle(state.tabs[i].icon, px(16), dpi_, win_.scale());
+        }
+        push();
+    }
+
+    std::unique_ptr<caption_tabs> strip_;
+    HWND tip_ = nullptr;
+    HWND back_ = nullptr;         // where F6 took the focus from
+    std::vector<HICON> icons_;    // per tab, in order; null for none
+    std::vector<unsigned> keys_;  // per tab: its UI Automation elements'
+    unsigned next_key_ = 0;
+    UINT dpi_ = 96;
 };
 
 // -- splitter -----------------------------------------------------------------
@@ -9402,17 +9615,29 @@ public:
                             std::exchange(layout_cause_, 0));
         relayout_pending_ = false;
         if (!root) return;
+        sync_caption();  // first: it may change the client area
         RECT r = client();
         const int m = margin();
         moves_in_one_pass batch(ahead_.has_value() && !grow_ahead_);
         // The document tabs across the top, edge to edge; the content, with
-        // its margins, under them.
+        // its margins, under them. In the caption, the strip stops at the
+        // caption buttons, and the top of a window that isn't maximised is
+        // its frame's, to resize by.
         if (doc_tabs)
         {
             doc_tabs->show_all(true);
             if (const int h = strip_height())
             {
-                doc_tabs->place({r.left, r.top, r.right, r.top + h});
+                RECT strip{r.left, r.top, r.right, r.top + h};
+                if (caption_)
+                {
+                    RECT now;
+                    GetClientRect(hwnd_, &now);
+                    const RECT buttons = caption_buttons(hwnd_);
+                    strip.right = std::max(strip.left, strip.right - std::max<LONG>(0, now.right - buttons.left));
+                }
+                doc_tabs->set_frame(caption_, caption_ && !IsZoomed(hwnd_) ? caption_resize_band(hwnd_) : 0);
+                doc_tabs->place(strip);
                 r.top += h;
             }
         }
@@ -9429,8 +9654,43 @@ public:
     std::vector<button_impl*> role_buttons;
     std::vector<std::shared_ptr<deferred_build>> deferred;  // built when first idle (see show)
     std::map<std::string, std::vector<form_item*>> form_groups;  // forms aligned by key
-    std::unique_ptr<document_tabs_impl> doc_tabs;                // window_spec::tabs
+    std::unique_ptr<window_tabs> doc_tabs;                       // window_spec::tabs
     int strip_height() const { return doc_tabs && doc_tabs->visible ? doc_tabs->height() : 0; }
+
+    // The document tabs go in the caption (Windows 11, no menu bar, not a
+    // dialog: see create_window), whenever they're shown and the window
+    // isn't fullscreen. While they're there, the title bar's area is the
+    // client area's, the frame is extended over the strip, and the window
+    // answers for the caption where the strip lets the mouse through.
+    void use_caption_tabs()
+    {
+        caption_allowed_ = true;
+        sync_caption();
+    }
+    void sync_caption()
+    {
+        const bool want = caption_allowed_ && doc_tabs && doc_tabs->visible && !fullscreen_;
+        const int h = want ? strip_height() : 0;
+        const bool hc = high_contrast();
+        if (want == caption_ && h == caption_height_ && hc == caption_hc_) return;
+        const bool frame = want != caption_;
+        caption_ = want;
+        caption_height_ = h;
+        caption_hc_ = hc;
+        if (want)
+            extend_caption_frame(hwnd_, h);
+        else
+            release_caption_frame(hwnd_, dialog_, fullscreen_);
+        // The non-client area asked for again (WM_NCCALCSIZE): the title
+        // bar's gone, or back.
+        if (frame)
+            traced_set_window_pos(hwnd_, nullptr, 0, 0, 0, 0,
+                                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    bool caption_allowed_ = false;
+    bool caption_ = false;     // the tabs are in the caption now
+    int caption_height_ = 0;   // the frame extended by, as the strip was
+    bool caption_hc_ = false;  // high contrast, as the frame was set for
 
     void set_title(const std::string& t) override { SetWindowTextW(hwnd_, wide(t).c_str()); }
     void flush_layout() override
@@ -9451,8 +9711,7 @@ public:
     {
         const SIZE s = first_size();
         RECT r{0, 0, s.cx, s.cy};
-        AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), GetMenu(hwnd_) != nullptr,
-                           DWORD(GetWindowLongPtrW(hwnd_, GWL_EXSTYLE)));
+        adjust(r);
         traced_set_window_pos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         layout_now();
@@ -9469,8 +9728,7 @@ public:
             auto [w, h] = first_size();
             if (requested_) w = requested_->cx, h = requested_->cy;
             RECT r{0, 0, w, h};
-            AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), GetMenu(hwnd_) != nullptr,
-                               DWORD(GetWindowLongPtrW(hwnd_, GWL_EXSTYLE)));
+            adjust(r);
             UINT flags = SWP_NOZORDER | SWP_NOACTIVATE;
             int x = 0, y = 0;
             if (parent)
@@ -9837,7 +10095,14 @@ public:
             // takes tabs has it as typing.
             if (doc_tabs::is_ctrl_tab(e) && page_tabs_key(e)) return true;
             if (!(doc_tabs::is_ctrl_tab(e) && focus_takes_tabs()) && doc_tabs->key(e)) return true;
+            // F6 (or Shift+F6: there are only the two) to the tabs in the
+            // caption and back, as Explorer's.
+            if (m.message == WM_KEYDOWN && m.wParam == VK_F6 && !(e.modifiers & (mod_ctrl | mod_alt)) &&
+                doc_tabs->cycle_focus())
+                return true;
         }
+        // The arrows, Enter and Delete on the focused tabs are theirs.
+        if (doc_tabs && doc_tabs->owns_key(m)) return false;
         if (!on_key_) return false;
         wchar_t cls[32] = {};
         GetClassNameW(GetFocus(), cls, 32);
@@ -9929,10 +10194,14 @@ private:
         const metrics m = metrics::for_scale(scale());
         return dialog_ ? m.dialog_margin : m.margin;
     }
+    // A client area's window: with the tabs in the caption, no title bar
+    // above it (see caption_frame_message's WM_NCCALCSIZE).
     void adjust(RECT& r) const
     {
+        const LONG top = r.top;
         AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(hwnd_, GWL_STYLE)), GetMenu(hwnd_) != nullptr,
                            DWORD(GetWindowLongPtrW(hwnd_, GWL_EXSTYLE)));
+        if (caption_) r.top = top;
     }
     void close_requested()
     {
@@ -9997,6 +10266,21 @@ private:
                               reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams));
         auto* self = reinterpret_cast<window_impl*>(GetWindowLongPtrW(h, GWLP_USERDATA));
         LRESULT r = 0;
+        // The tabs in the caption: the compositor's caption buttons first,
+        // then the frame's size and hit tests; the strip's row painted with
+        // the window's background.
+        if (self && self->caption_)
+        {
+            if (caption_frame_message(h, msg, wp, lp, self->caption_height_, r)) return r;
+            if (msg == WM_ERASEBKGND)
+            {
+                forward_child_message(h, msg, wp, lp, r);
+                paint_caption_band(h, reinterpret_cast<HDC>(wp), self->caption_height_, true);
+                return 1;
+            }
+            if (msg == WM_ACTIVATE || msg == WM_DWMCOMPOSITIONCHANGED)
+                extend_caption_frame(h, self->caption_height_);
+        }
         if (self && forward_child_message(h, msg, wp, lp, r)) return r;
         if (self && dark_menu_bar(h, msg, wp, lp, r)) return r;
         if (self)
@@ -10064,6 +10348,14 @@ private:
             case WM_THEMECHANGED:
                 forget_theme_colors();
                 self->retheme();
+                // The tabs in the caption: its frame for high contrast, or
+                // not, and their font (the caption's) and colours anew.
+                if (self->caption_allowed_)
+                {
+                    self->sync_caption();
+                    if (self->doc_tabs) self->doc_tabs->settings_changed();
+                    self->relayout();
+                }
                 break;
             case WM_DROPFILES:
             {
@@ -10560,9 +10852,17 @@ public:
         win->set_menu_bar(spec.menu_bar);
         if (spec.tabs)
         {
-            win->doc_tabs = std::make_unique<document_tabs_impl>(*win);
+            // In the caption on Windows 11, as Explorer's; but in the client
+            // area, as before it, under a menu bar (which would come between
+            // the tabs and what they show) and in a dialog.
+            const bool caption = caption_tabs_supported() && !spec.dialog && spec.menu_bar.empty();
+            if (caption)
+                win->doc_tabs = std::make_unique<caption_tabs_impl>(*win);
+            else
+                win->doc_tabs = std::make_unique<document_tabs_impl>(*win);
             for (const document_tab& t : spec.tabs->items) win->doc_tabs->insert(-1, t);
             if (!spec.tabs->current.empty()) win->doc_tabs->select(spec.tabs->current);
+            if (caption) win->use_caption_tabs();
             sink.created(*spec.tabs, *win->doc_tabs);
         }
         win->root = builder(*win, sink).build(spec.content, win->hwnd(), orientation::vertical);

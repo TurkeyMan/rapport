@@ -3,7 +3,9 @@
 // surface (window_spec::base_surface) on Windows 11 that's the base colour,
 // where the style's own drawing left it the dialog colour; before Windows 11,
 // and on a window without one, the window colour. On screen and printed (as
-// a pane's copy prints it); light and dark (RAPPORT_THEME=light).
+// a pane's copy prints it); light and dark (RAPPORT_THEME=light). On Windows
+// 11 the windows have a menu bar, under which the tabs stay this strip (a
+// window without one has them in its caption: win32-caption-tabs).
 #include <rapport/rapport.h>
 #include <windows.h>
 // After windows.h, which it needs.
@@ -141,10 +143,13 @@ void check(rap::ui& ui, bool base_surface, DWORD want, int x, int y)
 {
     using namespace rap::layout;
     const char* title = base_surface ? "Document tabs, base surface" : "Document tabs";
+    std::vector<rap::menu_bar_item> menus;
+    if (windows_build() >= 22000) menus.push_back({"_File", [] { return rap::menu{}; }});
     auto win = ui.create(
         window{title, {label{"Content"}}}
             .size(480_px, 160_px)
             .base_surface(base_surface)
+            .menu_bar(menus)
             .tabs(document_tabs{{{"a", "Alpha", {}, {}}, {"b", "Beta", {}, {}}}}.current("a")));
     win->show();
     HWND root = FindWindowW(nullptr, std::wstring(title, title + std::strlen(title)).c_str());

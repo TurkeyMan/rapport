@@ -346,6 +346,36 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-base-surface-high-contrast PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 
+    # The document tabs in the caption on Windows 11 (stage 2), and stage 1
+    # kept before it, under a menu bar and in a dialog. Light, dark, on a
+    # base surface, and under high contrast (CI only, as above); the DPI and
+    # high contrast changed with the window open (--transitions: CI only,
+    # skipped unless GITHUB_ACTIONS=true and RAPPORT_TEST_SET_DPI=1 or
+    # RAPPORT_TEST_SET_HIGH_CONTRAST=1).
+    add_executable(rapport-win32-caption-tabs-test win32_caption_tabs_test.cpp)
+    target_link_libraries(rapport-win32-caption-tabs-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi
+                                                                  ole32 oleaut32 uiautomationcore)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-caption-tabs-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-caption-tabs-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-caption-tabs-test rapport_win32)
+    add_test(NAME win32-caption-tabs COMMAND rapport-win32-caption-tabs-test)
+    add_test(NAME win32-caption-tabs-light COMMAND rapport-win32-caption-tabs-test)
+    add_test(NAME win32-caption-tabs-base COMMAND rapport-win32-caption-tabs-test --base)
+    add_test(NAME win32-caption-tabs-base-light COMMAND rapport-win32-caption-tabs-test --base)
+    set_tests_properties(win32-caption-tabs win32-caption-tabs-base PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 120)
+    set_tests_properties(win32-caption-tabs-light win32-caption-tabs-base-light PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" TIMEOUT 120)
+    add_test(NAME win32-caption-tabs-high-contrast
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-caption-tabs-test> --base)
+    set_tests_properties(win32-caption-tabs-high-contrast PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    add_test(NAME win32-caption-tabs-transitions COMMAND rapport-win32-caption-tabs-test --transitions)
+    set_tests_properties(win32-caption-tabs-transitions PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+
     add_executable(rapport-pane-readback-loss-test pane_readback_loss_test.cpp)
     target_compile_definitions(rapport-pane-readback-loss-test PRIVATE RAPPORT_TEST_READBACK)
     target_include_directories(rapport-pane-readback-loss-test PRIVATE ../core/src)

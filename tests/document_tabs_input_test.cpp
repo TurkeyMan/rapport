@@ -376,16 +376,19 @@ constexpr const char* backend_name = "qt6";
 
 #elif defined(RAPPORT_TEST_WIN32)
 
+// Stage 1's tab control (before Windows 11, and under a menu bar), or
+// Windows 11's strip in the caption, which says where its parts are and what
+// it shows (its "rapport-caption-tabs" message) and is clicked by messages.
 class native : public driver
 {
 public:
     bool ready() override
     {
-        if (!tab_) EnumThreadWindows(GetCurrentThreadId(), find, reinterpret_cast<LPARAM>(this));
-        return tab_ && IsWindowVisible(tab_);
+        if (!tab_ && !strip_) EnumThreadWindows(GetCurrentThreadId(), find, reinterpret_cast<LPARAM>(this));
+        return control() && IsWindowVisible(control());
     }
-    int count() override { return TabCtrl_GetItemCount(tab_); }
-    int current() override { return TabCtrl_GetCurSel(tab_); }
+    int count() override { return strip_ ? ask(0) : TabCtrl_GetItemCount(tab_); }
+    int current() override { return strip_ ? ask(1) : TabCtrl_GetCurSel(tab_); }
     // Posted, for the backend's message loop to take as it takes typing:
     // with Ctrl (and Shift) held in the thread's key state.
     void key(k key, bool shift) override
@@ -399,16 +402,7 @@ public:
         case k::one: vk = '1'; break;
         case k::nine: vk = '9'; break;
         }
-        BYTE state[256] = {};
-        GetKeyboardState(state);
-        state[VK_CONTROL] = state[VK_LCONTROL] = 0x80;
-        state[VK_SHIFT] = state[VK_LSHIFT] = shift ? 0x80 : 0;
-        SetKeyboardState(state);
-        const LPARAM lp = 1 | (LPARAM(MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC)) << 16);
-        HWND to = GetFocus() ? GetFocus() : GetParent(tab_);
-        PostMessageW(to, WM_KEYDOWN, vk, lp);
-        PostMessageW(to, WM_KEYUP, vk, lp | (LPARAM(3) << 30));
-        pending_keys_ = true;
+        post_key(vk, true, shift);
     }
     // The keys are taken by the backend's loop, after this step.
     void settle()
@@ -420,25 +414,49 @@ public:
         state[VK_CONTROL] = state[VK_LCONTROL] = state[VK_SHIFT] = state[VK_LSHIFT] = 0;
         SetKeyboardState(state);
     }
-    void choose(int i) override { TabCtrl_SetCurFocus(tab_, i); }  // selects, and notifies
+    void choose(int i) override
+    {
+        if (!strip_)
+        {
+            TabCtrl_SetCurFocus(tab_, i);  // selects, and notifies
+            return;
+        }
+        const LPARAM at = centre(rect(3, i));
+        SendMessageW(strip_, WM_LBUTTONDOWN, MK_LBUTTON, at);
+        SendMessageW(strip_, WM_LBUTTONUP, 0, at);
+    }
     void middle_click(int i) override
     {
-        RECT r;
-        TabCtrl_GetItemRect(tab_, i, &r);
-        const LPARAM at = MAKELPARAM((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-        SendMessageW(tab_, WM_MBUTTONDOWN, MK_MBUTTON, at);
-        SendMessageW(tab_, WM_MBUTTONUP, 0, at);
+        RECT r{};
+        if (strip_)
+            r = rect(3, i);
+        else
+            TabCtrl_GetItemRect(tab_, i, &r);
+        const LPARAM at = centre(r);
+        SendMessageW(control(), WM_MBUTTONDOWN, MK_MBUTTON, at);
+        SendMessageW(control(), WM_MBUTTONUP, 0, at);
     }
-    bool close_button(int) override { return false; }
+    // Stage 1's tabs have none; the caption's have.
+    bool close_button(int i) override
+    {
+        if (!strip_) return false;
+        const LPARAM at = centre(rect(4, i));
+        SendMessageW(strip_, WM_LBUTTONDOWN, MK_LBUTTON, at);
+        SendMessageW(strip_, WM_LBUTTONUP, 0, at);
+        return true;
+    }
     // Posted, as a right click's WM_CONTEXTMENU is: the menu's loop runs in
     // the backend's, and the next step finds the menu there.
     bool open_menu(int i) override
     {
-        RECT r;
-        TabCtrl_GetItemRect(tab_, i, &r);
+        RECT r{};
+        if (strip_)
+            r = rect(3, i);
+        else
+            TabCtrl_GetItemRect(tab_, i, &r);
         POINT at{(r.left + r.right) / 2, (r.top + r.bottom) / 2};
-        ClientToScreen(tab_, &at);
-        PostMessageW(tab_, WM_CONTEXTMENU, WPARAM(tab_), MAKELPARAM(at.x, at.y));
+        ClientToScreen(control(), &at);
+        PostMessageW(control(), WM_CONTEXTMENU, WPARAM(control()), MAKELPARAM(at.x, at.y));
         return true;
     }
     void choose_in_menu(int item) override
@@ -457,7 +475,40 @@ public:
         return true;
     }
 
+    // The caption's strip, which takes the focus (F6) and its keys.
+    bool caption() const { return strip_ != nullptr; }
+    void plain_key(WPARAM vk) { post_key(vk, false, false); }
+    // The focused tab (count(): "+"), -1 when the strip hasn't the focus.
+    int strip_focus() { return strip_ ? ask(2) : -1; }
+    bool strip_has_focus() const { return strip_ && GetFocus() == strip_; }
+
 private:
+    HWND control() const { return strip_ ? strip_ : tab_; }
+    void post_key(WPARAM vk, bool ctrl, bool shift)
+    {
+        BYTE state[256] = {};
+        GetKeyboardState(state);
+        state[VK_CONTROL] = state[VK_LCONTROL] = ctrl ? 0x80 : 0;
+        state[VK_SHIFT] = state[VK_LSHIFT] = shift ? 0x80 : 0;
+        SetKeyboardState(state);
+        const LPARAM lp = 1 | (LPARAM(MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC)) << 16);
+        HWND to = GetFocus() ? GetFocus() : GetParent(control());
+        PostMessageW(to, WM_KEYDOWN, vk, lp);
+        PostMessageW(to, WM_KEYUP, vk, lp | (LPARAM(3) << 30));
+        pending_keys_ = true;
+    }
+    int ask(int what, int index = 0, RECT* r = nullptr)
+    {
+        static const UINT m = RegisterWindowMessageW(L"rapport-caption-tabs");
+        return int(SendMessageW(strip_, m, MAKEWPARAM(what, index), reinterpret_cast<LPARAM>(r)));
+    }
+    RECT rect(int what, int index)
+    {
+        RECT r{};
+        ask(what, index, &r);
+        return r;
+    }
+    static LPARAM centre(const RECT& r) { return MAKELPARAM((r.left + r.right) / 2, (r.top + r.bottom) / 2); }
     static BOOL CALLBACK find(HWND top, LPARAM p)
     {
         EnumChildWindows(
@@ -471,12 +522,13 @@ private:
                 if (!_wcsicmp(name, WC_TABCONTROLW) &&
                     (GetWindowLongPtrW(c, GWL_STYLE) & TCS_FIXEDWIDTH))
                     self->tab_ = c;
+                if (!_wcsicmp(name, L"rapportCaptionTabs")) self->strip_ = c;
                 return TRUE;
             },
             p);
         return TRUE;
     }
-    HWND tab_ = nullptr;
+    HWND tab_ = nullptr, strip_ = nullptr;
     bool pending_keys_ = false;
 };
 constexpr const char* backend_name = "win32";
@@ -512,7 +564,9 @@ int main(int argc, char** argv)
                          .on_changed([&](int i) { inner_changed.push_back(i); })
                          .bind(inner)
                          .stretch()}}}
-            .size(60_ch, 12_lines)
+            // Wide enough for Windows 11's tabs in the caption, beside its
+            // buttons, to show each of the three whole, close button and all.
+            .size(90_ch, 12_lines)
             // --base: on a base surface (Windows 11 paints the strip anew there)
             .base_surface(argc > 1 && std::string_view(argv[1]) == "--base")
             .tabs(document_tabs{{{"a", "Alpha", rap::icon::for_file("alpha/"), "/home/me/alpha"},
@@ -662,6 +716,59 @@ int main(int argc, char** argv)
             expect(added == 1 && closed.size() == 1, "the right-click menu's New Tab: on_new once");
 #endif
         });
+#if defined(RAPPORT_TEST_WIN32)
+    // Windows 11's tabs in the caption take the focus, from F6: the arrows
+    // move it along them, Enter makes the focused one current, Delete
+    // closes it, each handler once; F6 again, the focus back.
+    std::vector<std::string> at_f6;
+    steps.push_back(
+        [&]
+        {
+            if (!d.caption())
+            {
+                step = steps.size();  // stage 1's take no focus
+                return;
+            }
+            at_f6 = tabs->ids();
+            tabs->select(at_f6[0]);
+            if (field) field->focus();
+            d.plain_key(VK_F6);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(d.strip_has_focus() && d.strip_focus() == 0, "F6: the focus on the tabs, the current one (" +
+                                                                    std::to_string(d.strip_focus()) + ")");
+            selected.clear();
+            closed.clear();
+            d.plain_key(VK_RIGHT);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(d.strip_focus() == 1 && d.current() == 0 && selected.empty(),
+                   "Right: the focus on the next tab, the current one kept");
+            d.plain_key(VK_RETURN);
+        });
+    steps.push_back(
+        [&]
+        {
+            once(selected, {at_f6[1]}, "Enter: on_select once, for the focused tab");
+            expect(d.current() == 1, "and it's current");
+            d.plain_key(VK_DELETE);
+        });
+    steps.push_back(
+        [&]
+        {
+            once(closed, {at_f6[1]}, "Delete: on_close once, for the focused tab");
+            d.plain_key(VK_F6);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(!d.strip_has_focus() && field && field->has_focus(), "F6 again: the focus back in the field");
+        });
+#endif
 
     int waited = 0;
     rap::subscription tick = (*ui)->timer(

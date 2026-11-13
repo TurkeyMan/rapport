@@ -117,12 +117,16 @@ jobs:
           }
           Remove-Item Env:RAPPORT_THEME
 
-      # Server 2025's runner also runs the base surface test under high
-      # contrast (win32-base-surface-high-contrast), which changes a system
-      # setting: only on a throwaway runner, and only this job.
+      # Server 2025's runner also runs the base surface and caption tabs
+      # tests under high contrast (win32-base-surface-high-contrast,
+      # win32-caption-tabs-high-contrast), and the caption tabs with the
+      # display's scale and high contrast changed while they're open
+      # (win32-caption-tabs-transitions): system settings, so only on a
+      # throwaway runner, and only this job.
       - name: Portable tests
         env:
           RAPPORT_TEST_SET_HIGH_CONTRAST: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
+          RAPPORT_TEST_SET_DPI: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
         run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
 
       - name: Shell extension
