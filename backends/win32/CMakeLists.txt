@@ -11,6 +11,8 @@ if(NOT TARGET rapport::headers)
 endif()
 
 set(sources win32_backend.cpp win32_caption_tabs.cpp win32_painter.cpp win32_shell_icons.cpp win32_theme.cpp win32_trace.cpp win32_uia.cpp)
+# The toolbar band's metrics and text fields (win32_band_field.h).
+list(APPEND sources win32_band_field.cpp)
 if(RAPPORT_STATIC)
     add_library(rapport_win32 STATIC ${sources})
 else()

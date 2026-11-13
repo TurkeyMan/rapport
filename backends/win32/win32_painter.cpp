@@ -393,6 +393,13 @@ bool high_contrast()
     return desktop().high_contrast;
 }
 
+color accent_fill_default()
+{
+    const desktop_colors& d = desktop();
+    if (!d.shades) return d.accent;
+    return d.dark ? d.shades->light(2) : d.shades->dark(1);
+}
+
 HBRUSH theme_brush(theme_color role)
 {
     HBRUSH& b = g_brushes[size_t(role)];
