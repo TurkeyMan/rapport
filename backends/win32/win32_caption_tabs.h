@@ -216,9 +216,11 @@ int caption_line_px(UINT dpi);
 // -- the toolbar band ---------------------------------------------------------
 //
 // Explorer's address row: under the tabs in the caption a band in WinUI's
-// LayerFillColorDefault (#F8F8F8 drawn opaque; dark, the dark one) with
-// the stroke as a line under it, and the current tab filled the same, so
-// the tab and the band read as one surface; the panes under it white.
+// LayerFillColorDefault (#80FFFFFF; dark, #4C3A3A3A) at its own alpha, the
+// frame extended over it (extend_caption_frame) so the compositor puts Mica
+// Alt under it, with the stroke as an opaque line under it, and the current
+// tab filled the same, so the tab and the band read as one surface; the
+// panes under it white.
 //
 // Only while all three hold: Windows 11, the tabs in the caption (stage 2),
 // and a base surface window. And only for a toolbar that's the window's
@@ -240,14 +242,18 @@ int caption_line_px(UINT dpi);
 void set_toolbar_band(HWND top, const RECT& band);
 // The band `top` has: false if none.
 bool toolbar_band(HWND top, RECT& band);
+// `fill` at its alpha (opaque in high contrast); `solid`, the same drawn
+// opaque, for GDI; `line`, opaque.
 struct toolbar_band_colors
 {
-    color fill, line;
+    color fill, solid, line;
 };
 toolbar_band_colors band_colors(HWND top);
-// The band's fill and line onto `dc` (the window's client area), if it has one.
+// The band's fill and line onto `dc` (the window's client area), if it has
+// one: through a 32-bit buffer, premultiplied, the fill at its alpha.
 void paint_toolbar_band(HWND top, HDC dc);
-// `h`, a child, is wholly within its window's band: `fill` its colour.
+// `h`, a child, is wholly within its window's band: `fill` its colour drawn
+// opaque (`solid`), for GDI's brushes.
 bool in_toolbar_band(HWND h, color& fill);
 
 }  // namespace rap::win32

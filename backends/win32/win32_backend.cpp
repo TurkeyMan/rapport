@@ -10152,6 +10152,9 @@ public:
         const bool had = toolbar_band(hwnd_, was);
         if (had ? EqualRect(&was, &band) : IsRectEmpty(&band)) return;
         set_toolbar_band(hwnd_, band);
+        // The frame extended over it (or no longer), for Mica Alt under its
+        // translucent layer.
+        if (caption_) extend_caption_frame(hwnd_, caption_height_);
         // Its fill under the toolbar's controls, the current tab's, and
         // what was band and isn't.
         RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);

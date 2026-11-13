@@ -22,11 +22,20 @@
 // window's native controls stay where UIA's HWND proxy puts them, untouched
 // by the strip's provider.
 //
-// Text. ClearType wherever what's under a glyph is opaque and ours (the
-// current tab, the whole strip where it's opaque), grayscale where the
-// compositor puts Mica under it (other tabs, hovered too: WinUI's hover
-// fill is translucent; "+"): ClearType blends each colour channel with
-// what's beneath, which a pixel the compositor fills later hasn't got.
+// Text. ClearType wherever what's under a glyph is opaque and ours,
+// grayscale where the compositor puts Mica under it, through a translucent
+// fill or none: ClearType blends each colour channel with what's beneath,
+// which a pixel the compositor fills later hasn't got.
+//
+//   where                                       ground              text
+//   another tab, hovered or not; "+"            Mica (Alt)          grayscale
+//   the current tab over the toolbar band       LayerFillColorDefault,
+//                                               translucent, on Mica Alt  grayscale
+//   the current tab, no band                    the window's surface ClearType
+//   the whole strip opaque (high contrast,
+//   not in the caption)                         ours, opaque        ClearType
+//
+// The toolbar band's own native controls: see win32_backend.cpp's band glass.
 // ClearType can't be drawn on a premultiplied target, so it's a second
 // pass: the strip drawn first (with its grayscale text), then each ClearType
 // run drawn in a small bitmap of its own (the opaque rectangle it sits in,
@@ -86,8 +95,9 @@ int line_px(UINT dpi)
 // clear (Mica's) in the caption; opaque, the window colour, in fullscreen;
 // high contrast's window colour there. The current tab is the colour of
 // what's under the strip, so the two are one: the toolbar band's fill where
-// the window has one (win32_caption_tabs.h), else the window's surface (its
-// base colour on a base surface); in high contrast it's the selection.
+// the window has one (win32_caption_tabs.h), translucent as it is, else the
+// window's surface (its base colour on a base surface), opaque; in high
+// contrast it's the selection.
 // Its text, line and buttons are WinUI's (winui::chrome_palette), the line
 // drawn opaque, as over the band; high contrast's are the system's.
 struct strip_colors
@@ -734,8 +744,18 @@ struct caption_tabs::impl
         // Where it's all opaque (in fullscreen, in high contrast): the strip.
         const RECT* everywhere = colors.clear ? nullptr : &c;
         // The line along the bottom, between the strip and the band under
-        // it, broken only by the current tab.
-        fill(RECT{0, c.bottom - line, c.right, c.bottom}, colors.line);
+        // it, broken only by the current tab (which may be translucent: not
+        // drawn under it at all), the tab's sides its ends.
+        {
+            const RECT gap = self.current_ >= 0 && self.current_ < n ? tab_rects[size_t(self.current_)] : RECT{};
+            if (IsRectEmpty(&gap))
+                fill(RECT{0, c.bottom - line, c.right, c.bottom}, colors.line);
+            else
+            {
+                fill(RECT{0, c.bottom - line, gap.left, c.bottom}, colors.line);
+                fill(RECT{gap.right, c.bottom - line, c.right, c.bottom}, colors.line);
+            }
+        }
         const RECT clip{0, 0, add_rect.left, c.bottom};
         rt->PushAxisAlignedClip(D2D1::RectF(0, 0, float(clip.right), float(clip.bottom)), D2D1_ANTIALIAS_MODE_ALIASED);
         const int up = lifted();
@@ -748,19 +768,22 @@ struct caption_tabs::impl
             const bool current = i == self.current_;
             const bool hovered = hot.what != part::none && hot.what != part::add && hot.index == i;
             // What's opaque under the tab's text and glyph, and its colour:
-            // the current tab's fill, past its rounded corners; a hovered
-            // tab's, if that's opaque, past its own; else only an opaque
-            // strip's.
+            // the current tab's fill, if that's opaque (not the band's
+            // translucent layer), past its rounded corners; a hovered tab's,
+            // if that's opaque, past its own; else only an opaque strip's.
             RECT solid{};
             const RECT* opaque = everywhere;
             color under = colors.empty;
             if (current)
             {
                 current_tab(r, colors);
-                const int k = px(caption_metrics::corner);
-                solid = RECT{r.left + k, r.top, r.right - k, c.bottom};
-                opaque = &solid;
                 under = colors.current;
+                if (colors.current.a == 255)
+                {
+                    const int k = px(caption_metrics::corner);
+                    solid = RECT{r.left + k, r.top, r.right - k, c.bottom};
+                    opaque = &solid;
+                }
             }
             else if (hovered)
             {
@@ -1476,8 +1499,13 @@ RECT caption_buttons(HWND top)
 void extend_caption_frame(HWND top, int height)
 {
     // Down to the strip's bottom, which maximised is the frame's thickness
-    // further down (caption_inset).
-    const MARGINS m{0, 0, height ? height + caption_inset(top) : 0, 0};
+    // further down (caption_inset), or the toolbar band's, line and all,
+    // where the window has one (set_toolbar_band, laid out from the strip's
+    // bottom: maximised, inset as well), its layer translucent over Mica Alt.
+    int bottom = height ? height + caption_inset(top) : 0;
+    RECT band;
+    if (height && toolbar_band(top, band)) bottom = std::max<int>(bottom, band.bottom);
+    const MARGINS m{0, 0, bottom, 0};
     DwmExtendFrameIntoClientArea(top, &m);
     // Mica Alt behind the strip (22621 on, where it's named), as Explorer
     // has with its tabs (DWMSBT_TABBEDWINDOW, its window says): the
@@ -1623,26 +1651,55 @@ bool toolbar_band(HWND top, RECT& band)
 toolbar_band_colors band_colors(HWND top)
 {
     const color surface = theme_color_of(surface_of(top));
-    if (high_contrast()) return {surface, theme_color_of(theme_color::divider)};
+    if (high_contrast()) return {surface, surface, theme_color_of(theme_color::divider)};
     const winui::chrome_palette& p = dark_mode() ? winui::dark : winui::light;
-    return {p.layer, winui::over(p.stroke, surface)};
+    return {p.layer, p.layer_solid, winui::over(p.stroke, surface)};
 }
+
+namespace
+{
+// A colour as a premultiplied BGRA pixel.
+uint32_t premultiplied(color c)
+{
+    auto m = [&](uint8_t v) { return uint32_t((v * c.a + 127) / 255); };
+    return uint32_t(c.a) << 24 | m(c.r) << 16 | m(c.g) << 8 | m(c.b);
+}
+}  // namespace
 
 void paint_toolbar_band(HWND top, HDC dc)
 {
     RECT band;
     if (!toolbar_band(top, band)) return;
     const toolbar_band_colors k = band_colors(top);
-    const RECT line{band.left, band.bottom - line_px(dpi_of(top)), band.right, band.bottom};
-    const RECT fill{band.left, band.top, band.right, line.top};
+    const int line = line_px(dpi_of(top));
+    // GDI's pixels would have no alpha (the frame's extended over the band:
+    // they'd be glass), so straight into a 32-bit buffer, premultiplied.
+    BP_PAINTPARAMS params{sizeof params, 0, nullptr, nullptr};
+    HDC mem = nullptr;
+    if (HPAINTBUFFER buffer = BeginBufferedPaint(dc, &band, BPBF_TOPDOWNDIB, &params, &mem))
+    {
+        RGBQUAD* bits = nullptr;
+        int row = 0;
+        if (SUCCEEDED(GetBufferedPaintBits(buffer, &bits, &row)))
+        {
+            const int w = band.right - band.left, h = band.bottom - band.top;
+            const uint32_t fill = premultiplied(k.fill), under = premultiplied(k.line);
+            for (int y = 0; y < h; ++y)
+                std::fill_n(reinterpret_cast<uint32_t*>(bits + size_t(y) * row), w, y >= h - line ? under : fill);
+            EndBufferedPaint(buffer, TRUE);
+            return;
+        }
+        EndBufferedPaint(buffer, FALSE);
+    }
+    // No buffer: opaque, then, rather than nothing.
     auto paint = [dc](const RECT& r, color c)
     {
         HBRUSH b = CreateSolidBrush(color_ref(c));
         FillRect(dc, &r, b);
         DeleteObject(b);
     };
-    paint(fill, k.fill);
-    paint(line, k.line);
+    paint(RECT{band.left, band.top, band.right, band.bottom - line}, k.solid);
+    paint(RECT{band.left, band.bottom - line, band.right, band.bottom}, k.line);
 }
 
 bool in_toolbar_band(HWND h, color& fill)
@@ -1654,7 +1711,7 @@ bool in_toolbar_band(HWND h, color& fill)
     GetWindowRect(h, &r);
     MapWindowPoints(nullptr, top, reinterpret_cast<POINT*>(&r), 2);
     if (r.top < band.top || r.bottom > band.bottom - line_px(dpi_of(top))) return false;
-    fill = band_colors(top).fill;
+    fill = band_colors(top).solid;
     return true;
 }
 
