@@ -475,6 +475,18 @@ if(TARGET rapport_win32)
     add_test(NAME win32-caption-tabs-transitions COMMAND rapport-win32-caption-tabs-test --transitions)
     set_tests_properties(win32-caption-tabs-transitions PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    # The toolbar band's glass when a control's own message destroys it
+    # (a slider's on_changed closing the window mid-move): never shown.
+    add_executable(rapport-win32-caption-glass-reentrant-test win32_caption_glass_reentrant_test.cpp)
+    target_link_libraries(rapport-win32-caption-glass-reentrant-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-caption-glass-reentrant-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-caption-glass-reentrant-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-caption-glass-reentrant-test rapport_win32)
+    add_test(NAME win32-caption-glass-reentrant COMMAND rapport-win32-caption-glass-reentrant-test)
+    set_tests_properties(win32-caption-glass-reentrant PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
     # The toolbar band's controls on screen, captured (Windows.Graphics.
     # Capture, C++/WinRT: MSVC only): no holes in the extended frame. Shown;
     # a real skip (77) where there's nothing to capture or tell by, never a
