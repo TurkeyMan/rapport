@@ -47,7 +47,8 @@ size_t shell_icon_extractions();
 // seconds (a disconnected network drive, an optical drive spinning up), so
 // it's found on a background thread, never the UI thread, once per path and
 // size for the process. Meanwhile, and where there's none, the icon's name is
-// drawn.
+// drawn. A path found to have none isn't asked again (not in v1): a drive
+// that comes back later keeps its name's icon until the process restarts.
 
 enum class path_icon_state
 {
@@ -58,8 +59,14 @@ enum class path_icon_state
 
 // Where `path`'s icon at exactly `px` square stands; the first ask starts
 // finding it, in the background. Takes a lock and returns: never waits for
-// the path or asks the shell itself, so it's safe from paint.
+// the path or asks the shell itself, so it may be called from paint. (The
+// lock is never held across a shell call: a finder takes its job out,
+// unlocks, asks the shell, and locks again to keep what it found.)
 path_icon_state request_path_icon(const std::string& path, int px);
+
+// The one spelling the cache keys a path by, and listeners are told:
+// "C:\" for "C:" and "C:/".
+std::string path_icon_key(const std::string& path);
 
 // Its pixels once ready (premultiplied BGRA, px square, rows top-down), else
 // null. Safe from paint.
@@ -67,11 +74,14 @@ const std::vector<uint32_t>* path_icon_pixels(const std::string& path, int px);
 
 // How a found icon is told on the UI thread: `post` is given a function to
 // run there (the backend's post). Until it's set, nobody is told (the pixels
-// are kept all the same). Set it on the UI thread.
+// are kept all the same). Set it on the UI thread, before the first
+// request: setting it warms the shell there (see the .cpp) before any
+// finder can start.
 void set_path_icon_post(std::function<void(std::function<void()>)> post);
 
 // Run on the UI thread each time an icon is found, or found to be none, with
-// its path (one spelling: "C:\" for "C:" and "C:/") and size. Returns an id for remove_path_icon_listener.
+// its path (path_icon_key's spelling) and size. Returns an id for
+// remove_path_icon_listener.
 size_t add_path_icon_listener(std::function<void(const std::string& path, int px)> f);
 void remove_path_icon_listener(size_t id);
 
@@ -81,5 +91,9 @@ void want_path_icon(const std::string& path, int logical, UINT dpi);
 
 // How many times the shell has been asked for a path's icon, for tests.
 size_t path_icon_lookups();
+
+// How many shell calls this module has made on the calling thread, for
+// tests: none may be made while painting.
+size_t shell_calls_on_this_thread();
 
 }  // namespace rap::win32

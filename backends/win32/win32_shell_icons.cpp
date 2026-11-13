@@ -47,10 +47,14 @@ const known_name known_names[] = {
     {"folder-videos", &FOLDERID_Videos},
 };
 
+// Shell calls made on each thread, for shell_calls_on_this_thread.
+thread_local size_t shell_calls = 0;
+
 // The icon at `index` in `file` (a negative index is a resource id), made at
 // `px` from the image nearest that size, as the shell itself does.
 HICON extract(const wchar_t* file, int index, int px)
 {
+    ++shell_calls;
     HICON h = nullptr;
     if (!file || !file[0]) return nullptr;
     if (SHDefExtractIconW(file, index, 0, &h, nullptr, MAKELONG(px, 0)) != S_OK) return nullptr;
@@ -59,6 +63,7 @@ HICON extract(const wchar_t* file, int index, int px)
 
 HICON lookup(const std::string& name, int px)
 {
+    ++shell_calls;
     for (const stock_name& s : stock_names)
         if (name == s.name)
         {
@@ -282,14 +287,23 @@ std::vector<uint32_t> pixels_of_bitmap(HBITMAP b, int px)
     return out;
 }
 
-// The shell's first icon lookup sets up its icon cache, and finders making
-// theirs at once crashed it: one alone first, by type (it touches no path).
+// One icon lookup by type (it touches no path), alone, before any finder
+// asks for a path's. Without it, finders making the process's first
+// lookups at once crashed it (an access violation in 2 of 3 fresh runs of
+// rapport-win32-path-icons-test); with it, 40 of 40 passed. The cause is
+// believed to be the shell setting up its icon cache on the first lookup,
+// which isn't safe from several threads at once: believed, not proven. So
+// keep it even if a run passes without it: the race is a matter of timing.
+// The backend makes it on the UI thread as it sets the post
+// (set_path_icon_post), before any finder can start; the call_once is for
+// the module used without a backend (the windowless test).
 void warm_shell()
 {
     static std::once_flag warmed;
     std::call_once(warmed,
                    []
                    {
+                       ++shell_calls;
                        SHFILEINFOW w{};
                        SHGetFileInfoW(L"x.txt", FILE_ATTRIBUTE_NORMAL, &w, sizeof w,
                                       SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES);
@@ -303,6 +317,7 @@ void warm_shell()
 std::optional<std::vector<uint32_t>> find_path_icon(const std::wstring& path, int px)
 {
     warm_shell();
+    ++shell_calls;
     SHFILEINFOW info{};
     if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof info, SHGFI_ICONLOCATION) && info.szDisplayName[0])
     {
@@ -438,6 +453,11 @@ path_icon_state request_path_icon(const std::string& path, int px)
     return path_icon_state::pending;
 }
 
+std::string path_icon_key(const std::string& path)
+{
+    return path_key(path);
+}
+
 const std::vector<uint32_t>* path_icon_pixels(const std::string& path, int px)
 {
     if (path.empty()) return nullptr;
@@ -449,8 +469,7 @@ const std::vector<uint32_t>* path_icon_pixels(const std::string& path, int px)
 
 void set_path_icon_post(std::function<void(std::function<void()>)> post)
 {
-    // Here, on the UI thread before any finder, so the UI thread's own
-    // lookups never race the shell's setting up either.
+    // Here, on the UI thread before any finder can start (see warm_shell).
     if (post) warm_shell();
     path_store& s = the_path_store();
     std::lock_guard lock(s.m);
@@ -505,6 +524,11 @@ size_t path_icon_lookups()
     path_store& s = the_path_store();
     std::lock_guard lock(s.m);
     return s.lookups;
+}
+
+size_t shell_calls_on_this_thread()
+{
+    return shell_calls;
 }
 
 }  // namespace rap::win32

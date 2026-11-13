@@ -1,6 +1,7 @@
 // rapport Win32 backend: native controls (common controls v6), Direct2D and
 // DirectWrite for canvases and drawn icons, our own box/form layout (Win32
 // has none), per-monitor DPI awareness.
+#include "builtin_icons.h"
 #include "container_state.h"
 #include "document_tabs.h"
 #include "lazy_tree.h"
@@ -976,15 +977,69 @@ void set_tooltip_text(HWND h, const std::string& text)
 
 // -- menus --------------------------------------------------------------------
 
-// Items' icons, as bitmaps the menu shows; they go when the menu does.
+HBITMAP menu_bitmap(const icon& icon, UINT dpi);
+
+// Items' icons, as bitmaps the menu shows; they go when the menu does. A
+// path's own icon (icon::for_path) is found in the background: its name's
+// meanwhile, and the item's bitmap replaced once it's found, the menu open
+// or not.
 struct menu_bitmaps
 {
     struct free_bitmap
     {
         void operator()(HBITMAP b) const { DeleteObject(b); }
     };
-    std::vector<std::unique_ptr<std::remove_pointer_t<HBITMAP>, free_bitmap>> held;
+    using bitmap = std::unique_ptr<std::remove_pointer_t<HBITMAP>, free_bitmap>;
+    // Where the listener finds it: put, while the menu_bitmaps moves (a
+    // menu bar's are in a vector).
+    struct items
+    {
+        std::vector<bitmap> held;
+        struct pending
+        {
+            HMENU menu;
+            UINT item;
+            BOOL by_position;
+            rap::icon icon;
+            UINT dpi;
+        };
+        std::vector<pending> waiting;
+        size_t listener = 0;
+        items() = default;
+        items(const items&) = delete;
+        items& operator=(const items&) = delete;
+        ~items()
+        {
+            if (listener) remove_path_icon_listener(listener);
+        }
+        void wait_for(HMENU m, UINT item, BOOL by_position, const rap::icon& icon, UINT dpi)
+        {
+            waiting.push_back({m, item, by_position, icon, dpi});
+            if (!listener) listener = add_path_icon_listener([this](const std::string&, int) { found(); });
+        }
+        void found()
+        {
+            std::erase_if(waiting,
+                          [&](const pending& w)
+                          {
+                              if (request_path_icon(w.icon.path, MulDiv(16, int(w.dpi), 96)) == path_icon_state::pending)
+                                  return false;
+                              if (HBITMAP bmp = menu_bitmap(w.icon, w.dpi))
+                              {
+                                  held.emplace_back(bmp);
+                                  MENUITEMINFOW mi{sizeof mi};
+                                  mi.fMask = MIIM_BITMAP;
+                                  mi.hbmpItem = bmp;
+                                  SetMenuItemInfoW(w.menu, w.item, w.by_position, &mi);
+                              }
+                              return true;
+                          });
+        }
+    };
+    std::unique_ptr<items> own = std::make_unique<items>();
     UINT dpi = 96;
+    // For a menu built again: what the old one showed goes.
+    void clear() { own = std::make_unique<items>(); }
 };
 
 // `icon` for a menu at `dpi`: menus blend their bitmaps premultiplied.
@@ -1002,9 +1057,12 @@ HBITMAP menu_bitmap(const icon& icon, UINT dpi)
 void set_menu_icon(HMENU m, UINT item, BOOL by_position, const icon& icon, menu_bitmaps* bitmaps)
 {
     if (!icon || !bitmaps) return;
+    const bool waits = !icon.path.empty() &&
+                       request_path_icon(icon.path, MulDiv(16, int(bitmaps->dpi), 96)) == path_icon_state::pending;
+    if (waits) bitmaps->own->wait_for(m, item, by_position, icon, bitmaps->dpi);
     HBITMAP bmp = menu_bitmap(icon, bitmaps->dpi);
     if (!bmp) return;
-    bitmaps->held.emplace_back(bmp);
+    bitmaps->own->held.emplace_back(bmp);
     MENUITEMINFOW mi{sizeof mi};
     mi.fMask = MIIM_BITMAP;
     mi.hbmpItem = bmp;
@@ -5765,6 +5823,27 @@ private:
         return DefSubclassProc(h, msg, wp, lp);
     }
 
+    // A path's own icon (icon::for_path) once it's found, else null: asks
+    // for it (which only queues, never the shell: safe from paint) and
+    // paints what was found. The list paints again when it is.
+    ID2D1Bitmap* path_icon(ID2D1RenderTarget* rt, const std::string& path)
+    {
+        if (path.empty()) return nullptr;
+        const int size = px(16);
+        if (request_path_icon(path, size) != path_icon_state::ready) return nullptr;
+        const std::string key = "p:" + std::to_string(size) + ":" + path;
+        if (const auto it = file_icons_.find(key); it != file_icons_.end()) return it->second.get();
+        const std::vector<uint32_t>* pixels = path_icon_pixels(path, size);
+        if (!pixels) return nullptr;
+        float dpi_x = 96, dpi_y = 96;
+        rt->GetDpi(&dpi_x, &dpi_y);
+        const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), dpi_x, dpi_y);
+        com<ID2D1Bitmap>& out = file_icons_[key];
+        rt->CreateBitmap(D2D1::SizeU(UINT32(size), UINT32(size)), pixels->data(), UINT32(size) * 4, props, out.put());
+        return out.get();
+    }
+
     ID2D1Bitmap* file_icon(ID2D1RenderTarget* rt, const std::string& name)
     {
         const bool folder = !name.empty() && name.back() == '/';
@@ -5944,8 +6023,14 @@ private:
                     // drawing, before the text; its overlay over it.
                     if (const icon icon = model_->icon(size_t(row), sp.col))
                     {
-                        ID2D1Bitmap* bmp = !icon.file.empty() ? file_icon(rt, icon.file) : nullptr;
-                        if (bmp || icon.draw)
+                        ID2D1Bitmap* bmp = !icon.file.empty() ? file_icon(rt, icon.file) : path_icon(rt, icon.path);
+                        // A path's until it's found: its drawing, else its
+                        // name's (drawn: the shell isn't asked from paint).
+                        std::function<void(rap::painter&, rap::size_f)> drawing = icon.draw;
+                        if (!bmp && !drawing && !icon.path.empty() && !icon.name.empty())
+                            drawing = [&name = icon.name](rap::painter& p, rap::size_f s)
+                            { builtin::draw_builtin_icon(name, p, s); };
+                        if (bmp || drawing)
                         {
                             const D2D1_SIZE_F sz = bmp ? bmp->GetSize()  // DIPs at the target's DPI
                                                        : D2D1::SizeF(16, 16);
@@ -5963,7 +6048,7 @@ private:
                             if (bmp)
                                 rt->DrawBitmap(bmp, D2D1::RectF(x, y, x + sz.width, y + sz.height));
                             else
-                                draw(icon.draw);
+                                draw(drawing);
                             if (icon.overlay) draw(icon.overlay);
                             icon_space += sz.width + 2;
                         }
@@ -7179,7 +7264,20 @@ HICON tab_icon_handle(const rap::icon& icon, int size, UINT dpi, float scale)
 class window_tabs : public leaf<rap::document_tabs>
 {
 public:
-    using leaf::leaf;
+    // A tab's path icon (icon::for_path) is found in the background: its
+    // name's meanwhile, and the tabs' icons made again once it's found.
+    explicit window_tabs(win_context& win)
+        : leaf(win)
+    {
+        path_listener_ = add_path_icon_listener(
+            [this](const std::string& key, int size)
+            {
+                if (size != px(16)) return;
+                for (const document_tab& t : state.tabs)
+                    if (!t.icon.path.empty() && path_icon_key(t.icon.path) == key) return path_icon_found();
+            });
+    }
+    ~window_tabs() override { remove_path_icon_listener(path_listener_); }
     // A key from the window, before the focused control has it: the
     // browser's keys (Ctrl+T, Ctrl+W, Ctrl+Tab...).
     virtual bool key(const key_event& e) = 0;
@@ -7200,6 +7298,9 @@ public:
     doc_tabs::state state;
 
 protected:
+    // A tab's path icon was found: its icon made again from it.
+    virtual void path_icon_found() = 0;
+
     // A right click's menu: New tab, and Close tab for tab `i` (none: -1),
     // as the keys do.
     void tab_menu(int i, POINT screen)
@@ -7220,6 +7321,9 @@ protected:
         }
         show_popup_menu(GetAncestor(h_, GA_ROOT), items, screen);
     }
+
+private:
+    size_t path_listener_ = 0;
 };
 
 // A window's document tabs (window_spec::tabs): the tab control as a strip,
@@ -7327,6 +7431,7 @@ public:
         return 0;
     }
     void theme_changed() override { rebuild_icons(); }  // drawn ones are in the text colour
+    void path_icon_found() override { rebuild_icons(); }
 
     int height() override
     {
@@ -7713,6 +7818,7 @@ public:
         strip_->refresh();
     }
     void settings_changed() override { strip_->refresh(); }
+    void path_icon_found() override { rebuild_icons(); }
 
     // caption_tabs_owner: the user's clicks, keys and UI Automation's calls.
     // The strip shows a tab current before the app hears of it, as stage
@@ -10065,7 +10171,7 @@ public:
             if (bar.popup != popup) continue;
             while (GetMenuItemCount(popup) > 0) DeleteMenu(popup, 0, MF_BYPOSITION);  // destroys submenus too
             bar.actions.clear();
-            bar.bitmaps.held.clear();
+            bar.bitmaps.clear();
             bar.bitmaps.dpi = dpi();
             fill_menu(popup, bar.item.menu ? bar.item.menu() : menu{}, bar.actions,
                       menu_bar_ids + UINT(i) * menu_bar_block, &bar.bitmaps);
