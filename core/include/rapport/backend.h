@@ -19,7 +19,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 77;
+inline constexpr int abi_version = 78;
 
 // Light or dark: as the desktop has it (system), or the app's own choice
 // (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for
@@ -161,9 +161,11 @@ public:
     // the UI thread, possibly before this returns.
     virtual void
     read_clipboard_image(std::function<void(std::optional<sys::decoded_image>)> done) = 0;
-    // The window shown last (a dialog over the main window, say) as a PNG, as
-    // drawn now; false if there's none or it couldn't be written. For tests.
-    virtual bool save_snapshot(const std::string& png_path) = 0;
+    // A window as a PNG, as drawn now: `w`, or with none the one shown most
+    // recently that's still there (a dialog over the main window, say),
+    // failing any the oldest there; false if there's none or it couldn't be
+    // written. For tests.
+    virtual bool save_snapshot(window* w, const std::string& png_path) = 0;
 
     // Pixels for painter::image; `pixels` is copied (or uploaded).
     virtual std::unique_ptr<image> create_image(int width, int height, pixel_format,
@@ -171,8 +173,9 @@ public:
     // Calls `fn` after `ms` milliseconds, then every `ms` if `repeat`, on
     // the UI thread, until the subscription is dropped.
     [[nodiscard]] virtual subscription timer(int ms, bool repeat, std::function<void()> fn) = 0;
-    // The pointer over the app's windows: the platform's working-in-the-
-    // background shape (an arrow with a spinner), or as it was.
+    // The pointer over all the app's windows: the platform's working-in-the-
+    // background shape (an arrow with a spinner), or as it was; with each
+    // window's own (window::begin_busy), either shows it.
     virtual void set_busy(bool) = 0;
 };
 
