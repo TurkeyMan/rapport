@@ -381,7 +381,7 @@ if(TARGET rapport_win32)
     # skipped unless GITHUB_ACTIONS=true and RAPPORT_TEST_SET_DPI=1 or
     # RAPPORT_TEST_SET_HIGH_CONTRAST=1).
     add_executable(rapport-win32-caption-tabs-test win32_caption_tabs_test.cpp)
-    target_link_libraries(rapport-win32-caption-tabs-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi
+    target_link_libraries(rapport-win32-caption-tabs-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi dwrite
                                                                   ole32 oleaut32 uiautomationcore)
     if(RAPPORT_STATIC)
         target_link_libraries(rapport-win32-caption-tabs-test PRIVATE rapport::backend_win32)

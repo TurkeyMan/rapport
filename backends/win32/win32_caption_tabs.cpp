@@ -20,7 +20,22 @@
 // HWND (the provider's root is the strip, not the top-level window), so the
 // window's native controls stay where UIA's HWND proxy puts them, untouched
 // by the strip's provider.
+//
+// Text. ClearType wherever what's under a glyph is opaque and ours (the
+// current tab, the whole strip where it's opaque), grayscale where the
+// compositor puts Mica under it (other tabs, hovered too: WinUI's hover
+// fill is translucent; "+"): ClearType blends each colour channel with
+// what's beneath, which a pixel the compositor fills later hasn't got.
+// ClearType can't be drawn on a premultiplied target, so it's a
+// second pass: the strip drawn first (with its grayscale text), then each
+// ClearType run through a target that ignores alpha (D2D1_ALPHA_MODE_IGNORE),
+// bound to just the opaque rectangle the run sits in, which is then made
+// opaque again (alpha 255), whatever that target left there. The rendering
+// parameters are the monitor's (its ClearType level, gamma and pixel order,
+// RGB or BGR, as tuned), with the system's font smoothing: no ClearType, and
+// it's grayscale everywhere.
 #include "win32_caption_tabs.h"
+#include "win32_chrome_palette.h"
 
 #include "document_tabs.h"
 #include "rapport/i18n.h"
@@ -68,50 +83,106 @@ int line_px(UINT dpi)
 // high contrast's window colour there. The current tab is the colour of the
 // band under the strip, which is the window's surface (its base colour on a
 // base surface), so the two are one; in high contrast it's the selection.
+// Its text, line and buttons are WinUI's (winui::chrome_palette), the line
+// drawn opaque, as over the band; high contrast's are the system's.
 struct strip_colors
 {
     bool clear = true;
     color empty, band, line, text, hover, pressed, current, current_text;
+    // "+" and the close buttons: their glyph at rest, hovered and pressed,
+    // and what's under it hovered and pressed.
+    color glyph, glyph_hover, glyph_pressed, button_hover, button_pressed;
 };
 strip_colors colors_for(HWND h, bool transparent)
 {
     strip_colors c;
     const theme_color surface = surface_of(h);
     c.band = theme_color_of(surface);
-    c.line = theme_color_of(theme_color::divider);
     c.hover = theme_color_of(theme_color::hover);
     c.pressed = theme_color_of(theme_color::pressed);
     if (high_contrast())
     {
         c.clear = false;
+        c.line = theme_color_of(theme_color::divider);
         c.empty = sys_color(COLOR_WINDOW);
         c.text = sys_color(COLOR_WINDOWTEXT);
         c.current = sys_color(COLOR_HIGHLIGHT);
         c.current_text = sys_color(COLOR_HIGHLIGHTTEXT);
+        c.glyph = c.glyph_hover = c.glyph_pressed = c.text;
+        c.button_hover = c.hover;
+        c.button_pressed = c.pressed;
         return c;
     }
+    const winui::chrome_palette& p = dark_mode() ? winui::dark : winui::light;
     c.clear = transparent;
     c.empty = theme_color_of(theme_color::window);
-    c.text = theme_color_of(surface_text_of(h));
+    c.line = winui::over(p.stroke, c.band);
+    // As WinUI's TabView: a tab not current in the secondary text colour
+    // (TabViewItemHeaderForeground), hovered or not, with a translucent fill
+    // when hovered, so it's still over Mica (grayscale); the current one in
+    // the primary (...ForegroundSelected).
+    c.text = p.text_secondary;
+    c.hover = p.layer_alt_secondary;
     c.current = c.band;
-    c.current_text = c.text;
+    c.current_text = p.text_primary;
+    // At rest the secondary text colour, as Explorer's; hovered and pressed
+    // WinUI's TabView buttons' (TabViewButtonForegroundPointerOver,
+    // ...Pressed; TabViewButtonBackgroundPointerOver, ...Pressed).
+    c.glyph = p.text_secondary;
+    c.glyph_hover = p.text_primary;
+    c.glyph_pressed = p.text_secondary;
+    c.button_hover = p.subtle_secondary;
+    c.button_pressed = p.subtle_tertiary;
     return c;
 }
 
-// The caption font at `dpi`, as the title bar's text was.
-LOGFONTW caption_font(UINT dpi)
+// WinUI's TabView glyphs: "+" (TabViewItemAddButtonFontSize) and a tab's
+// close button (TabViewItemHeaderCloseFontSize), both 12.
+constexpr float glyph_size = 12;
+constexpr wchar_t add_glyph[] = L"", close_glyph[] = L"";
+
+bool has_family(const wchar_t* name)
 {
-    NONCLIENTMETRICSW ncm{};
-    ncm.cbSize = sizeof ncm;
-    using fn_t = BOOL(WINAPI*)(UINT, UINT, PVOID, UINT, UINT);
-    static fn_t fn = reinterpret_cast<fn_t>(reinterpret_cast<void*>(
-        GetProcAddress(GetModuleHandleW(L"user32.dll"), "SystemParametersInfoForDpi")));
-    if (!fn || !fn(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, dpi))
+    com<IDWriteFontCollection> fonts;
+    UINT32 index = 0;
+    BOOL exists = FALSE;
+    return dwrite_factory() && SUCCEEDED(dwrite_factory()->GetSystemFontCollection(fonts.put(), FALSE)) &&
+           SUCCEEDED(fonts->FindFamilyName(name, &index, &exists)) && exists;
+}
+
+// The system's font smoothing says ClearType (not off, not standard).
+bool system_cleartype()
+{
+    BOOL smoothing = FALSE;
+    UINT type = 0;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &smoothing, 0);
+    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &type, 0);
+    return smoothing && type == FE_FONTSMOOTHINGCLEARTYPE;
+}
+
+// Pixels of `r` (logical coordinates of `dc`) made opaque: through the
+// paint buffer, or straight into the DIB section `dc` has selected (a
+// WM_PRINTCLIENT's). A DC with neither has no alpha to mend.
+void make_opaque(HDC dc, HPAINTBUFFER buffer, RECT r)
+{
+    if (buffer)
     {
-        SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0);
-        ncm.lfCaptionFont.lfHeight = MulDiv(ncm.lfCaptionFont.lfHeight, int(dpi), 96);
+        BufferedPaintSetAlpha(buffer, &r, 255);
+        return;
     }
-    return ncm.lfCaptionFont;
+    DIBSECTION ds{};
+    auto* bitmap = static_cast<HBITMAP>(GetCurrentObject(dc, OBJ_BITMAP));
+    if (!bitmap || GetObjectW(bitmap, sizeof ds, &ds) != sizeof ds || ds.dsBm.bmBitsPixel != 32 ||
+        !ds.dsBm.bmBits)
+        return;
+    LPtoDP(dc, reinterpret_cast<POINT*>(&r), 2);
+    const int w = ds.dsBm.bmWidth, h = ds.dsBm.bmHeight;
+    const bool bottom_up = ds.dsBmih.biHeight > 0;
+    for (int y = std::max<LONG>(r.top, 0); y < std::min<LONG>(r.bottom, h); ++y)
+    {
+        auto* row = static_cast<uint8_t*>(ds.dsBm.bmBits) + size_t(bottom_up ? h - 1 - y : y) * ds.dsBm.bmWidthBytes;
+        for (int x = std::max<LONG>(r.left, 0); x < std::min<LONG>(r.right, w); ++x) row[x * 4 + 3] = 255;
+    }
 }
 
 const wchar_t* strip_class = L"rapportCaptionTabs";
@@ -143,9 +214,30 @@ struct caption_tabs::impl
     com<ID2D1DCRenderTarget> rt;
     com<ID2D1SolidColorBrush> brush;
     com<ID2D1StrokeStyle> dotted;
-    com<IDWriteTextFormat> text;
+    com<IDWriteTextFormat> text, glyphs;
+    std::wstring text_family, glyph_family;
     UINT text_dpi = 0;
     std::map<HICON, com<ID2D1Bitmap>> icons;  // the tabs' icons on rt, until set_tabs
+    // ClearType's pass (see the top): its target, which ignores alpha, and
+    // the rendering parameters of the monitor they were made for, made
+    // again when the settings, the monitor or the DPI change.
+    com<ID2D1DCRenderTarget> opaque_rt;
+    com<ID2D1SolidColorBrush> opaque_brush;
+    com<IDWriteRenderingParams> params;
+    HMONITOR params_monitor = nullptr;
+    bool cleartype = false;
+    unsigned params_made = 0;  // for the tests (query_message)
+    // A run of text to draw with ClearType: where it's laid out, the opaque
+    // rectangle it's drawn into, and its colour over what's there.
+    struct cleartype_run
+    {
+        const wchar_t* s;
+        UINT32 n;
+        IDWriteTextFormat* format;
+        RECT box, opaque;
+        color ink;
+    };
+    std::vector<cleartype_run> runs;
 
     impl(caption_tabs& s, caption_tabs_owner& o) : self(s), owner(o) {}
 
@@ -220,9 +312,12 @@ struct caption_tabs::impl
         if (text_dpi != dpi())
         {
             text.reset();
+            glyphs.reset();
             rt.reset();
+            params.reset();
             icons.clear();
         }
+        rendering_params();
         if (!rt)
         {
             const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
@@ -244,10 +339,14 @@ struct caption_tabs::impl
         }
         if (!text && dwrite_factory())
         {
-            const LOGFONTW f = caption_font(dpi());
+            // The UI font (Segoe UI Variable Text on Windows 11, at the
+            // message font's size), Segoe UI if DirectWrite hasn't it.
+            LOGFONTW f{};
+            GetObjectW(ui_font(dpi()), sizeof f, &f);
+            text_family = has_family(f.lfFaceName) ? f.lfFaceName : L"Segoe UI";
             const float size = float(f.lfHeight < 0 ? -f.lfHeight : std::max<LONG>(f.lfHeight, px(12)));
             if (SUCCEEDED(dwrite_factory()->CreateTextFormat(
-                    f.lfFaceName, nullptr, DWRITE_FONT_WEIGHT(f.lfWeight ? f.lfWeight : 400),
+                    text_family.c_str(), nullptr, DWRITE_FONT_WEIGHT(f.lfWeight ? f.lfWeight : 400),
                     f.lfItalic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                     size, L"", text.put())))
             {
@@ -262,7 +361,82 @@ struct caption_tabs::impl
             }
             text_dpi = dpi();
         }
+        if (!glyphs && dwrite_factory())
+        {
+            glyph_family = has_family(L"Segoe Fluent Icons") ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets";
+            if (SUCCEEDED(dwrite_factory()->CreateTextFormat(glyph_family.c_str(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                                             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                                             glyph_size * float(dpi()) / 96.f, L"", glyphs.put())))
+            {
+                glyphs->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                glyphs->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                glyphs->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+        }
+        if (cleartype && !opaque_rt)
+        {
+            const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96, 96);
+            opaque_brush.reset();
+            if (FAILED(d2d_factory()->CreateDCRenderTarget(&props, opaque_rt.put())) ||
+                FAILED(opaque_rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), opaque_brush.put())))
+                opaque_rt.reset();
+        }
+        if (!opaque_rt) cleartype = false;  // grayscale, then, rather than nothing
         return true;
+    }
+
+    // The rendering parameters for the monitor the strip's on, and whether
+    // it's ClearType there: made again for another monitor, or once
+    // refresh() or a new DPI has dropped them.
+    void rendering_params()
+    {
+        HMONITOR monitor = MonitorFromWindow(self.hwnd_, MONITOR_DEFAULTTONEAREST);
+        if (params && monitor == params_monitor) return;
+        params.reset();
+        params_monitor = monitor;
+        ++params_made;
+        cleartype = system_cleartype();
+        if (dwrite_factory()) dwrite_factory()->CreateMonitorRenderingParams(monitor, params.put());
+    }
+
+    // Text in `box`, in `ink`: over an opaque rectangle of ours (`opaque`,
+    // which holds the glyphs, drawn in `under`) ClearType, in the second
+    // pass; otherwise grayscale, now.
+    void draw_text(const wchar_t* s, UINT32 n, IDWriteTextFormat* format, const RECT& box, color ink,
+                   const RECT* opaque, color under)
+    {
+        if (!format || n == 0 || IsRectEmpty(&box)) return;
+        RECT in{};
+        if (cleartype && opaque && IntersectRect(&in, &box, opaque))
+        {
+            runs.push_back({s, n, format, box, in, winui::over(ink, under)});
+            return;
+        }
+        brush->SetColor(d2d_color(ink));
+        rt->DrawText(s, n, format, D2D1::RectF(float(box.left), float(box.top), float(box.right), float(box.bottom)),
+                     brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+    void draw_cleartype(HDC dc, HPAINTBUFFER buffer)
+    {
+        for (const cleartype_run& t : runs)
+        {
+            if (FAILED(opaque_rt->BindDC(dc, &t.opaque))) continue;
+            opaque_rt->BeginDraw();
+            opaque_rt->SetTransform(D2D1::Matrix3x2F::Translation(-float(t.opaque.left), -float(t.opaque.top)));
+            opaque_rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+            if (params) opaque_rt->SetTextRenderingParams(params.get());
+            opaque_brush->SetColor(d2d_color(t.ink));
+            opaque_rt->DrawText(t.s, t.n, t.format,
+                                D2D1::RectF(float(t.box.left), float(t.box.top), float(t.box.right),
+                                            float(t.box.bottom)),
+                                opaque_brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            if (opaque_rt->EndDraw() == D2DERR_RECREATE_TARGET) opaque_rt.reset();
+            make_opaque(dc, buffer, t.opaque);
+            if (!opaque_rt) break;
+        }
+        runs.clear();
     }
 
     ID2D1Bitmap* icon_bitmap(HICON icon)
@@ -331,23 +505,10 @@ struct caption_tabs::impl
             rt->DrawGeometry(edge.get(), brush.get(), w);
         }
     }
-    void cross(const RECT& r, color c)
+    // A button's glyph (Segoe Fluent Icons'), centred in `r`.
+    void glyph(const wchar_t* g, const RECT& r, color ink, const RECT* opaque, color under)
     {
-        const float x = (r.left + r.right) / 2.f, y = (r.top + r.bottom) / 2.f, k = float(px(5)),
-                    w = float(line_px(dpi()));
-        brush->SetColor(d2d_color(c));
-        rt->DrawLine(D2D1::Point2F(x - k, y - k), D2D1::Point2F(x + k, y + k), brush.get(), w);
-        rt->DrawLine(D2D1::Point2F(x - k, y + k), D2D1::Point2F(x + k, y - k), brush.get(), w);
-    }
-    void plus(const RECT& r, color c)
-    {
-        // On whole pixels, so its strokes are sharp.
-        const float w = float(line_px(dpi()));
-        const float x = std::floor((r.left + r.right) / 2.f) + w / 2, y = std::floor((r.top + r.bottom) / 2.f) + w / 2,
-                    k = float(px(6));
-        brush->SetColor(d2d_color(c));
-        rt->DrawLine(D2D1::Point2F(x - k, y), D2D1::Point2F(x + k, y), brush.get(), w);
-        rt->DrawLine(D2D1::Point2F(x, y - k), D2D1::Point2F(x, y + k), brush.get(), w);
+        draw_text(g, 1, glyphs.get(), r, ink, opaque, under);
     }
     void focus_rect(const RECT& r, color c)
     {
@@ -359,8 +520,9 @@ struct caption_tabs::impl
                           dotted.get());
     }
 
-    // The strip onto `dc` (a 32-bit one: BufferedPaint's, or a bitmap's).
-    void render(HDC dc)
+    // The strip onto `dc` (a 32-bit one: BufferedPaint's, whose `buffer`
+    // it is, or a bitmap's).
+    void render(HDC dc, HPAINTBUFFER buffer)
     {
         RECT c;
         GetClientRect(self.hwnd_, &c);
@@ -370,11 +532,16 @@ struct caption_tabs::impl
         const int line = line_px(dpi()), n = self.count();
         const bool focused = self.has_focus() &&
                              !(SendMessageW(self.hwnd_, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS);
+        runs.clear();
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        // Grey, not ClearType: most of it is drawn over nothing (Mica).
+        // Grayscale here (the target's premultiplied); ClearType's text is
+        // the second pass's.
         rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        if (params) rt->SetTextRenderingParams(params.get());
         rt->Clear(colors.clear ? D2D1::ColorF(0, 0, 0, 0) : d2d_color(colors.empty));
+        // Where it's all opaque (in fullscreen, in high contrast): the strip.
+        const RECT* everywhere = colors.clear ? nullptr : &c;
         // The line along the bottom, between the strip and the band under
         // it, broken only by the current tab.
         fill(RECT{0, c.bottom - line, c.right, c.bottom}, colors.line);
@@ -386,13 +553,34 @@ struct caption_tabs::impl
             if (IsRectEmpty(&r)) continue;
             const bool current = i == self.current_;
             const bool hovered = hot.what != part::none && hot.what != part::add && hot.index == i;
+            // What's opaque under the tab's text and glyph, and its colour:
+            // the current tab's fill, past its rounded corners; a hovered
+            // tab's, if that's opaque, past its own; else only an opaque
+            // strip's.
+            RECT solid{};
+            const RECT* opaque = everywhere;
+            color under = colors.empty;
             if (current)
+            {
                 current_tab(r, colors);
+                const int k = px(caption_metrics::corner);
+                solid = RECT{r.left + k, r.top, r.right - k, c.bottom};
+                opaque = &solid;
+                under = colors.current;
+            }
             else if (hovered)
             {
                 RECT h = hit_rect(i);
                 h.bottom -= line + px(3);
-                fill_round(h, float(px(caption_metrics::corner) / 2), colors.hover);
+                const int k = px(caption_metrics::corner) / 2;
+                fill_round(h, float(k), colors.hover);
+                under = winui::over(colors.hover, colors.empty);  // (an opaque strip's)
+                if (colors.hover.a == 255)
+                {
+                    solid = RECT{h.left + k, h.top, h.right - k, h.bottom};
+                    opaque = &solid;
+                    under = colors.hover;
+                }
             }
             const color ink = current ? colors.current_text : colors.text;
             RECT body{r.left + px(caption_metrics::text_inset), r.top, r.right, c.bottom - line};
@@ -405,33 +593,54 @@ struct caption_tabs::impl
             }
             const RECT& x = close_rects[size_t(i)];
             body.right = IsRectEmpty(&x) ? r.right - px(caption_metrics::close_inset) : x.left - px(4);
-            if (text && body.right > body.left)
+            if (body.right > body.left)
             {
-                brush->SetColor(d2d_color(ink));
-                rt->DrawText(t.title.c_str(), UINT32(t.title.size()), text.get(),
-                             D2D1::RectF(float(body.left), float(body.top), float(body.right), float(body.bottom)),
-                             brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                RECT in{};
+                IntersectRect(&in, &body, &clip);
+                draw_text(t.title.c_str(), UINT32(t.title.size()), text.get(), in, ink, opaque, under);
             }
             // Its close button on the current tab, and on one hovered.
             if (!IsRectEmpty(&x) && (current || hovered))
             {
                 const bool on = hot.what == part::close && hot.index == i;
                 const bool down = on && pressed.what == part::close && pressed.index == i;
-                if (on) fill_round(x, float(px(4)), down ? colors.pressed : colors.hover);
-                cross(x, on && high_contrast() ? colors.text : ink);
+                color fill_under = under;
+                if (on)
+                {
+                    const color fill = down ? colors.button_pressed : colors.button_hover;
+                    fill_round(x, float(px(4)), fill);
+                    fill_under = winui::over(fill, under);
+                }
+                const color mark = high_contrast() ? (on ? colors.text : ink)
+                                   : down          ? colors.glyph_pressed
+                                   : on            ? colors.glyph_hover
+                                                   : colors.glyph;
+                glyph(close_glyph, x, mark, opaque, fill_under);
             }
             if (focused && focus == i) focus_rect(RECT{r.left, r.top, r.right, c.bottom - line}, ink);
         }
         rt->PopAxisAlignedClip();
-        if (hot.what == part::add)
-            fill_round(add_rect, float(px(4)), pressed.what == part::add ? colors.pressed : colors.hover);
-        plus(add_rect, colors.text);
+        {
+            const bool on = hot.what == part::add, down = on && pressed.what == part::add;
+            color under = colors.empty;
+            if (on)
+            {
+                const color fill = down ? colors.button_pressed : colors.button_hover;
+                fill_round(add_rect, float(px(4)), fill);
+                under = winui::over(fill, under);
+            }
+            glyph(add_glyph, add_rect, down ? colors.glyph_pressed : on ? colors.glyph_hover : colors.glyph, everywhere,
+                  under);
+        }
         if (focused && focus == n) focus_rect(add_rect, colors.text);
         if (rt->EndDraw() == D2DERR_RECREATE_TARGET)
         {
             rt.reset();
+            runs.clear();
             InvalidateRect(self.hwnd_, nullptr, FALSE);
+            return;
         }
+        draw_cleartype(dc, buffer);
     }
 
     void paint()
@@ -441,15 +650,15 @@ struct caption_tabs::impl
         RECT c;
         GetClientRect(self.hwnd_, &c);
         // Zeroed first (BPPF_ERASE): transparent wherever nothing's drawn.
-        BP_PAINTPARAMS params{sizeof params, BPPF_ERASE, nullptr, nullptr};
+        BP_PAINTPARAMS bp{sizeof bp, BPPF_ERASE, nullptr, nullptr};
         HDC mem = nullptr;
-        if (HPAINTBUFFER buffer = BeginBufferedPaint(dc, &c, BPBF_TOPDOWNDIB, &params, &mem))
+        if (HPAINTBUFFER buffer = BeginBufferedPaint(dc, &c, BPBF_TOPDOWNDIB, &bp, &mem))
         {
-            render(mem);
+            render(mem, buffer);
             EndBufferedPaint(buffer, TRUE);
         }
         else
-            render(dc);
+            render(dc, nullptr);
         EndPaint(self.hwnd_, &ps);
     }
 
@@ -622,6 +831,23 @@ struct caption_tabs::impl
             case 3: return out && s->part_rect(part::tab, i, *out);
             case 4: return out && s->part_rect(part::close, i, *out);
             case 5: return out && s->part_rect(part::add, 0, *out);
+            case 6: return LRESULT(d.params_made);
+            case 7:
+            {
+                auto* f = reinterpret_cast<caption_tabs_fonts*>(lp);
+                if (!f || !d.ready()) return 0;
+                *f = caption_tabs_fonts{};
+                wcsncpy_s(f->text, d.text_family.c_str(), _TRUNCATE);
+                wcsncpy_s(f->glyphs, d.glyph_family.c_str(), _TRUNCATE);
+                if (d.text)
+                {
+                    f->text_size = d.text->GetFontSize();
+                    f->text_weight = int(d.text->GetFontWeight());
+                }
+                if (d.glyphs) f->glyph_size = d.glyphs->GetFontSize();
+                f->cleartype = d.cleartype;
+                return 1;
+            }
             default: return 0;
             }
         }
@@ -630,7 +856,7 @@ struct caption_tabs::impl
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: d.paint(); return 0;
         case WM_PRINTCLIENT:
-            if (lp & PRF_CLIENT) d.render(reinterpret_cast<HDC>(wp));
+            if (lp & PRF_CLIENT) d.render(reinterpret_cast<HDC>(wp), nullptr);
             return 0;
         case WM_SIZE:
             d.layout();
@@ -862,10 +1088,18 @@ void caption_tabs::set_frame(bool transparent, int resize_band)
 void caption_tabs::refresh()
 {
     d_->text.reset();
+    d_->glyphs.reset();
+    d_->params.reset();  // the font smoothing may have changed too
     d_->text_dpi = 0;
     d_->layout();
     d_->update_uia();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void caption_tabs::moved()
+{
+    if (d_->params && MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST) != d_->params_monitor)
+        InvalidateRect(hwnd_, nullptr, FALSE);  // drawn again with that monitor's parameters
 }
 
 void caption_tabs::take_focus()
