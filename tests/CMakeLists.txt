@@ -84,6 +84,7 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_dependencies(rapport-back-forward-test-gtk3 rapport_gtk3)
         # A splitter's on_moved: its dividers' drags only (#30).
         add_executable(rapport-splitter-moved-test-gtk3 splitter_moved_test.cpp)
+        target_include_directories(rapport-splitter-moved-test-gtk3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/gtk-common)
         target_link_libraries(rapport-splitter-moved-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
         add_dependencies(rapport-splitter-moved-test-gtk3 rapport_gtk3)
     endif()

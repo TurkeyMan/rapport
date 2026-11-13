@@ -1,6 +1,8 @@
 // A splitter's on_moved fires for a drag of its divider and nothing else
 // (#30): a press elsewhere in the panes, held while the window relays them
-// out, isn't a drag.
+// out, isn't a drag. A splitter that is a pane of another, the last pane
+// included, is a splitter of its own: its divider, its sizes and its
+// on_moved are its, not the outer one's.
 //   rapport-splitter-moved-test-gtk3   (GDK_BACKEND=broadway, broadwayd running)
 //   rapport-splitter-moved-test-gtk4   (GDK_BACKEND=broadway, gtk4-broadwayd running)
 // GTK 3: presses go to the paned as it gets them, on its handle's window or
@@ -12,9 +14,7 @@
 
 #include <gtk/gtk.h>
 
-#if GTK_MAJOR_VERSION >= 4
 #include "split_handle.h"
-#endif
 
 #include <chrono>
 #include <cstdio>
@@ -123,55 +123,99 @@ int main(int argc, char** argv)
     auto ui = rap::ui::load(argc, argv, {.backend = GTK_MAJOR_VERSION >= 4 ? "gtk4" : "gtk3"});
     if (!ui) return 2;
     using namespace rap::layout;
-    rap::splitter *outer = nullptr, *inner = nullptr;
-    // Three panes (two paneds in the chain); the middle one holds a splitter
-    // of its own, whose handle isn't the outer splitter's.
-    auto win = (*ui)->create(window{"Splitter moved",
-                                    {splitter{rap::orientation::horizontal, button{"left"}.stretch(),
-                                              splitter{rap::orientation::vertical, label{"top"}, label{"bottom"}}
-                                                  .bind(inner)
-                                                  .stretch(),
-                                              label{"right"}}
-                                         .bind(outer)}}
-                                 .size(60_ch, 20_lines));
+    rap::splitter *outer = nullptr, *inner = nullptr, *last = nullptr, *nested = nullptr;
+    // Above: three panes (two paneds in its chain), the middle one a splitter
+    // of its own. Below: two panes, the last one a splitter of its own, put
+    // straight in (the end child of the outer paned, as more of a chain is).
+    auto win = (*ui)->create(
+        window{"Splitter moved",
+               {vbox{
+                   splitter{rap::orientation::horizontal, button{"left"}.stretch(),
+                            splitter{rap::orientation::vertical, label{"top"}, label{"bottom"}}.bind(inner).stretch(),
+                            label{"right"}}
+                       .bind(outer)
+                       .stretch(),
+                   splitter{rap::orientation::horizontal, label{"first"}.stretch(),
+                            splitter{rap::orientation::vertical, label{"upper"}, label{"lower"}}.bind(nested).stretch()}
+                       .bind(last)
+                       .stretch(),
+               }}}
+            .size(60_ch, 24_lines));
     win->show();
     pump(400);
-    if (!outer || !inner) return 2;
-    int moved = 0;
+    if (!outer || !inner || !last || !nested) return 2;
+    int moved = 0, moved_last = 0, moved_nested = 0;
     outer->on_moved([&] { ++moved; });
+    last->on_moved([&] { ++moved_last; });
+    nested->on_moved([&] { ++moved_nested; });
 
     GtkWidget* top = toplevel();
     std::vector<GtkWidget*> all;
     if (top) paneds(top, all);
-    // The outer chain is the first paned and the next marked one; the inner
-    // splitter is the remaining paned.
-    expect(all.size() == 3, "three paneds: two for the outer splitter's three panes, one for the inner");
-    if (all.size() != 3) return 1;
-    GtkWidget *first = all[0], *second = nullptr, *other = nullptr;
-    for (size_t i = 1; i < all.size(); ++i)
-        (g_object_get_data(G_OBJECT(all[i]), "rapport-split-chain") && !second ? second : other) = all[i];
-    expect(second && other, "the outer chain's second paned and the inner splitter's are told apart");
-    if (!second || !other) return 1;
+    // In the order a depth-first walk meets them: the upper splitter's two,
+    // the one in its middle pane, the lower splitter's, the one in its last.
+    expect(all.size() == 5, "five paneds: two for the upper splitter, one each for the other three");
+    if (all.size() != 5) return 1;
+    GtkWidget *first = all[0], *second = all[1], *other = all[2], *lower = all[3], *in_last = all[4];
+    auto chain = [](GtkWidget* w) { return g_object_get_data(G_OBJECT(w), "rapport-split-chain"); };
+    expect(chain(first) && chain(first) == chain(second), "the upper splitter's two paneds are one chain");
+    expect(chain(other) && chain(other) != chain(first), "the splitter in its middle pane is a chain of its own");
+    expect(chain(lower) && chain(in_last) && chain(lower) != chain(in_last),
+           "the splitter in the lower one's last pane is a chain of its own");
+    expect(rap::gtk_split::next(first) == second && !rap::gtk_split::next(second),
+           "the upper chain goes on to its second paned and no further");
+    expect(!rap::gtk_split::next(lower), "the lower chain doesn't go on into the splitter in its last pane");
+    expect(outer->sizes().size() == 3, "the upper splitter has three sizes");
+    expect(last->sizes().size() == 2, "the lower splitter has two sizes, not the nested one's too");
+    expect(nested->sizes().size() == 2, "the splitter in its last pane has its own two");
+
     const std::vector<float> at = outer->sizes();
-    auto nudged = [&](float by)
+    auto nudged = [](const std::vector<float>& from, float by)
     {
-        std::vector<float> s = at;
-        s[0] += by;
+        std::vector<float> s = from;
+        if (!s.empty()) s[0] += by;
         return s;
     };
 
 #if GTK_MAJOR_VERSION < 4
+    auto handle = [](GtkWidget* paned) { return gtk_paned_get_handle_window(GTK_PANED(paned)); };
     GdkWindow* elsewhere = gtk_widget_get_window(top);
-    click(first, elsewhere, outer, nudged(40));
+    click(first, elsewhere, outer, nudged(at, 40));
     expect(moved == 0, "a press from a pane, held while the panes are laid out again: no on_moved");
-    click(first, gtk_paned_get_handle_window(GTK_PANED(first)), outer, nudged(-30));
+    click(first, handle(first), outer, nudged(at, -30));
     expect(moved == 1, "a press on the first divider, the panes moved: on_moved once");
-    click(second, gtk_paned_get_handle_window(GTK_PANED(second)), outer, nudged(20));
+    click(second, handle(second), outer, nudged(at, 20));
     expect(moved == 2, "a press on the second divider, the panes moved: on_moved once more");
-    click(first, gtk_paned_get_handle_window(GTK_PANED(first)), outer, {});
+    click(first, handle(first), outer, {});
     expect(moved == 2, "a press on a divider, nothing moved: no on_moved");
-    click(other, gtk_paned_get_handle_window(GTK_PANED(other)), outer, nudged(10));
-    expect(moved == 2, "a press on the inner splitter's divider: not the outer one's on_moved");
+    click(other, handle(other), outer, nudged(at, 10));
+    expect(moved == 2, "a press on the middle pane's splitter's divider: not the outer one's on_moved");
+    // The splitter in the last pane: a press on its divider reaches both its
+    // paned and the one it's the last pane of (as it bubbles); with both laid
+    // out again while it's down, it's the inner one's drag only.
+    auto send = [&](GtkWidget* to, GdkEventType type)
+    {
+        GdkEvent* e = gdk_event_new(type);
+        e->button.window = GDK_WINDOW(g_object_ref(handle(in_last)));
+        e->button.send_event = true;
+        e->button.button = GDK_BUTTON_PRIMARY;
+        gdk_event_set_device(e, gdk_seat_get_pointer(gdk_display_get_default_seat(gdk_display_get_default())));
+        gboolean handled = FALSE;
+        g_signal_emit_by_name(to, type == GDK_BUTTON_PRESS ? "button-press-event" : "button-release-event", e,
+                              &handled);
+        gdk_event_free(e);
+    };
+    const std::vector<float> lower_at = last->sizes(), nested_at = nested->sizes();
+    send(in_last, GDK_BUTTON_PRESS);
+    send(lower, GDK_BUTTON_PRESS);
+    last->set_sizes(nudged(lower_at, 30));
+    nested->set_sizes(nudged(nested_at, 15));
+    pump(100);
+    send(in_last, GDK_BUTTON_RELEASE);
+    send(lower, GDK_BUTTON_RELEASE);
+    pump(50);
+    expect(moved_nested == 1, "a press on the last pane's splitter's divider: its on_moved once");
+    expect(moved_last == 0, "and not the on_moved of the splitter it's the last pane of");
 #else
     expect(rap::gtk_split::handle_picked(first, pick_middle(handle_of(first))),
            "the first divider's middle is one of its handles");
@@ -182,12 +226,19 @@ int main(int argc, char** argv)
     expect(!rap::gtk_split::handle_picked(first, pick_middle(gtk_paned_get_end_child(GTK_PANED(second)))),
            "the middle of the right pane isn't");
     expect(!rap::gtk_split::handle_picked(first, pick_middle(handle_of(other))),
-           "the inner splitter's divider isn't the outer splitter's");
-    expect(rap::gtk_split::handle_picked(other, pick_middle(handle_of(other))),
-           "but it is the inner splitter's own");
+           "the middle pane's splitter's divider isn't the outer splitter's");
+    expect(rap::gtk_split::handle_picked(other, pick_middle(handle_of(other))), "but it is that splitter's own");
+    expect(!rap::gtk_split::handle_picked(lower, pick_middle(handle_of(in_last))),
+           "the last pane's splitter's divider isn't the splitter it's the last pane of");
+    expect(rap::gtk_split::handle_picked(in_last, pick_middle(handle_of(in_last))), "but it is its own");
+    expect(rap::gtk_split::handle_picked(lower, pick_middle(handle_of(lower))),
+           "and the lower splitter's own divider is its");
     expect(!rap::gtk_split::handle_picked(first, nullptr), "nothing picked isn't");
     (void)moved;
+    (void)moved_last;
+    (void)moved_nested;
     (void)nudged;
+    (void)at;
 #endif
 
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
