@@ -553,10 +553,7 @@ public:
     {
         if (!pending_keys_) return;
         pending_keys_ = false;
-        BYTE state[256] = {};
-        GetKeyboardState(state);
-        state[VK_CONTROL] = state[VK_LCONTROL] = state[VK_SHIFT] = state[VK_LSHIFT] = 0;
-        SetKeyboardState(state);
+        set_modifiers(false, false);
     }
     void choose(int i) override
     {
@@ -678,13 +675,23 @@ public:
 
 private:
     HWND control() const { return strip_ ? strip_ : tab_; }
-    void post_key(WPARAM vk, bool ctrl, bool shift)
+    // The thread's key state with exactly these modifiers down: every other
+    // modifier (Alt, the Windows key, the right-hand ones) and the mouse
+    // buttons cleared, so nothing left over can change what a posted key is.
+    static void set_modifiers(bool ctrl, bool shift)
     {
         BYTE state[256] = {};
         GetKeyboardState(state);
-        state[VK_CONTROL] = state[VK_LCONTROL] = ctrl ? 0x80 : 0;
-        state[VK_SHIFT] = state[VK_LSHIFT] = shift ? 0x80 : 0;
+        for (int vk : {VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU,
+                       VK_RMENU, VK_LWIN, VK_RWIN, VK_LBUTTON, VK_RBUTTON, VK_MBUTTON})
+            state[vk] = 0;
+        if (ctrl) state[VK_CONTROL] = state[VK_LCONTROL] = 0x80;
+        if (shift) state[VK_SHIFT] = state[VK_LSHIFT] = 0x80;
         SetKeyboardState(state);
+    }
+    void post_key(WPARAM vk, bool ctrl, bool shift)
+    {
+        set_modifiers(ctrl, shift);
         const LPARAM lp = 1 | (LPARAM(MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC)) << 16);
         HWND to = GetFocus() ? GetFocus() : GetParent(control());
         PostMessageW(to, WM_KEYDOWN, vk, lp);

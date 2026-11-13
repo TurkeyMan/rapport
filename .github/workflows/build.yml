@@ -60,6 +60,9 @@ jobs:
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-gtk3
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-gtk4
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-qt6
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_BACKEND=gtk3 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-tearoff-test-gtk3
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_BACKEND=gtk4 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-tearoff-test-gtk4
+          QT_QPA_PLATFORM=offscreen RAPPORT_BACKEND=qt6 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-tearoff-test-qt6
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-moved-test-gtk3
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-moved-test-gtk4
 
@@ -122,11 +125,15 @@ jobs:
       # win32-caption-tabs-high-contrast), and the caption tabs with the
       # display's scale and high contrast changed while they're open
       # (win32-caption-tabs-transitions): system settings, so only on a
-      # throwaway runner, and only this job.
+      # throwaway runner, and only this job. Every Windows job drives the
+      # document tabs' tearing off with real input (SendInput: the move loop
+      # needs the real mouse), win32-document-tabs-tearoff-input, as it
+      # moves the pointer and presses keys: only on a runner.
       - name: Portable tests
         env:
           RAPPORT_TEST_SET_HIGH_CONTRAST: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
           RAPPORT_TEST_SET_DPI: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
+          RAPPORT_TEST_SEND_INPUT: '1'
         run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
 
       - name: Shell extension
