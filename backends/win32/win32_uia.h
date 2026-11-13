@@ -20,7 +20,10 @@
 // Lifetime: the window's WM_DESTROY (through handle_message) or the
 // provider's destruction, whichever is first, disconnects every element
 // handed out. A client still holding one gets UIA_E_ELEMENTNOTAVAILABLE from
-// then on, and the owner is never called again.
+// then on, and the owner is never called again. Inside a message sent from
+// another thread COM refuses UIA's disconnect: the elements are dead to
+// clients at once all the same, and the disconnect is retried from a thread
+// timer (deferred_disconnects).
 #pragma once
 
 #include <windows.h>
@@ -121,13 +124,21 @@ public:
     void raise_property_changed(int id, PROPERTYID property, const VARIANT& before, const VARIANT& after);
     // ChildAdded on the new child; ChildrenInvalidated, ChildrenBulkAdded,
     // ChildrenBulkRemoved and ChildrenReordered on the parent whose children
-    // changed. ChildRemoved has its own, as the child is gone by then.
+    // changed. ChildRemoved has its own, as the child is gone by then (given
+    // here, it's ignored).
     void raise_structure_changed(StructureChangeType change, int id);
     void raise_child_removed(int parent, int child);
 
     // The fragment root, as WM_GETOBJECT hands it to UIA (not add-refed);
     // null once disconnected. For tests.
     IRawElementProviderSimple* root() const;
+
+    // Elements removed (or a window destroyed) inside a message sent from
+    // another thread are dead to clients at once, but COM refuses UIA's
+    // disconnect there: it's retried from a thread timer, which this
+    // thread's message loop dispatches. How many wait on this thread. For
+    // tests.
+    static size_t deferred_disconnects();
 
     struct state;
 

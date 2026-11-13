@@ -519,8 +519,66 @@ private:
     unsigned serial_;  // the incarnation of id_ this is; 0 for the root
 };
 
+// UiaDisconnectProvider calls out, which COM refuses inside a message sent
+// synchronously from another thread (RPC_E_CANTCALLOUT_ININPUTSYNCCALL): an
+// element removed, or a window destroyed, while handling one. The node is
+// dead to clients already (its incarnation is gone); its disconnect waits
+// here, holding the reference, for a thread timer: dispatched by the
+// thread's message loop, not by a window, which may be gone by then.
+struct deferred_disconnects
+{
+    std::vector<IRawElementProviderSimple*> nodes;
+    UINT_PTR timer = 0;
+};
+thread_local deferred_disconnects t_deferred;
+
+bool refused_callout(HRESULT hr)
+{
+    return hr == RPC_E_CANTCALLOUT_ININPUTSYNCCALL || hr == RPC_E_CANTCALLOUT_INASYNCCALL ||
+           hr == RPC_E_CANTCALLOUT_INEXTERNALCALL;
+}
+
+void CALLBACK retry_disconnects(HWND, UINT, UINT_PTR, DWORD);
+
+// Disconnects `n` and drops the reference given with it, now if COM allows
+// the call, otherwise once it does.
+void disconnect_node(IRawElementProviderSimple* n)
+{
+    const HRESULT hr = UiaDisconnectProvider(n);
+    if (!refused_callout(hr))
+    {
+        // Anything else (S_OK, or no client ever had it) is final.
+        n->Release();
+        return;
+    }
+    t_deferred.nodes.push_back(n);
+    if (!t_deferred.timer) t_deferred.timer = SetTimer(nullptr, 0, 10, retry_disconnects);
+}
+
+void CALLBACK retry_disconnects(HWND, UINT, UINT_PTR, DWORD)
+{
+    std::vector<IRawElementProviderSimple*> waiting;
+    waiting.swap(t_deferred.nodes);
+    for (IRawElementProviderSimple* n : waiting)
+    {
+        if (refused_callout(UiaDisconnectProvider(n)))
+            t_deferred.nodes.push_back(n);  // a timer inside a sent message: again later
+        else
+            n->Release();
+    }
+    if (t_deferred.nodes.empty() && t_deferred.timer)
+    {
+        KillTimer(nullptr, t_deferred.timer);
+        t_deferred.timer = 0;
+    }
+}
+
 }  // namespace
 
+size_t uia_provider::deferred_disconnects()
+{
+    return t_deferred.nodes.size();
+}
 
 node* uia_provider::state::get(int id)
 {
@@ -542,8 +600,8 @@ void uia_provider::state::release(int id)
     nodes.erase(it);
     // UIA lets go of what it holds of the node, and refuses its clients
     // from then on; the node itself goes when the last of them releases it.
-    UiaDisconnectProvider(static_cast<IRawElementProviderSimple*>(n));
-    static_cast<IRawElementProviderSimple*>(n)->Release();
+    // Clients already find it unavailable, whenever this can be done.
+    disconnect_node(static_cast<IRawElementProviderSimple*>(n));
 }
 
 void uia_provider::state::disconnect()
@@ -618,7 +676,10 @@ void uia_provider::set_elements(std::vector<uia_element> elements)
         const auto kept = s.serials.find(e.id);
         unsigned serial = kept != s.serials.end() ? kept->second : 0;
         if (!serial)
-            if (!(serial = ++s.next_serial)) serial = ++s.next_serial;  // 0 is no element
+        {
+            serial = ++s.next_serial;
+            if (!serial) serial = ++s.next_serial;  // wrapped: 0 is no element
+        }
         serials.emplace(e.id, serial);
     }
     for (const auto& [id, serial] : s.serials)
@@ -664,13 +725,14 @@ void uia_provider::raise_property_changed(int id, PROPERTYID property, const VAR
 
 void uia_provider::raise_structure_changed(StructureChangeType change, int id)
 {
+    // ChildRemoved names the child gone: raise_child_removed's.
+    if (change == StructureChangeType_ChildRemoved) return;
     if (!state_->connected() || !UiaClientsAreListening()) return;
     node* n = state_->get(id);
     if (!n) return;
-    // The root's runtime id is the window's, which UIA knows: none given.
-    int runtime_id[3] = {UiaAppendRuntimeId, id, int(state_->serial_of(id))};
-    UiaRaiseStructureChangedEvent(static_cast<IRawElementProviderSimple*>(n), change, id ? runtime_id : nullptr,
-                                  id ? 3 : 0);
+    // UIA takes a runtime id for ChildRemoved only; with one, the others
+    // aren't all delivered (ChildrenInvalidated wasn't).
+    UiaRaiseStructureChangedEvent(static_cast<IRawElementProviderSimple*>(n), change, nullptr, 0);
 }
 
 void uia_provider::raise_child_removed(int parent, int child)
