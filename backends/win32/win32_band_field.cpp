@@ -104,13 +104,13 @@ font_box box_of(HWND h)
     GetTextMetricsW(dc, &tm);
     b.height = int(tm.tmHeight);
     b.ascent = int(tm.tmAscent);
+    // The capitals' height: an H's ink above the baseline, as drawn at this
+    // size (hinted), else the ascent less the internal leading.
     b.cap = int(tm.tmAscent - tm.tmInternalLeading);
-    if (const UINT n = GetOutlineTextMetricsW(dc, 0, nullptr))
-    {
-        std::vector<char> buffer(n);
-        auto* otm = reinterpret_cast<OUTLINETEXTMETRICW*>(buffer.data());
-        if (GetOutlineTextMetricsW(dc, n, otm) && otm->otmsCapEmHeight > 0) b.cap = int(otm->otmsCapEmHeight);
-    }
+    GLYPHMETRICS gm{};
+    const MAT2 identity{{0, 1}, {0, 0}, {0, 0}, {0, 1}};
+    if (GetGlyphOutlineW(dc, L'H', GGO_METRICS, &gm, 0, nullptr, &identity) != GDI_ERROR && gm.gmptGlyphOrigin.y > 0)
+        b.cap = int(gm.gmptGlyphOrigin.y);
     SelectObject(dc, old);
     ReleaseDC(h, dc);
     return b;
@@ -562,7 +562,7 @@ int band_field_height(HWND edit)
     const UINT dpi = dpi_of(edit);
     // WinUI's padding above and below the text (TextControlThemePadding's
     // 5 and 6) and the border's: what a larger text takes.
-    const int around = band_px(5 + 6, dpi) + 2 * band_px(band_metrics::border, dpi);
+    const int around = band_px(5 + 6 + 2 * band_metrics::border, dpi);
     return std::max(band_px(band_metrics::field, dpi), box_of(edit).height + around);
 }
 

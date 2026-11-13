@@ -612,7 +612,9 @@ void check_band_rows(HWND top, int from, bool band, const palette& pal, HWND too
     while (y < p.h && colour(y) == fill) ++y;
     const int fill_end = y;
     const RECT tb = toolbar ? rect_in(top, toolbar) : RECT{};
-    expect(fill_end > from && (!toolbar || (fill_end >= tb.bottom && fill_end <= tb.bottom + px(4, dpi))),
+    // (Its buttons centred in the band's row: 7 px under them at 100%,
+    // win32-band-fields.)
+    expect(fill_end > from && (!toolbar || (fill_end >= tb.bottom && fill_end <= tb.bottom + px(8, dpi))),
            "the band " + hex(fill) + " from the strip's bottom, " + str(from) + ", to the toolbar's, " +
                str(long(tb.bottom)) + at + ": to " + str(fill_end) + ", then " + hex(colour(fill_end)));
     while (y < p.h && colour(y) == pal.line) ++y;

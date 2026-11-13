@@ -117,9 +117,10 @@ jobs:
           }
           Remove-Item Env:RAPPORT_THEME
 
-      # Server 2025's runner also runs the base surface and caption tabs
-      # tests under high contrast (win32-base-surface-high-contrast,
-      # win32-caption-tabs-high-contrast), and the caption tabs with the
+      # Server 2025's runner also runs the base surface, caption tabs and
+      # band fields tests under high contrast (win32-base-surface-high-contrast,
+      # win32-caption-tabs-high-contrast, win32-band-fields-high-contrast),
+      # and the caption tabs with the
       # display's scale and high contrast changed while they're open
       # (win32-caption-tabs-transitions): system settings, so only on a
       # throwaway runner, and only this job.
