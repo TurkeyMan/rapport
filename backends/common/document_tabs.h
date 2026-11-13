@@ -23,17 +23,26 @@ struct action
         new_tab,
         close,   // the current tab
         select,  // `index`
+        move,    // the current tab, to `index` (where it is already at either end)
     };
     kind what = none;
     int index = -1;
 };
 
 // Ctrl+T, Ctrl+W, Ctrl+Tab and Ctrl+Shift+Tab (round), Ctrl+1..8 and Ctrl+9
-// for the last, as browsers and file managers have them. Presses only.
+// for the last, as browsers and file managers have them; Ctrl+Shift+PgUp and
+// Ctrl+Shift+PgDn move the current tab left and right, as browsers', and are
+// the tabs' even at either end (no round). Presses only.
 inline action for_key(const key_event& e, int current, int count)
 {
     if (!e.press || (e.modifiers & (mod_alt | mod_meta)) || !(e.modifiers & mod_ctrl)) return {};
     const bool shift = e.modifiers & mod_shift;
+    if (shift && (e.key == key::page_up || e.key == key::page_down))
+    {
+        if (current < 0 || current >= count) return {};
+        const int to = e.key == key::page_up ? std::max(current - 1, 0) : std::min(current + 1, count - 1);
+        return {action::move, to};
+    }
     if (e.key == key::tab)
     {
         if (count < 2 || current < 0) return {};
@@ -80,9 +89,29 @@ inline int tab_width(int available, int count, int narrowest, int widest)
     return std::clamp(available / count, narrowest, widest);
 }
 
+// The element at `from` moved to `to`, the others between closing up: as a
+// tab dragged along a row. Both must be in range.
+template <class T>
+void move_element(std::vector<T>& v, int from, int to)
+{
+    if (from < to)
+        std::rotate(v.begin() + from, v.begin() + from + 1, v.begin() + to + 1);
+    else if (to < from)
+        std::rotate(v.begin() + to, v.begin() + from, v.begin() + from + 1);
+}
+
+// Where the tab at `i` is once the one at `from` has moved to `to`.
+inline int index_after_move(int i, int from, int to)
+{
+    if (i == from) return to;
+    if (from < to && i > from && i <= to) return i - 1;
+    if (to < from && i >= to && i < from) return i + 1;
+    return i;
+}
+
 // The bookkeeping: the tabs in order, which is current, and the app's
-// handlers, which only the user's own clicks and keys fire (through picked,
-// close_asked, new_asked), once each.
+// handlers, which only the user's own clicks, drags and keys fire (through
+// picked, close_asked, new_asked, reordered), once each.
 class state
 {
 public:
@@ -90,6 +119,8 @@ public:
     int current = -1;
     std::function<void(const std::string&)> on_select, on_close;
     std::function<void()> on_new;
+    // The tab's id and the index it's at now, once it's been moved there.
+    std::function<void(const std::string&, int)> on_reorder;
 
     int count() const { return int(tabs.size()); }
     int index_of(const std::string& id) const
@@ -145,10 +176,36 @@ public:
     {
         if (auto f = on_new) f();
     }
+
+    // The tab at `from` moved to `to`, telling no one (a drag's live steps,
+    // and putting it back when one's cancelled): the current tab stays the
+    // same tab. False if there's nothing to move.
+    bool move(int from, int to)
+    {
+        if (from < 0 || from >= count() || to < 0 || to >= count() || from == to) return false;
+        move_element(tabs, from, to);
+        if (current >= 0) current = index_after_move(current, from, to);
+        return true;
+    }
+    // The user moved the tab now at `index` there (a drag let go, a key):
+    // on_reorder, once. Only when its index changed; the caller knows.
+    void reordered(int index)
+    {
+        if (index < 0 || index >= count()) return;
+        if (auto f = on_reorder) f(std::string(tabs[size_t(index)].id), index);
+    }
+
+    // What a key's move needs of the native control: nothing.
+    struct no_move
+    {
+        void operator()(int, int) const {}
+    };
     // A key, done; true if it was one of the tabs'. `show(i)` makes the
-    // native control show tab i as current, without telling the app.
-    template <class Show>
-    bool key(const key_event& e, Show&& show)
+    // native control show tab i as current, without telling the app;
+    // `moved(from, to)` moves its tab at `from` to `to` likewise, the
+    // bookkeeping moved already.
+    template <class Show, class Move = no_move>
+    bool key(const key_event& e, Show&& show, Move&& moved = Move{})
     {
         const action a = for_key(e, current, count());
         switch (a.what)
@@ -163,6 +220,16 @@ public:
                 picked(a.index);
             }
             return true;
+        case action::move:
+        {
+            const int from = current;
+            if (move(from, a.index))
+            {
+                moved(from, a.index);
+                reordered(a.index);  // last: the app may change the tabs
+            }
+            return true;
+        }
         }
         return false;
     }
