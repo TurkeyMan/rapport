@@ -235,6 +235,9 @@ struct comctl6
     decltype(&ImageList_Replace) replace = ImageList_Replace;
     decltype(&ImageList_GetImageCount) image_count = ImageList_GetImageCount;
     decltype(&ImageList_GetIconSize) icon_size = ImageList_GetIconSize;
+    // The classes' registration too: activating a context doesn't redirect
+    // the imported one, v5's in an app without common controls 6.
+    decltype(&InitCommonControlsEx) init = InitCommonControlsEx;
 
     void resolve()
     {
@@ -248,6 +251,7 @@ struct comctl6
         take(m, "ImageList_Replace", replace);
         take(m, "ImageList_GetImageCount", image_count);
         take(m, "ImageList_GetIconSize", icon_size);
+        take(m, "InitCommonControlsEx", init);
     }
 
 private:
@@ -10367,7 +10371,7 @@ public:
                                  ICC_WIN95_CLASSES | ICC_DATE_CLASSES | ICC_PROGRESS_CLASS |
                                      ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES |
                                      ICC_UPDOWN_CLASS | ICC_STANDARD_CLASSES | ICC_LINK_CLASS};
-        InitCommonControlsEx(&icc);
+        g_comctl.init(&icc);
         apply_app_mode();
         if (!d2d_factory() || !dwrite_factory()) return nullptr;
         return new win32_backend;
