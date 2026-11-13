@@ -185,55 +185,54 @@ int main(int argc, char** argv)
     }
 
     // The paging keys, landing exactly on a placeholder. Where a page key
-    // lands depends on how many rows show, and a horizontal scroll bar (its
-    // widest row, which the theme and font decide) takes one, so it's found
-    // first on a tree of plain rows as wide as the real one's (the same
-    // tail rows, and an open lazy row at the very end with its "Loading…"),
-    // the same keys pressed the same way: the row PageDown reaches from the
-    // top, and the row PageUp starts from to come back to that one. The
-    // placeholder is then put just there.
+    // lands depends on how many rows show, which depends on the scroll bars
+    // (how wide the widest row is, in the theme's font) and on when the tree
+    // works them out. So it's found first on a tree made just as the real
+    // one is (the same rows, the open lazy row with its "Loading…"), with
+    // the lazy row far below the first pages, the same keys pressed the
+    // same way: the row PageDown reaches from the top, and the row PageUp
+    // starts from to come back to that one. The placeholder then goes there.
     {
         const auto index_of = [](const std::optional<std::string>& id) {
-            return id && id->rfind("tail", 0) == 0 ? std::stoi(id->substr(4)) : -1;
+            return id && id->size() > 1 && (*id)[0] == 'i' ? std::stoi(id->substr(1)) : -1;
         };
-        const auto tail = [](int i) { return "tail" + std::to_string(i); };
-        std::vector<rap::tree_item> plain;
-        for (int i = 0; i < 200; ++i) plain.push_back(item(tail(i), false));
-        plain.push_back(item("lazy", true));
-        t->set_items(plain);
-        t->set_expanded("lazy", true);
-        t->select(tail(0));
+        const auto made = [&](int rows_before_lazy) {
+            std::vector<rap::tree_item> items;
+            for (int i = 0; i < rows_before_lazy; ++i) items.push_back(item("i" + std::to_string(i), false));
+            items.push_back(item("lazy", true));
+            items.push_back(item("after", false));
+            for (int i = 0; i < 200; ++i) items.push_back(item("tail" + std::to_string(i), false));
+            t->set_items(items);
+            t->set_expanded("lazy", true);
+            return items;
+        };
+        made(120);
+        t->select("i0");
         press(tree_hwnd, VK_NEXT);
         const int lands = index_of(t->selected());  // PageDown from the top
         int from = -1;  // where PageUp comes back to `lands` from
-        for (int x = lands + 1; lands > 0 && x < 150 && from < 0; ++x)
+        for (int x = lands + 1; lands > 0 && x < 100 && from < 0; ++x)
         {
-            t->select(tail(0));
+            t->select("i0");
             press(tree_hwnd, VK_NEXT);
-            t->select(tail(lands + 1));  // where the real tree's PageDown ends
-            t->select(tail(x));
+            t->select("i" + std::to_string(lands + 1));  // where the real tree's PageDown ends
+            t->select("i" + std::to_string(x));
             press(tree_hwnd, VK_PRIOR);
             if (index_of(t->selected()) == lands) from = x;
         }
         std::printf("     PageDown from the top lands on row %d; PageUp from row %d comes back to it\n", lands, from);
-        expect(lands > 1 && from > lands, "a page key's landing row is found on a plain tree");
+        expect(lands > 1 && from > lands, "a page key's landing row is found on the same tree with the placeholder further down");
         if (lands > 1 && from > lands)
         {
             // Row `lands` the placeholder: plain rows, "lazy" (open) before
             // it, "after" and the tail behind.
-            std::vector<rap::tree_item> items;
-            for (int i = 0; i < lands - 1; ++i) items.push_back(item("i" + std::to_string(i), false));
-            items.push_back(item("lazy", true));
-            items.push_back(item("after", false));
-            for (int i = 0; i < 200; ++i) items.push_back(item("tail" + std::to_string(i), false));
+            std::vector<rap::tree_item> items = made(lands - 1);
             const auto id_at = [&](int row) -> std::string {
                 return row < lands - 1  ? "i" + std::to_string(row)
                        : row == lands - 1 ? "lazy"
                        : row == lands + 1 ? "after"
                                           : "tail" + std::to_string(row - lands - 2);
             };
-            t->set_items(items);
-            t->set_expanded("lazy", true);
             t->select("i0");
             press(tree_hwnd, VK_NEXT);
             expect(t->selected() == "after", "PageDown landing on a placeholder goes on to the next row");
