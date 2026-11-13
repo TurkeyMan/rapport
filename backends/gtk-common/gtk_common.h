@@ -5,6 +5,7 @@
 
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
+#include "split_handle.h"
 #include "theme_palette.h"
 
 #include <gtk/gtk.h>
@@ -1221,15 +1222,7 @@ private:
 // A splitter of n panes is a chain of n-1 nested GtkPaneds (each marked
 // "rapport-split-chain"); sizes are one per pane, along the split. The
 // paned after `paned` in its chain, if any.
-inline GtkWidget* next_in_split(GtkWidget* paned)
-{
-#if GTK_MAJOR_VERSION >= 4
-    GtkWidget* next = gtk_paned_get_end_child(GTK_PANED(paned));
-#else
-    GtkWidget* next = gtk_paned_get_child2(GTK_PANED(paned));
-#endif
-    return next && g_object_get_data(G_OBJECT(next), "rapport-split-chain") ? next : nullptr;
-}
+inline GtkWidget* next_in_split(GtkWidget* paned) { return ::rap::gtk_split::next(paned); }
 
 // Each pane's length along the split, from the chain's first paned.
 inline std::vector<float> split_sizes(GtkWidget* first)

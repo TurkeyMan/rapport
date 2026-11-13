@@ -1829,6 +1829,8 @@ public:
 
     // GtkPaned reports a drag no differently from layout, so a drag is a
     // press and release on a divider with the position changed in between.
+    // A press that bubbles up from a pane (one its widget didn't take, held
+    // while the window relaid them out) is no drag (#30).
     void on_moved(std::function<void()> f) override
     {
         const bool first = !moved_;
@@ -1838,10 +1840,13 @@ public:
         {
             connect(
                 w, "button-press-event",
-                +[](GtkWidget*, GdkEventButton*, gpointer p) -> gboolean
+                +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
                 {
                     auto* self = static_cast<splitter_impl*>(p);
-                    self->pressed_ = self->sizes();
+                    if (rap::gtk_split::press_on_handle(self->w_, e))
+                        self->pressed_ = self->sizes();
+                    else
+                        self->pressed_.clear();
                     return false;
                 },
                 this);
@@ -5067,8 +5072,9 @@ private:
     }
 
     // GtkPaned holds two children; more panes nest to the right/bottom.
-    GtkWidget* panes(const spec::splitter& s, size_t from)
+    GtkWidget* panes(const spec::splitter& s, size_t from, gpointer chain = nullptr)
     {
+        if (!chain) chain = ::rap::gtk_split::new_chain();  // this splitter's own
         GtkWidget* first = build(s.panes[from], s.dir);
         if (from + 1 == s.panes.size()) return first;
 
@@ -5083,9 +5089,9 @@ private:
         // Thin: the theme's narrow handle, a line (Adwaita's 1 px), which
         // GTK still lets the pointer take from a few pixels either side.
         gtk_paned_set_wide_handle(p, !s.thin);
-        g_object_set_data(G_OBJECT(paned), "rapport-split-chain", GINT_TO_POINTER(1));
+        ::rap::gtk_split::mark(paned, chain);
         gtk_paned_pack1(p, first, !any_stretch || s.panes[from].common.stretch > 0, false);
-        gtk_paned_pack2(p, panes(s, from + 1), !any_stretch || rest_stretch, false);
+        gtk_paned_pack2(p, panes(s, from + 1, chain), !any_stretch || rest_stretch, false);
         return paned;
     }
 
