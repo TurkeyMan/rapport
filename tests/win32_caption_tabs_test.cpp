@@ -21,7 +21,9 @@
 // LayerOnMicaBaseAltFillColorSecondary; the hover a WM_MOUSEMOVE sent to
 // the strip, not input); "+" and the close button
 // Segoe Fluent Icons' glyphs in TextFillColorSecondary; the rendering
-// parameters read again on a WM_SETTINGCHANGE. UI
+// parameters read again on a WM_SETTINGCHANGE. The backdrop (22621 on):
+// Mica Alt with the tabs in the caption, as Explorer's, none in high
+// contrast, Mica once they leave it. UI
 // Automation, from a client on a thread of its own: the Tab, its TabItems by
 // name, Select, each Close tab and New tab invoked, each handler once; the
 // window's native controls still reached; a tab dragged to the front (the
@@ -1829,6 +1831,39 @@ int dpi_transition(HWND top, HWND strip)
     return 0;
 }
 
+// The window's backdrop (DWMWA_SYSTEMBACKDROP_TYPE, 38): 0 if it can't be read.
+DWORD backdrop_of(HWND top)
+{
+    DWORD b = 0;
+    return SUCCEEDED(DwmGetWindowAttribute(top, 38, &b, sizeof b)) ? b : 0;
+}
+
+// Mica Alt (DWMSBT_TABBEDWINDOW, 4) behind the tabs in the caption, as
+// Explorer's window has; none (1) in high contrast; and Mica (2) again once
+// the tabs leave the caption (hidden), then Mica Alt as they come back.
+// 22621 on, where the attribute's named.
+void check_backdrop(HWND top, rap::document_tabs* tabs)
+{
+    if (windows_build() < 22621)
+    {
+        note("no backdrop attribute before build 22621: not checked");
+        return;
+    }
+    const bool hc = high_contrast();
+    const DWORD with = hc ? 1 : 4;
+    expect(backdrop_of(top) == with, std::string("the tabs in the caption: the backdrop ") +
+                                         (hc ? "none (1), high contrast" : "Mica Alt (4), as Explorer's") + ": " +
+                                         str(long(backdrop_of(top))));
+    if (!tabs) return;
+    tabs->set_visible(false);
+    pump(2);
+    expect(!strip_of(top) || !(GetWindowLongPtrW(strip_of(top), GWL_STYLE) & WS_VISIBLE), "the tabs hidden");
+    expect(backdrop_of(top) == 2, "the tabs gone from the caption: Mica (2) again: " + str(long(backdrop_of(top))));
+    tabs->set_visible(true);
+    pump(2);
+    expect(backdrop_of(top) == with, "and back in it: " + str(long(with)) + " again: " + str(long(backdrop_of(top))));
+}
+
 // High contrast on and off with the window open.
 int contrast_transition(HWND top, HWND strip)
 {
@@ -1877,7 +1912,7 @@ int contrast_transition(HWND top, HWND strip)
     expect(back, "high contrast off: the strip clear again");
     check_pixels(strip, expected(false), "high contrast turned off");
     check_text(strip, expected(false), "high contrast turned off");
-    if (mica) expect(backdrop() == 2, "Mica again (" + str(long(backdrop())) + ")");
+    if (mica) expect(backdrop() == 4, "Mica Alt again (" + str(long(backdrop())) + ")");
     return 0;
 }
 
@@ -2014,6 +2049,7 @@ int main(int argc, char** argv)
     check_rebuild(top, strip);
     check_clipped_prints(strip);
     check_copy_failure(strip, expected(hc));
+    check_backdrop(top, tabs);
     // Its first item a text field, no toolbar: no band, no line, the current
     // tab the window's surface (check_pixels).
     check_band_rows(top, int(rect_in(top, strip).bottom), false, expected(hc), nullptr, "no toolbar");

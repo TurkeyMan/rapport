@@ -196,8 +196,9 @@ int caption_resize_band(HWND top);
 // Where the caption buttons are, in the window's client coordinates: from
 // the compositor once it knows them, else where Windows 11 puts them.
 RECT caption_buttons(HWND top);
-// The frame extended down over the strip, `height` px, with Mica behind it
-// (none in high contrast); and back to the plain frame.
+// The frame extended down over the strip, `height` px, with Mica Alt behind
+// it (DWMSBT_TABBEDWINDOW, as Explorer's; plain Mica if refused; none in
+// high contrast); and back to the plain frame, with Mica (frame_top_window).
 void extend_caption_frame(HWND top, int height);
 void release_caption_frame(HWND top, bool dialog, bool fullscreen);
 // The window's messages while its tabs are in the caption, first: the
