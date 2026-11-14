@@ -9998,6 +9998,8 @@ public:
     }
     ~window_impl() override
     {
+        // First, while every widget is still there; taken out, so it runs once.
+        if (auto f = std::exchange(on_destroyed_, {})) f();
         windows().erase(this);
         // WM_DESTROY can't see us once GWLP_USERDATA is cleared below.
         std::erase(recent(), this);
@@ -10635,6 +10637,7 @@ public:
     void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    void on_destroyed(std::function<void()> f) override { on_destroyed_ = std::move(f); }
     // Drops on any child control reach the top level as WM_DROPFILES.
     void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
     {
@@ -11076,6 +11079,7 @@ private:
     std::function<bool(const key_event&)> on_key_;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void()> on_destroyed_;
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     bool app_id_ = false;  // a taskbar group of its own (set_app_id), cleared before it goes
     rap::icon window_icon_;
