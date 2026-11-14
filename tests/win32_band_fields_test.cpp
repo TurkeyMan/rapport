@@ -22,7 +22,10 @@
 // same metrics scaled. At a larger text size (Settings > Accessibility >
 // Text size: 150% and 225%, through rap::win32::set_text_scale_for_tests,
 // the setting untouched), the fields' text enlarged by it from WinUI's 14
-// and the fields and the row taller to hold it. Under high contrast (rapport-win32-high-contrast-run,
+// and the fields and the row taller to hold it. A framed control on the band
+// that isn't a band field (a spin's EDIT, its client edge) printed whole
+// (WM_PRINT): its client area inside its frame, as it prints alone, opaque,
+// and its frame our border. Under high contrast (rapport-win32-high-contrast-run,
 // CI only): nothing drawn, the native bordered EDIT at the band's metrics,
 // its text centred. Shown only (UI Automation leaves hidden windows out):
 // the field still an Edit to UIA, with its name and value.
@@ -634,6 +637,73 @@ void check_search(HWND search, rap::entry* entry, const int& searched, std::stri
     expect(!(GetWindowLongPtrW(clear, GWL_STYLE) & WS_VISIBLE), "and goes");
 }
 
+// A framed control on the band that isn't a band field (a spin's EDIT, its
+// native client edge), printed whole (WM_PRINT with PRF_NONCLIENT, as a
+// pane's copy prints it): its client area inside its frame, at the client
+// area's offset in the window, exactly as it prints on its own
+// (WM_PRINTCLIENT) and opaque; its frame our border, as it prints alone
+// (WM_PRINT, PRF_NONCLIENT only), nothing of the bitmap left unpainted.
+// (Without the frame, DefWindowProc would put the client area at the DC's
+// origin, under the frame, its last columns and rows never painted.)
+void check_framed_print(HWND edit)
+{
+    expect(field_state(edit) == 0, "the spin's EDIT not a band field: " + str(field_state(edit)));
+    expect((GetWindowLongPtrW(edit, GWL_EXSTYLE) & WS_EX_CLIENTEDGE) != 0, "with its client edge");
+    RECT w{}, c{};
+    GetWindowRect(edit, &w);
+    GetClientRect(edit, &c);
+    POINT o{0, 0};
+    ClientToScreen(edit, &o);
+    const int cx = o.x - w.left, cy = o.y - w.top;
+    expect(cx > 0 && cy > 0 && c.right > 0 && c.bottom > 0,
+           "its client area inside its frame, at " + str(cx) + "," + str(cy));
+    if (cx <= 0 || cy <= 0 || c.right <= 0 || c.bottom <= 0) return;
+    const printed client = into_bitmap(c.right, c.bottom,
+                                       [&](HDC dc)
+                                       {
+                                           SendMessageW(edit, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc),
+                                                        PRF_CLIENT | PRF_ERASEBKGND);
+                                       });
+    const printed whole = print_field(edit);
+    const printed frame = into_bitmap(whole.w, whole.h,
+                                      [&](HDC dc)
+                                      {
+                                          SendMessageW(edit, WM_PRINT, reinterpret_cast<WPARAM>(dc),
+                                                       PRF_NONCLIENT);
+                                      });
+    // Its text (right-aligned, so where a shift shows) is there to compare.
+    const ink_found f = ink(client, RECT{0, 0, c.right, c.bottom}, client.at(1, 1));
+    expect(f.any(), "its value printed in its client area");
+    int moved = 0, clear = 0, unpainted = 0, border = 0;
+    POINT first{-1, -1};
+    for (int y = 0; y < whole.h; ++y)
+        for (int x = 0; x < whole.w; ++x)
+        {
+            const DWORD v = whole.raw(x, y);
+            if (v == 0x00ABCDEFu) ++unpainted;
+            const bool inside = x >= cx && x < cx + c.right && y >= cy && y < cy + c.bottom;
+            if (inside)
+            {
+                if (v != client.raw(x - cx, y - cy))
+                {
+                    if (!moved++) first = {x, y};
+                }
+                if ((v >> 24) != 255) ++clear;
+            }
+            else if (v != frame.raw(x, y))
+                ++border;
+        }
+    expect(moved == 0, "its client area printed at " + str(cx) + "," + str(cy) + ", as it prints alone: " +
+                           str(moved) + " pixels differ" +
+                           (moved ? ", the first at " + str(first.x) + "," + str(first.y) + ": " +
+                                        argb_hex(whole.raw(first.x, first.y)) + ", not " +
+                                        argb_hex(client.raw(first.x - cx, first.y - cy))
+                                  : std::string()));
+    expect(clear == 0, "its client area opaque: " + str(clear) + " pixels not");
+    expect(border == 0, "its frame our border, as printed alone: " + str(border) + " pixels differ");
+    expect(unpainted == 0, "nothing left unpainted: " + str(unpainted) + " pixels");
+}
+
 // Under high contrast: nothing drawn; the native bordered EDIT, the band's
 // height, its text centred on the system's window colour.
 void check_high_contrast(HWND edit, UINT dpi)
@@ -1145,6 +1215,20 @@ int main(int argc, char** argv)
     {
         check_states(top, address, fields[0], fields[1]);
         check_search(fields[1], search, searched, changed);
+        // A framed control on the band that isn't a band field: a spin.
+        const char* framed_title = "Band fields, a framed control";
+        auto framed = (*ui)->create(window{framed_title, {toolbar{label{"Size"}, spin{0, 99999, 88888}},
+                                                          label{"A spin on the band"}}}
+                                        .size(600_px, 200_px)
+                                        .margins(false)
+                                        .base_surface()
+                                        .tabs(tabs()));
+        if (g_shown) show(*framed);
+        pump();
+        HWND ft = top_of(framed_title);
+        const std::vector<HWND> spins = ft ? edits_of(ft) : std::vector<HWND>{};
+        expect(spins.size() == 1, "the window with a spin on its band");
+        if (spins.size() == 1) check_framed_print(spins.front());
     }
 
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
