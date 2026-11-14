@@ -916,6 +916,7 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         target_link_libraries(rapport-setters-quiet-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
         add_dependencies(rapport-setters-quiet-test-qt6 rapport_qt6)
     endif()
+endif()
 
 # A toolbar's buttons from the keyboard: one Tab stop, the arrows, Home,
 # End, Space and Enter, focus() and has_focus() per button. Shown and
