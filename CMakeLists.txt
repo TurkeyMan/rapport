@@ -40,6 +40,10 @@ if(RAPPORT_ASAN)
         # object format's section limit (C1128): /bigobj.
         add_compile_options(/fsanitize=address /Zi /bigobj)
         add_link_options(/DEBUG /INCREMENTAL:NO)
+        # /RTC (Debug's default) can't be combined with /fsanitize=address.
+        foreach(flags CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG)
+            string(REGEX REPLACE "/RTC[1csu]*" "" ${flags} "${${flags}}")
+        endforeach()
         get_filename_component(rapport_cl_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
         set(rapport_asan_dll "${rapport_cl_dir}/clang_rt.asan_dynamic-x86_64.dll")
         if(NOT EXISTS "${rapport_asan_dll}")
