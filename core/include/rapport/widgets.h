@@ -781,12 +781,14 @@ class entry : public widget
 {
 public:
     virtual std::string text() const = 0;
-    virtual void set_text(const std::string&) = 0;
+    virtual void set_text(const std::string&) = 0;  // doesn't fire on_changed
     virtual void set_placeholder(const std::string&) = 0;
     // Shows its text (selectable, copyable) without letting it be edited.
     virtual void set_read_only(bool) {}
     // The toolkit's frame round it, or none (spec::entry::frame).
     virtual void set_frame(bool) {}
+    // The user's changes only (typed, pasted, cleared with the clear
+    // button): never set_text's.
     virtual void on_changed(std::function<void(const std::string&)>) = 0;
     virtual void on_activate(std::function<void()>) = 0;  // Enter pressed
 };
@@ -795,19 +797,20 @@ public:
 class drop_down : public widget
 {
 public:
-    virtual void set_items(std::vector<std::string>) = 0;
-    virtual int current() const = 0;  // -1 = none
-    virtual void set_current(int) = 0;
-    virtual void on_changed(std::function<void(int)>) = 0;
+    virtual void set_items(std::vector<std::string>) = 0;  // doesn't fire on_changed
+    virtual int current() const = 0;                        // -1 = none
+    virtual void set_current(int) = 0;                      // doesn't fire on_changed
+    virtual void on_changed(std::function<void(int)>) = 0;  // the user's choices only
 };
 
 // Editable drop-down: free text plus suggestions.
 class combo : public widget
 {
 public:
-    virtual void set_items(std::vector<std::string>) = 0;
+    virtual void set_items(std::vector<std::string>) = 0;  // doesn't fire on_changed
     virtual std::string text() const = 0;
-    virtual void set_text(const std::string&) = 0;
+    virtual void set_text(const std::string&) = 0;  // doesn't fire on_changed
+    // The user's changes only: typed, or a suggestion chosen.
     virtual void on_changed(std::function<void(const std::string&)>) = 0;
     virtual void on_activate(std::function<void()>) = 0;
 };

@@ -1418,12 +1418,18 @@ public:
         QObject::connect(edit(), &QLineEdit::textChanged, edit(),
                          [this](const QString& t)
                          {
-                             if (changed_) changed_(t.toStdString());
+                             if (!quiet_ && changed_) changed_(t.toStdString());
                          });
         handle_enter(edit(), &activate_);
     }
     std::string text() const override { return edit()->text().toStdString(); }
-    void set_text(const std::string& t) override { edit()->setText(qs(t)); }
+    // The app's change, not the user's: on_changed isn't fired.
+    void set_text(const std::string& t) override
+    {
+        quiet_ = true;
+        edit()->setText(qs(t));
+        quiet_ = false;
+    }
     void set_placeholder(const std::string& t) override { edit()->setPlaceholderText(qs(t)); }
     void set_read_only(bool v) override
     {
@@ -1460,6 +1466,7 @@ private:
     }
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
+    bool quiet_ = false;
 };
 
 class drop_down_impl : public widget_base<rap::drop_down>
@@ -1485,7 +1492,13 @@ public:
         quiet_ = false;
     }
     int current() const override { return combo()->currentIndex(); }
-    void set_current(int i) override { combo()->setCurrentIndex(i); }
+    // The app's change, not the user's: on_changed isn't fired.
+    void set_current(int i) override
+    {
+        quiet_ = true;
+        combo()->setCurrentIndex(i);
+        quiet_ = false;
+    }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
 private:
@@ -1508,19 +1521,28 @@ public:
         QObject::connect(combo()->lineEdit(), &QLineEdit::textChanged, combo(),
                          [this](const QString& t)
                          {
-                             if (changed_) changed_(t.toStdString());
+                             if (!quiet_ && changed_) changed_(t.toStdString());
                          });
         handle_enter(combo()->lineEdit(), &activate_);
     }
+    // The app's changes, not the user's: on_changed isn't fired (clearing
+    // the items clears the edit's text, which is put back).
     void set_items(std::vector<std::string> items) override
     {
+        quiet_ = true;
         const QString text = combo()->currentText();
         combo()->clear();
         for (auto& i : items) combo()->addItem(qs(i));
         combo()->setEditText(text);
+        quiet_ = false;
     }
     std::string text() const override { return combo()->currentText().toStdString(); }
-    void set_text(const std::string& t) override { combo()->setEditText(qs(t)); }
+    void set_text(const std::string& t) override
+    {
+        quiet_ = true;
+        combo()->setEditText(qs(t));
+        quiet_ = false;
+    }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
 
@@ -1528,6 +1550,7 @@ private:
     QComboBox* combo() const { return static_cast<QComboBox*>(w_); }
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
+    bool quiet_ = false;
 };
 
 // QPlainTextEdit: lays out lazily, so long diffs open at once. Styled spans
