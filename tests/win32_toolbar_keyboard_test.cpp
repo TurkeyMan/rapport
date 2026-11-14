@@ -147,7 +147,7 @@ int main(int argc, char** argv)
     win->on_key(
         [&](const rap::key_event& e)
         {
-            if (!e.pressed) return false;
+            if (!e.press) return false;
             switch (e.key)
             {
             case rap::key::left:
