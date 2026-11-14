@@ -14,7 +14,9 @@
 // with its edge the divider's, one with the band under the strip (a toolbar
 // band's: WinUI's LayerOnMicaBaseAltFillColorDefault at its own alpha, premultiplied, its
 // title grey; on screen, that over the backdrop); the line
-// between strip and band elsewhere, under the caption buttons too. Its
+// between strip and band elsewhere, under the caption buttons too; WinUI's
+// separator (TabViewItemSeparator) between two tabs neither current nor
+// hovered, and after the last tab when it's neither, and only there. Its
 // text: the titles in the UI font (Segoe UI Variable Text, else Segoe UI),
 // as heavy as that face is, the current one in WinUI's TextFillColorPrimary,
 // the others TextFillColorSecondary; ClearType on the current tab when the
@@ -188,6 +190,8 @@ constexpr argb light_primary{0x000000, 0xE4}, light_secondary{0x000000, 0x9E}, l
 constexpr argb dark_primary{0xFFFFFF, 0xFF}, dark_secondary{0xFFFFFF, 0xC5}, dark_stroke{0xFFFFFF, 0x18};
 // LayerOnMicaBaseAltFillColorSecondary: a tab not current, hovered.
 constexpr argb light_hover{0x000000, 0x0A}, dark_hover{0xFFFFFF, 0x0F};
+// DividerStrokeColorDefault: WinUI's TabViewItemSeparator, between two tabs.
+constexpr argb light_divider{0x000000, 0x0F}, dark_divider{0xFFFFFF, 0x15};
 
 int channel(DWORD v, int shift)
 {
@@ -219,6 +223,9 @@ struct palette
     // another tab's title; a tab not current hovered (none in high contrast).
     argb title{}, glyph{}, close{}, other{}, hover{};
     argb add{};  // "+" at rest
+    // The separator between two tabs neither current nor hovered, as
+    // printed: premultiplied ARGB over the clear strip, else opaque.
+    DWORD separator_px = 0;
 };
 palette expected(bool hc)
 {
@@ -235,6 +242,8 @@ palette expected(bool hc)
         p.close = p.title;
         p.other = {rgb(GetSysColor(COLOR_WINDOWTEXT)), 255};
         p.current_px = 0xFF000000u | p.current;
+        // WinUI's HighContrast TabViewItemSeparator: SystemColorWindowTextColor.
+        p.separator_px = 0xFF000000u | rgb(GetSysColor(COLOR_WINDOWTEXT));
         return p;
     }
     p.band = g_base ? (g_dark ? 0x191919 : rgb(GetSysColor(COLOR_WINDOW)))
@@ -247,6 +256,13 @@ palette expected(bool hc)
     // "+", as Explorer's: TextFillColorPrimary.
     p.add = g_dark ? dark_primary : light_primary;
     p.hover = g_dark ? dark_hover : light_hover;
+    {
+        const argb d = g_dark ? dark_divider : light_divider;
+        DWORD premultiplied = DWORD(d.a) << 24;
+        for (int shift : {16, 8, 0})
+            premultiplied |= DWORD((channel(d.rgb, shift) * d.a + 127) / 255) << shift;
+        p.separator_px = premultiplied;
+    }
     return p;
 }
 
@@ -566,6 +582,99 @@ void check_pixels(HWND strip, const palette& pal, const std::string& when)
         for (int x = tab.left + px(12, dpi); x < tab.left + px(120, dpi); ++x)
             if (!near_px(p.at(x, y), pal.current_px, 0)) ++ink;
     expect(ink > 10, "the current tab's title is drawn" + at + " (" + str(ink) + " pixels)");
+}
+
+// The separators between tabs, as WinUI's TabView has them
+// (TabViewItemSeparator): a line's width at the boundary of two tabs (the
+// left one's last column), 8 logical px short of the tab's top and bottom
+// (TabViewItemSeparatorMargin, 0,8,0,8), in DividerStrokeColorDefault
+// (translucent, premultiplied over the clear strip; high contrast's
+// SystemColorWindowTextColor); none beside the current tab, nor beside a
+// hovered one (the mouse's move sent as a message, no input). And after
+// the last tab, at its right edge (before "+"), as WinUI's: the last tab's
+// own, none when it's current or hovered. Alpha is current: Beta|Gamma has
+// one, and Gamma's right edge, Alpha|Beta none.
+void check_separators(HWND strip, const palette& pal, const std::string& when)
+{
+    const UINT dpi = GetDpiForWindow(strip);
+    const std::string at = " (" + when + ")";
+    const int line = std::max(1, px(1, dpi));
+    const RECT alpha = part(strip, q_tab, 0), beta = part(strip, q_tab, 1), gamma = part(strip, q_tab, 2);
+    expect(ask(strip, q_current) == 0 && !IsRectEmpty(&gamma) && beta.right == gamma.left &&
+               alpha.right == beta.left,
+           "Alpha current, the three tabs side by side" + at);
+    if (IsRectEmpty(&gamma)) return;
+    const int top = beta.top + px(8, dpi), bottom = beta.bottom - px(8, dpi);
+    // The rows of column x unlike those of `ref` (a column of the strip's
+    // ground beside it), between the tab's top and the line.
+    auto marked = [&](const printed& p, int x, int ref)
+    {
+        std::vector<int> rows;
+        for (int y = beta.top; y < p.h - line; ++y)
+            if (p.at(x, y) != p.at(ref, y)) rows.push_back(y);
+        return rows;
+    };
+    auto span = [](const std::vector<int>& rows)
+    {
+        return rows.empty() ? std::string("none") : str(rows.front()) + ".." + str(rows.back());
+    };
+    // A separator in the last column(s) of the tab ending at `end`.
+    auto present = [&](const printed& p, int end, const std::string& what)
+    {
+        for (int x = end - line; x < end; ++x)
+        {
+            const std::vector<int> rows = marked(p, x, end - px(4, dpi));
+            const bool contiguous = !rows.empty() && rows.back() - rows.front() + 1 == int(rows.size());
+            expect(contiguous && rows.front() == top && rows.back() == bottom - 1,
+                   "a separator " + what + " at x " + str(x) + ", rows " + str(top) + ".." + str(bottom - 1) +
+                       " (8 px in from the tab's top and bottom, scaled)" + at + ": " + span(rows));
+            for (int y : {top, (top + bottom) / 2, bottom - 1})
+                expect(near_px(p.at(x, y), pal.separator_px),
+                       "in DividerStrokeColorDefault, " + argb_hex(pal.separator_px) +
+                           (pal.clear ? " (premultiplied, translucent)" : "") + ", at " + str(x) + "," + str(y) +
+                           at + ": " + argb_hex(p.at(x, y)));
+        }
+    };
+    // None about `end`: its columns either side as they are at row `ref`.
+    auto absent = [&](const printed& p, int end, int ref, const std::string& what)
+    {
+        for (int x = end - line; x < end + line; ++x)
+        {
+            int unlike = 0;
+            for (int y = top; y < bottom; ++y)
+                if (!near_px(p.at(x, y), p.at(x, ref), 2)) ++unlike;
+            expect(unlike == 0, "no separator " + what + ", at x " + str(x) + at + ": " + str(unlike) +
+                                    " rows marked");
+        }
+    };
+    {
+        const printed p = print(strip);
+        // Beta|Gamma: in Beta's last column(s), Gamma's first untouched.
+        present(p, beta.right, "between Beta and Gamma");
+        // After the last tab, Gamma: at its right edge, before "+".
+        present(p, gamma.right, "after the last tab, Gamma, before \"+\"");
+        {
+            const std::vector<int> rows = marked(p, gamma.left, gamma.left + px(4, dpi));
+            expect(rows.empty(), "Gamma's first column past the separator untouched" + at + ": " + span(rows));
+        }
+        // Alpha|Beta: none beside the current tab; the columns there as they
+        // are below the separator's rows (the current tab's side, or its
+        // fill), give or take the corner's antialiasing (a level).
+        absent(p, alpha.right, bottom + px(2, dpi), "beside the current tab, between Alpha and Beta");
+    }
+    // Hovered, Beta or Gamma: none between them; Gamma, none after it.
+    for (const bool first : {true, false})
+    {
+        const RECT& r = first ? beta : gamma;
+        const char* name = first ? "Beta" : "Gamma";
+        const POINT in{r.left + px(60, dpi), (r.top + beta.bottom) / 2};
+        SendMessageW(strip, WM_MOUSEMOVE, 0, MAKELPARAM(in.x, in.y));
+        const printed p = print(strip);  // before the leave TrackMouseEvent may post
+        SendMessageW(strip, WM_MOUSELEAVE, 0, 0);
+        pump(2);
+        absent(p, beta.right, beta.top + px(2, dpi), std::string("between Beta and Gamma, ") + name + " hovered");
+        if (!first) absent(p, gamma.right, beta.top + px(2, dpi), "after the last tab, Gamma, hovered");
+    }
 }
 
 // -- the toolbar band -------------------------------------------------------
@@ -2435,6 +2544,7 @@ int main(int argc, char** argv)
     check_hits(top, strip, "shown");
     check_pixels(strip, expected(hc), hc ? "high contrast" : g_dark ? "dark" : "light");
     check_text(strip, expected(hc), hc ? "high contrast" : g_dark ? "dark" : "light");
+    check_separators(strip, expected(hc), hc ? "high contrast" : g_dark ? "dark" : "light");
     check_rebuild(top, strip);
     check_clipped_prints(strip);
     check_copy_failure(strip, expected(hc));

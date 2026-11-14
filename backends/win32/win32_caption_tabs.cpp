@@ -107,6 +107,8 @@ struct strip_colors
 {
     bool clear = true;
     color empty, band, line, text, hover, pressed, current, current_text;
+    // Between two tabs neither current nor hovered (TabViewItemSeparator).
+    color separator;
     // "+" and the close buttons: their glyph at rest, hovered and pressed,
     // and what's under it hovered and pressed.
     color glyph, glyph_hover, glyph_pressed, button_hover, button_pressed;
@@ -137,6 +139,8 @@ strip_colors colors_for(HWND h, bool transparent)
         c.text = sys_color(COLOR_WINDOWTEXT);
         c.current = sys_color(COLOR_HIGHLIGHT);
         c.current_text = sys_color(COLOR_HIGHLIGHTTEXT);
+        // WinUI's HighContrast TabViewItemSeparator: SystemColorWindowTextColor.
+        c.separator = c.text;
         c.glyph = c.glyph_hover = c.glyph_pressed = c.add = c.text;
         c.button_hover = c.hover;
         c.button_pressed = c.pressed;
@@ -155,6 +159,8 @@ strip_colors colors_for(HWND h, bool transparent)
     color band_fill{};
     c.current = in_band_window(h, band_fill) ? band_fill : c.band;
     c.current_text = p.text_primary;
+    // TabViewItemSeparator: DividerStrokeColorDefault, at its own alpha.
+    c.separator = p.divider;
     // At rest the secondary text colour, as Explorer's; hovered and pressed
     // WinUI's TabView buttons' (TabViewButtonForegroundPointerOver,
     // ...Pressed; TabViewButtonBackgroundPointerOver, ...Pressed).
@@ -846,6 +852,32 @@ struct caption_tabs::impl
         const RECT clip{0, 0, add_rect.left, c.bottom};
         rt->PushAxisAlignedClip(D2D1::RectF(0, 0, float(clip.right), float(clip.bottom)), D2D1_ANTIALIAS_MODE_ALIASED);
         const int up = lifted();
+        // The separators, as WinUI's TabView has them (TabViewItemSeparator):
+        // a line's width at the end of a tab, 8 short of its top and bottom
+        // (TabViewItemSeparatorMargin), translucent over the strip; none
+        // beside the current tab or a hovered one. Each tab has its own, the
+        // last one too (before "+"), as WinUI's TabViewItems do. First,
+        // under every tab: the dragged one (not beside any here, its place
+        // along the strip left empty) clears its footprint, separators and
+        // all, as it's drawn.
+        for (int i = 0; i < n; ++i)
+        {
+            const RECT& r = tab_rects[size_t(i)];
+            auto quiet = [&](int k)
+            {
+                return k != self.current_ && k != up &&
+                       !(hot.what != part::none && hot.what != part::add && hot.index == k);
+            };
+            if (IsRectEmpty(&r) || !quiet(i)) continue;
+            // The next one, if there is one in sight: against this one, and
+            // neither current, dragged nor hovered.
+            if (i + 1 < n && !IsRectEmpty(&tab_rects[size_t(i + 1)]) &&
+                (r.right != tab_rects[size_t(i + 1)].left || !quiet(i + 1)))
+                continue;
+            if (i + 1 < n && i + 1 == up) continue;
+            const int inset = px(8);
+            fill(RECT{r.right - line, r.top + inset, r.right, r.bottom - inset}, colors.separator);
+        }
         for (int k = 0; k < n; ++k)
         {
             // The dragged tab last, over the others.
