@@ -314,7 +314,7 @@ void paint_native_padding(HWND h, HDC dc)
 
 void paint_nonclient(HWND h, HDC dc)
 {
-    if (high_contrast())
+    if (!faces_on())
         paint_native_padding(h, dc);
     else
         paint_frame(h, dc);
@@ -327,7 +327,7 @@ void paint_nonclient(HWND h, HDC dc)
 // (an empty field focused) is hidden while BeginPaint's painting.
 bool paints_client(HWND h)
 {
-    return !high_contrast() && (GetWindowTextLengthW(h) == 0 || !IsWindowEnabled(h));
+    return faces_on() && (GetWindowTextLengthW(h) == 0 || !IsWindowEnabled(h));
 }
 
 void paint_client(HWND h, HDC dc)
@@ -382,7 +382,7 @@ void frame_changed(HWND h)
 void apply_style(HWND h)
 {
     const LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-    const LONG_PTR want = high_contrast() ? ex | WS_EX_CLIENTEDGE : ex & ~WS_EX_CLIENTEDGE;
+    const LONG_PTR want = !faces_on() ? ex | WS_EX_CLIENTEDGE : ex & ~WS_EX_CLIENTEDGE;
     if (want != ex) SetWindowLongPtrW(h, GWL_EXSTYLE, want);
 }
 
@@ -390,7 +390,7 @@ LRESULT CALLBACK field_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
 {
     auto* st = reinterpret_cast<field_state*>(data);
     if (msg == band_field_query_message() && msg)
-        return 1 | (high_contrast() ? 0 : 2) | (st->hot ? 4 : 0) | (st->focused ? 8 : 0);
+        return 1 | (!faces_on() ? 0 : 2) | (st->hot ? 4 : 0) | (st->focused ? 8 : 0);
     switch (msg)
     {
     case WM_NCCALCSIZE:
@@ -400,7 +400,7 @@ LRESULT CALLBACK field_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
         const UINT dpi = dpi_of(h);
         LRESULT result = 0;
         int margin = 0;
-        if (high_contrast())
+        if (!faces_on())
         {
             // The native edge first, then the text centred inside it.
             result = DefSubclassProc(h, msg, wp, lp);
@@ -423,7 +423,7 @@ LRESULT CALLBACK field_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
     }
     case WM_NCPAINT:
     {
-        if (high_contrast()) DefSubclassProc(h, msg, wp, lp);
+        if (!faces_on()) DefSubclassProc(h, msg, wp, lp);
         if (HDC dc = GetWindowDC(h))
         {
             paint_nonclient(h, dc);
@@ -547,6 +547,31 @@ UINT band_field_query_message()
 namespace
 {
 int g_density_for_tests = -1;
+control_style g_style = control_style::automatic;
+bool g_compact = false;
+}  // namespace
+
+void set_control_style(control_style style, rap::density density)
+{
+    g_style = style;
+    g_compact = density == rap::density::compact;
+}
+
+bool fluent_controls()
+{
+    // No Windows before 11 had WinUI's look on its own controls.
+    static const bool eleven = windows_build() >= 22000;
+    return eleven && g_style != control_style::native;
+}
+
+bool faces_on()
+{
+    return fluent_controls() && !high_contrast();
+}
+
+const band_density* face_density()
+{
+    return fluent_controls() ? &band_density_now() : nullptr;
 }
 
 const band_density& band_density_now()
@@ -557,7 +582,8 @@ const band_density& band_density_now()
         const DWORD n = GetEnvironmentVariableA("RAPPORT_DENSITY", v, sizeof v);
         return n > 0 && n < sizeof v && !_stricmp(v, "compact");
     }();
-    const bool compact = g_density_for_tests >= 0 ? g_density_for_tests == 1 : from_env;
+    const bool compact =
+        g_density_for_tests >= 0 ? g_density_for_tests == 1 : from_env || g_compact;
     return compact ? compact_band : standard_band;
 }
 
@@ -614,7 +640,7 @@ bool is_band_field(HWND edit)
 
 bool band_field_drawn(HWND edit)
 {
-    return state_of(edit) && !high_contrast();
+    return state_of(edit) && faces_on();
 }
 
 void refresh_band_field(HWND edit)
@@ -648,7 +674,7 @@ int band_control_height(HFONT font, UINT dpi, const band_density& d)
 bool band_field_ctlcolor(HWND control, HDC dc, LRESULT& result)
 {
     field_state* st = state_of(control);
-    if (!st || high_contrast()) return false;
+    if (!st || !faces_on()) return false;
     const look l = look_of(control, *st);
     SetTextColor(dc, color_ref(l.text));
     SetBkColor(dc, color_ref(l.face));
@@ -659,7 +685,7 @@ bool band_field_ctlcolor(HWND control, HDC dc, LRESULT& result)
 bool band_field_button_colors(HWND edit, bool pressed, bool hot, color& fill, color& ink)
 {
     field_state* st = state_of(edit);
-    if (!st || high_contrast()) return false;
+    if (!st || !faces_on()) return false;
     const look l = look_of(edit, *st);
     fill = pressed ? over(l.colors->button_pressed, l.face) : hot ? over(l.colors->button_hover, l.face) : l.face;
     ink = l.text;

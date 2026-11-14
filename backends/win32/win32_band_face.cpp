@@ -261,7 +261,7 @@ LRESULT CALLBACK painted_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
         st->painter->band_resized(h);
         return r;
     }
-    if (high_contrast()) return DefSubclassProc(h, msg, wp, lp);
+    if (!faces_on()) return DefSubclassProc(h, msg, wp, lp);
     LRESULT result = 0;
     if (st->painter && st->painter->band_message(h, msg, wp, lp, result)) return result;
     switch (msg)

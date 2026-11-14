@@ -30,8 +30,9 @@
 // its text centred. Shown only (UI Automation leaves hidden windows out):
 // the field still an Edit to UIA, with its name and value.
 //
-// Unchanged elsewhere: a window without a base surface keeps its plain
-// fields and toolbar, and before Windows 11 there's no band.
+// Elsewhere: a window without a base surface has no band, its fields
+// WinUI's where the app's controls are fluent (look_options::controls,
+// automatic: Windows 11), else plain; before Windows 11 there's no band.
 //   rapport-win32-band-fields-test
 #include <rapport/rapport.h>
 #ifndef NOMINMAX
@@ -1179,13 +1180,32 @@ int main(int argc, char** argv)
     pump();
     if (HWND p = top_of(plain_title))
     {
-        bool none = true;
-        for (HWND f : edits_of(p))
-            none = none && field_state(f) == 0 && (GetWindowLongPtrW(f, GWL_EXSTYLE) & WS_EX_CLIENTEDGE);
-        expect(none, "without a base surface, its fields plain EDITs with their native edge");
+        // Out of the band, the app's controls are WinUI's where they're
+        // fluent (look_options::controls, automatic: Windows 11), at the
+        // density's height (drawn but under high contrast); else plain EDITs
+        // with their native edge, at their own height.
+        const bool fluent = build >= 22000;
         RECT r = rect_in(p, edits_of(p).front());
         const UINT dpi = GetDpiForWindow(p);
-        expect(r.bottom - r.top < px(32, dpi), "at their own height: " + str(r.bottom - r.top));
+        if (fluent)
+        {
+            bool faced = true;
+            for (HWND f : edits_of(p))
+                faced = faced && (field_state(f) & 3) == (high_contrast() ? 1 : 3);
+            expect(faced, "without a base surface, fluent, its fields WinUI's still");
+            expect(r.bottom - r.top == px(32, dpi),
+                   "at the density's height, " + str(px(32, dpi)) + ": " + str(r.bottom - r.top));
+        }
+        else
+        {
+            bool none = true;
+            for (HWND f : edits_of(p))
+                none = none && field_state(f) == 0 &&
+                       (GetWindowLongPtrW(f, GWL_EXSTYLE) & WS_EX_CLIENTEDGE);
+            expect(none,
+                   "without a base surface, native, its fields plain EDITs with their native edge");
+            expect(r.bottom - r.top < px(32, dpi), "at their own height: " + str(r.bottom - r.top));
+        }
     }
     else
         expect(false, "the window without a base surface");

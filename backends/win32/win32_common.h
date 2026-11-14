@@ -351,10 +351,11 @@ public:
     // Width beyond its natural size that it would show to advantage, given
     // from a row's spare space: an ellipsized label's full text.
     virtual long wants_wider() const { return 0; }
-    // In the toolbar band's row (a toolbar or a row of controls), at its
-    // density, or out of it (null; win32_band_field.h): its metrics and its
-    // look. Set before it's measured.
-    virtual void set_in_band(const band_density*) {}
+    // Its density (win32_band_field.h): in the toolbar band's row (`row`: a
+    // toolbar or a row of controls), the band's; out of it, the app's where
+    // its controls are fluent (face_density), else none (null): its metrics
+    // and its look. Set before it's measured.
+    virtual void set_in_band(const band_density*, bool /*row*/) {}
 
     bool visible = true;
     int stretch = 0;
