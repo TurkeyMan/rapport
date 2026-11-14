@@ -79,21 +79,22 @@ public:
     // The drag let go: the tab now at `index` was moved there from elsewhere.
     virtual void caption_reordered(int index) = 0;
     // A tab dragged past the threshold, the pointer at `screen`: what it does
-    // there, where it may leave the strip (tearing off, dropping in another
-    // window). The strip goes on as it says; `gone` means the owner's ended
-    // the drag (forget_drag) and taken it on: the strip may be destroyed.
+    // there, where it may leave the strip (out to be torn off, or over
+    // another window's strip, the owner's drag image following the pointer).
+    // The strip goes on as it says.
     enum class drag_there
     {
         along,  // along the strip, as ever
-        away,   // over another window's strip: put back where it was, and held
-        gone,
+        away,   // out of it: put back where it was, its place left empty
     };
     virtual drag_there caption_drag_at(int index, POINT screen) = 0;
-    // Let go while away: the owner drops it where it's over (the strip does
-    // nothing more; it may be destroyed).
-    virtual void caption_drop(int index) = 0;
-    // The drag cancelled (Escape, the capture lost, the app's change).
-    virtual void caption_drag_cancelled() = 0;
+    // Let go while away, at `screen`: the owner drops it or tears it off
+    // there (the strip's drag is over, and it does nothing more; it may be
+    // destroyed).
+    virtual void caption_drop(int index, POINT screen) = 0;
+    // The drag over otherwise: let go along the strip, or cancelled (Escape,
+    // the capture lost, the app's change).
+    virtual void caption_drag_ended() = 0;
 
 protected:
     ~caption_tabs_owner() = default;
@@ -133,15 +134,15 @@ public:
     // A tab pressed and maybe being dragged (see caption_tabs::impl::drag).
     bool dragging() const;
     // That drag's tab put back where it was, the owner told of its move
-    // back (caption_moved) and nothing else; the mouse released.
+    // back (caption_moved) and that it's over (caption_drag_ended), and
+    // nothing else; the mouse released.
     void cancel_drag();
-    // Tearing off and dropping (see caption_drag_at). The dragged tab put
-    // back where it was, the owner told of its move back, the drag held.
-    void put_back_drag();
-    // The drag ended without a word: the mouse released.
-    void forget_drag();
     // Where the pointer holds the dragged tab, from the tab's top-left.
     POINT drag_grab() const;
+    // Tab `index` as the strip draws it at rest, at its DPI, for a drag
+    // image: a 32-bit top-down DIB `size` px, premultiplied, made opaque on
+    // the window's colour; null if it's not in sight.
+    HBITMAP tab_image(int index, SIZE& size);
     // Where a tab dropped at `p` (client) would land: 0 to count().
     int drop_index_at(POINT p) const;
     // A mark where a dropped tab would land (-1: none).
