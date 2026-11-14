@@ -329,6 +329,10 @@ public:
     virtual bool draw_item(DRAWITEMSTRUCT*) { return false; }
     // The desktop's colours or dark mode changed (after theme_control).
     virtual void theme_changed() {}
+    // The UI fonts were made anew (renew_ui_fonts: a new text size), and
+    // every control given its new one (WM_SETFONT): what else was measured
+    // from the old, measured again. The window lays out after.
+    virtual void fonts_changed() {}
 };
 
 std::unordered_map<HWND, handler*>& handlers()
@@ -2746,6 +2750,9 @@ public:
         place_buttons();
         win_.relayout();
     }
+    // A band field's font is its own size (field_font, from the text size):
+    // it's measured again, as for a new theme.
+    void fonts_changed() override { theme_changed(); }
     void set_placeholder(const std::string& p) override
     {
         SendMessageW(h_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(wide(p).c_str()));
@@ -6032,6 +6039,11 @@ private:
     IDWriteTextFormat* text_format(const text_style& st, align align)
     {
         const int key = (st.bold ? 1 : 0) | (st.italic ? 2 : 0) | (st.monospace ? 4 : 0) | (int(align) << 3);
+        if (formats_generation_ != ui_fonts_generation())  // made from the old UI font: made again
+        {
+            formats_.clear();
+            formats_generation_ = ui_fonts_generation();
+        }
         com<IDWriteTextFormat>& f = formats_[key];
         if (!f)
         {
@@ -7135,6 +7147,7 @@ private:
     int header_images_w_ = 0;
     std::array<com<ID2D1Bitmap>, 3> check_bitmaps_;       // per check_state, for row_target_
     std::map<int, com<IDWriteTextFormat>> formats_;  // by style and alignment
+    unsigned formats_generation_ = ui_fonts_generation();  // the UI fonts formats_ was made from
     bool soft_ = false;
     int hot_ = -1;  // the row under the pointer
     int sort_column_ = -1;
@@ -7450,6 +7463,12 @@ public:
         }
         SendMessageW(h_, LB_SETITEMHEIGHT, 0, font_metrics(win.dpi()).cy + px(12));
         SendMessageW(h_, LB_SETCURSEL, 0, 0);
+    }
+    // Its rows as tall as the new font's line, as they were made for the old.
+    void fonts_changed() override
+    {
+        SendMessageW(h_, LB_SETITEMHEIGHT, 0, font_metrics(win_.dpi()).cy + px(12));
+        InvalidateRect(h_, nullptr, TRUE);
     }
     std::vector<item*> pages;
     std::vector<std::function<node()>> lazy;
@@ -10940,6 +10959,82 @@ public:
         RedrawWindow(hwnd_, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
     }
+    // The desktop's message font or text size changed (Settings >
+    // Accessibility > Text size, while windows are open): the UI fonts made
+    // again, and every window of the thread given them. Once for all the
+    // windows, by the first to hear of it (the rest find nothing changed),
+    // as the old fonts are freed only once every control has its new one.
+    static void renew_fonts()
+    {
+        if (!renew_ui_fonts()) return;
+        ++g_layout_pass;  // new fonts, new sizes
+        // Every window of the thread, its controls and theirs (a combo box's
+        // list, a tooltip) as well as rapport's own windows.
+        auto every_window = []
+        {
+            std::vector<HWND> all;
+            EnumThreadWindows(
+                GetCurrentThreadId(),
+                [](HWND top, LPARAM p) -> BOOL
+                {
+                    auto& all = *reinterpret_cast<std::vector<HWND>*>(p);
+                    all.push_back(top);
+                    EnumChildWindows(
+                        top,
+                        [](HWND c, LPARAM p) -> BOOL
+                        {
+                            reinterpret_cast<std::vector<HWND>*>(p)->push_back(c);
+                            return TRUE;
+                        },
+                        p);
+                    return TRUE;
+                },
+                reinterpret_cast<LPARAM>(&all));
+            return all;
+        };
+        // The font each was given, as it was given: a glass control's (on
+        // the band, it has the grayscale copy), a band field's or a mono
+        // text view's, each the same kind again (a band field's subclass
+        // makes it its own size from the new text size).
+        auto given = [](HWND c)
+        {
+            HFONT f = glass_given_font(c);
+            return f ? f : reinterpret_cast<HFONT>(SendMessageW(c, WM_GETFONT, 0, 0));
+        };
+        for (HWND c : every_window())
+        {
+            HFONT f = IsWindow(c) ? renewed_ui_font(given(c)) : nullptr;
+            if (f) SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(f), TRUE);
+        }
+        for (window_impl* w : windows()) w->fonts_renewed();
+        // Only then the old fonts freed, those no window has any more.
+        std::set<HFONT> in_use;
+        for (HWND c : every_window())
+        {
+            in_use.insert(reinterpret_cast<HFONT>(SendMessageW(c, WM_GETFONT, 0, 0)));
+            in_use.insert(glass_given_font(c));
+        }
+        free_unused_grayscale_fonts(in_use);
+        free_retired_ui_fonts(in_use);
+    }
+    // This window's part, once its controls have their new fonts: what was
+    // measured from the old measured again, the caption's tabs' text made
+    // again, and all laid out and drawn again (its natural and least sizes
+    // with it).
+    void fonts_renewed()
+    {
+        EnumChildWindows(
+            hwnd_,
+            [](HWND c, LPARAM) -> BOOL
+            {
+                if (handler* h = handler_of(c)) h->fonts_changed();
+                return TRUE;
+            },
+            0);
+        if (doc_tabs) doc_tabs->settings_changed();
+        relayout();
+        RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
+    }
     bool dark_ = false;  // the mode the frame and controls were last styled for
     std::array<color, theme_color_count> palette_{};  // the colours they were last given
 
@@ -11953,6 +12048,9 @@ private:
             case WM_SYSCOLORCHANGE:
             case WM_DWMCOLORIZATIONCOLORCHANGED:
             case WM_THEMECHANGED:
+                // A new text size (SPI_SETNONCLIENTMETRICS, "WindowMetrics"
+                // and others): the fonts made again if it changed them.
+                if (msg == WM_SETTINGCHANGE) renew_fonts();
                 forget_theme_colors();
                 self->retheme();
                 // The tabs in the caption: its frame for high contrast, or

@@ -548,6 +548,19 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-band-fields-transitions PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
 
+    # A new text size while windows are open (WM_SETTINGCHANGE, through the
+    # text size and message font test hooks: static builds; a plugin build
+    # skips): never-shown windows.
+    add_executable(rapport-win32-text-size-test win32_text_size_test.cpp)
+    target_link_libraries(rapport-win32-text-size-test PRIVATE rapport::rapport user32 gdi32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-text-size-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-text-size-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-text-size-test rapport_win32)
+    add_test(NAME win32-text-size COMMAND rapport-win32-text-size-test)
+    set_tests_properties(win32-text-size PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     # The document tabs reordered by dragging and by the keys, in both strips:
     # never-shown windows, given the mouse's messages and the keys.
     add_executable(rapport-win32-document-tabs-reorder-test win32_document_tabs_reorder_test.cpp)

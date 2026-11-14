@@ -131,15 +131,22 @@ bool on_glass(HWND h)
 }
 
 // A font's grayscale copy (ANTIALIASED_QUALITY), one per face, size and
-// style, kept for the process's life (one per DPI, in practice).
+// style, kept until no control has it after the UI fonts are renewed
+// (free_unused_grayscale_fonts; one per DPI, in practice).
+struct grayscale_font
+{
+    LOGFONTW from;
+    HFONT font;
+};
+std::vector<grayscale_font>& grayscale_fonts()
+{
+    static std::vector<grayscale_font> fonts;
+    return fonts;
+}
 HFONT grayscale(HFONT f)
 {
-    struct made
-    {
-        LOGFONTW from;
-        HFONT font;
-    };
-    static std::vector<made> fonts;
+    using made = grayscale_font;
+    std::vector<made>& fonts = grayscale_fonts();
     LOGFONTW lf{};
     if (!f || !GetObjectW(f, sizeof lf, &lf) || lf.lfQuality == ANTIALIASED_QUALITY) return f;
     for (const made& m : fonts)
@@ -606,6 +613,25 @@ void glass_band_controls(HWND top)
 {
     enum_state s{top};
     EnumChildWindows(top, glass_child, reinterpret_cast<LPARAM>(&s));
+}
+
+HFONT glass_given_font(HWND c)
+{
+    DWORD_PTR data = 0;
+    if (!GetWindowSubclass(c, glass_proc, glass_id, &data)) return nullptr;
+    const auto* g = reinterpret_cast<const glass*>(data);
+    return g->fonts && g->alive ? g->given : nullptr;
+}
+
+void free_unused_grayscale_fonts(const std::set<HFONT>& in_use)
+{
+    std::erase_if(grayscale_fonts(),
+                  [&](const grayscale_font& m)
+                  {
+                      if (in_use.count(m.font)) return false;
+                      DeleteObject(m.font);
+                      return true;
+                  });
 }
 
 bool glass_matte(color& matte)
