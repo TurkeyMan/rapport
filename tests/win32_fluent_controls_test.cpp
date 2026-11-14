@@ -255,7 +255,7 @@ int main(int argc, char** argv)
                    menu_button{"master"}.on_menu([] { return rap::menu{}; }),
                    drop_down{{"Author Email", "Subject"}, 0}, combo{{"one", "two"}, "one"},
                    tool_button{rap::icon::named("go-up"), "Pull"}, label{"Label"}, check{"Check"}},
-              label{"content"}.stretch()}}}
+              label{"content"}.stretch(), buttons{ok("Go ahead"), cancel("Stop")}}}}
                                  .size(1000_px, 300_px));
     pump();
     HWND top = top_of(title);
@@ -363,6 +363,35 @@ int main(int argc, char** argv)
             else
                 std::printf("     the accent palette unknown here: the default button's fill not "
                             "checked\n");
+            // A dialog's row (layout::buttons): its OK the default
+            // (BS_DEFPUSHBUTTON) in the accent, Cancel beside it plain; the
+            // default moved to Cancel (as the dialog manager moves it to a
+            // focused push button) and back.
+            HWND go = child(top, L"Button", L"Go ahead"), stop = child(top, L"Button", L"Stop");
+            expect(go && stop, "a dialog's row: OK and Cancel");
+            if (go && stop && accent != 0xFFFFFFFF)
+            {
+                auto fill_of = [](HWND b)
+                {
+                    const printed p = print(b);
+                    return p.at(3, p.h / 2);
+                };
+                const DWORD plain = over(fill, ground_of(top, stop));
+                expect((GetWindowLongPtrW(go, GWL_STYLE) & BS_TYPEMASK) == BS_DEFPUSHBUTTON,
+                       "the row's OK the default push button");
+                expect(fill_of(go) == accent && fill_of(stop) == plain,
+                       "the row's OK the accent, " + hex(accent) + ", Cancel " + hex(plain) + ": " +
+                           hex(fill_of(go)) + ", " + hex(fill_of(stop)));
+                SendMessageW(go, BM_SETSTYLE, BS_PUSHBUTTON, TRUE);
+                SendMessageW(stop, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
+                expect(fill_of(stop) == accent && fill_of(go) == plain,
+                       "the default moved to Cancel, the accent with it: " + hex(fill_of(stop)) +
+                           ", " + hex(fill_of(go)));
+                SendMessageW(stop, BM_SETSTYLE, BS_PUSHBUTTON, TRUE);
+                SendMessageW(go, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
+                expect(fill_of(go) == accent && fill_of(stop) == plain,
+                       "and back to OK: " + hex(fill_of(go)) + ", " + hex(fill_of(stop)));
+            }
             // An entry's frame: the band field's, drawn (the test tools' message).
             static const UINT query = RegisterWindowMessageW(L"rapport-band-field");
             expect((SendMessageW(entry_h, query, 0, 0) & 3) == 3,
