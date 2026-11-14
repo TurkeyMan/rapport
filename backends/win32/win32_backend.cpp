@@ -3070,43 +3070,60 @@ public:
         if (lines) SendMessageW(h, EM_LINESCROLL, 0, -lines);
         return 0;
     }
-    // A zoom as RichEdit takes it: num/den reduced, within 1/64..64, 0/0
-    // for none (1).
-    static void zoom_to(HWND h, long long num, long long den)
+    // A fraction, reduced (0/0 and the like: 1/1).
+    using ratio = std::pair<long long, long long>;
+    static ratio reduced(long long num, long long den)
     {
-        if (num <= 0 || den <= 0) num = den = 1;
+        if (num <= 0 || den <= 0) return {1, 1};
         const long long g = std::gcd(num, den);
-        num /= g;
-        den /= g;
-        while (num > 0x7fff || den > 0x7fff)  // small enough for RichEdit's arithmetic
+        return {num / g, den / g};
+    }
+    // The zoom (Ctrl+wheel and the text size's) is three fractions: the
+    // user's own, the text size's (the message font's height now over
+    // base_px_), and what EM_SETZOOM last took (0/0: none). RichEdit takes
+    // a ratio strictly between 1/64 and 64 (64/1 and 1/64 it refuses,
+    // 6399/100 and 100/6399 it takes), each part at most 65535.
+    //
+    // The user's part, as it is now: if the zoom isn't what was last
+    // applied, the user has zoomed since, and theirs is what's shown over
+    // the text size's; otherwise it's as kept, even where what was applied
+    // was clipped (50 times, at 150%, shown at 63.99, is 50 again at 100%).
+    void read_user_zoom()
+    {
+        int num = 0, den = 0;
+        SendMessageW(h_, EM_GETZOOM, reinterpret_cast<WPARAM>(&num), reinterpret_cast<LPARAM>(&den));
+        if (num == zoom_applied_.first && den == zoom_applied_.second) return;
+        const ratio shown = num > 0 && den > 0 ? ratio{num, den} : ratio{1, 1};
+        zoom_user_ = reduced(shown.first * zoom_text_.second, shown.second * zoom_text_.first);
+    }
+    // The zoom the user's part times the text size's: clamped into what
+    // RichEdit takes, 0/0 for 1; zoom_applied_ what it took (on a refusal,
+    // the zoom and zoom_applied_ as they were, and the next change aims at the
+    // whole again).
+    void apply_zoom()
+    {
+        auto [num, den] = reduced(zoom_user_.first * zoom_text_.first, zoom_user_.second * zoom_text_.second);
+        if (num >= 64 * den)
+            num = 6399, den = 100;
+        else if (den >= 64 * num)
+            num = 100, den = 6399;
+        while (num > 65535 || den > 65535)  // inside the range, in RichEdit's parts
         {
             num = std::max(1LL, (num + 1) / 2);
             den = std::max(1LL, (den + 1) / 2);
         }
-        num = std::min(num, 64 * den);
-        den = std::min(den, 64 * num);
-        if (num == den) num = den = 0;
-        SendMessageW(h, EM_SETZOOM, WPARAM(num), LPARAM(den));
-    }
-    // The zoom the text is shown at, and the user's own part of it
-    // (Ctrl+wheel): what's shown over the text size's part, last applied
-    // as text_num_/text_den_.
-    std::pair<long long, long long> user_zoom() const
-    {
-        int num = 0, den = 0;
-        SendMessageW(h_, EM_GETZOOM, reinterpret_cast<WPARAM>(&num), reinterpret_cast<LPARAM>(&den));
-        if (num <= 0 || den <= 0) num = den = 1;  // 0/0: none
-        return {1LL * num * text_den_, 1LL * den * text_num_};
+        if (num == den) num = den = 0;  // none
+        if (SendMessageW(h_, EM_SETZOOM, WPARAM(num), LPARAM(den))) zoom_applied_ = {int(num), int(den)};
     }
     // A font for a new DPI (refont): RichEdit makes all its text that font,
     // at the message font's size now, which is then the size the text is
-    // made at; the text size's zoom goes, the user's stays.
+    // made at; the text size's part of the zoom goes, the user's stays.
     void rebased()
     {
-        const auto [num, den] = user_zoom();
+        read_user_zoom();
         base_px_ = std::max(1L, std::lround(ui_font_size_dip()));
-        text_num_ = text_den_ = 1;
-        zoom_to(h_, num, den);
+        zoom_text_ = {1, 1};
+        apply_zoom();
     }
     std::string text() const override
     {
@@ -3182,12 +3199,11 @@ public:
     // the zoom shown is the user's times the text size's.
     void fonts_changed() override
     {
-        const long now = std::max(1L, std::lround(ui_font_size_dip()));
-        if (1LL * now * text_den_ == 1LL * base_px_ * text_num_) return;  // the ratio it has
-        const auto [user_num, user_den] = user_zoom();
-        text_num_ = now;
-        text_den_ = base_px_;
-        zoom_to(h_, user_num * text_num_, user_den * text_den_);
+        const ratio now = reduced(std::max(1L, std::lround(ui_font_size_dip())), base_px_);
+        if (now == zoom_text_) return;
+        read_user_zoom();
+        zoom_text_ = now;
+        apply_zoom();
     }
 
 private:
@@ -3395,10 +3411,11 @@ private:
     }
 
     // The message font's height (px at 96 dpi) the text is made at: its
-    // formats stay at it. And the text size's part of the zoom, as last
-    // applied (now's height over that).
+    // formats stay at it. The zoom's parts (read_user_zoom, apply_zoom):
+    // the user's, the text size's, and what RichEdit last took.
     long base_px_ = std::max(1L, std::lround(ui_font_size_dip()));
-    long long text_num_ = 1, text_den_ = 1;
+    std::pair<long long, long long> zoom_user_{1, 1}, zoom_text_{1, 1};
+    std::pair<int, int> zoom_applied_{0, 0};
     int wheel_ = 0;  // wheel delta × lines per notch not yet scrolled
     bool mono_;
     bool quiet_ = false;

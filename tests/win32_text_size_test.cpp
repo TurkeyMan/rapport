@@ -614,6 +614,47 @@ int main(int argc, char** argv)
            "the sizes as they were");
     expect(rap::win32::retired_ui_font_count() == 0, "the old fonts freed again");
 
+    // RichEdit's zoom takes a ratio strictly between 1/64 and 64: a refused
+    // one returns 0 and leaves the zoom as it was.
+    expect(SendMessageW(plain.rich, EM_SETZOOM, 64, 1) == 0 && zoom_of(plain.rich) == std::pair{5, 4},
+           "EM_SETZOOM refuses 64/1, the zoom left 5/4");
+    expect(SendMessageW(plain.rich, EM_SETZOOM, 1, 64) == 0 && zoom_of(plain.rich) == std::pair{5, 4},
+           "and 1/64");
+    // The text size at a message font of `px` (12 its base).
+    auto text_at = [&](float px)
+    {
+        rap::win32::set_text_scale_for_tests(px / 12.f);
+        rap::win32::set_message_font_size_for_tests(px);
+        setting_changed(top);
+    };
+    // The user at 50 times: at 150%, 75 wanted, as far as RichEdit goes
+    // (6399/100); at 100%, the user's 50 exactly.
+    expect(SendMessageW(plain.rich, EM_SETZOOM, 50, 1) != 0, "the user's zoom 50/1 taken");
+    text_at(18);
+    expect_zoom(plain.rich, 6399, 100, "at 150%, the user's 50 times 3/2 clamped:");
+    text_at(12);
+    expect_zoom(plain.rich, 50, 1, "at 100%, the user's again:");
+    // At the bottom: the user at 1/50, the text 2/3 (8 px).
+    expect(SendMessageW(plain.rich, EM_SETZOOM, 1, 50) != 0, "the user's zoom 1/50 taken");
+    text_at(8);
+    expect_zoom(plain.rich, 100, 6399, "at 2/3, the user's 1/50 times 2/3 clamped:");
+    text_at(12);
+    expect_zoom(plain.rich, 1, 50, "at 100%, the user's again:");
+    // The user zooming between two text size changes, while clamped: theirs
+    // is what's shown over the text size's (40 over 3/2), and stays.
+    expect(SendMessageW(plain.rich, EM_SETZOOM, 50, 1) != 0, "the user's zoom 50/1 again");
+    text_at(18);
+    expect_zoom(plain.rich, 6399, 100, "at 150%, clamped:");
+    expect(SendMessageW(plain.rich, EM_SETZOOM, 40, 1) != 0, "the user zooms to 40/1 meanwhile");
+    text_at(12);
+    expect_zoom(plain.rich, 80, 3, "at 100%, the user's 40 over 3/2:");
+    text_at(15);
+    expect_zoom(plain.rich, 100, 3, "at 125%, 80/3 times 5/4:");
+    text_at(12);
+    expect_zoom(plain.rich, 80, 3, "at 100% again:");
+    // Back to the user's 5/4.
+    expect(SendMessageW(plain.rich, EM_SETZOOM, 5, 4) != 0, "the user's zoom 5/4 again");
+
     // A new DPI while the text size is 150%: refont gives the RichEdit the
     // new DPI's font, at the message font's size then, which is what its
     // text is made at from then on; the text size's part of the zoom goes,
