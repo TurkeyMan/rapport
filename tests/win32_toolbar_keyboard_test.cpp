@@ -78,30 +78,28 @@ std::vector<HWND> strips()
 
 bool tab_stop(HWND h) { return (GetWindowLongPtrW(h, GWL_STYLE) & WS_TABSTOP) != 0; }
 
+// Shift held (for Shift+Tab) or not, as the loop's GetKeyState sees it
+// while it handles the keys posted after.
+void hold_shift(bool on)
+{
+    BYTE state[256] = {};
+    GetKeyboardState(state);
+    state[VK_SHIFT] = on ? 0x80 : 0;
+    SetKeyboardState(state);
+}
+
 // A key as typed: down (with its character, as TranslateMessage would make
 // it, for Space and Enter) and up, posted to the focus, through the loop.
+// Shift is let go before the next step (each step starts so).
 void type_key(UINT vk, bool shift = false)
 {
     HWND f = GetFocus();
-    BYTE state[256] = {};
-    GetKeyboardState(state);
-    BYTE was = state[VK_SHIFT];
-    if (shift)
-    {
-        state[VK_SHIFT] = 0x80;
-        SetKeyboardState(state);
-    }
+    hold_shift(shift);
     const LPARAM scan = LPARAM(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)) << 16;
     PostMessageW(f, WM_KEYDOWN, vk, scan | 1);
     if (vk == VK_SPACE) PostMessageW(f, WM_CHAR, L' ', scan | 1);
     if (vk == VK_RETURN) PostMessageW(f, WM_CHAR, L'\r', scan | 1);
     PostMessageW(f, WM_KEYUP, vk, scan | 0xC0000001);
-    if (shift)
-    {
-        // Put back once these are handled: a posted step after them.
-        PostMessageW(f, WM_NULL, 0, 0);
-        state[VK_SHIFT] = was;
-    }
 }
 
 }  // namespace
@@ -177,6 +175,7 @@ int main(int argc, char** argv)
             (*ui)->quit(fails ? 1 : 0);
             return;
         }
+        hold_shift(false);
         steps[at++]();
         (*ui)->post([&] { next(); });
     };
