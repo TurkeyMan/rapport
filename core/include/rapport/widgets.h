@@ -788,7 +788,7 @@ public:
     // The toolkit's frame round it, or none (spec::entry::frame).
     virtual void set_frame(bool) {}
     // The user's changes only (typed, pasted, cleared with the clear
-    // button), as for every widget's on_changed: never the app's setters.
+    // button): never set_text's.
     virtual void on_changed(std::function<void(const std::string&)>) = 0;
     virtual void on_activate(std::function<void()>) = 0;  // Enter pressed
 };

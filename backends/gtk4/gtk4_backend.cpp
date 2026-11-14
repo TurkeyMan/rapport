@@ -2000,7 +2000,7 @@ public:
             {
                 auto* self = static_cast<entry_box_impl*>(p);
                 self->update_clear();
-                if (self->changed_) self->changed_(gtk_editable_get_text(e));
+                if (!self->quiet_ && self->changed_) self->changed_(gtk_editable_get_text(e));
             },
             this);
         connect(
@@ -2014,9 +2014,12 @@ public:
     }
 
     std::string text() const override { return gtk_editable_get_text(GTK_EDITABLE(w_)); }
+    // The app's change, not the user's: on_changed isn't fired.
     void set_text(const std::string& t) override
     {
+        quiet_ = true;
         gtk_editable_set_text(GTK_EDITABLE(w_), t.c_str());
+        quiet_ = false;
     }
     void set_read_only(bool v) override { gtk_editable_set_editable(GTK_EDITABLE(w_), !v); }
     void set_frame(bool v) override { set_entry_frame(outer_, v); }
@@ -2038,6 +2041,7 @@ private:
     GtkWidget* clear_ = nullptr;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
+    bool quiet_ = false;
 };
 
 class entry_impl : public widget_base<rap::entry>
@@ -2129,7 +2133,14 @@ public:
             +[](GObject*, GParamSpec*, gpointer p)
             {
                 auto* self = static_cast<drop_down_impl*>(p);
-                if (!self->quiet_ && self->changed_) self->changed_(self->current());
+                // Only a selection that's new since the last reported or
+                // set: GObject doesn't recurse into notify, so one the app
+                // sets from inside on_changed comes after quiet_ is cleared,
+                // for a selection the app already has.
+                const int now = self->current();
+                if (now == self->known_) return;
+                self->known_ = now;
+                if (!self->quiet_ && self->changed_) self->changed_(now);
             },
             this);
         // The font is known once styled, in a window.
@@ -2144,6 +2155,7 @@ public:
         for (auto& i : items) gtk_string_list_append(list, i.c_str());
         quiet_ = true;
         gtk_drop_down_set_model(GTK_DROP_DOWN(w_), G_LIST_MODEL(list));
+        known_ = current();
         quiet_ = false;
         g_object_unref(list);
         items_ = std::move(items);
@@ -2158,6 +2170,7 @@ public:
     {
         quiet_ = true;
         gtk_drop_down_set_selected(GTK_DROP_DOWN(w_), i < 0 ? GTK_INVALID_LIST_POSITION : guint(i));
+        known_ = current();
         quiet_ = false;
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
@@ -2166,6 +2179,7 @@ private:
     std::function<void(int)> changed_;
     std::vector<std::string> items_;
     bool quiet_ = false;
+    int known_ = -1;  // the selection last reported or set
 
     // GTK sizes the button to the item showing, so choosing a longer one
     // would widen it and push its neighbours about: as wide as the widest
