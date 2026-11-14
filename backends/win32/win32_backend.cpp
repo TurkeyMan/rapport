@@ -7455,8 +7455,9 @@ struct tab_drags
     bool test_no_loop = false;
     bool test_stack_set = false;
     std::vector<HWND> test_stack;
-    // With no move loop, the window the menu's Move to new window would
-    // have shown last (it isn't: the tests' windows are never shown).
+    // With no move loop, the window a tab torn off or the menu's Move to new
+    // window would have shown last (it isn't: the tests' windows are never
+    // shown).
     HWND test_shown = nullptr;
 };
 tab_drags& tab_drag()
@@ -7473,8 +7474,9 @@ tab_drags& tab_drag()
 // (lParam a null-terminated HWND array; 0 the desktop's again); 2 the drop
 // mark the window's strip shows (-1 none); 3 the window a tab drag is moving
 // (0 none); 4 the tabs' right-click menus captured, not shown (lParam a
-// tab_menu_capture; 0 shown again); 5 with no move loop, the window the
-// menu's Move to new window would have shown last (0 none), forgotten.
+// tab_menu_capture; 0 shown again); 5 with no move loop, the window a tab
+// torn off or the menu's Move to new window would have shown last (0 none),
+// forgotten.
 UINT tab_drag_message()
 {
     static const UINT m = RegisterWindowMessageW(L"rapport-document-tabs-drag");
@@ -11913,6 +11915,7 @@ void begin_window_drag(window_impl* w, const std::string& id, POINT screen, POIN
     if (d.test_no_loop)
     {
         d.moving->simulated = true;
+        if (torn) d.test_shown = w->hwnd();  // shown, but for the tests
         return;
     }
     if (!IsWindowVisible(w->hwnd()))  // never into a move loop for a window not shown
@@ -12019,15 +12022,19 @@ window_tabs::there window_tabs::tear_off(std::string id, POINT screen)
     const std::weak_ptr<int> alive = alive_;
     const float s = win_.scale();
     rap::window* made = state.detach_asked(from, point_f{float(screen.x) / s, float(screen.y) / s});
-    if (alive.expired()) return there::gone;
+    // The handler may have closed this window (the strip with it): nothing
+    // of it touched then, but the app's window is shown and carried all the
+    // same, with no home for Escape to send the tab back to.
+    const bool gone = alive.expired();
     if (!made)
     {
+        if (gone) return there::gone;
         detach_refused_ = true;
         return dragging() ? there::along : there::gone;
     }
-    forget_drag();
-    if (auto* w = dynamic_cast<window_impl*>(made); w && w->hwnd() != top)
-        begin_window_drag(w, id, screen, grab, true, top, from);
+    if (!gone) forget_drag();
+    if (auto* w = dynamic_cast<window_impl*>(made); w && (gone || w->hwnd() != top))
+        begin_window_drag(w, id, screen, grab, true, gone ? nullptr : top, from);
     return there::gone;
 }
 

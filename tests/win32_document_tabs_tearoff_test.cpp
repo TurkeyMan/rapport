@@ -174,6 +174,7 @@ struct fixture
     // How it answers.
     bool refuse_detach = false, accept = true;
     bool close_emptied = false;  // on_receive closes the source it empties, there and then
+    bool close_on_detach = false;  // on_detach closes this window once it's made the new one
     fixture* made = nullptr;  // the window on_detach made last
 
     RECT tab(int i) const
@@ -233,7 +234,13 @@ rap::layout::document_tabs tabs_spec(fixture& f, const std::vector<std::string>&
                 fixture* made = make(self->name + "+" + id, {id}, group);
                 self->tabs->remove(id);
                 self->made = made;
-                return made->win.get();
+                rap::window* w = made->win.get();
+                if (self->close_on_detach)
+                {
+                    self->tabs = nullptr;
+                    self->win.reset();
+                }
+                return w;
             })
         .on_receive(
             [self](const rap::document_tabs::transfer& t)
@@ -570,6 +577,30 @@ void run(const char* stage)
            "Escape, A's on_receive taking it home and closing the emptied window: closed" + at);
     expect(a.tabs->ids() == ids{"a", "n"}, "and A has it back where it was" + at + ": " + join(a.tabs->ids()));
     a.close_emptied = false;
+
+    // on_detach making the window and closing its own there and then: the
+    // app's window shown and carried all the same, holding the tab.
+    fixture& s = *make("S" + tag, {"s1", "s2"}, "g");
+    place(s, 500, 400);
+    s.close_on_detach = true;
+    const HWND s_top = s.top;
+    ask(a.top, 5);
+    RECT s_strip;
+    GetClientRect(s.strip, &s_strip);
+    p = s.centre(0);
+    s.down(p);
+    s.move(POINT{p.x + th + 1, p.y});
+    s.move(POINT{p.x, s_strip.bottom + 200});  // torn off, and S closed
+    fixture* sm = s.made;
+    expect(!s.win && !IsWindow(s_top) && sm && sm->tabs && sm->tabs->ids() == ids{"s1"},
+           "on_detach closing its own window: closed, the app's window holds s1" + at);
+    expect(sm && HWND(ask(a.top, 5)) == sm->top && HWND(ask(a.top, 3)) == sm->top && !IsWindowVisible(sm->top),
+           "and it's shown (the tests' noted) and the drag carries it" + at);
+    if (sm)
+    {
+        SendMessageW(sm->top, WM_EXITSIZEMOVE, 1, 0);  // Escape: no home to go back to
+        expect(sm->tabs->ids() == ids{"s1"} && !ask(a.top, 3), "Escape: it stays, nothing moving" + at);
+    }
 
     // The right-click menu: the fixed items, then the app's.
     tab_menu_capture cap{};
