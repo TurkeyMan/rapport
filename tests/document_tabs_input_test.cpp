@@ -358,6 +358,19 @@ public:
         spin();
         return true;
     }
+    // The strip's sizes, either way, as its window asks for them: none
+    // below 0. GTK warns of a part's negative size (its tabs row's, say)
+    // as it measures it, which the warnings count catches.
+    bool sizes_ok(std::string& got)
+    {
+        int min[2], nat[2];
+        gtk_widget_measure(nb_, GTK_ORIENTATION_HORIZONTAL, -1, &min[0], &nat[0], nullptr, nullptr);
+        gtk_widget_measure(nb_, GTK_ORIENTATION_VERTICAL, -1, &min[1], &nat[1], nullptr, nullptr);
+        got = "w " + std::to_string(min[0]) + "/" + std::to_string(nat[0]) + ", h " +
+              std::to_string(min[1]) + "/" + std::to_string(nat[1]);
+        return min[0] >= 0 && nat[0] >= min[0] && min[1] >= 0 && nat[1] >= min[1];
+    }
+    bool tabs_shown() { return gtk_notebook_get_show_tabs(GTK_NOTEBOOK(nb_)); }
 
 private:
     GtkWidget* tab(int i)
@@ -384,6 +397,15 @@ private:
     GtkWidget* win_ = nullptr;
 };
 constexpr const char* backend_name = "gtk4";
+
+// GTK's warnings and criticals, counted: GTK only warns of a size it's told
+// that can't be (below 0), and the test fails on any, G_DEBUG or not.
+int gtk_warnings = 0;
+GLogWriterOutput count_warnings(GLogLevelFlags level, const GLogField* fields, gsize n, gpointer)
+{
+    if (level & (G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL)) ++gtk_warnings;
+    return g_log_writer_default(level, fields, n, nullptr);
+}
 
 #elif defined(RAPPORT_TEST_QT6)
 
@@ -740,6 +762,9 @@ constexpr const char* backend_name = "win32";
 
 int main(int argc, char** argv)
 {
+#if defined(RAPPORT_TEST_GTK4)
+    g_log_set_writer_func(count_warnings, nullptr, nullptr);
+#endif
     rap::load_options opts;
     opts.backend = backend_name;
     auto ui = rap::ui::load(argc, argv, opts);
@@ -1087,6 +1112,40 @@ int main(int argc, char** argv)
             d.release();
             expect(reordered.size() == 1, "and let go: nothing more (" + std::to_string(reordered.size()) + ")");
         });
+#if defined(RAPPORT_TEST_GTK4)
+    // The strip down to one tab, then none, then one again: no negative
+    // size anywhere in it (Adwaita's tabs row, empty, was -3 high), and no
+    // tabs row while there are no tabs.
+    std::string sizes;
+    steps.push_back(
+        [&]
+        {
+            const std::vector<std::string> ids = tabs->ids();
+            for (size_t i = 1; i < ids.size(); ++i) tabs->remove(ids[i]);
+        });
+    steps.push_back(
+        [&]
+        {
+            const bool ok = d.count() == 1 && d.sizes_ok(sizes) && d.tabs_shown();
+            expect(ok, "one tab: shown, the strip's sizes none below 0 (" + sizes + ")");
+            tabs->remove(tabs->ids()[0]);
+        });
+    steps.push_back(
+        [&]
+        {
+            const bool ok = d.count() == 0 && d.sizes_ok(sizes) && !d.tabs_shown();
+            expect(ok, "no tabs: no tabs row, the strip's sizes none below 0 (" + sizes + ")");
+            tabs->add({"z", "Back", {}, {}});
+        });
+    steps.push_back(
+        [&]
+        {
+            const bool ok = d.count() == 1 && d.sizes_ok(sizes) && d.tabs_shown();
+            expect(ok, "a tab again: shown, the strip's sizes none below 0 (" + sizes + ")");
+            expect(gtk_warnings == 0,
+                   "no GTK warning all along (" + std::to_string(gtk_warnings) + ")");
+        });
+#endif
 #if defined(RAPPORT_TEST_WIN32)
     // Windows 11's tabs in the caption take the focus, from F6: the arrows
     // move it along them, Enter makes the focused one current, Delete

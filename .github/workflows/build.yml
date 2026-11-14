@@ -46,7 +46,7 @@ jobs:
       # on a Broadway server, Qt on its offscreen platform; GTK 4's entry
       # buttons through focus and activate, on its own Broadway server.
       # (Plugins only: the tests load the backends.) A GTK critical fails
-      # the test it's in.
+      # the test it's in; GTK 4's document tabs fail on any GTK warning.
       - name: List input
         if: matrix.link == 'plugins'
         run: |
@@ -60,10 +60,10 @@ jobs:
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-back-forward-test-qt6
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-entry-buttons-test-gtk4
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-gtk3
-          GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-gtk4
+          G_DEBUG=fatal-warnings GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-gtk4
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-test-qt6
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_BACKEND=gtk3 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-tearoff-test-gtk3
-          GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_BACKEND=gtk4 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-tearoff-test-gtk4
+          G_DEBUG=fatal-warnings GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_BACKEND=gtk4 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-tearoff-test-gtk4
           QT_QPA_PLATFORM=offscreen RAPPORT_BACKEND=qt6 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-document-tabs-tearoff-test-qt6
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-stack-test-gtk3
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-stack-test-gtk4

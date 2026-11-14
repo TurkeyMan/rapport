@@ -2546,6 +2546,15 @@ public:
         auto* nb = GTK_NOTEBOOK(w_);
         gtk_notebook_set_show_border(nb, false);
         gtk_notebook_set_scrollable(nb, true);
+        // Its tabs row only while it has tabs: the theme's negative margins
+        // on an empty row (Adwaita's tabs node, -1 top and -2 bottom) leave
+        // it a height of -3, which GTK warns of (sizes must be >= 0). Shown
+        // and hidden as pages come and go, by the app, a drag or a drop.
+        gtk_notebook_set_show_tabs(nb, false);
+        auto tabs_if_any = +[](GtkNotebook* nb, GtkWidget*, guint, gpointer)
+        { gtk_notebook_set_show_tabs(nb, gtk_notebook_get_n_pages(nb) > 0); };
+        connect(w_, "page-added", tabs_if_any, this);
+        connect(w_, "page-removed", tabs_if_any, this);
         gtk_widget_set_focusable(w_, false);
         gtk_widget_set_hexpand(w_, true);
         gtk_widget_set_parent(w_, outer_);

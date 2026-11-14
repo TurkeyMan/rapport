@@ -55,6 +55,18 @@ void expect(bool ok, const std::string& what)
     if (!ok) ++fails;
 }
 
+#if defined(RAPPORT_TEST_GTK4)
+// GTK's warnings and criticals, counted: GTK only warns of a size it's told
+// that can't be (below 0: the tabs row of a strip a tab's left empty, say),
+// and the test fails on any, G_DEBUG or not.
+int gtk_warnings = 0;
+GLogWriterOutput count_warnings(GLogLevelFlags level, const GLogField* fields, gsize n, gpointer)
+{
+    if (level & (G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL)) ++gtk_warnings;
+    return g_log_writer_default(level, fields, n, nullptr);
+}
+#endif
+
 std::string join(const std::vector<std::string>& v)
 {
     std::string out;
@@ -474,6 +486,9 @@ void run()
 
 int main(int argc, char** argv)
 {
+#if defined(RAPPORT_TEST_GTK4)
+    g_log_set_writer_func(count_warnings, nullptr, nullptr);
+#endif
     auto ui = rap::ui::load(argc, argv);
     if (!ui)
     {
@@ -485,6 +500,9 @@ int main(int argc, char** argv)
     run();
     pump();
     fixtures.clear();
+#if defined(RAPPORT_TEST_GTK4)
+    expect(gtk_warnings == 0, "no GTK warning all along (" + std::to_string(gtk_warnings) + ")");
+#endif
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
