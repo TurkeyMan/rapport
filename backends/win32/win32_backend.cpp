@@ -7632,7 +7632,11 @@ tab_drags& tab_drag()
 // 3 the drag image's window (0 none); 4 the tabs' right-click menus
 // captured, not shown (lParam a tab_menu_capture; 0 shown again); 5 in the
 // tests' mode, the window a drag let go or the menu's Move to new window
-// would have shown last (0 none), forgotten.
+// would have shown last (0 none), forgotten; 6 Escape's state as a drag
+// polls it (escape_watch): lParam 1 down, 0 up, -1 the real key's; 7 how
+// many drags' Escape timers are running; 8, 9 and 10 how the last drag
+// cancelled by Escape heard it (escape_watch::last: the route, and for the
+// message loop's the message's window and type).
 UINT tab_drag_message()
 {
     static const UINT m = RegisterWindowMessageW(L"rapport-document-tabs-drag");
@@ -8015,6 +8019,7 @@ private:
         bool away = false;    // out of the row
     };
     std::optional<drag_state> drag_;
+    escape_watch escape_;         // while the drag holds the mouse
     int drop_ = -1;               // the drop mark's index (show_drop)
     bool drop_painting_ = false;  // painting under the mark
 
@@ -8038,6 +8043,7 @@ private:
         }
         drag_->from = i;
         SetCapture(h_);
+        escape_.start(h_);
     }
     void drag_to(POINT p, bool letting_go = false)
     {
@@ -8097,6 +8103,7 @@ private:
         // row (to the place there), or away.
         if (drag_ && drag_->active) drag_to(p, true);
         const std::optional<drag_state> d = std::exchange(drag_, std::nullopt);
+        escape_.stop();
         if (GetCapture() == h_) ReleaseCapture();  // the drag's gone: its WM_CAPTURECHANGED is nothing
         if (!d || !d->active) return;
         if (d->away)
@@ -8115,6 +8122,7 @@ private:
     void cancel_drag()
     {
         const std::optional<drag_state> d = std::exchange(drag_, std::nullopt);
+        escape_.stop();
         if (!d) return;
         if (GetCapture() == h_) ReleaseCapture();
         const int at = state.index_of(d->id);
@@ -8303,6 +8311,12 @@ private:
         }
         case WM_MOUSEMOVE:
             if (!self->drag_) break;
+            if (self->escape_.pressed())  // however the focus is set (see escape_watch)
+            {
+                escape_watch::last() = {escape_watch::route::poll_move};
+                self->cancel_drag();
+                return 0;
+            }
             if (!(wp & MK_LBUTTON))  // let go where it wasn't heard
             {
                 self->let_go(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});  // the window may be gone
@@ -8323,9 +8337,18 @@ private:
         case WM_CAPTURECHANGED:
             if (self->drag_ && reinterpret_cast<HWND>(lp) != h) self->cancel_drag();
             break;
+        case WM_TIMER:
+            if (wp != escape_watch::timer_id) break;
+            if (self->drag_ && self->escape_.pressed())
+            {
+                escape_watch::last() = {escape_watch::route::poll_timer};
+                self->cancel_drag();
+            }
+            return 0;
         case WM_KEYDOWN:
             if (wp == VK_ESCAPE && self->drag_)
             {
+                escape_watch::last() = {escape_watch::route::strip_key};
                 self->cancel_drag();
                 return 0;
             }
@@ -11690,6 +11713,14 @@ private:
             result = 1;
             break;
         case 5: result = reinterpret_cast<LRESULT>(std::exchange(d.test_shown, nullptr)); break;
+        case 6:
+            escape_watch::fake() = int(lp);
+            result = 1;
+            break;
+        case 7: result = escape_watch::running(); break;
+        case 8: result = LRESULT(escape_watch::last().how); break;
+        case 9: result = reinterpret_cast<LRESULT>(escape_watch::last().hwnd); break;
+        case 10: result = LRESULT(escape_watch::last().message); break;
         default: result = 0; break;
         }
         return true;
@@ -12693,6 +12724,15 @@ public:
                 g_dragging->cancel_drag();
                 continue;
             }
+            // Likewise a tab's drag, whichever of this thread's windows the
+            // key is for (the strip has the mouse, not the keys).
+            if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE && escape_watch::active())
+                if (window_tabs* t = tabs_of(GetAncestor(escape_watch::active(), GA_ROOT)); t && t->dragging())
+                {
+                    escape_watch::last() = {escape_watch::route::loop, m.hwnd, m.message};
+                    t->cancel_tab_drag();
+                    continue;
+                }
             if (m.message >= WM_KEYFIRST && m.message <= WM_KEYLAST && m.message != WM_CHAR)
             {
                 HWND top = GetAncestor(m.hwnd, GA_ROOT);

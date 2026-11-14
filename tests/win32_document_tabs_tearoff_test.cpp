@@ -429,7 +429,16 @@ bool inside(const RECT& f, const RECT& work)
     return f.left >= work.left && f.top >= work.top && f.right <= work.right && f.bottom <= work.bottom;
 }
 
-void run(const char* stage)
+int timers()
+{
+    return int(ask(g_hook_window, 7));
+}
+int route()
+{
+    return int(ask(g_hook_window, 8));
+}
+
+void run(const char* stage, bool last)
 {
     const std::string at = std::string(" (") + stage + ")";
     const std::string tag = g_menu_bar ? "1" : "2";
@@ -453,6 +462,7 @@ void run(const char* stage)
     place(d, 900, 100);
     stack({a.top, b.top, c.top, d.top});
     ask(b.top, 0, 1);  // test mode: nothing shown
+    ask(b.top, 6, 0);  // Escape up, whatever the desktop's key does meanwhile
     loop_seen = 0;
     const int th = a.threshold();
     RECT strip_rect;
@@ -522,6 +532,7 @@ void run(const char* stage)
     a.escape();
     expect(img && !IsWindow(img) && !image() && a.tabs->ids() == ids{"a", "b", "c"},
            "Escape out of the row: the image gone, the tab back" + at);
+    expect(timers() == 0 && route() == 2, "the strip's own WM_KEYDOWN heard it, no Escape timer left" + at);
     a.up(POINT{p.x, below});
     expect(a.detached.empty() && a.reordered.empty() && !ask(b.top, 5), "and let go after: nothing asked" + at);
 
@@ -532,6 +543,7 @@ void run(const char* stage)
     SendMessageW(a.strip, WM_CAPTURECHANGED, 0, 0);
     expect(img && !IsWindow(img) && !image() && a.tabs->ids() == ids{"a", "b", "c"},
            "the capture lost: the image gone, the tab back" + at);
+    expect(timers() == 0, "no Escape timer left" + at);
     a.up(POINT{p.x, below});
     expect(a.detached.empty() && a.reordered.empty(), "and nothing asked" + at);
     // The window deactivated: the same.
@@ -542,8 +554,61 @@ void run(const char* stage)
     SendMessageW(a.top, WM_ACTIVATE, MAKEWPARAM(WA_INACTIVE, 0), 0);
     expect(img && !IsWindow(img) && !image() && a.tabs->ids() == ids{"a", "b", "c"},
            "the window deactivated: the image gone, the tab back" + at + ": " + join(a.tabs->ids()));
+    expect(timers() == 0, "no Escape timer left" + at);
     a.up(POINT{p.x, below});
     expect(a.detached.empty() && a.reordered.empty(), "and nothing asked" + at);
+
+    // Escape seen however the focus is set (a drag from a window that isn't
+    // the foreground's: keys go elsewhere): its state polled, as OLE's
+    // DoDragDrop does, on each move and on a timer while the drag holds the
+    // mouse. The test hook stands in for the key's state.
+    ask(b.top, 6, 0);  // Escape up
+    p = a.start(1);
+    expect(ask(b.top, 7) == 1, "a drag on: Escape watched, on its timer" + at);
+    a.move(POINT{p.x, below});
+    img = image();
+    ask(b.top, 6, 1);  // Escape down
+    a.move(POINT{p.x + 5, below});
+    expect(img && !IsWindow(img) && !image() && a.tabs->ids() == ids{"a", "b", "c"} && route() == 3,
+           "Escape down, seen on the next move: the image gone, the tab back" + at);
+    ask(b.top, 6, 0);
+    a.up(POINT{p.x + 5, below});
+    expect(a.detached.empty() && a.reordered.empty() && ask(b.top, 7) == 0,
+           "and nothing asked, the timer gone" + at);
+    // Seen on the timer, with no move.
+    p = a.start(1);
+    a.move(POINT{p.x, below});
+    img = image();
+    ask(b.top, 6, 1);
+    {
+        const DWORD until = GetTickCount() + 2000;
+        while (image() && GetTickCount() < until)
+        {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+            pump();
+        }
+    }
+    expect(img && !IsWindow(img) && !image() && a.tabs->ids() == ids{"a", "b", "c"} && ask(b.top, 7) == 0 &&
+               route() == 4,
+           "Escape down, seen on the timer: the image gone, the tab back, the timer gone" + at);
+    ask(b.top, 6, 0);
+    a.up(POINT{p.x, below});
+    expect(a.detached.empty() && a.reordered.empty(), "and nothing asked" + at);
+    // Escape already down as the tab's pressed: not a press (it must be
+    // pressed during the drag).
+    ask(b.top, 6, 1);
+    p = a.start(1);
+    a.move(POINT{p.x, below});
+    expect(image() != nullptr, "Escape held from before the press: the drag goes on" + at);
+    ask(b.top, 6, 0);
+    a.move(POINT{p.x + 3, below});
+    ask(b.top, 6, 1);
+    a.move(POINT{p.x + 6, below});
+    expect(!image() && a.tabs->ids() == ids{"a", "b", "c"}, "and let up and pressed again: cancelled" + at);
+    ask(b.top, 6, 0);
+    a.up(POINT{p.x + 6, below});
+    ask(b.top, 6, 0);  // up, for the rest
+    expect(a.detached.empty() && ask(b.top, 7) == 0, "nothing asked, no timer" + at);
 
     // Let go outside, refused: on_detach once, nothing changes.
     a.refuse_detach = true;
@@ -563,6 +628,7 @@ void run(const char* stage)
     }
     expect(a.tabs->ids() == ids{"a", "b", "c"} && !ask(b.top, 5) && img && !IsWindow(img) && !image(),
            "null: nothing changed, nothing shown, the image gone" + at);
+    expect(timers() == 0, "no Escape timer left" + at);
     a.refuse_detach = false;
     a.detached.clear();
 
@@ -663,6 +729,7 @@ void run(const char* stage)
     expect(b.tabs->ids() == ids{"x", "m", "y"} && a.tabs->ids() == ids{"a", "c"} && b.drop_mark() == -1 &&
                a.detached.empty() && img && !IsWindow(img),
            "the app moved it; nothing marked, nothing detached, the image gone" + at + ": " + join(b.tabs->ids()));
+    expect(timers() == 0, "no Escape timer left" + at);
     expect(c.received.empty(), "and C was asked nothing" + at);
     // Refused by B: both as they were.
     b.received.clear();
@@ -759,6 +826,7 @@ void run(const char* stage)
            "on_detach closing its own window: closed, the app's window holds s1" + at);
     expect(sm && HWND(ask(b.top, 5)) == sm->top && !IsWindowVisible(sm->top) && img && !IsWindow(img),
            "and it's shown (noted), the image gone" + at);
+    expect(timers() == 0, "no Escape timer left" + at);
 
     expect(loop_seen == 0 && same(a.window_rect(), a_was), "never the move loop, no window moved by a drag" + at);
 
@@ -871,7 +939,49 @@ void run(const char* stage)
         set_keys({});
         expect(cap.count == 7 && cap.opened == 1, "Shift+F10: the menu, once" + at);
     }
+    // The source window destroyed mid-drag (by the app): the drag, its image
+    // and its timer gone with it.
+    {
+        fixture& x = *make("X" + tag, {"x1", "x2"}, "g");
+        place(x, 500, 900);
+        RECT xs;
+        GetClientRect(x.strip, &xs);
+        const POINT xp = x.start(0);
+        x.move(POINT{xp.x, xs.bottom + 200});
+        const HWND ximg = image();
+        expect(ximg && timers() == 1, "X's tab out: its image, its timer" + at);
+        x.tabs = nullptr;
+        x.win.reset();
+        expect(!IsWindow(ximg) && !image() && timers() == 0 && b.drop_mark() == -1,
+               "X closed mid-drag: no image, no timer, nothing marked" + at);
+    }
+
+    // Escape as a WM_KEYDOWN for another of this thread's windows (C's),
+    // through the message loop: the drag cancelled all the same. The loop
+    // runs once a process (rapport's quit ends it for good): in the last run.
+    if (last)
+    {
+        RECT bs;
+        GetClientRect(b.strip, &bs);
+        b.detached.clear();
+        p = b.start(0);
+        const POINT b_out{p.x, bs.bottom + 200};
+        b.move(b_out);
+        img = image();
+        const ids was = b.tabs->ids();
+        PostMessageW(c.top, WM_KEYDOWN, VK_ESCAPE, 1);
+        rap::subscription done = g_ui->timer(20, false, [] { g_ui->quit(0); });
+        g_ui->run();
+        expect(img && !IsWindow(img) && !image() && timers() == 0 && b.tabs->ids() == was,
+               "Escape for C's window, through the message loop: B's drag cancelled" + at);
+        expect(route() == 1 && HWND(ask(b.top, 9)) == c.top && ask(b.top, 10) == WM_KEYDOWN,
+               "heard by the loop, as C's WM_KEYDOWN" + at + " (" + std::to_string(route()) + ")");
+        b.up(b_out);
+        expect(b.detached.empty() && b.received.empty(), "and nothing asked" + at);
+    }
+
     ask(b.top, 4, 0);
+    ask(b.top, 6, -1);
     ask(b.top, 0, 0);
     stack({});
     ask(b.top, 1, 0);
@@ -927,6 +1037,7 @@ struct step
     int timeout_ms = 3000;
 };
 std::vector<step> steps;
+std::function<void()> g_on_timeout;  // more to print, if the step waiting times out
 
 bool pointer_at(POINT p)
 {
@@ -1045,7 +1156,57 @@ int input_mode(rap::ui& ui)
     // Escape with a tab out: back, nothing asked.
     const POINT from_e = a.screen(a.centre(1));
     drag(a, from_e, {POINT{from_e.x + 12, from_e.y}, POINT{from_e.x, out.y}}, out, false);
-    steps.push_back({"Escape", [] { send_key(VK_ESCAPE, false); }, [&] { return GetCapture() != a.strip; }});
+    steps.push_back({"Escape",
+                     [&]
+                     {
+                         // Where the keys go (Escape must cancel either way).
+                         auto name = [&](HWND h)
+                         {
+                             if (!h) return std::string("none");
+                             for (auto& f : fixtures)
+                                 if (f->top == h) return f->name;
+                                 else if (f->strip == h) return f->name + "'s strip";
+                                 else if (f->top && IsChild(f->top, h)) return "a child of " + f->name;
+                             wchar_t cls[64]{};
+                             GetClassNameW(h, cls, 64);
+                             std::string s;
+                             for (wchar_t c : std::wstring(cls)) s += char(c < 128 ? c : '?');
+                             return "another window (" + s + ")";
+                         };
+                         GUITHREADINFO gi{sizeof gi};
+                         GetGUIThreadInfo(0, &gi);
+                         std::printf("     at Escape: foreground %s (its focus %s, active %s, capture %s); this "
+                                     "thread's active %s, focus %s, capture %s; the source %s\n",
+                                     name(GetForegroundWindow()).c_str(), name(gi.hwndFocus).c_str(),
+                                     name(gi.hwndActive).c_str(), name(gi.hwndCapture).c_str(),
+                                     name(GetActiveWindow()).c_str(), name(GetFocus()).c_str(),
+                                     name(GetCapture()).c_str(), name(a.top).c_str());
+                         g_on_timeout = [&, name]
+                         {
+                             std::printf("     at the timeout: foreground %s, this thread's focus %s, capture %s; "
+                                         "Escape heard by route %d\n",
+                                         name(GetForegroundWindow()).c_str(), name(GetFocus()).c_str(),
+                                         name(GetCapture()).c_str(), int(ask(a.top, 8)));
+                         };
+                         ask(a.top, 8);
+                         send_key(VK_ESCAPE, false);  // held until the drag's seen to end
+                     },
+                     [&] { return GetCapture() != a.strip; }});
+    steps.push_back({"(how Escape was heard)", [&]
+                     {
+                         g_on_timeout = nullptr;
+                         const int how = int(ask(a.top, 8));
+                         static const char* routes[] = {"none", "the message loop", "the strip's WM_KEYDOWN",
+                                                        "the key's state, on a move", "the key's state, on the timer"};
+                         HWND h = HWND(ask(a.top, 9));
+                         wchar_t cls[64]{};
+                         if (h) GetClassNameW(h, cls, 64);
+                         std::string c;
+                         for (wchar_t ch : std::wstring(cls)) c += char(ch < 128 ? ch : '?');
+                         std::printf("     Escape heard by %s%s\n", how >= 0 && how <= 4 ? routes[how] : "?",
+                                     how == 1 ? (" (WM_KEYDOWN for a " + c + ")").c_str() : "");
+                     },
+                     nullptr});
     steps.push_back({"and let go", [out] {
                          send_key(VK_ESCAPE, true);
                          send_mouse(out, MOUSEEVENTF_LEFTUP);
@@ -1110,6 +1271,7 @@ int input_mode(rap::ui& ui)
             if (waited.count() >= s.timeout_ms)
             {
                 expect(false, s.what + " (timed out after " + std::to_string(waited.count()) + " ms)");
+                if (g_on_timeout) g_on_timeout();
                 code = 1;
                 ui.quit(1);
             }
@@ -1136,11 +1298,11 @@ int main(int argc, char** argv)
     HHOOK sent = SetWindowsHookExW(WH_CALLWNDPROC, watch_sent, nullptr, GetCurrentThreadId());
     HHOOK posted = SetWindowsHookExW(WH_GETMESSAGE, watch_posted, nullptr, GetCurrentThreadId());
     g_menu_bar = true;
-    run("stage 1, under a menu bar");
+    run("stage 1, under a menu bar", windows_build() < 22000);
     if (windows_build() >= 22000)
     {
         g_menu_bar = false;
-        run("in the caption");
+        run("in the caption", true);
     }
     else
         std::printf("     no caption strip before Windows 11: stage 1 only\n");
