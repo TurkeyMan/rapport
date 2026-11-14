@@ -330,11 +330,22 @@ int main(int argc, char** argv)
     steps.push_back(
         [&]
         {
+            a->focus();
             a->set_enabled(false);
             d->set_enabled(false);
             expect(!tab_stop(s[0]) && !tab_stop(s[1]), "no button reachable: no Tab stop");
-            a->set_enabled(true);
-            expect(tab_stop(s[0]) != tab_stop(s[1]) && tab_stop(s[0]), "one enabled again: its strip the Tab stop");
+            expect(!a->has_focus() && !d->has_focus(), "and no button has the focus");
+            // One enabled again in the other strip than the focus's: it's
+            // the current button, the focus there.
+            d->set_enabled(true);
+            expect(tab_stop(s[1]) && !tab_stop(s[0]), "one enabled again: its strip the Tab stop");
+            expect(d->has_focus() && focused() == s[1], "and the current button, the focus moved to it");
+            type_key(VK_SPACE);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(d_toggles == 4, "Space presses it");
             expect(c_clicks == 0, "nothing pressed that wasn't asked for");
         });
 

@@ -5167,7 +5167,7 @@ public:
     {
         SendMessageW(h_, TB_ENABLEBUTTON, WPARAM(id), MAKELPARAM(e, 0));
         update_tab_stop();
-        if (GetFocus() == h_ && !usable(current_)) rehome();
+        repair_focus();
     }
     void set_checked(int id, bool c) { SendMessageW(h_, TB_CHECKBUTTON, WPARAM(id), MAKELPARAM(c, 0)); }
     void set_text(int id, const std::string& text) { entries_[size_t(id) - 1].text = wide(text); }
@@ -5349,7 +5349,25 @@ private:
             }
         if (!changed) return;
         update_tab_stop();
-        if (GetFocus() == h_ && !usable(current_)) rehome();
+        repair_focus();
+    }
+    // Whichever of the group's strips has the focus, its current button
+    // gone (disabled, hidden), or none while one's now reachable (enabled or
+    // shown again, maybe in another strip): a current button found again.
+    void repair_focus()
+    {
+        const HWND f = GetFocus();
+        if (!group_)
+        {
+            if (f == h_ && !usable(current_)) rehome();
+            return;
+        }
+        for (tool_strip* s : group_->strips)
+            if (s->h_ == f && !s->usable(s->current_))
+            {
+                s->rehome();
+                return;
+            }
     }
     // The focused current button gone (disabled, hidden): the next one the
     // keyboard can reach, in this strip, else in the group's next strip
