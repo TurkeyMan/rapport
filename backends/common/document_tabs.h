@@ -4,10 +4,12 @@
 // are. No toolkit here, so tests/document_tabs_test.cpp can check it.
 #pragma once
 
+#include "rapport/i18n.h"
 #include "rapport/widgets.h"
 
 #include <algorithm>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -109,6 +111,58 @@ inline int index_after_move(int i, int from, int to)
     return i;
 }
 
+// -- tearing off and dropping ---------------------------------------------------
+
+// What a tab drag past its threshold does at the pointer's place, the same
+// on every backend that drags tabs itself (Windows'):
+//  - the window's only tab drags the window itself, as its caption would;
+//  - over another window's row in the same group: that row shows where the
+//    tab would land, and the tab sits where it was in its own;
+//  - over its own row, or near it (within the tear-off distance of the
+//    row, above or below, and of the window, either side): along the row;
+//  - further out, with an on_detach not yet refused: torn off;
+//  - otherwise along the row still, at its nearer end.
+enum class drag_step
+{
+    reorder,
+    over_other,
+    tear_off,
+    move_window,
+};
+struct drag_place
+{
+    bool only_tab = false;       // the window has the one tab
+    bool over_other = false;     // over another window's row in the group
+    bool past_tear = false;      // out past the tear-off distance
+    bool can_detach = false;     // on_detach set, and not refused this drag
+};
+inline drag_step step_for(const drag_place& p)
+{
+    if (p.only_tab) return drag_step::move_window;
+    if (p.over_other) return drag_step::over_other;
+    if (p.past_tear && p.can_detach) return drag_step::tear_off;
+    return drag_step::reorder;
+}
+
+// How far out of its row (logical px) a tab is dragged to tear it off.
+inline constexpr float tear_distance = 24;
+
+// The point (x, y) is past the tear-off distance `d` of a row from `top` to
+// `bottom`, in a window from `left` to `right`: all in one coordinate space.
+inline bool past_tear(int x, int y, int top, int bottom, int left, int right, int d)
+{
+    return y < top - d || y >= bottom + d || x < left - d || x >= right + d;
+}
+
+// Where a tab dropped at `x` lands in a row whose tabs' middles are
+// `middles` (left to right): before the first whose middle is past x.
+inline int drop_index(const std::vector<int>& middles, int x)
+{
+    int i = 0;
+    while (i < int(middles.size()) && middles[size_t(i)] <= x) ++i;
+    return i;
+}
+
 // The bookkeeping: the tabs in order, which is current, and the app's
 // handlers, which only the user's own clicks, drags and keys fire (through
 // picked, close_asked, new_asked, reordered), once each.
@@ -121,6 +175,15 @@ public:
     std::function<void()> on_new;
     // The tab's id and the index it's at now, once it's been moved there.
     std::function<void(const std::string&, int)> on_reorder;
+    // Tearing off, dropping in, and the menu's own items (rap::document_tabs).
+    rap::document_tabs::detach_fn on_detach;
+    rap::document_tabs::receive_fn on_receive;
+    std::string group;
+    std::function<rap::menu(const std::string&)> on_context_menu;
+    // The menu's Move to new window: the app's window, which it placed and
+    // didn't show, shown. Unset, its show(); the Win32 tests' never-shown
+    // windows put a stand-in here.
+    std::function<void(rap::window*)> show_moved;
 
     int count() const { return int(tabs.size()); }
     int index_of(const std::string& id) const
@@ -193,6 +256,81 @@ public:
     {
         if (index < 0 || index >= count()) return;
         if (auto f = on_reorder) f(std::string(tabs[size_t(index)].id), index);
+    }
+
+    // A drag from this window may drop on `other`'s: the same, non-empty group.
+    bool same_group(const state& other) const { return !group.empty() && group == other.group; }
+    // Tab i, as another window's on_receive is given it.
+    rap::document_tabs::transfer transfer_of(int i, int index, rap::window* source) const
+    {
+        rap::document_tabs::transfer t;
+        if (i < 0 || i >= count()) return t;
+        const document_tab& d = tabs[size_t(i)];
+        t.id = d.id;
+        t.title = d.title;
+        t.icon = d.icon;
+        t.tooltip = d.tooltip;
+        t.index = index;
+        t.source = source;
+        return t;
+    }
+    // Tab i torn off (dragged, `screen` where the pointer is; or the menu's
+    // Move to new window, none): the app's window, or null where it refused
+    // or there's no handler. Never for a window's only tab.
+    rap::window* detach_asked(int i, std::optional<point_f> screen)
+    {
+        if (i < 0 || i >= count() || count() < 2) return nullptr;
+        if (auto f = on_detach) return f(std::string(tabs[size_t(i)].id), screen);
+        return nullptr;
+    }
+    // A tab dropped in from another window of the group: the app's answer.
+    bool received(const rap::document_tabs::transfer& t)
+    {
+        if (auto f = on_receive) return f(t);
+        return false;
+    }
+    // The right-click menu for tab `i` (-1: none, the row's empty part):
+    // New tab; then Close tab and, with on_detach, Move to new window
+    // (disabled for the only tab); then the app's own, after a separator.
+    // Each item finds its tab again by id as it's chosen.
+    rap::menu context_menu(int i)
+    {
+        rap::menu items;
+        items.push_back({rap::i18n::tr("rapport", "_New tab"), [this] { new_asked(); }, {},
+                         rap::i18n::shortcut_label("Ctrl+T")});
+        if (i < 0 || i >= count()) return items;
+        const std::string id = tabs[size_t(i)].id;
+        items.push_back(menu_item::separator());
+        items.push_back({rap::i18n::tr("rapport", "_Close tab"), [this, id] { close_asked(index_of(id)); }, {},
+                         rap::i18n::shortcut_label("Ctrl+W")});
+        if (on_detach)
+        {
+            // Shown as a torn-off tab's is: the handler returns it unshown.
+            // Copied first: the handler may change these tabs, or end them.
+            menu_item move{rap::i18n::tr("rapport", "_Move to new window"),
+                           [this, id]
+                           {
+                               auto show = show_moved;
+                               rap::window* made = detach_asked(index_of(id), std::nullopt);
+                               if (!made) return;
+                               if (show)
+                                   show(made);
+                               else
+                                   made->show();
+                           }};
+            move.enabled = count() > 1;
+            items.push_back(std::move(move));
+        }
+        if (auto f = on_context_menu)
+        {
+            rap::menu own = f(id);
+            if (!own.empty())
+            {
+                items.push_back(menu_item::separator());
+                for (menu_item& m : own) items.push_back(std::move(m));
+            }
+        }
+        return items;
     }
 
     // What a key's move needs of the native control: nothing.

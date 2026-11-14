@@ -238,8 +238,10 @@ struct caption_tabs::impl
         int grab = 0;  // the pointer's x in the tab, as pressed
         int x = 0;     // the pointer's x
         bool active = false;  // past the threshold
+        bool away = false;    // over another window's strip (caption_drag_at)
     };
     std::optional<drag_state> drag;
+    int drop = -1;  // where a tab dropped in would land, marked (show_drop)
     // The row's places in sight, from layout(): the first's left, their
     // width, and the first and last tabs there.
     int slot_left = 0, slot_width = 1, slot_first = 0, slot_last = -1;
@@ -356,7 +358,7 @@ struct caption_tabs::impl
         return -1;
     }
     // The tab dragged past the threshold, -1 for none.
-    int lifted() const { return drag && drag->active ? index_of_key(drag->key) : -1; }
+    int lifted() const { return drag && drag->active && !drag->away ? index_of_key(drag->key) : -1; }
     // Where the dragged tab's left is: the pointer's, less where it was
     // grabbed, kept to the places in sight.
     int dragged_left() const
@@ -388,25 +390,50 @@ struct caption_tabs::impl
         drag = drag_state{self.tabs_[size_t(i)].key, i, p, p.x - r.left, p.x};
         SetCapture(self.hwnd_);
     }
-    void drag_to(POINT p)
+    // False once the owner's taken the drag on (gone): the strip may have
+    // gone with its window, and nothing of it's touched after.
+    bool drag_to(POINT p)
     {
         if (!drag->active)
         {
             if (std::abs(p.x - drag->press.x) <= GetSystemMetricsForDpi(SM_CXDRAG, dpi()) &&
                 std::abs(p.y - drag->press.y) <= GetSystemMetricsForDpi(SM_CYDRAG, dpi()))
-                return;
+                return true;
             drag->active = true;
             hot = {};
         }
         drag->x = p.x;
-        const int at = index_of_key(drag->key);
-        if (at < 0 || slot_last < slot_first) return;
+        int at = index_of_key(drag->key);
+        if (at < 0) return true;
+        // Out of the strip: the owner's to say (tearing off, dropping).
+        POINT screen = p;
+        ClientToScreen(self.hwnd_, &screen);
+        const unsigned key = drag->key;
+        const caption_tabs_owner::drag_there there = owner.caption_drag_at(at, screen);
+        if (there == caption_tabs_owner::drag_there::gone) return false;
+        if (!drag || drag->key != key) return true;
+        at = index_of_key(key);
+        if (at < 0) return true;
+        const bool away = there == caption_tabs_owner::drag_there::away;
+        if (away != drag->away)
+        {
+            drag->away = away;
+            if (away)
+            {
+                const bool back = at != drag->from && drag->from < self.count();
+                if (back) move_tab(at, drag->from);
+                moved(back);
+                return true;
+            }
+        }
+        if (away || slot_last < slot_first) return true;
         // The place whose left is nearest the dragged tab's.
         const int to = std::clamp(slot_first + (dragged_left() - slot_left + slot_width / 2) / slot_width, slot_first,
                                   slot_last);
         const bool reordered = to != at;
         if (reordered) move_tab(at, to);
         moved(reordered);
+        return true;
     }
     // Let go: the owner's told, if the tab moved; nothing's done after.
     void let_go()
@@ -416,6 +443,11 @@ struct caption_tabs::impl
         if (!d || !d->active) return;
         moved(false);  // into its place
         const int at = index_of_key(d->key);
+        if (d->away)
+        {
+            owner.caption_drop(at);  // last: it may change the tabs
+            return;
+        }
         if (at >= 0 && at != d->from) owner.caption_reordered(at);  // last: it may change the tabs
     }
     void cancel()
@@ -428,6 +460,37 @@ struct caption_tabs::impl
         const bool back = at >= 0 && at != d->from && d->from < self.count();
         if (back) move_tab(at, d->from);
         moved(back);
+        owner.caption_drag_cancelled();
+    }
+    // Where a tab dropped at x lands: by the middles of the tabs in sight.
+    int drop_index_at(int x) const
+    {
+        std::vector<int> middles;
+        int first_seen = -1;
+        for (int i = 0; i < self.count(); ++i)
+        {
+            const RECT& r = tab_rects[size_t(i)];
+            if (IsRectEmpty(&r)) continue;
+            if (first_seen < 0) first_seen = i;
+            middles.push_back((r.left + r.right) / 2);
+        }
+        if (first_seen < 0) return self.count();
+        return first_seen + doc_tabs::drop_index(middles, x);
+    }
+    // The drop mark: a bar where the tab would land, before tab `drop` (after
+    // the last in sight past them).
+    RECT drop_rect() const
+    {
+        RECT c;
+        GetClientRect(self.hwnd_, &c);
+        int x = slot_left;
+        if (drop >= 0 && drop < self.count() && !IsRectEmpty(&tab_rects[size_t(drop)]))
+            x = tab_rects[size_t(drop)].left;
+        else
+            for (const RECT& r : tab_rects)
+                if (!IsRectEmpty(&r)) x = r.right;
+        const int w = std::max(2, px(2));
+        return RECT{x - w / 2, px(caption_metrics::tab_top), x - w / 2 + w, c.bottom - line_px(dpi())};
     }
 
     // The hover's and the hit's shape of tab i: a tab not current leaves
@@ -902,6 +965,7 @@ struct caption_tabs::impl
                   under);
         }
         if (focused && focus == n) focus_rect(add_rect, colors.text);
+        if (drop >= 0) fill(drop_rect(), high_contrast() ? colors.current : theme_color_of(theme_color::accent));
         if (rt->EndDraw() == D2DERR_RECREATE_TARGET)
         {
             rt.reset();
@@ -1118,6 +1182,7 @@ struct caption_tabs::impl
                 f->cleartype = d.cleartype;
                 return 1;
             }
+            case 9: return d.drop;
             case 8:
             {
                 const unsigned failed = d.copies_failed;
@@ -1164,8 +1229,8 @@ struct caption_tabs::impl
                     d.let_go();
                     return 0;
                 }
-                d.drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
-                if (d.drag->active) return 0;
+                if (!d.drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) return 0;  // gone: torn off, or the window's moving
+                if (!d.drag || d.drag->active) return 0;
             }
             d.set_hot(s->hit_test(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}));
             return 0;
@@ -1268,6 +1333,20 @@ struct caption_tabs::impl
                 return 0;
             }
             if (d.key(wp)) return 0;
+            if (wp != VK_APPS) break;
+            [[fallthrough]];
+        // The menu key and Shift+F10: the focused tab's menu, once, as
+        // they're pressed; neither the press nor the release left to
+        // DefWindowProc, which would make one of its own on either.
+        case WM_SYSKEYDOWN:
+            if (msg == WM_SYSKEYDOWN && (wp != VK_F10 || GetKeyState(VK_SHIFT) >= 0)) break;
+            SendMessageW(h, WM_CONTEXTMENU, WPARAM(h), MAKELPARAM(-1, -1));
+            return 0;
+        case WM_KEYUP:
+            if (wp == VK_APPS) return 0;
+            break;
+        case WM_SYSKEYUP:
+            if (wp == VK_F10 && GetKeyState(VK_SHIFT) < 0) return 0;
             break;
         case WM_CHAR:
             if (wp == L' ' || wp == L'\r') return 0;  // done as keys
@@ -1410,6 +1489,41 @@ bool caption_tabs::dragging() const
 void caption_tabs::cancel_drag()
 {
     d_->cancel();
+}
+
+void caption_tabs::put_back_drag()
+{
+    if (!d_->drag || !d_->drag->active) return;
+    const int at = d_->index_of_key(d_->drag->key);
+    const bool back = at >= 0 && at != d_->drag->from && d_->drag->from < count();
+    if (back) d_->move_tab(at, d_->drag->from);
+    d_->moved(back);
+}
+
+void caption_tabs::forget_drag()
+{
+    if (!d_->drag) return;
+    d_->drag.reset();
+    if (GetCapture() == hwnd_) ReleaseCapture();
+    d_->moved(false);
+}
+
+POINT caption_tabs::drag_grab() const
+{
+    if (!d_->drag) return {};
+    return POINT{d_->drag->grab, d_->drag->press.y - scaled(caption_metrics::tab_top, dpi_of(hwnd_))};
+}
+
+int caption_tabs::drop_index_at(POINT p) const
+{
+    return d_->drop_index_at(p.x);
+}
+
+void caption_tabs::show_drop(int index)
+{
+    if (index == d_->drop) return;
+    d_->drop = index;
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void caption_tabs::set_frame(bool transparent, int resize_band)

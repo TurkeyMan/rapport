@@ -239,12 +239,16 @@ msgstr ""
 msgid "Loading…"
 msgstr ""
 
-#: document tabs (Windows): a tab's right-click menu
+#: document tabs: a tab's right-click menu
 msgid "_New tab"
 msgstr ""
 
-#: document tabs (Windows): a tab's right-click menu
+#: document tabs: a tab's right-click menu
 msgid "_Close tab"
+msgstr ""
+
+#: document tabs: a tab's right-click menu, with tearing off (on_detach)
+msgid "_Move to new window"
 msgstr ""
 
 #: document tabs (Windows 11, in the caption): the tabs' name to UI Automation
