@@ -847,22 +847,28 @@ struct caption_tabs::impl
         rt->PushAxisAlignedClip(D2D1::RectF(0, 0, float(clip.right), float(clip.bottom)), D2D1_ANTIALIAS_MODE_ALIASED);
         const int up = lifted();
         // The separators, as WinUI's TabView has them (TabViewItemSeparator):
-        // a line's width at the end of a tab, the next one's against it,
-        // 8 short of the tab's top and bottom (TabViewItemSeparatorMargin),
-        // translucent over the strip; none beside the current tab or a
-        // hovered one. First, under every tab: the dragged one (not beside
-        // any here, its place along the strip left empty) clears its
-        // footprint, separators and all, as it's drawn.
-        for (int i = 0; i + 1 < n; ++i)
+        // a line's width at the end of a tab, 8 short of its top and bottom
+        // (TabViewItemSeparatorMargin), translucent over the strip; none
+        // beside the current tab or a hovered one. Each tab has its own, the
+        // last one too (before "+"), as WinUI's TabViewItems do. First,
+        // under every tab: the dragged one (not beside any here, its place
+        // along the strip left empty) clears its footprint, separators and
+        // all, as it's drawn.
+        for (int i = 0; i < n; ++i)
         {
-            const RECT &r = tab_rects[size_t(i)], &next = tab_rects[size_t(i + 1)];
+            const RECT& r = tab_rects[size_t(i)];
             auto quiet = [&](int k)
             {
                 return k != self.current_ && k != up &&
                        !(hot.what != part::none && hot.what != part::add && hot.index == k);
             };
-            if (IsRectEmpty(&r) || IsRectEmpty(&next) || r.right != next.left || !quiet(i) || !quiet(i + 1))
+            if (IsRectEmpty(&r) || !quiet(i)) continue;
+            // The next one, if there is one in sight: against this one, and
+            // neither current, dragged nor hovered.
+            if (i + 1 < n && !IsRectEmpty(&tab_rects[size_t(i + 1)]) &&
+                (r.right != tab_rects[size_t(i + 1)].left || !quiet(i + 1)))
                 continue;
+            if (i + 1 < n && i + 1 == up) continue;
             const int inset = px(8);
             fill(RECT{r.right - line, r.top + inset, r.right, r.bottom - inset}, colors.separator);
         }
