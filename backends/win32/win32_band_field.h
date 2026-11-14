@@ -9,10 +9,12 @@
 // A field in it (an entry) stays the native EDIT, for everything but its
 // look: UI Automation, the IME, its context menu, caret, selection and undo
 // are all the control's own. Only its frame and background are drawn here,
-// as WinUI draws a TextBox: opaque, rounded, its fill by state (rest, hover,
-// focus with the accent along its bottom, disabled), the text vertically
-// centred in it, and its placeholder (and, disabled, its text) in WinUI's
-// colours. Under high contrast nothing is drawn: the native bordered EDIT at
+// as WinUI draws a TextBox: rounded, opaque within its shape, its fill by
+// state (rest, hover, focus with the accent along its bottom, disabled), the
+// text vertically centred in it, and its placeholder (and, disabled, its
+// text) in WinUI's colours. Round its shape, the band's layer at its own
+// alpha, premultiplied, as the band draws it (Mica Alt through it), its
+// edge antialiased into it. Under high contrast nothing is drawn: the native bordered EDIT at
 // the band's metrics, in the system colours.
 //
 // Everywhere else (other entries, Windows 10, stage 1's tabs, a window

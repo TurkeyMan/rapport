@@ -90,6 +90,12 @@ std::string hex(DWORD v)
     std::snprintf(b, sizeof b, "%06lx", v & 0xffffff);
     return b;
 }
+std::string argb_hex(DWORD v)
+{
+    char b[16];
+    std::snprintf(b, sizeof b, "%08lx", v);
+    return b;
+}
 std::string str(long v)
 {
     return std::to_string(v);
@@ -190,13 +196,22 @@ field_colors colours()
             from(0xE4000000), from(0x9E000000), from(0x72000000), from(0x5C000000)};
 }
 
-// The band's fill (win32-caption-tabs): WinUI's LayerFillColorDefault drawn
-// opaque, #F8F8F8 light, #4C3A3A3A over #202020 dark; high contrast's window
-// colour.
+// The band (win32-caption-tabs): WinUI's LayerOnMicaBaseAltFillColorDefault,
+// #B3FFFFFF (dark #733A3A3A), at its own alpha over the extended frame,
+// printed premultiplied: 0xB3B3B3B3, dark 0x731A1A1A; high contrast's window
+// colour, opaque.
+DWORD band_layer_px()
+{
+    if (high_contrast()) return 0xFF000000u | rgb(GetSysColor(COLOR_WINDOW));
+    return g_dark ? 0x731A1A1Au : 0xB3B3B3B3u;
+}
+// The same family's opaque one, what a field's fill goes over (GDI's ground
+// for the band: LayerOnMicaBaseAltFillColorTertiary), #F9F9F9, dark #2C2C2C;
+// high contrast's window colour.
 DWORD band_fill()
 {
     if (high_contrast()) return rgb(GetSysColor(COLOR_WINDOW));
-    return g_dark ? over({0x3A3A3A, 0x4C}, 0x202020) : 0xF8F8F8;
+    return g_dark ? 0x2C2C2C : 0xF9F9F9;
 }
 
 // AccentFillColorDefault: the accent palette's Dark1 (Light2 dark), if the
@@ -270,6 +285,12 @@ struct printed
     {
         if (x < 0 || y < 0 || x >= w || y >= h) return 0xDEADBEEF;
         return px[size_t(y) * w + x] & 0xffffff;
+    }
+    // The pixel as printed, alpha and all (premultiplied ARGB).
+    DWORD raw(int x, int y) const
+    {
+        if (x < 0 || y < 0 || x >= w || y >= h) return 0xDEADBEEF;
+        return px[size_t(y) * w + x];
     }
 };
 printed into_bitmap(int w, int h, const std::function<void(HDC)>& paint)
@@ -362,9 +383,9 @@ void check_metrics(HWND top, const std::vector<HWND>& fields, UINT dpi, const st
     const int from = strip ? int(rect_in(top, strip).bottom) : 0;
     const int row = px(46, dpi), field = px(32, dpi), above = (row - field) / 2;
     const printed bg = print_erase(top);
-    const DWORD fill = band_fill();
+    const DWORD fill = band_layer_px();
     int y = from;
-    while (y < bg.h && bg.at(bg.w - 2, y) == fill) ++y;
+    while (y < bg.h && bg.raw(bg.w - 2, y) == fill) ++y;
     expect(y - from == row, "the band " + str(row) + " px from the strip's bottom to its line" + at + ": " +
                                 str(y - from) + " px, from " + str(from));
     for (HWND f : fields)
@@ -434,6 +455,46 @@ void check_centred(HWND edit, DWORD face, const std::string& what)
                                              std::to_string(mid) + " for " + std::to_string(want));
 }
 
+// A field printed on the band: outside its rounded shape (each corner's
+// outermost pixel) the band's layer exactly as the band prints it,
+// premultiplied at its own alpha (not made opaque, which on the extended
+// frame would be square corners of the opaque ground over Mica Alt); along
+// its rounded top-left edge, antialiased between the layer and the field,
+// never less opaque than the layer and each channel no more than its alpha
+// (premultiplied); inside the shape, round the text (the padding above it),
+// the field's own fill, opaque.
+void check_corners(const printed& p, DWORD face, const std::string& what)
+{
+    const DWORD layer = band_layer_px();
+    const POINT corners[] = {{0, 0}, {p.w - 1, 0}, {0, p.h - 1}, {p.w - 1, p.h - 1}};
+    bool all = true;
+    std::string seen;
+    for (const POINT c : corners)
+    {
+        all = all && p.raw(c.x, c.y) == layer;
+        seen += " " + argb_hex(p.raw(c.x, c.y));
+    }
+    expect(all, "its corners the band's layer, " + argb_hex(layer) + " (premultiplied)" + what + ":" + seen);
+    const int la = int(layer >> 24);
+    bool premultiplied = true, between = false;
+    for (int y = 0; y < 4 && y < p.h; ++y)
+        for (int x = 0; x < 4 && x < p.w; ++x)
+        {
+            const DWORD v = p.raw(x, y);
+            const int a = int(v >> 24);
+            premultiplied = premultiplied && a >= la && channel(v, 16) <= a && channel(v, 8) <= a &&
+                            channel(v, 0) <= a;
+            between = between || (a > la && a < 255);
+        }
+    expect(premultiplied && (between || la == 255),
+           "its rounded edge antialiased over the layer, premultiplied" + what + ": " + argb_hex(p.raw(1, 0)) +
+               ", " + argb_hex(p.raw(0, 1)) + ", " + argb_hex(p.raw(1, 1)));
+    const DWORD inside = p.raw(p.w * 3 / 4, 2), middle = p.raw(p.w * 3 / 4, p.h / 2);
+    expect(inside == (0xFF000000u | face) && middle == (0xFF000000u | face),
+           "inside its shape its own fill, opaque, round the text and by it" + what + ": " + argb_hex(inside) +
+               ", " + argb_hex(middle));
+}
+
 // A field's printed look: its corners the band's (rounded to it), its edge
 // the border or the fill, its fill, its bottom the accent when focused; the
 // text's ink as expected.
@@ -446,11 +507,8 @@ struct look
 void check_look(HWND edit, const look& want, const std::string& what)
 {
     const printed p = print_field(edit);
-    const DWORD behind = band_fill();
     const int mid = p.w * 3 / 4;  // past the text, before a button
-    expect(p.at(0, 0) == behind && p.at(p.w - 1, p.h - 1) == behind,
-           "its corners rounded, the band's " + hex(behind) + what + ": " + hex(p.at(0, 0)) + ", " +
-               hex(p.at(p.w - 1, p.h - 1)));
+    check_corners(p, want.face, what);
     expect(p.at(mid, 0) == want.edge, "its top edge " + hex(want.edge) + what + ": " + hex(p.at(mid, 0)));
     expect(p.at(mid, 2) == want.face && p.at(mid, p.h / 2) == want.face,
            "its fill " + hex(want.face) + ", opaque" + what + ": " + hex(p.at(mid, 2)) + ", " +
@@ -675,7 +733,8 @@ void check_at_dpi(HWND top, const std::vector<HWND>& fields, UINT dpi, const std
     check_centred(fields[0], rest, at);
     check_centred(fields[1], rest, " (placeholder," + at.substr(1));
     const printed p = print_field(fields[0]);
-    expect(p.at(0, 0) == band_fill() && p.at(p.w * 3 / 4, p.h / 2) == rest, "its corners rounded and its fill" + at);
+    expect(p.at(p.w * 3 / 4, p.h / 2) == rest, "its fill" + at + ": " + hex(p.at(p.w * 3 / 4, p.h / 2)));
+    check_corners(p, rest, at);
 }
 
 // At a text size (Settings > Accessibility > Text size) of `scale`: the
@@ -719,9 +778,9 @@ void check_text_size(HWND top, const std::vector<HWND>& fields, UINT dpi, float 
                "the fields taller than " + str(px(32, dpi)) + " px" + at + ": " + str(tallest));
     const int row = tallest + px(46, dpi) - px(32, dpi);
     const printed bg = print_erase(top);
-    const DWORD fill = band_fill();
+    const DWORD fill = band_layer_px();
     int y = from;
-    while (y < bg.h && bg.at(bg.w - 2, y) == fill) ++y;
+    while (y < bg.h && bg.raw(bg.w - 2, y) == fill) ++y;
     expect(y - from == row, "the band " + str(row) + " px from the strip to its line" + at + ": " + str(y - from));
     if (!high_contrast())
     {

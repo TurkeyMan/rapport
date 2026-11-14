@@ -1,6 +1,7 @@
 // The toolbar band's text fields: see win32_band_field.h.
 #include "win32_band_field.h"
 
+#include "win32_caption_tabs.h"
 #include "win32_chrome_palette.h"
 
 #include <algorithm>
@@ -169,12 +170,6 @@ HBRUSH face_brush(field_state& st, color face)
     return st.brush;
 }
 
-color mix(color under, color top, float a)
-{
-    auto m = [a](uint8_t u, uint8_t t) { return uint8_t(std::lround(float(u) * (1 - a) + float(t) * a)); };
-    return color{m(under.r, top.r), m(under.g, top.g), m(under.b, top.b), 255};
-}
-
 // The window's rectangle and its client area's, in the window's coordinates.
 void frame_rects(HWND h, RECT& window, RECT& client)
 {
@@ -183,6 +178,16 @@ void frame_rects(HWND h, RECT& window, RECT& client)
     MapWindowPoints(h, nullptr, reinterpret_cast<POINT*>(&client), 2);
     OffsetRect(&client, -window.left, -window.top);
     OffsetRect(&window, -window.left, -window.top);
+}
+
+// What's under the field outside its rounded shape: the band's layer, at
+// its alpha (the frame's extended over the band: Mica Alt shows through
+// it), or, with no band under it, the surface it's on, opaque.
+color layer_under(HWND h, const look& l)
+{
+    color solid{};
+    if (in_toolbar_band(h, solid)) return band_colors(GetAncestor(h, GA_ROOT)).fill;
+    return l.behind;
 }
 
 // The drawn frame (everything but the client area) onto `dc`, the window's
@@ -231,26 +236,46 @@ void paint_frame(HWND h, HDC dc)
     };
     const float fw = float(w), fh = float(ht);
     const float bottom = l.focused ? line : border;
+    // Premultiplied, alpha and all: outside the rounded shape the band's
+    // layer as the band draws it, the shape's own pixels (its fill, border,
+    // accent) opaque over it, an antialiased edge between the two. (On a
+    // frame extended into the client area a pixel at alpha 0 would be the
+    // backdrop's.)
+    struct pm
+    {
+        float a, r, g, b;
+    };
+    const color under = layer_under(h, l);
+    const float ua = float(under.a) / 255.f;
+    const pm layer{float(under.a), float(under.r) * ua, float(under.g) * ua, float(under.b) * ua};
+    // The layer where nothing covers the pixel, plus `c` (opaque) by as
+    // much of it as `c` covers.
+    auto add = [](pm p, color c, float k)
+    { return pm{p.a + 255.f * k, p.r + float(c.r) * k, p.g + float(c.g) * k, p.b + float(c.b) * k}; };
+    auto scaled = [](pm p, float k) { return pm{p.a * k, p.r * k, p.g * k, p.b * k}; };
+    auto level = [](float v) { return uint32_t(std::clamp(std::lround(v), 0L, 255L)); };
     auto* pixels = static_cast<uint32_t*>(bits);
     for (int y = 0; y < ht; ++y)
         for (int x = 0; x < w; ++x)
         {
-            color c = l.behind;
+            pm c = layer;
             if (!(x >= client.left && x < client.right && y >= client.top && y < client.bottom))
             {
                 const float outer = cover(x, y, 0, 0, fw, fh, radius);
+                c = scaled(layer, 1.f - outer);
                 if (!l.ringed)
-                    c = mix(c, l.face, outer);
-                else if (outer > 0)
+                    c = add(c, l.face, outer);
+                else
                 {
+                    // The fill inside the ring, the ring round it: each by
+                    // as much of the pixel as it covers.
                     const float inner = cover(x, y, border, border, fw - border, fh - bottom, radius - border);
-                    c = mix(c, l.face, inner);
-                    c = mix(c, l.focused && float(y) >= fh - line ? l.accent : l.stroke, std::max(0.f, outer - inner));
+                    c = add(c, l.face, inner);
+                    c = add(c, l.focused && float(y) >= fh - line ? l.accent : l.stroke, std::max(0.f, outer - inner));
                 }
             }
-            // Opaque, alpha and all (on a frame extended into the client
-            // area a pixel at alpha 0 would be the backdrop's).
-            pixels[size_t(y) * size_t(w) + size_t(x)] = 0xFF000000u | uint32_t(c.r) << 16 | uint32_t(c.g) << 8 | c.b;
+            pixels[size_t(y) * size_t(w) + size_t(x)] =
+                level(c.a) << 24 | level(c.r) << 16 | level(c.g) << 8 | level(c.b);
         }
     GdiFlush();
     const int saved = SaveDC(dc);
