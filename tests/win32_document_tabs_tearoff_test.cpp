@@ -647,7 +647,7 @@ void run(const char* stage, bool last)
         };
         auto nothing_after = [&](POINT q, int how, const std::string& by)
         {
-            const bool cancelled = ask(b.top, 12) == 0 || ask(a.top, 12) == 0;
+            const bool cancelled = ask(a.top, 12) == 0;  // (A's the drag; B never drags)
             const int heard = route();
             ask(b.top, 6, 0);
             a.up(POINT{q.x + 1, q.y});
