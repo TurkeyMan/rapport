@@ -1145,7 +1145,8 @@ enum class key
     f12,
     // Navigation: the mouse's side buttons (the X buttons), and the keys
     // some keyboards have. Only presses are reported, and only to the
-    // window's on_key, whatever has focus. A canvas taking a side button
+    // window's on_key, whatever has focus (but an input method composing in
+    // a focused text field: see window::on_key). A canvas taking a side button
     // itself (on_pointer returning true for button 4 or 5) produces none.
     back,
     forward,
@@ -1381,7 +1382,20 @@ public:
     // Keys reach this before the focused widget; return true to consume. For
     // app-wide keys (navigation, fullscreen, find) that must work whatever
     // has focus. While an editable text field has focus only Escape, the
-    // function keys and back/forward come here; the rest are typing.
+    // function keys, back/forward and shortcut chords come here; the rest
+    // are typing. A chord (Ctrl or Alt held) comes here first, as an
+    // accelerator, unless it's one of the field's editing keys: Ctrl+A, C,
+    // V, X, Z, Y, Ctrl+Left, Right, Home, End, Backspace, Delete, each with
+    // Shift too, Shift+Insert, Shift+Delete and Ctrl+Insert. Only presses;
+    // Ctrl+Alt with a character is typing (AltGr). One not taken (false)
+    // goes on to the field unchanged, and Alt+letter from there to the menu
+    // bar's access keys (on Qt those come first, before this, as its
+    // shortcuts). While an input method is composing in the focused field
+    // nothing comes here - no chord, no Escape, no function key, no back or
+    // forward (key or side button): they're the input method's (Escape
+    // cancels, Japanese ones convert with F6-F10), and a dialog's Escape
+    // doesn't close it then. Once it commits or cancels, the rules above
+    // apply again.
     // Read-only text views don't count as editable.
     virtual void on_key(std::function<bool(const key_event&)>) = 0;
     // Dialogs: fired once with the role of the button that ended it
@@ -1390,6 +1404,13 @@ public:
     virtual void on_finished(std::function<void(dialog_role)>) = 0;
     // Return false to veto closing (e.g. unsaved commit message).
     virtual void on_close_request(std::function<bool()>) = 0;
+    // Runs once, on the UI thread, at the start of the window's destructor,
+    // before any of its widgets go, so it may still read them. That holds
+    // whoever destroys the window: the app resetting its pointer, or the
+    // backend after a close. It must not destroy this window again or
+    // re-enter its own destruction; making or destroying other windows is
+    // fine. Setting it again replaces it; an empty function clears it.
+    virtual void on_destroyed(std::function<void()>) = 0;
     // Files dragged in (from a file manager) and dropped anywhere on the
     // window, as local paths in UTF-8, in the order given. Setting it is
     // what makes the window accept them; other drags are refused.

@@ -10,6 +10,7 @@
 #include "win32_caption_tabs.h"
 #include "win32_common.h"
 #include "win32_shell_icons.h"
+#include "window_chords.h"
 #define RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
 #include "win32_trace.h"
 
@@ -26,6 +27,7 @@
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <format>
+#include <imm.h>
 #include <ole2.h>
 #include <oleacc.h>
 #include <propsys.h>
@@ -159,6 +161,34 @@ unsigned key_modifiers()
     if (GetKeyState(VK_MENU) & 0x8000) m |= mod_alt;
     if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) m |= mod_meta;
     return m;
+}
+
+// An IME composing in `h` (its candidate text not yet committed): keys are
+// its until then. A test, with no IME to drive, says one is composing with
+// the control's "rapport-test-composing" property.
+bool ime_composing(HWND h)
+{
+    if (GetPropW(h, L"rapport-test-composing")) return true;
+    HIMC imc = ImmGetContext(h);
+    if (!imc) return false;
+    const bool composing = ImmGetCompositionStringW(imc, GCS_COMPSTR, nullptr, 0) > 0;
+    ImmReleaseContext(h, imc);
+    return composing;
+}
+
+// An editable text field: an Edit or a rich edit, not read-only.
+bool editable_field(HWND h)
+{
+    wchar_t cls[32] = {};
+    if (!h || !GetClassNameW(h, cls, 32)) return false;
+    return (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
+           !(GetWindowLongPtrW(h, GWL_STYLE) & ES_READONLY);
+}
+
+// A text field whose IME is composing: every key and navigation is its.
+bool field_composing(HWND h)
+{
+    return editable_field(h) && ime_composing(h);
 }
 
 key_event make_key_event(WPARAM vk, LPARAM lp, bool press)
@@ -10277,6 +10307,8 @@ public:
     }
     ~window_impl() override
     {
+        // First, while every widget is still there; taken out, so it runs once.
+        if (auto f = std::exchange(on_destroyed_, {})) f();
         windows().erase(this);
         // WM_DESTROY can't see us once GWLP_USERDATA is cleared below.
         std::erase(recent(), this);
@@ -10917,6 +10949,7 @@ public:
     void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    void on_destroyed(std::function<void()> f) override { on_destroyed_ = std::move(f); }
     // Drops on any child control reach the top level as WM_DROPFILES.
     void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
     {
@@ -10952,12 +10985,18 @@ public:
         // The arrows, Enter and Delete on the focused tabs are theirs.
         if (doc_tabs && doc_tabs->owns_key(m)) return false;
         if (!on_key_) return false;
-        wchar_t cls[32] = {};
-        GetClassNameW(GetFocus(), cls, 32);
-        const bool typing = (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
-                            !(GetWindowLongPtrW(GetFocus(), GWL_STYLE) & ES_READONLY);
+        // The control the key is going to (the focus, as it was typed).
+        const bool typing = editable_field(m.hwnd);
+        // While an IME composes in the field every key is its (Escape cancels,
+        // the function keys convert): none is the window's.
+        if (typing && ime_composing(m.hwnd)) return false;
         const bool not_text = m.wParam == VK_ESCAPE || (m.wParam >= VK_F1 && m.wParam <= VK_F12);
-        if (typing && !not_text) return false;
+        // A shortcut chord is the window's first, as an accelerator.
+        if (typing && !not_text)
+        {
+            const key_event e = make_key_event(m.wParam, m.lParam, m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN);
+            return window_chords::to_window(e) && on_key_(e);
+        }
         // The Back and Forward keys come as WM_APPCOMMAND, whatever has focus.
         if (m.wParam == VK_BROWSER_BACK || m.wParam == VK_BROWSER_FORWARD) return false;
         return on_key_(make_key_event(m.wParam, m.lParam, m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN));
@@ -11196,6 +11235,11 @@ private:
                 const int command = GET_APPCOMMAND_LPARAM(lp);
                 if (command != APPCOMMAND_BROWSER_BACKWARD && command != APPCOMMAND_BROWSER_FORWARD) break;
                 if (!self->on_key_) break;
+                // Not while an IME composes in the window's focused field (or,
+                // with no focus here, the control it came from).
+                HWND field = GetFocus();
+                if (!field || !IsChild(h, field)) field = reinterpret_cast<HWND>(wp);
+                if (field_composing(field)) break;
                 key_event e;
                 e.key = command == APPCOMMAND_BROWSER_BACKWARD ? key::back : key::forward;
                 e.modifiers = key_modifiers();
@@ -11347,6 +11391,7 @@ private:
     std::function<bool(const key_event&)> on_key_;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void()> on_destroyed_;
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     bool app_id_ = false;  // a taskbar group of its own (set_app_id), cleared before it goes
     rap::icon window_icon_;
@@ -11831,7 +11876,11 @@ public:
                 if (consumed) continue;
             }
             HWND top = GetAncestor(m.hwnd, GA_ROOT);
-            if (top && IsDialogMessageW(top, &m)) continue;
+            // A field whose IME composes has its keys, not the dialog's
+            // handling (Escape closing it, Enter, Tab), as an IME's own keys
+            // never reach it.
+            const bool composing = m.message >= WM_KEYFIRST && m.message <= WM_KEYLAST && field_composing(m.hwnd);
+            if (top && !composing && IsDialogMessageW(top, &m)) continue;
             TranslateMessage(&m);
             DispatchMessageW(&m);
         }

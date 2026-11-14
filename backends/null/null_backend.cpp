@@ -14,6 +14,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace rap::null
 {
@@ -503,11 +504,17 @@ public:
 class null_window : public rap::window
 {
 public:
+    ~null_window() override
+    {
+        // First, while every widget is still there; taken out, so it runs once.
+        if (auto f = std::exchange(on_destroyed_, {})) f();
+    }
     void set_title(const std::string&) override {}
     void show() override {}
     void close() override {}
     void on_finished(std::function<void(dialog_role)>) override {}
     void on_close_request(std::function<bool()>) override {}
+    void on_destroyed(std::function<void()> f) override { on_destroyed_ = std::move(f); }
     void on_files_dropped(std::function<void(const std::vector<std::string>&)>) override {}
 
     size_f size() const override { return size_; }
@@ -533,6 +540,7 @@ protected:
 private:
     size_f size_{640, 480};
     bool fullscreen_ = false;
+    std::function<void()> on_destroyed_;
 };
 
 const char* role_name(dialog_role r)

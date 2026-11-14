@@ -7,6 +7,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "../common/window_chords.h"
 #include <gtk/gtk.h>
 
 #include "builtin_icons.h"
@@ -4487,8 +4488,10 @@ public:
                 win_, "key-press-event",
                 +[](GtkWidget*, GdkEventKey* e, gpointer p) -> gboolean
                 {
-                    if (e->keyval != GDK_KEY_Escape) return false;
-                    static_cast<window_impl*>(p)->close_requested();
+                    // Not while an input method composes: Escape cancels that.
+                    auto* self = static_cast<window_impl*>(p);
+                    if (e->keyval != GDK_KEY_Escape || self->field_composing()) return false;
+                    self->close_requested();
                     return true;
                 },
                 this);
@@ -4531,24 +4534,38 @@ public:
             if (ev.key == key::character)
                 ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(e->keyval));
             ev.modifiers = modifiers(e->state);
+            // Asked of every key, so the field's composition is watched from
+            // before it starts (im_composing).
+            const bool composing = self->field_composing();
             // The document tabs' keys first, whatever has the focus (none of
             // them is typing), and while the strip is hidden too.
             if (self->doc_tabs && self->document_tabs_key(ev)) return true;
             if (!self->on_key_) return false;
             GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(w));
-            const bool typing =
-                focus &&
-                (GTK_IS_EDITABLE(focus) ||
-                 (GTK_IS_TEXT_VIEW(focus) && gtk_text_view_get_editable(GTK_TEXT_VIEW(focus))));
+            const bool typing = editable_field(focus);
+            // While an input method composes in the field every key is its
+            // (Escape cancels, the function keys convert): none is the window's.
+            if (composing) return false;
             const bool navigation = navigation_key(key_for(e->keyval));
             if (navigation && e->type != GDK_KEY_PRESS) return false;  // presses only
             const bool not_text = navigation || e->keyval == GDK_KEY_Escape ||
                                  (e->keyval >= GDK_KEY_F1 && e->keyval <= GDK_KEY_F12);
-            if (typing && !not_text) return false;
+            // A shortcut chord is the window's first, as an accelerator (this
+            // runs before the field has the key).
+            if (typing && !not_text) return window_chords::to_window(ev) && self->on_key_(ev);
             return self->on_key_(ev);
         };
         connect(win_, "key-press-event", key, this);
         connect(win_, "key-release-event", key, this);
+        // A field's composition is watched from when it has the focus, as
+        // well as from its first key (im_composing).
+        connect(
+            win_, "set-focus",
+            +[](GtkWindow*, GtkWidget* f, gpointer)
+            {
+                if (f) im_composing(f);
+            },
+            this);
 
         // The mouse's side buttons are back and forward, pressed anywhere in
         // the window: taken on the way down (capture), before a list or a
@@ -4585,10 +4602,23 @@ public:
             this);
     }
 
-    // Back or forward, from a side button.
+    // An editable text field (an entry, an editable text view).
+    static bool editable_field(GtkWidget* w)
+    {
+        return w && (GTK_IS_EDITABLE(w) || (GTK_IS_TEXT_VIEW(w) && gtk_text_view_get_editable(GTK_TEXT_VIEW(w))));
+    }
+    // An input method composing in the window's focused field: every key and
+    // navigation is its then, none the window's.
+    bool field_composing()
+    {
+        GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
+        return editable_field(focus) && im_composing(focus);
+    }
+
+    // Back or forward, from a side button; not while an input method composes.
     bool navigate(key k, unsigned mods)
     {
-        if (!on_key_) return false;
+        if (!on_key_ || field_composing()) return false;
         key_event ev;
         ev.key = k;
         ev.modifiers = mods;
@@ -4597,6 +4627,8 @@ public:
 
     ~window_impl() override
     {
+        // First, while every widget is still there; taken out, so it runs once.
+        if (auto f = std::exchange(on_destroyed_, {})) f();
         std::erase(recent(), win_);
         for (auto& part : parts) part->disconnect();
         disconnect();
@@ -4624,6 +4656,7 @@ public:
     void close() override { gtk_widget_hide(win_); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    void on_destroyed(std::function<void()> f) override { on_destroyed_ = std::move(f); }
     void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
     {
         const bool first = !on_files_dropped_;
@@ -4958,6 +4991,7 @@ private:
     bool finished_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void()> on_destroyed_;
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     std::function<void(bool)> on_fullscreen_;
     std::function<bool(const key_event&)> on_key_;

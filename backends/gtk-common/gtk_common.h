@@ -2110,4 +2110,22 @@ inline void follow_color_scheme(void (*apply)(int scheme))
         reinterpret_cast<gpointer>(read));
 }
 
+// An input method composing in the text field `w` (its preedit text not yet
+// committed). The field's preedit-changed is watched from the first key
+// that reaches the window for it, which comes before the field (and its
+// input method) has that key: so from before any composition starts.
+inline bool im_composing(GtkWidget* w)
+{
+    if (!w || !g_signal_lookup("preedit-changed", G_OBJECT_TYPE(w))) return false;
+    if (!g_object_get_data(G_OBJECT(w), "rapport-preedit-watched"))
+    {
+        g_object_set_data(G_OBJECT(w), "rapport-preedit-watched", GINT_TO_POINTER(1));
+        g_signal_connect(w, "preedit-changed",
+                         G_CALLBACK(+[](GtkWidget* w, const char* text, gpointer)
+                                    { g_object_set_data(G_OBJECT(w), "rapport-preedit", GINT_TO_POINTER(text && *text)); }),
+                         nullptr);
+    }
+    return g_object_get_data(G_OBJECT(w), "rapport-preedit") != nullptr;
+}
+
 }  // namespace rap::gtkcommon
