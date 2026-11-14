@@ -7638,7 +7638,9 @@ tab_drags& tab_drag()
 // cancelled by Escape heard it (escape_watch::last: the route, 1 to 5 as
 // escape_watch::route has them, and for the
 // message loop's the message's window and type); 11 the keys the message
-// loop takes noted into the key_log lParam points to (0: no more).
+// loop takes noted into the key_log lParam points to (0: no more); 12 the
+// window's tab drag: 0 none, 1 pressed (not past the threshold), 2 dragged;
+// 13 how many times Escape's been polled.
 UINT tab_drag_message()
 {
     static const UINT m = RegisterWindowMessageW(L"rapport-document-tabs-drag");
@@ -7800,6 +7802,7 @@ public:
     // A drag on; cancelled as Escape cancels it (the tab back where it was,
     // nothing told); where it's held, from the tab's top-left.
     virtual bool dragging() const = 0;
+    virtual int drag_phase() const = 0;  // 0 none, 1 pressed (not past the threshold), 2 dragged
     virtual void cancel_tab_drag() = 0;
     virtual POINT drag_grab() const = 0;
     // Tab `id` as the strip draws it at rest (current), at the strip's DPI,
@@ -8116,8 +8119,9 @@ private:
     // or torn off if it's away; nothing's done after.
     void let_go(POINT p)
     {
-        // Escape pressed since the last poll: cancelled, not dropped.
-        if (drag_ && drag_->active && escape_.pressed())
+        // Escape pressed since the last poll: cancelled, not dropped (and a
+        // tab only pressed: nothing done as it's let go).
+        if (drag_ && escape_.pressed())
         {
             escape_watch::last() = {escape_watch::route::poll_release};
             cancel_drag();
@@ -8187,6 +8191,7 @@ public:
     }
     int drop_shown() const override { return drop_; }
     bool dragging() const override { return drag_.has_value(); }
+    int drag_phase() const override { return !drag_ ? 0 : drag_->active ? 2 : 1; }
     void cancel_tab_drag() override { cancel_drag(); }
     POINT drag_grab() const override { return drag_ ? drag_->grab : POINT{}; }
     // The control's own drawing (WM_PRINTCLIENT), its tab cut out, made
@@ -8751,6 +8756,7 @@ public:
         return int(SendMessageW(h_, caption_tabs::query_message(), MAKEWPARAM(9, 0), 0));
     }
     bool dragging() const override { return strip_->dragging(); }
+    int drag_phase() const override { return strip_->drag_phase(); }
     void cancel_tab_drag() override { strip_->cancel_drag(); }
     POINT drag_grab() const override { return strip_->drag_grab(); }
     HBITMAP tab_image(const std::string& id, SIZE& size) override
@@ -11747,6 +11753,8 @@ private:
             g_key_log = reinterpret_cast<key_log*>(lp);
             result = 1;
             break;
+        case 12: result = doc_tabs ? doc_tabs->drag_phase() : 0; break;
+        case 13: result = escape_watch::polls(); break;
         case 9: result = reinterpret_cast<LRESULT>(escape_watch::last().hwnd); break;
         case 10: result = LRESULT(escape_watch::last().message); break;
         default: result = 0; break;
