@@ -107,7 +107,9 @@ bool type_into(const char* text)
 {
     HWND e = find_edit(text);
     if (!e) return false;
-    SendMessageW(e, EM_SETSEL, WPARAM(-1), LPARAM(-1));
+    // The caret at the end (-1, -1 would only take the selection away).
+    const int end = GetWindowTextLengthW(e);
+    SendMessageW(e, EM_SETSEL, WPARAM(end), LPARAM(end));
     SendMessageW(e, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L" typed"));
     return true;
 }
