@@ -250,8 +250,9 @@ int caption_line_px(UINT dpi);
 // loop takes it (active()); and, for keys that go to another thread (a drag
 // from a window that isn't the foreground's), as OLE's DoDragDrop does, the
 // key's state polled (GetAsyncKeyState: down, or pressed since the last
-// poll) on each move and on a timer on the strip while the drag holds the
-// mouse, a press seen (having been up during the drag) cancelling it. The
+// poll) on each move, on a timer on the strip while the drag holds the
+// mouse, and as the button's let go (before anything's dropped or torn
+// off), a press seen (having been up during the drag) cancelling it. The
 // poll reads the key's state only: it takes no input from anyone.
 class escape_watch
 {
@@ -278,6 +279,7 @@ public:
         strip_key,   // WM_KEYDOWN at the strip itself
         poll_move,   // the key's state, polled on a move
         poll_timer,  // the key's state, polled on the timer
+        poll_release,  // the key's state, polled as the button's let go
     };
     struct heard
     {

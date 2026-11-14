@@ -7635,8 +7635,10 @@ tab_drags& tab_drag()
 // would have shown last (0 none), forgotten; 6 Escape's state as a drag
 // polls it (escape_watch): lParam 1 down, 0 up, -1 the real key's; 7 how
 // many drags' Escape timers are running; 8, 9 and 10 how the last drag
-// cancelled by Escape heard it (escape_watch::last: the route, and for the
-// message loop's the message's window and type).
+// cancelled by Escape heard it (escape_watch::last: the route, 1 to 5 as
+// escape_watch::route has them, and for the
+// message loop's the message's window and type); 11 the keys the message
+// loop takes noted into the key_log lParam points to (0: no more).
 UINT tab_drag_message()
 {
     static const UINT m = RegisterWindowMessageW(L"rapport-document-tabs-drag");
@@ -7654,6 +7656,21 @@ struct tab_menu_capture
     int opened;  // how many times a menu's been captured
 };
 tab_menu_capture* g_tab_menu_capture = nullptr;
+// The keys the message loop takes (WM_KEYDOWN, WM_KEYUP, and their WM_SYS*
+// ones), any window's, noted for the tests (query 11) as it takes them: up
+// to 64. The test tools have the same layout.
+struct key_log
+{
+    int count;
+    struct entry
+    {
+        HWND hwnd;
+        UINT message;
+        WPARAM key;
+        LPARAM flags;
+    } entries[64];
+};
+key_log* g_key_log = nullptr;
 
 // A strip's drawing (`draw`, into a 32-bit DC as big as its client area
 // `client`), the part `part` of it cut out for a drag image: a top-down DIB
@@ -8099,6 +8116,13 @@ private:
     // or torn off if it's away; nothing's done after.
     void let_go(POINT p)
     {
+        // Escape pressed since the last poll: cancelled, not dropped.
+        if (drag_ && drag_->active && escape_.pressed())
+        {
+            escape_watch::last() = {escape_watch::route::poll_release};
+            cancel_drag();
+            return;
+        }
         // Where it's let go decides, not where the last move was: along the
         // row (to the place there), or away.
         if (drag_ && drag_->active) drag_to(p, true);
@@ -11719,6 +11743,10 @@ private:
             break;
         case 7: result = escape_watch::running(); break;
         case 8: result = LRESULT(escape_watch::last().how); break;
+        case 11:
+            g_key_log = reinterpret_cast<key_log*>(lp);
+            result = 1;
+            break;
         case 9: result = reinterpret_cast<LRESULT>(escape_watch::last().hwnd); break;
         case 10: result = LRESULT(escape_watch::last().message); break;
         default: result = 0; break;
@@ -12724,6 +12752,10 @@ public:
                 g_dragging->cancel_drag();
                 continue;
             }
+            if (key_log* k = g_key_log;
+                k && k->count < 64 && (m.message == WM_KEYDOWN || m.message == WM_KEYUP ||
+                                       m.message == WM_SYSKEYDOWN || m.message == WM_SYSKEYUP))
+                k->entries[k->count++] = {m.hwnd, m.message, m.wParam, m.lParam};
             // Likewise a tab's drag, whichever of this thread's windows the
             // key is for (the strip has the mouse, not the keys).
             if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE && escape_watch::active())
