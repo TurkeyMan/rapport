@@ -212,6 +212,8 @@ int main(int argc, char** argv)
                            [&r]
                            {
                                had_focus = focused();
+                               std::printf("     the foreground window before: %s\n",
+                                           had_focus ? "this one (the focus check is vacuous)" : "another");
                                r.win->present();
                            },
                            [] { return visible() && !minimized(); }});
