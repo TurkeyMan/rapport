@@ -244,6 +244,58 @@ void paint_caption_band(HWND top, HDC dc, int strip_height, bool transparent);
 // A line's width at `dpi` (the strip's, the toolbar band's): a pixel, scaled.
 int caption_line_px(UINT dpi);
 
+// Escape, watched while a tab's dragged (both strips'), however the focus is
+// set. Escape cancels the drag: sent to the strip (WM_KEYDOWN); any
+// WM_KEYDOWN of it on this thread, whatever window it's for, as the message
+// loop takes it (active()); and, for keys that go to another thread (a drag
+// from a window that isn't the foreground's), as OLE's DoDragDrop does, the
+// key's state polled (GetAsyncKeyState: down, or pressed since the last
+// poll) on each move and on a timer on the strip while the drag holds the
+// mouse, a press seen (having been up during the drag) cancelling it. The
+// poll reads the key's state only: it takes no input from anyone.
+class escape_watch
+{
+public:
+    static constexpr UINT_PTR timer_id = 0xE5C;
+    static constexpr UINT interval_ms = 50;
+    ~escape_watch() { stop(); }
+    // The drag's mouse taken by `strip`: watched from now, its timer on.
+    void start(HWND strip);
+    // The drag over: the timer gone.
+    void stop();
+    // Escape pressed since the drag began (polled now).
+    bool pressed();
+    // The timers running, across the app's strips (the tests' query 7).
+    static int running();
+    // The strip whose drag is watched now (null: none).
+    static HWND active();
+    // How the last drag cancelled by Escape heard it, for the tests (query
+    // 8: the route; 9: the message's window, 10 its type, for the loop's).
+    enum class route
+    {
+        none,
+        loop,        // a WM_KEYDOWN on this thread, in the message loop
+        strip_key,   // WM_KEYDOWN at the strip itself
+        poll_move,   // the key's state, polled on a move
+        poll_timer,  // the key's state, polled on the timer
+    };
+    struct heard
+    {
+        route how = route::none;
+        HWND hwnd = nullptr;
+        UINT message = 0;
+    };
+    static heard& last();
+    // The tests' stand-in for the key's state (query 6): -1 the real key's,
+    // else 1 down, 0 up.
+    static int& fake();
+
+private:
+    HWND strip_ = nullptr;
+    bool timer_ = false;  // its timer set
+    bool was_down_ = false;
+};
+
 // -- the toolbar band ---------------------------------------------------------
 //
 // Explorer's address row: under the tabs in the caption a band in WinUI's

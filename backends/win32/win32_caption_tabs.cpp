@@ -250,6 +250,7 @@ struct caption_tabs::impl
         bool away = false;    // out of the strip (caption_drag_at)
     };
     std::optional<drag_state> drag;
+    escape_watch escape;  // while the drag holds the mouse
     int drop = -1;  // where a tab dropped in would land, marked (show_drop)
     // The row's places in sight, from layout(): the first's left, their
     // width, and the first and last tabs there.
@@ -401,6 +402,7 @@ struct caption_tabs::impl
         const RECT& r = tab_rects[size_t(i)];
         drag = drag_state{self.tabs_[size_t(i)].key, i, p, p.x - r.left, p.x};
         SetCapture(self.hwnd_);
+        escape.start(self.hwnd_);
     }
     void drag_to(POINT p, bool letting_go = false)
     {
@@ -451,6 +453,7 @@ struct caption_tabs::impl
         // strip (to the place there), or away.
         if (drag && drag->active) drag_to(p, true);
         const std::optional<drag_state> d = std::exchange(drag, std::nullopt);
+        escape.stop();
         if (GetCapture() == self.hwnd_) ReleaseCapture();  // the drag's gone: its WM_CAPTURECHANGED is nothing
         if (!d || !d->active) return;
         moved(false);  // into its place
@@ -468,6 +471,7 @@ struct caption_tabs::impl
     void cancel()
     {
         const std::optional<drag_state> d = std::exchange(drag, std::nullopt);
+        escape.stop();
         if (!d) return;
         if (GetCapture() == self.hwnd_) ReleaseCapture();
         if (!d->active) return;
@@ -1265,6 +1269,12 @@ struct caption_tabs::impl
             }
             if (d.drag)
             {
+                if (d.escape.pressed())  // however the focus is set (see escape_watch)
+                {
+                    escape_watch::last() = {escape_watch::route::poll_move};
+                    d.cancel();
+                    return 0;
+                }
                 if (!(wp & MK_LBUTTON))  // let go where it wasn't heard
                 {
                     d.let_go(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});  // the window may be gone
@@ -1320,6 +1330,14 @@ struct caption_tabs::impl
                 d.owner.caption_new();
             return 0;
         }
+        case WM_TIMER:
+            if (wp != escape_watch::timer_id) break;
+            if (d.drag && d.escape.pressed())
+            {
+                escape_watch::last() = {escape_watch::route::poll_timer};
+                d.cancel();
+            }
+            return 0;
         case WM_CAPTURECHANGED:
             if (d.drag && reinterpret_cast<HWND>(lp) != h) d.cancel();
             if (d.pressed.what != part::none)
@@ -1370,6 +1388,7 @@ struct caption_tabs::impl
         case WM_KEYDOWN:
             if (wp == VK_ESCAPE && d.drag)
             {
+                escape_watch::last() = {escape_watch::route::strip_key};
                 d.cancel();
                 return 0;
             }
@@ -1423,6 +1442,74 @@ struct caption_tabs::impl
         return DefWindowProcW(h, msg, wp, lp);
     }
 };
+
+// -- Escape while dragging -----------------------------------------------------
+
+namespace
+{
+int escape_timers = 0;
+HWND escape_active = nullptr;
+// Down now, or pressed since the last poll (a tap between two).
+bool escape_down()
+{
+    const int f = escape_watch::fake();
+    if (f >= 0) return f != 0;
+    return (GetAsyncKeyState(VK_ESCAPE) & 0x8001) != 0;
+}
+}  // namespace
+
+int& escape_watch::fake()
+{
+    static int f = -1;
+    return f;
+}
+
+int escape_watch::running()
+{
+    return escape_timers;
+}
+
+HWND escape_watch::active()
+{
+    return escape_active;
+}
+
+escape_watch::heard& escape_watch::last()
+{
+    static heard h;
+    return h;
+}
+
+void escape_watch::start(HWND strip)
+{
+    stop();
+    strip_ = strip;
+    was_down_ = escape_down();  // held from before (or pressed then): not a press
+    escape_active = strip;
+    timer_ = SetTimer(strip_, timer_id, interval_ms, nullptr) != 0;
+    if (timer_) ++escape_timers;
+}
+
+void escape_watch::stop()
+{
+    if (!strip_) return;
+    if (timer_)
+    {
+        KillTimer(strip_, timer_id);  // (gone already with a window destroyed)
+        --escape_timers;
+        timer_ = false;
+    }
+    if (escape_active == strip_) escape_active = nullptr;
+    strip_ = nullptr;
+}
+
+bool escape_watch::pressed()
+{
+    const bool down = escape_down();
+    const bool press = down && !was_down_;
+    was_down_ = down;
+    return press;
+}
 
 UINT caption_tabs::query_message()
 {
@@ -1493,6 +1580,7 @@ void caption_tabs::set_tabs(std::vector<caption_tab> tabs, int current)
         if (i < 0)
         {
             d_->drag.reset();
+            d_->escape.stop();
             if (GetCapture() == hwnd_) ReleaseCapture();
         }
         else if (!d_->drag->active)
