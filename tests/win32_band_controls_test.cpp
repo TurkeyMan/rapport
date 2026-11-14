@@ -21,8 +21,8 @@
 // (rapport-win32-high-contrast-run, CI only): none of it drawn, the native
 // controls at the band's heights.
 //
-// Compact is through the density's test hook (static builds: a plugin build
-// checks the standard density only).
+// A static build checks both densities through the density's test hook; a
+// plugin build the one RAPPORT_DENSITY says (win32-band-controls-compact).
 //   rapport-win32-band-controls-test
 #include <rapport/rapport.h>
 #ifndef NOMINMAX
@@ -53,6 +53,7 @@ namespace rap::win32
 void set_text_scale_for_tests(
     float scale);  // win32_common.h (which wants the backend's include paths)
 void set_band_density_for_tests(int compact);  // win32_band_field.h
+void set_dpi_for_tests(UINT dpi);              // win32_common.h
 }  // namespace rap::win32
 #endif
 
@@ -472,6 +473,19 @@ void check_tool_button(HWND b, bool checked, const std::string& at)
            "hovered, SubtleFillColorSecondary over it" + at + ": " + argb_hex(p.raw(3, p.h / 2)));
 }
 
+// An editable combo box's edit in its face's colour: its fill right of its
+// text, where there's no ink, the face's beside it (left of the edit).
+void check_combo_fill(HWND combo, const std::string& what)
+{
+    const printed p = print(combo);
+    COMBOBOXINFO info{};
+    info.cbSize = sizeof info;
+    GetComboBoxInfo(combo, &info);
+    const RECT e = rect_in(combo, info.hwndItem);
+    const DWORD face = p.at(3, p.h / 2), in = p.at(e.right - 3, (e.top + e.bottom) / 2);
+    expect(in == face, "its edit's ground the face's, " + hex(face) + what + ": " + hex(in));
+}
+
 // An editable combo box: a band field (no border at rest), focused the
 // accent along its bottom.
 void check_combo(HWND combo, const std::string& at)
@@ -491,6 +505,13 @@ void check_combo(HWND combo, const std::string& at)
                                       ": " + str(e.left) + " (" + str(e.top) + ", " + str(e.right) +
                                       ", " + str(e.bottom) + " in " + str(p.w) + " by " + str(p.h) +
                                       ")");
+    check_combo_fill(combo, " (an editable combo box" + at + ")");
+    // Disabled: ControlFillColorDisabled, its edit's (WM_CTLCOLORSTATIC) too.
+    EnableWindow(combo, FALSE);
+    p = print(combo);
+    check_face(p, over(c.disabled, band_fill()), " (an editable combo box, disabled" + at + ")");
+    check_combo_fill(combo, " (an editable combo box, disabled" + at + ")");
+    EnableWindow(combo, TRUE);
     const DWORD accent = accent_fill();
     if (accent == 0xFFFFFFFF) return;
     // The edit's focus is the face's.
@@ -512,10 +533,67 @@ void check_separator(HWND top, HWND sep, const density& d, const std::string& at
                str(r.bottom - r.top));
 }
 
+// A font's height in px (its LOGFONT's, unsigned).
+long font_height(HWND h)
+{
+    LOGFONTW lf{};
+    GetObjectW(reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)), sizeof lf, &lf);
+    return std::labs(lf.lfHeight);
+}
+
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+// 125% and 150%, and back, through the DPI test hook (every window taken to
+// be at that DPI, then WM_DPICHANGED as Windows sends it, which gives every
+// control the UI font at the new DPI): each control the field's height at
+// that DPI, and the editable combo's edit the band field's font still (its
+// combo box gives it the band's, whatever it's sent).
+void check_dpi(HWND top, const std::vector<HWND>& controls, HWND combo, HWND field,
+               const density& d, const std::string& at)
+{
+    const UINT dpi = GetDpiForWindow(top);
+    UINT was = dpi;
+    for (const UINT to : {120u, 144u, dpi})
+    {
+        rap::win32::set_dpi_for_tests(to == dpi ? 0 : to);
+        RECT wr{};
+        GetWindowRect(top, &wr);
+        RECT suggested{wr.left, wr.top, wr.left + MulDiv(wr.right - wr.left, int(to), int(was)),
+                       wr.top + MulDiv(wr.bottom - wr.top, int(to), int(was))};
+        was = to;
+        SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&suggested));
+        pump();
+        const std::string here = at + ", " + str(long(to)) + " dpi";
+        for (HWND c : controls)
+        {
+            const RECT r = rect_in(top, c);
+            wchar_t cls[32]{}, text[64]{};
+            GetClassNameW(c, cls, 32);
+            GetWindowTextW(c, text, 64);
+            char name[128];
+            std::snprintf(name, sizeof name, "%ls \"%ls\"", cls, text);
+            expect(r.bottom - r.top == px(d.field, to), std::string(name) + " " +
+                                                            str(px(d.field, to)) + " px tall" +
+                                                            here + ": " + str(r.bottom - r.top));
+        }
+        COMBOBOXINFO info{};
+        info.cbSize = sizeof info;
+        GetComboBoxInfo(combo, &info);
+        expect(info.hwndItem && font_height(info.hwndItem) == font_height(field),
+               "the editable combo's text in the band field's font" + here + ": " +
+                   str(info.hwndItem ? font_height(info.hwndItem) : 0) + " px, the field's " +
+                   str(font_height(field)));
+        const RECT e = rect_in(combo, info.hwndItem);
+        expect(e.left == px(11, to),
+               "its text " + str(px(11, to)) + " px in" + here + ": " + str(e.left));
+    }
+}
+#endif
+
 // One density: a row of controls (an hbox) and a toolbar, each its window's
 // band.
 void run(rap::ui& ui, const density& d, bool hc)
 {
+    rap::document_tabs* row_tabs = nullptr;
     using namespace rap::layout;
     const std::string at = std::string(", ") + d.name + ", " +
                            (hc       ? "high contrast"
@@ -540,7 +618,7 @@ void run(rap::ui& ui, const density& d, bool hc)
                       .size(1100_px, 300_px)
                       .margins(false)
                       .base_surface()
-                      .tabs(tabs()));
+                      .tabs(tabs().bind(row_tabs)));
     const std::string bar_title = std::string("Band controls toolbar ") + d.name;
     auto bar = ui.create(
         window{bar_title,
@@ -604,6 +682,32 @@ void run(rap::ui& ui, const density& d, bool hc)
         check_tool_button(pull, false, at);
         check_tool_button(toggle, true, at);
         check_combo(editable, at);
+        // Out of the band and back (its tabs hidden: no band; shown again):
+        // each face printed through the band's glass still, its corners the
+        // band's layer, not opaque.
+        if (row_tabs)
+        {
+            row_tabs->set_visible(false);
+            pump();
+            row_tabs->set_visible(true);
+            pump();
+            for (HWND c : {fetch, list, editable})
+            {
+                const printed p = print(c);
+                expect(p.raw(0, 0) == band_layer_px(),
+                       "out of the band and back, its corner the band's layer, " +
+                           argb_hex(band_layer_px()) + at + ": " + argb_hex(p.raw(0, 0)));
+            }
+            check_button(fetch, false, "a button, out of the band and back", at);
+            check_combo_fill(editable,
+                             " (an editable combo box, out of the band and back" + at + ")");
+        }
+        else
+            expect(false, "the row's tabs bound" + at);
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+        check_dpi(top, {pull, menu_b, fetch, entry_h, list, editable, toggle}, editable, entry_h, d,
+                  at);
+#endif
     }
 }
 
@@ -627,13 +731,16 @@ int main(int argc, char** argv)
     const bool hc = high_contrast();
     g_dark = !hc && env("RAPPORT_THEME") != "light";
     std::printf("build %lu, %s\n", build, hc ? "high contrast" : g_dark ? "dark" : "light");
-    run(**ui, standard, hc);
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
+    // Both, through the density's test hook.
+    rap::win32::set_band_density_for_tests(0);
+    run(**ui, standard, hc);
     rap::win32::set_band_density_for_tests(1);
     run(**ui, compact, hc);
     rap::win32::set_band_density_for_tests(-1);
 #else
-    note("compact: through its test hook, static builds only");
+    // The environment's (RAPPORT_DENSITY: win32-band-controls-compact).
+    run(**ui, env("RAPPORT_DENSITY") == "compact" ? compact : standard, hc);
 #endif
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;

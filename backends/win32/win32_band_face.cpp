@@ -255,6 +255,12 @@ LRESULT CALLBACK painted_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
         delete st;
         return DefSubclassProc(h, msg, wp, lp);
     }
+    if (msg == WM_WINDOWPOSCHANGED && st->painter)
+    {
+        const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+        st->painter->band_resized(h);
+        return r;
+    }
     if (high_contrast()) return DefSubclassProc(h, msg, wp, lp);
     LRESULT result = 0;
     if (st->painter && st->painter->band_message(h, msg, wp, lp, result)) return result;
@@ -277,6 +283,11 @@ LRESULT CALLBACK painted_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
             return 0;
         }
     case WM_PRINTCLIENT:
+        // On the band's glass, printed through it (its mattes), whichever
+        // subclass came first: a control out of the band and back in has
+        // this one over the glass's, which then prints it, its print
+        // reaching here again.
+        if (glass_paints(h) && !glass_printing()) break;
         if (lp & PRF_CLIENT)
         {
             RECT c;

@@ -82,6 +82,9 @@ public:
     virtual void band_paint(HWND h, HDC dc, const RECT& client) = 0;
     // True if handled, `result` its result.
     virtual bool band_message(HWND, UINT, WPARAM, LPARAM, LRESULT&) { return false; }
+    // It's been moved or sized (WM_WINDOWPOSCHANGED), drawn here or (under
+    // high contrast) not: a combo box keeps the band's height.
+    virtual void band_resized(HWND) {}
 };
 // `h` painted by `painter` (null: by itself again).
 void set_band_painted(HWND h, band_painted* painter);

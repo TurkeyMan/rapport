@@ -3142,17 +3142,31 @@ public:
         }
         long w = px(60);
         for (const std::string& i : items_) w = std::max(w, text_extent(h_, wide(i)).cx);
+        // Under high contrast in the band: the native one at the band's height.
+        if (band_)
+            return {w + px(32),
+                    band_control_height(reinterpret_cast<HFONT>(SendMessageW(h_, WM_GETFONT, 0, 0)),
+                                        win_.dpi(), *band_)};
         return {w + px(32), font_metrics(win_.dpi()).cy + px(10)};
     }
     void place(RECT r) override
     {
         leaf::place(r);
-        if (band_) fit_combo_height(h_, r.bottom - r.top);
+        if (!band_) return;
+        height_ = r.bottom - r.top;
+        fit_combo_height(h_, height_);
+    }
+    // A combo box keeps its own height, whatever it's moved to, and finds
+    // it again from its font as it's moved: the band's kept.
+    void band_resized(HWND h) override
+    {
+        if (band_ && height_ > 0) fit_combo_height(h, height_);
     }
     void set_in_band(const band_density* density) override
     {
         if (band_ == density) return;
         band_ = density;
+        height_ = 0;
         set_band_painted(h_, density ? this : nullptr);
         // Out of it, its own height again: its font's.
         if (!density) SendMessageW(h_, WM_SETFONT, SendMessageW(h_, WM_GETFONT, 0, 0), TRUE);
@@ -3197,19 +3211,12 @@ public:
         // A new font (a new DPI) sets its height anew: the band's again.
         if (msg != WM_SETFONT) return false;
         result = DefSubclassProc(h, msg, wp, lp);
-        RECT r{};
-        if (const auto at = g_parked.find(h); at != g_parked.end())
-            r = at->second;
-        else
-        {
-            GetWindowRect(h, &r);
-            r.bottom = r.top + band_control_height(band_text_font(h, *band_), dpi_of(h), *band_);
-        }
-        fit_combo_height(h, r.bottom - r.top);
+        fit_combo_height(h, band_control_height(band_text_font(h, *band_), dpi_of(h), *band_));
         return true;
     }
 
 private:
+    int height_ = 0;  // in the band: its height, as placed
     bool band_drawn() const { return band_ && !high_contrast(); }
     const band_density* band_ = nullptr;
 
@@ -3296,15 +3303,31 @@ public:
     SIZE measure() override
     {
         const SIZE m = font_metrics(win_.dpi());
-        if (band_drawn())
-            return {m.cx * 20 + px(32),
-                    band_control_height(band_font(win_.dpi(), *band_), win_.dpi(), *band_)};
+        // In the band its density's height, drawn or (under high contrast)
+        // native.
+        if (band_)
+        {
+            const HFONT font = band_drawn()
+                                   ? band_font(win_.dpi(), *band_)
+                                   : reinterpret_cast<HFONT>(SendMessageW(h_, WM_GETFONT, 0, 0));
+            return {m.cx * 20 + px(32), band_control_height(font, win_.dpi(), *band_)};
+        }
         return {m.cx * 20 + px(32), m.cy + px(10)};
     }
     void place(RECT r) override
     {
         leaf::place(r);
-        if (band_drawn()) fit_combo_height(h_, r.bottom - r.top);
+        if (!band_) return;
+        height_ = r.bottom - r.top;
+        fit_combo_height(h_, height_);
+    }
+    // A combo box keeps its own height, whatever it's moved to, and finds
+    // it again from its font as it's moved: the band's kept, its edit placed
+    // in it.
+    void band_resized(HWND h) override
+    {
+        if (band_ && height_ > 0) fit_combo_height(h, height_);
+        if (band_) place_edit(h);
     }
     ~combo_impl() override
     {
@@ -3371,7 +3394,6 @@ public:
             place_edit(h);
             return true;
         case WM_SIZE:
-        case WM_WINDOWPOSCHANGED:
         case CB_SETITEMHEIGHT:
             result = DefSubclassProc(h, msg, wp, lp);
             place_edit(h);
@@ -3398,7 +3420,10 @@ public:
             result = 0;
             return true;
         }
+        // Its edit's colours, the face's: editable (WM_CTLCOLOREDIT), or
+        // disabled or read-only (WM_CTLCOLORSTATIC).
         case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORSTATIC:
         {
             const band_field_look l = look(h);
             auto* dc = reinterpret_cast<HDC>(wp);
@@ -3499,8 +3524,13 @@ private:
                 pos->flags &= ~UINT(SWP_NOMOVE | SWP_NOSIZE);
             }
         }
+        // Its font the band field's, whatever it's sent: a new DPI gives
+        // every child the UI font, the edit after its combo box.
         if (msg == WM_SETFONT)
         {
+            auto* self = reinterpret_cast<combo_impl*>(data);
+            if (self->band_ && !high_contrast())
+                wp = reinterpret_cast<WPARAM>(band_font(dpi_of(e), *self->band_));
             const LRESULT r = DefSubclassProc(e, msg, wp, lp);
             SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
             return r;
@@ -3517,6 +3547,7 @@ private:
     }
 
     const band_density* band_ = nullptr;
+    int height_ = 0;  // in the band: its height, as placed
     HBRUSH brush_ = nullptr;
     COLORREF brush_color_ = CLR_INVALID;
     bool quiet_ = false;
