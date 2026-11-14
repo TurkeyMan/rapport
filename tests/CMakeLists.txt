@@ -548,6 +548,27 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-band-fields-transitions PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
 
+    # The toolbar band's other controls (Windows 11): each the field's
+    # height at both densities (compact through its test hook: static
+    # builds), and their WinUI faces printed, never shown, light and dark,
+    # and under high contrast (CI only, as above).
+    add_executable(rapport-win32-band-controls-test win32_band_controls_test.cpp)
+    target_link_libraries(rapport-win32-band-controls-test PRIVATE rapport::rapport user32 gdi32 comctl32 advapi32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-band-controls-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-band-controls-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-band-controls-test rapport_win32)
+    add_test(NAME win32-band-controls COMMAND rapport-win32-band-controls-test)
+    set_tests_properties(win32-band-controls PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+    add_test(NAME win32-band-controls-light COMMAND rapport-win32-band-controls-test)
+    set_tests_properties(win32-band-controls-light PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 TIMEOUT 120)
+    add_test(NAME win32-band-controls-high-contrast
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-band-controls-test>)
+    set_tests_properties(win32-band-controls-high-contrast PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build
     # skips): never-shown windows.

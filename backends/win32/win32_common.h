@@ -310,6 +310,8 @@ void want_icon(const icon& icon, int logical, UINT dpi);
 // re-measures each leaf once per level, twice over.
 inline unsigned g_layout_pass = 1;
 
+struct band_density;  // win32_band_field.h
+
 // Anything that takes space in a window: a control, or a container of items.
 // Sizes and rectangles are device pixels of the window's current DPI.
 class item
@@ -349,9 +351,10 @@ public:
     // Width beyond its natural size that it would show to advantage, given
     // from a row's spare space: an ellipsized label's full text.
     virtual long wants_wider() const { return 0; }
-    // In the toolbar band's toolbar, or out of it (win32_band_field.h): its
-    // metrics and, for a field, its look. Set before it's measured.
-    virtual void set_in_band(bool) {}
+    // In the toolbar band's row (a toolbar or a row of controls), at its
+    // density, or out of it (null; win32_band_field.h): its metrics and its
+    // look. Set before it's measured.
+    virtual void set_in_band(const band_density*) {}
 
     bool visible = true;
     int stretch = 0;

@@ -131,18 +131,24 @@ jobs:
           $p = Start-Process .\rapport-gallery.exe -PassThru -Wait
           if ($p.ExitCode -ne 0 -or -not (Test-Path $env:RAPPORT_SNAPSHOT)) { throw "rapport-gallery didn't snapshot" }
 
-      # The document tabs' strip, light and dark, narrowed and scrolling: to
-      # look at, as no test can.
+      # The document tabs' strip, light and dark, narrowed and scrolling, and
+      # the toolbar band under it (one of each control, at both densities:
+      # RAPPORT_DENSITY): to look at, as no test can.
       - name: Document tabs snapshots
         working-directory: build/bin/Release
         run: |
           foreach ($theme in 'light', 'dark') {
-            $env:RAPPORT_THEME = $theme
-            $env:RAPPORT_SNAPSHOT = "$env:RUNNER_TEMP\document-tabs-$theme.png"
-            $p = Start-Process .\rapport-document-tabs.exe -ArgumentList '--many' -PassThru -Wait
-            if ($p.ExitCode -ne 0 -or -not (Test-Path $env:RAPPORT_SNAPSHOT)) { throw "rapport-document-tabs didn't snapshot ($theme)" }
+            foreach ($density in 'standard', 'compact') {
+              $env:RAPPORT_THEME = $theme
+              $env:RAPPORT_DENSITY = $density
+              $name = if ($density -eq 'standard') { "document-tabs-$theme" } else { "document-tabs-$theme-$density" }
+              $env:RAPPORT_SNAPSHOT = "$env:RUNNER_TEMP\$name.png"
+              $p = Start-Process .\rapport-document-tabs.exe -ArgumentList '--many' -PassThru -Wait
+              if ($p.ExitCode -ne 0 -or -not (Test-Path $env:RAPPORT_SNAPSHOT)) { throw "rapport-document-tabs didn't snapshot ($theme, $density)" }
+            }
           }
           Remove-Item Env:RAPPORT_THEME
+          Remove-Item Env:RAPPORT_DENSITY
 
       # Server 2025's runner also runs the base surface, caption tabs and
       # band fields tests under high contrast (win32-base-surface-high-contrast,

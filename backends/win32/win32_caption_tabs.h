@@ -360,6 +360,12 @@ HFONT glass_given_font(HWND c);
 // The grayscale copies no control has (none in `in_use`) deleted, as the UI
 // fonts are renewed (renew_ui_fonts); they're made again as they're wanted.
 void free_unused_grayscale_fonts(const std::set<HFONT>& in_use);
+// `c` is on the band's glass with its subclass in place: its WM_PAINT is
+// the glass's, which prints it on the mattes (WM_PRINTCLIENT).
+bool glass_paints(HWND c);
+// The font `c` should draw its text in, given `f`: f's grayscale copy while
+// `c` is on the band's glass, else `f`.
+HFONT glass_font(HWND c, HFONT f);
 // While a layer control is printed onto a matte for that: the matte, which
 // its background (surface_color_of, surface_brush_of, paint_toolbar_band)
 // is instead of the band's.

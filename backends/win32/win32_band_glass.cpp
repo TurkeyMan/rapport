@@ -42,6 +42,7 @@
 // Tooltips are top-level windows with their own surface: nothing to do.
 #include "win32_caption_tabs.h"
 
+#include "win32_band_face.h"
 #include "win32_band_field.h"
 
 #include <uxtheme.h>
@@ -447,7 +448,10 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
         if (on_glass(h)) wp = reinterpret_cast<WPARAM>(grayscale(g->given));
     }
     if (t_printing > 0 || !on_glass(h)) return DefSubclassProc(h, msg, wp, lp);
-    if (g->k == kind::layer)
+    // A control whose band face is drawn (win32_band_face.h) is a layer
+    // control, whatever its class: an editable combo box's face over the
+    // band, its edit opaque on it.
+    if (g->k == kind::layer || (is_band_painted(h) && GetParent(h) == GetAncestor(h, GA_ROOT)))
     {
         switch (msg)
         {
@@ -641,6 +645,17 @@ void free_unused_grayscale_fonts(const std::set<HFONT>& in_use)
                       DeleteObject(m.font);
                       return true;
                   });
+}
+
+bool glass_paints(HWND c)
+{
+    DWORD_PTR data = 0;
+    return GetWindowSubclass(c, glass_proc, glass_id, &data) && on_glass(c);
+}
+
+HFONT glass_font(HWND c, HFONT f)
+{
+    return on_glass(c) ? grayscale(f) : f;
 }
 
 bool glass_matte(color& matte)

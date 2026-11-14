@@ -17,8 +17,9 @@ else()
     add_library(rapport_win32 MODULE ${sources})
 endif()
 add_library(rapport::backend_win32 ALIAS rapport_win32)
-# The toolbar band's metrics and text fields (win32_band_field.h).
-target_sources(rapport_win32 PRIVATE win32_band_field.cpp)
+# The toolbar band's metrics, its text fields (win32_band_field.h) and its
+# other controls' faces (win32_band_face.h).
+target_sources(rapport_win32 PRIVATE win32_band_field.cpp win32_band_face.cpp)
 # Linked into one executable, a backend needs the core after it on the link
 # line (its strings, from rapport::i18n). A module finds it loaded already,
 # except on Windows, where a DLL resolves every symbol when it's linked.
