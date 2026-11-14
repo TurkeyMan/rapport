@@ -37,6 +37,9 @@ struct chrome_palette
     // what the layer comes to over Mica's base, for what can't be
     // translucent: GDI's brushes (a native control's background).
     color layer_on_mica_base_alt_tertiary;
+    // DividerStrokeColorDefault: the separator between two tabs
+    // (TabViewItemSeparator), translucent.
+    color divider;
 };
 
 // `top` over opaque `under`, opaque.
@@ -69,9 +72,10 @@ constexpr color over(color top, color under)
 // by channel: 0.70, this layer. LayerFillColorDefault (#80FFFFFF), tried
 // first, came out #E8EEF6 over the same strip. Opaque:
 // LayerOnMicaBaseAltFillColorTertiary, #F9F9F9.
+// DividerStrokeColorDefault #0F000000.
 inline constexpr chrome_palette light{argb(0xE4000000), argb(0x9E000000), argb(0x29000000),
                                       argb(0x09000000), argb(0x06000000), argb(0x0A000000),
-                                      argb(0xB3FFFFFF),   argb(0xFFF9F9F9)};
+                                      argb(0xB3FFFFFF),   argb(0xFFF9F9F9), argb(0x0F000000)};
 
 // Dark: TextFillColorPrimary #FFFFFF, TextFillColorSecondary #C5FFFFFF,
 // ControlStrokeColorSecondary #18FFFFFF, SubtleFillColorSecondary
@@ -80,8 +84,9 @@ inline constexpr chrome_palette light{argb(0xE4000000), argb(0x9E000000), argb(0
 // LayerOnMicaBaseAltFillColorDefault, #733A3A3A (#3A3A3A at alpha 0x73,
 // 45%), over Mica Alt; opaque, LayerOnMicaBaseAltFillColorTertiary,
 // #2C2C2C (the layer over Mica's dark base, #202020, to a level).
+// DividerStrokeColorDefault #15FFFFFF.
 inline constexpr chrome_palette dark{argb(0xFFFFFFFF), argb(0xC5FFFFFF), argb(0x18FFFFFF),
                                      argb(0x0FFFFFFF), argb(0x0AFFFFFF), argb(0x0FFFFFFF),
-                                     argb(0x733A3A3A),   argb(0xFF2C2C2C)};
+                                     argb(0x733A3A3A),   argb(0xFF2C2C2C), argb(0x15FFFFFF)};
 
 }  // namespace rap::win32::winui
