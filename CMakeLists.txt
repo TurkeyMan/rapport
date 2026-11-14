@@ -36,7 +36,9 @@ option(RAPPORT_TESTS "Build the core's tests" ${PROJECT_IS_TOP_LEVEL})
 option(RAPPORT_ASAN "Build with AddressSanitizer" OFF)
 if(RAPPORT_ASAN)
     if(MSVC)
-        add_compile_options(/fsanitize=address /Zi)
+        # ASan's instrumentation takes win32_backend.cpp past the default
+        # object format's section limit (C1128): /bigobj.
+        add_compile_options(/fsanitize=address /Zi /bigobj)
         add_link_options(/DEBUG /INCREMENTAL:NO)
         get_filename_component(rapport_cl_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
         set(rapport_asan_dll "${rapport_cl_dir}/clang_rt.asan_dynamic-x86_64.dll")
