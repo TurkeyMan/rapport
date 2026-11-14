@@ -560,9 +560,10 @@ if(TARGET rapport_win32)
     add_test(NAME win32-document-tabs-reorder COMMAND rapport-win32-document-tabs-reorder-test)
     set_tests_properties(win32-document-tabs-reorder PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 60)
 
-    # Tabs torn off and dropped into other windows, in both strips: never-shown
-    # windows, given the mouse's messages, with test hooks for the z-order and
-    # the move loop; --input, the real thing with real input, on CI only.
+    # Tabs dragged out, torn off and dropped into other windows, in both
+    # strips: never-shown windows, given the mouse's messages, with test hooks
+    # for the z-order and for nothing shown (the drag image, the window let
+    # go); --input, the real thing with real input, on CI only.
     add_executable(rapport-win32-document-tabs-tearoff-test win32_document_tabs_tearoff_test.cpp)
     target_link_libraries(rapport-win32-document-tabs-tearoff-test PRIVATE rapport::rapport user32 comctl32)
     if(RAPPORT_STATIC)
@@ -572,8 +573,8 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-document-tabs-tearoff-test rapport_win32)
     add_test(NAME win32-document-tabs-tearoff COMMAND rapport-win32-document-tabs-tearoff-test)
     set_tests_properties(win32-document-tabs-tearoff PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 60)
-    # The real move loop needs the real mouse: skipped (77) unless
-    # GITHUB_ACTIONS=true and RAPPORT_TEST_SEND_INPUT=1.
+    # Real input on shown windows: skipped (77) unless GITHUB_ACTIONS=true and
+    # RAPPORT_TEST_SEND_INPUT=1.
     add_test(NAME win32-document-tabs-tearoff-input COMMAND rapport-win32-document-tabs-tearoff-test --input)
     set_tests_properties(win32-document-tabs-tearoff-input PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
 
