@@ -581,6 +581,16 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-band-controls-compact-high-contrast PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
         TIMEOUT 180)
+    # The display's scale really changed (125%, 150% where the runner
+    # reaches it) and put back, at each density: CI only, as
+    # win32-band-fields-transitions.
+    add_test(NAME win32-band-controls-transitions COMMAND rapport-win32-band-controls-test --transitions)
+    set_tests_properties(win32-band-controls-transitions PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    add_test(NAME win32-band-controls-compact-transitions COMMAND rapport-win32-band-controls-test --transitions)
+    set_tests_properties(win32-band-controls-compact-transitions PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 RUN_SERIAL
+        TRUE TIMEOUT 180)
 
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build

@@ -541,14 +541,62 @@ long font_height(HWND h)
     return std::labs(lf.lfHeight);
 }
 
+// The row at `dpi` (after a DPI change): each control the field's height;
+// the editable combo's edit in the band field's font (a new DPI gives every
+// child the UI font, the edit after its combo box) and where a band field's
+// text is; and each combo box still the field's height once moved again (a
+// combo box finds its own height from its font as it's moved).
+void check_at_dpi(HWND top, const std::vector<HWND>& controls, const std::vector<HWND>& combos,
+                  HWND editable, HWND field, const density& d, UINT dpi, const std::string& here)
+{
+    for (HWND c : controls)
+    {
+        const RECT r = rect_in(top, c);
+        wchar_t cls[32]{}, text[64]{};
+        GetClassNameW(c, cls, 32);
+        GetWindowTextW(c, text, 64);
+        char name[128];
+        std::snprintf(name, sizeof name, "%ls \"%ls\"", cls, text);
+        expect(r.bottom - r.top == px(d.field, dpi), std::string(name) + " " +
+                                                         str(px(d.field, dpi)) + " px tall" + here +
+                                                         ": " + str(r.bottom - r.top));
+    }
+    COMBOBOXINFO info{};
+    info.cbSize = sizeof info;
+    GetComboBoxInfo(editable, &info);
+    expect(info.hwndItem && font_height(info.hwndItem) == font_height(field),
+           "the editable combo's text in the band field's font" + here + ": " +
+               str(info.hwndItem ? font_height(info.hwndItem) : 0) + " px, the field's " +
+               str(font_height(field)));
+    if (info.hwndItem)
+    {
+        const RECT e = rect_in(editable, info.hwndItem);
+        expect(e.left == px(11, dpi),
+               "its text " + str(px(11, dpi)) + " px in" + here + ": " + str(e.left));
+    }
+    for (HWND c : combos)
+    {
+        // Moved a pixel and back, as a later layout moves it.
+        const RECT r = rect_in(top, c);
+        SetWindowPos(c, nullptr, r.left + 1, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(c, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        pump(2);
+        const RECT now = rect_in(top, c);
+        expect(now.bottom - now.top == px(d.field, dpi),
+               "a combo box still " + str(px(d.field, dpi)) + " px tall moved again" + here + ": " +
+                   str(now.bottom - now.top));
+    }
+}
+
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
 // 125% and 150%, and back, through the DPI test hook (every window taken to
 // be at that DPI, then WM_DPICHANGED as Windows sends it, which gives every
-// control the UI font at the new DPI): each control the field's height at
-// that DPI, and the editable combo's edit the band field's font still (its
-// combo box gives it the band's, whatever it's sent).
-void check_dpi(HWND top, const std::vector<HWND>& controls, HWND combo, HWND field,
-               const density& d, const std::string& at)
+// control the UI font at the new DPI). On CI the display's own scale is
+// changed instead (--transitions).
+void check_dpi(HWND top, const std::vector<HWND>& controls, const std::vector<HWND>& combos,
+               HWND editable, HWND field, const density& d, const std::string& at)
 {
     const UINT dpi = GetDpiForWindow(top);
     UINT was = dpi;
@@ -562,32 +610,291 @@ void check_dpi(HWND top, const std::vector<HWND>& controls, HWND combo, HWND fie
         was = to;
         SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&suggested));
         pump();
-        const std::string here = at + ", " + str(long(to)) + " dpi";
-        for (HWND c : controls)
-        {
-            const RECT r = rect_in(top, c);
-            wchar_t cls[32]{}, text[64]{};
-            GetClassNameW(c, cls, 32);
-            GetWindowTextW(c, text, 64);
-            char name[128];
-            std::snprintf(name, sizeof name, "%ls \"%ls\"", cls, text);
-            expect(r.bottom - r.top == px(d.field, to), std::string(name) + " " +
-                                                            str(px(d.field, to)) + " px tall" +
-                                                            here + ": " + str(r.bottom - r.top));
-        }
-        COMBOBOXINFO info{};
-        info.cbSize = sizeof info;
-        GetComboBoxInfo(combo, &info);
-        expect(info.hwndItem && font_height(info.hwndItem) == font_height(field),
-               "the editable combo's text in the band field's font" + here + ": " +
-                   str(info.hwndItem ? font_height(info.hwndItem) : 0) + " px, the field's " +
-                   str(font_height(field)));
-        const RECT e = rect_in(combo, info.hwndItem);
-        expect(e.left == px(11, to),
-               "its text " + str(px(11, to)) + " px in" + here + ": " + str(e.left));
+        check_at_dpi(top, controls, combos, editable, field, d, to,
+                     at + ", " + str(long(to)) + " dpi");
     }
 }
 #endif
+
+// -- the display's scale, for real (CI only) ----------------------------------
+//
+// As win32-band-fields-transitions (and win32-caption-tabs-transitions)
+// change it: the primary display's scale through DisplayConfig's
+// undocumented DPI scale (as Settings sets it, in steps relative to the
+// recommended one), its mode made larger first where a small screen allows
+// only 100%, and both put back exactly as they were, read back to be sure,
+// on every path. (The same code as win32_band_fields_test.cpp's.)
+
+struct dpi_scale_get
+{
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    int32_t min_rel, cur_rel, max_rel;
+};
+struct dpi_scale_set
+{
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    int32_t rel;
+};
+struct display_source
+{
+    LUID adapter{};
+    UINT32 id = 0;
+    bool known = false;
+};
+display_source g_source;
+
+bool source_of(const std::wstring& gdi_name, display_source& out)
+{
+    UINT32 paths = 0, modes = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &paths, &modes) != ERROR_SUCCESS ||
+        !paths)
+        return false;
+    std::vector<DISPLAYCONFIG_PATH_INFO> p(paths);
+    std::vector<DISPLAYCONFIG_MODE_INFO> m(modes);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &paths, p.data(), &modes, m.data(), nullptr) !=
+        ERROR_SUCCESS)
+        return false;
+    for (UINT32 i = 0; i < paths; ++i)
+    {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME name{};
+        name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        name.header.size = sizeof name;
+        name.header.adapterId = p[i].sourceInfo.adapterId;
+        name.header.id = p[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&name.header) == ERROR_SUCCESS &&
+            gdi_name == name.viewGdiDeviceName)
+        {
+            out = {p[i].sourceInfo.adapterId, p[i].sourceInfo.id, true};
+            return true;
+        }
+    }
+    return false;
+}
+bool get_scale(dpi_scale_get& g)
+{
+    g = {};
+    if (!g_source.known) return false;
+    g.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE(-3);
+    g.header.size = sizeof g;
+    g.header.adapterId = g_source.adapter;
+    g.header.id = g_source.id;
+    return DisplayConfigGetDeviceInfo(&g.header) == ERROR_SUCCESS;
+}
+bool set_scale(int32_t rel)
+{
+    if (!g_source.known) return false;
+    dpi_scale_set s{};
+    s.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE(-4);
+    s.header.size = sizeof s;
+    s.header.adapterId = g_source.adapter;
+    s.header.id = g_source.id;
+    s.rel = rel;
+    return DisplayConfigSetDeviceInfo(&s.header) == ERROR_SUCCESS;
+}
+
+template <class F>
+bool pump_until(F&& done, int ms = 10000)
+{
+    for (int waited = 0; waited < ms; waited += 50)
+    {
+        if (done()) return true;
+        pump(5);
+    }
+    return done();
+}
+
+// The display as it was before the first change, put back to exactly that
+// (main undoes it, the destructor if anything returns first); each restore
+// read back, bounded, and one that fails a failure, left marked.
+struct restore
+{
+    bool saved = false;
+    std::wstring device;
+    DEVMODEW mode{};
+    int32_t rel = 0;
+    bool scale = false, mode_changed = false;  // changed and not yet put back
+
+    ~restore() { undo(); }
+
+    bool save()
+    {
+        if (saved) return true;
+        DISPLAY_DEVICEW dev{sizeof dev};
+        bool found = false;
+        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dev, 0); ++i)
+            if (dev.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)
+            {
+                found = true;
+                break;
+            }
+        mode = {};
+        mode.dmSize = sizeof mode;
+        dpi_scale_get g{};
+        if (!found || !source_of(dev.DeviceName, g_source) ||
+            !EnumDisplaySettingsW(dev.DeviceName, ENUM_CURRENT_SETTINGS, &mode) || !get_scale(g))
+            return false;
+        device = dev.DeviceName;
+        rel = g.cur_rel;
+        saved = true;
+        return true;
+    }
+    bool mode_is_saved() const
+    {
+        DEVMODEW now{};
+        now.dmSize = sizeof now;
+        return EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &now) &&
+               now.dmPelsWidth == mode.dmPelsWidth && now.dmPelsHeight == mode.dmPelsHeight &&
+               now.dmBitsPerPel == mode.dmBitsPerPel &&
+               now.dmDisplayFrequency == mode.dmDisplayFrequency;
+    }
+    bool scale_is_saved() const
+    {
+        dpi_scale_get now{};
+        return get_scale(now) && now.cur_rel == rel;
+    }
+    template <class F>
+    static bool settles(F&& is)
+    {
+        for (int waited = 0; waited < 5000; waited += 50)
+        {
+            if (is()) return true;
+            pump(5);
+        }
+        return is();
+    }
+    void undo()
+    {
+        // The mode first: the scale saved is the saved mode's.
+        if (mode_changed)
+        {
+            const LONG r = ChangeDisplaySettingsExW(device.c_str(), &mode, nullptr, 0, nullptr);
+            const bool ok = r == DISP_CHANGE_SUCCESSFUL && settles([&] { return mode_is_saved(); });
+            expect(ok, "the display's mode put back to " + str(long(mode.dmPelsWidth)) + "x" +
+                           str(long(mode.dmPelsHeight)) + " (" + str(long(r)) + ")");
+            if (ok) mode_changed = false;
+        }
+        if (scale)
+        {
+            const bool ok = set_scale(rel) && settles([&] { return scale_is_saved(); });
+            expect(ok, "the display's scale put back to step " + str(rel));
+            if (ok) scale = false;
+        }
+    }
+};
+restore g_restore;
+
+// Every scale the display allows, for real, `check` at each new DPI of
+// `top` (125% and 150% where the runner reaches them), then the scale put
+// back and `check` again. Which ran is noted.
+int scale_transitions(HWND top, const std::function<void(UINT, const std::string&)>& check)
+{
+    if (!g_restore.save())
+    {
+        expect(false, "the display's mode and scale read before changing them");
+        return 1;
+    }
+    g_restore.scale = true;  // armed before anything changes
+    dpi_scale_get g{};
+    if (!get_scale(g))
+    {
+        expect(false, "the display's scale read");
+        return 1;
+    }
+    note("display scale steps " + str(g.min_rel) + ".." + str(g.max_rel) + ", now " +
+         str(g.cur_rel));
+    // A small screen (a runner's 1024x768) allows only 100%: its largest
+    // mode first, for the scales it allows.
+    if (g.max_rel <= g.cur_rel + 1)
+    {
+        const wchar_t* device = g_restore.device.c_str();
+        DEVMODEW best{}, mode{};
+        best.dmSize = mode.dmSize = sizeof(DEVMODEW);
+        for (DWORD i = 0; EnumDisplaySettingsW(device, i, &mode); ++i)
+            if (mode.dmPelsWidth * mode.dmPelsHeight > best.dmPelsWidth * best.dmPelsHeight)
+                best = mode;
+        if (best.dmPelsWidth && best.dmPelsWidth * best.dmPelsHeight >
+                                    g_restore.mode.dmPelsWidth * g_restore.mode.dmPelsHeight)
+        {
+            g_restore.mode_changed = true;  // marked before it's tried: half made is put back too
+            if (ChangeDisplaySettingsExW(device, &best, nullptr, CDS_FULLSCREEN, nullptr) ==
+                DISP_CHANGE_SUCCESSFUL)
+            {
+                note("display mode " + str(long(best.dmPelsWidth)) + "x" +
+                     str(long(best.dmPelsHeight)));
+                pump(50);
+                get_scale(g);
+                note("display scale steps " + str(g.min_rel) + ".." + str(g.max_rel) + ", now " +
+                     str(g.cur_rel));
+            }
+        }
+    }
+    const UINT before = GetDpiForWindow(top);
+    std::string ran;
+    bool at_125 = false;
+    UINT now = before;
+    for (int32_t rel = g.min_rel; rel <= g.max_rel; ++rel)
+    {
+        if (rel == g.cur_rel) continue;
+        if (!set_scale(rel))
+        {
+            expect(false, "the display's scale set to step " + str(rel));
+            continue;
+        }
+        const UINT was = now;
+        pump_until([&] { return GetDpiForWindow(top) != was; });
+        pump();
+        now = GetDpiForWindow(top);
+        if (now == was) continue;
+        ran += (ran.empty() ? "" : ", ") + str(long(now * 100 / 96)) + "%";
+        at_125 = at_125 || now == 120;
+        check(now, ", the display's scale, " + str(long(now)) + " dpi");
+    }
+    note("scales that ran: " + (ran.empty() ? std::string("none") : ran));
+    expect(!ran.empty(), "the display allows another scale");
+    expect(at_125, "125% among them");
+    g_restore.undo();
+    expect(pump_until([&] { return GetDpiForWindow(top) == before; }),
+           "and back to " + str(long(before)));
+    pump();
+    check(before, ", the scale back, " + str(long(before)) + " dpi");
+    return 0;
+}
+
+// --transitions: the row (an hbox) shown, its window taking each scale the
+// display allows, at the density RAPPORT_DENSITY names (as a plugin build
+// runs it); the checks at each DPI as check_at_dpi has them.
+int transitions(rap::ui& ui, const density& d)
+{
+    using namespace rap::layout;
+    const std::string title = std::string("Band controls transitions ") + d.name;
+    auto win = ui.create(
+        window{title,
+               {vbox{hbox{button{"Fetch"}, entry{}.placeholder("Filter").stretch(),
+                          drop_down{{"Author Email", "Subject"}, 0}, combo{{"one", "two"}, "one"}},
+                     label{"content"}.stretch()}}}
+            .size(900_px, 300_px)
+            .margins(false)
+            .base_surface()
+            .tabs(document_tabs{{{"a", "Alpha", rap::icon::named("folder"), {}}}}));
+    win->show();
+    pump();
+    HWND top = top_of(title.c_str());
+    expect(top != nullptr, "the window, shown");
+    if (!top) return 1;
+    HWND fetch = child(top, L"Button", L"Fetch"), field = child(top, L"Edit");
+    HWND list = combo_of(top, true), editable = combo_of(top, false);
+    expect(fetch && field && list && editable, "its controls");
+    if (!(fetch && field && list && editable)) return 1;
+    const std::string at = std::string(", ") + d.name;
+    check_at_dpi(top, {fetch, field, list, editable}, {list, editable}, editable, field, d,
+                 GetDpiForWindow(top), at + ", before");
+    return scale_transitions(top,
+                             [&](UINT dpi, const std::string& here)
+                             {
+                                 check_at_dpi(top, {fetch, field, list, editable}, {list, editable},
+                                              editable, field, d, dpi, at + here);
+                             });
+}
 
 // One density: a row of controls (an hbox) and a toolbar, each its window's
 // band.
@@ -705,8 +1012,8 @@ void run(rap::ui& ui, const density& d, bool hc)
         else
             expect(false, "the row's tabs bound" + at);
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
-        check_dpi(top, {pull, menu_b, fetch, entry_h, list, editable, toggle}, editable, entry_h, d,
-                  at);
+        check_dpi(top, {pull, menu_b, fetch, entry_h, list, editable, toggle}, {list, editable},
+                  editable, entry_h, d, at);
 #endif
     }
 }
@@ -715,6 +1022,17 @@ void run(rap::ui& ui, const density& d, bool hc)
 
 int main(int argc, char** argv)
 {
+    bool transitions_run = false;
+    for (int i = 1; i < argc; ++i)
+        if (std::string(argv[i]) == "--transitions") transitions_run = true;
+    // --transitions changes the display's scale: on a CI runner only, and
+    // checked before any window is made.
+    if (transitions_run && (env("GITHUB_ACTIONS") != "true" || env("RAPPORT_TEST_SET_DPI") != "1"))
+    {
+        note("skipped the scale changes: they change the display's scale, so only on a CI runner "
+             "(GITHUB_ACTIONS=true, RAPPORT_TEST_SET_DPI=1)");
+        return 77;
+    }
     const DWORD build = windows_build();
     if (build < 22000)
     {
@@ -731,6 +1049,13 @@ int main(int argc, char** argv)
     const bool hc = high_contrast();
     g_dark = !hc && env("RAPPORT_THEME") != "light";
     std::printf("build %lu, %s\n", build, hc ? "high contrast" : g_dark ? "dark" : "light");
+    if (transitions_run)
+    {
+        const int r = transitions(**ui, env("RAPPORT_DENSITY") == "compact" ? compact : standard);
+        g_restore.undo();
+        std::printf(fails ? "%d failed\n" : "all passed\n", fails);
+        return fails ? 1 : r;
+    }
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
     // Both, through the density's test hook.
     rap::win32::set_band_density_for_tests(0);
