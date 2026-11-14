@@ -7,6 +7,14 @@
 // CMAKE_CXX_FLAGS) a read of it freed is reported and the process fails;
 // without it, it at least mustn't crash. Never shown.
 //
+// Then a window going lays out nothing of what it's freed: its caption tabs'
+// strip, destroyed as the window's own parts go (after its items), sends
+// the window WM_SIZE as it goes, the layout that follows finding no items
+// and no band toolbar (window_impl's root and banded_ cleared first), not
+// the freed ones. Only AddressSanitizer tells: a freed item read as it was
+// looks the same, so without it this checks only that the layout ran and
+// the window went.
+//
 // Before Windows 11 there's no band, so no glass: skipped (77).
 //   rapport-win32-caption-glass-reentrant-test
 #include <rapport/rapport.h>
@@ -48,6 +56,26 @@ DWORD windows_build()
     OSVERSIONINFOW v{};
     v.dwOSVersionInfoSize = sizeof v;
     return get && get(&v) == 0 ? v.dwBuildNumber : 0;
+}
+
+// The caption strip's subclass: as it's destroyed, a layout of its window.
+struct going
+{
+    HWND top = nullptr;
+    int sized = 0;
+};
+LRESULT CALLBACK size_on_destroy(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data)
+{
+    if (msg == WM_NCDESTROY)
+    {
+        RemoveWindowSubclass(h, size_on_destroy, id);
+        auto* g = reinterpret_cast<going*>(data);
+        RECT c{};
+        GetClientRect(g->top, &c);
+        ++g->sized;
+        SendMessageW(g->top, WM_SIZE, SIZE_RESTORED, MAKELPARAM(c.right, c.bottom));
+    }
+    return DefSubclassProc(h, msg, wp, lp);
 }
 
 }  // namespace
@@ -115,6 +143,30 @@ int main(int argc, char** argv)
     // Messages still queued for them go nowhere.
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+
+    // A window going, laid out as its caption strip goes: nothing of its
+    // freed items (the band's toolbar among them) touched.
+    {
+        auto v = (*ui)->create(window{"Caption glass, laid out going",
+                                      {toolbar{rap::layout::slider{0, 100, 50}.stretch()}, label{"Content"}}}
+                                   .margins(false)
+                                   .base_surface()
+                                   .tabs(document_tabs{{{"a", "Alpha", {}, {}}}}));
+        v->resize({900, 300});
+        HWND top2 = FindWindowW(nullptr, L"Caption glass, laid out going");
+        HWND strip = top2 ? FindWindowExW(top2, nullptr, L"rapportCaptionTabs", nullptr) : nullptr;
+        expect(top2 && strip, "a second window, never shown, its tabs in the caption");
+        if (strip)
+        {
+            expect(GetPropW(top2, L"rapport-band-top") != nullptr, "its toolbar the band's (the band marked)");
+            going g{top2};
+            SetWindowSubclass(strip, size_on_destroy, 1, reinterpret_cast<DWORD_PTR>(&g));
+            v.reset();
+            expect(g.sized == 1, "its strip, going, sent the window WM_SIZE");
+            expect(!IsWindow(top2), "and the window's gone");
+        }
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+    }
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
