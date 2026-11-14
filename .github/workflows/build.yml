@@ -153,7 +153,8 @@ jobs:
       # z-order), win32-document-tabs-tearoff-input, as it moves the pointer
       # and presses keys: only on a runner. So does window::present's
       # (win32-present, win32-present-activate), which shows, minimises and
-      # restores windows.
+      # restores windows, and a toolbar's keyboard (win32-toolbar-keyboard),
+      # which moves the focus.
       - name: Portable tests
         env:
           RAPPORT_TEST_SET_HIGH_CONTRAST: ${{ matrix.os == 'windows-2025' && '1' || '0' }}

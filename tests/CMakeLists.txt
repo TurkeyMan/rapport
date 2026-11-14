@@ -870,3 +870,18 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_dependencies(rapport-present-test-qt6 rapport_qt6)
     endif()
 endif()
+
+# A toolbar's buttons from the keyboard: one Tab stop, the arrows, Home,
+# End, Space and Enter, focus() and has_focus() per button. Shown and
+# focused, so only on a CI runner (RAPPORT_TEST_SEND_INPUT); else skipped.
+if(TARGET rapport_win32)
+    add_executable(rapport-win32-toolbar-keyboard-test win32_toolbar_keyboard_test.cpp)
+    target_link_libraries(rapport-win32-toolbar-keyboard-test PRIVATE rapport::rapport user32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-toolbar-keyboard-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-toolbar-keyboard-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-toolbar-keyboard-test rapport_win32)
+    add_test(NAME win32-toolbar-keyboard COMMAND rapport-win32-toolbar-keyboard-test)
+    set_tests_properties(win32-toolbar-keyboard PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
+endif()
