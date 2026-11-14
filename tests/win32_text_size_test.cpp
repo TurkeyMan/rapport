@@ -14,7 +14,15 @@
 //   text the message font's size;
 // - the label and the band field taller for it, the windows' least size
 //   larger;
-// - the old fonts freed, none left retired.
+// - the old fonts freed, none left retired;
+// - an editable text view (RichEdit, which WM_GETFONT says nothing of, and
+//   which WM_SETFONT would reset to one font, telling on_changed) its
+//   text's sizes 1.5 times, run by run: plain text, a bold red span,
+//   Consolas, a run made Arial bold at 14 pt of its own (as pasted) and
+//   appended italic text keep their faces, effects and colours; the
+//   selection and the line at the top stay; on_changed isn't called; and
+//   one EM_UNDO undoes the user's last edit, made before the change, not
+//   the change (the sizes stay).
 // A WM_SETTINGCHANGE that changes neither (most of them) changes nothing:
 // the same fonts. Then 100% again, and everything as it was.
 //
@@ -25,6 +33,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <richedit.h>
 
 #include <cmath>
 #include <cstdio>
@@ -141,6 +150,83 @@ float caption_text_px(HWND top)
     return f.text_size;
 }
 
+// A text view's character formats, one character of each run, and its
+// selection.
+struct run_format
+{
+    long size;  // twips
+    std::wstring face;
+    DWORD effects;  // CFE_BOLD, CFE_ITALIC, CFE_AUTOCOLOR
+    COLORREF colour;
+};
+struct text_seen
+{
+    std::vector<run_format> runs;
+    CHARRANGE selection;
+    long first_line;
+};
+// Plain, bold red, mono, Arial bold 14 pt, appended italic.
+const std::vector<long> g_run_at = {1, 8, 14, 20, 33};
+
+long first_line(HWND rich)
+{
+    return long(SendMessageW(rich, EM_GETFIRSTVISIBLELINE, 0, 0));
+}
+// The selection and the line at the top put back as they were.
+void put_back(HWND rich, CHARRANGE sel, long line)
+{
+    SendMessageW(rich, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&sel));
+    pump(2);  // RichEdit scrolls to the selection once it's idle: first
+    SendMessageW(rich, EM_LINESCROLL, 0, line - first_line(rich));
+}
+
+text_seen look_text(HWND rich)
+{
+    text_seen t{};
+    SendMessageW(rich, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&t.selection));
+    t.first_line = first_line(rich);
+    for (long at : g_run_at)
+    {
+        CHARRANGE cr{at, at + 1};
+        SendMessageW(rich, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&cr));
+        CHARFORMAT2W cf{};
+        cf.cbSize = sizeof cf;
+        SendMessageW(rich, EM_GETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+        const DWORD effects = cf.dwEffects & (CFE_BOLD | CFE_ITALIC | CFE_AUTOCOLOR);
+        t.runs.push_back({cf.yHeight, cf.szFaceName, effects, cf.crTextColor});
+        std::printf("     run at %ld: %ld twips, %ls%s%s, colour %06lx\n", at, cf.yHeight, cf.szFaceName,
+                    cf.dwEffects & CFE_BOLD ? ", bold" : "", cf.dwEffects & CFE_ITALIC ? ", italic" : "",
+                    cf.crTextColor & 0xffffff);
+    }
+    std::printf("     selection %ld..%ld, line %ld at the top\n", t.selection.cpMin, t.selection.cpMax,
+                t.first_line);
+    put_back(rich, t.selection, t.first_line);
+    return t;
+}
+
+void check_text(const text_seen& was, const text_seen& now, float ratio, const std::string& at)
+{
+    bool sizes = was.runs.size() == now.runs.size(), kept = sizes;
+    for (size_t i = 0; sizes && i < was.runs.size(); ++i)
+    {
+        sizes = sizes && std::abs(now.runs[i].size - std::lround(was.runs[i].size * ratio)) <= 1;
+        kept = kept && now.runs[i].face == was.runs[i].face && now.runs[i].effects == was.runs[i].effects;
+    }
+    expect(sizes, "the text view's runs " + str(std::lround(ratio * 100)) + "% of their size" + at);
+    expect(kept, "their faces, bold, italic and colours kept" + at);
+    expect(now.selection.cpMin == was.selection.cpMin && now.selection.cpMax == was.selection.cpMax,
+           "its selection kept" + at + ": " + str(now.selection.cpMin) + ".." + str(now.selection.cpMax));
+    expect(now.first_line == was.first_line,
+           "the line at its top kept" + at + ": " + str(was.first_line) + " -> " + str(now.first_line));
+}
+
+std::wstring text_of(HWND rich)
+{
+    std::wstring w(size_t(GetWindowTextLengthW(rich)) + 1, L'\0');
+    w.resize(size_t(GetWindowTextW(rich, w.data(), int(w.size()))));
+    return w;
+}
+
 // What's measured of the two windows at one text size.
 struct seen
 {
@@ -206,7 +292,43 @@ int main(int argc, char** argv)
             .base_surface()
             .tabs(document_tabs{{{"a", "Alpha", {}, {}}, {"b", "Beta", {}, {}}}}));
     const char* other_title = "Text size, another window";
-    auto other = (*ui)->create(window{other_title, {label{"Another window"}}}.size(400_px, 200_px));
+    rap::text_view* tv = nullptr;
+    auto other = (*ui)->create(
+        window{other_title, {label{"Another window"}, text_view{}.wrap(false).bind(tv)}}.size(400_px, 300_px));
+    pump();
+    expect(tv != nullptr, "the text view");
+    if (!tv) return 1;
+    std::string lines = "Plain, Bold, mono, and plain.\n";
+    tv->set_text(lines, {{7, 11, {.fg = rap::color{200, 0, 0}, .bold = true}}, {13, 17, {.monospace = true}}});
+    tv->append("Appended", {.italic = true});
+    for (int i = 0; i < 60; ++i) tv->append("\nline " + std::to_string(i));
+    pump();
+    HWND rich = child_of(top_of(other_title), L"RICHEDIT50W");
+    expect(rich != nullptr, "the text view's RichEdit");
+    if (!rich) return 1;
+    {
+        // "and" Arial bold at 14 pt, a size of its own, as pasted text has.
+        CHARRANGE cr{19, 22};
+        SendMessageW(rich, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&cr));
+        CHARFORMAT2W cf{};
+        cf.cbSize = sizeof cf;
+        cf.dwMask = CFM_FACE | CFM_BOLD | CFM_SIZE;
+        cf.dwEffects = CFE_BOLD;
+        cf.yHeight = 280;
+        wcscpy_s(cf.szFaceName, L"Arial");
+        SendMessageW(rich, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+    }
+    // The user's last edit, before the text size changes: typed at the end.
+    CHARRANGE end{-1, -1};
+    SendMessageW(rich, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&end));
+    SendMessageW(rich, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L" typed"));
+    expect(text_of(rich).find(L" typed") != std::wstring::npos, "the user's edit made");
+    int changes = 0;
+    tv->on_changed([&changes] { ++changes; });
+    // A selection, and scrolled down 20 lines. Unwrapped, its lines are its
+    // paragraphs, whatever width a never-shown RichEdit has laid itself out
+    // for: line 20 is the same text at either size.
+    put_back(rich, CHARRANGE{2, 9}, 20);
     pump();
     HWND top = top_of(title), other_top = top_of(other_title);
     expect(top && other_top, "the two windows");
@@ -217,6 +339,8 @@ int main(int argc, char** argv)
 
     std::printf("at 100%%:\n");
     const seen before = look(top, other_top);
+    const text_seen text_before = look_text(rich);
+    expect(text_before.first_line == 20, "the text view scrolled to line 20: " + str(text_before.first_line));
     expect(before.label_text == px(12, dpi), "the label's text " + str(px(12, dpi)) + " px: " + str(before.label_text));
     if (band)
         expect(before.field_text == px(14, dpi),
@@ -234,6 +358,20 @@ int main(int argc, char** argv)
     setting_changed(top);
     std::printf("at 150%%:\n");
     const seen larger = look(top, other_top);
+    check_text(text_before, look_text(rich), 1.5f, " at 150%");
+    expect(changes == 0, "on_changed not called: " + str(changes));
+    // One undo: the user's edit, not the new sizes.
+    expect(SendMessageW(rich, EM_UNDO, 0, 0) != 0, "an undo");
+    expect(text_of(rich).find(L" typed") == std::wstring::npos, "one undo undoes the user's edit");
+    {
+        const text_seen undone = look_text(rich);
+        bool sizes = undone.runs.size() == text_before.runs.size();
+        for (size_t i = 0; sizes && i < undone.runs.size(); ++i)
+            sizes = std::abs(undone.runs[i].size - std::lround(text_before.runs[i].size * 1.5f)) <= 1;
+        expect(sizes, "and not the new sizes");
+    }
+    put_back(rich, text_before.selection, text_before.first_line);
+    const int undo_changes = changes;  // the undo's own (an edit)
     expect(larger.label_font != before.label_font, "the label given a new font");
     expect(larger.label_text == px(18, dpi), "the label's text " + str(px(18, dpi)) + " px: " + str(larger.label_text));
     expect(larger.other_text == px(18, dpi),
@@ -260,6 +398,8 @@ int main(int argc, char** argv)
     setting_changed(top);
     std::printf("at 100%% again:\n");
     const seen after = look(top, other_top);
+    check_text(text_before, look_text(rich), 1.f, " at 100% again");
+    expect(changes == undo_changes, "on_changed not called by the change back: " + str(changes - undo_changes));
     expect(after.label_text == before.label_text && after.other_text == before.other_text &&
                after.field_text == before.field_text && after.caption_text == before.caption_text,
            "the text as it was");
