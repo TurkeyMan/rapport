@@ -2032,16 +2032,18 @@ private:
     }
     static bool can_focus(QWidget* w, QWidget* page)
     {
-        return w && page->isAncestorOf(w) && (w->focusPolicy() & Qt::TabFocus) && w->isEnabled() &&
-               w->isVisibleTo(page);
+        return w && (w == page || page->isAncestorOf(w)) && (w->focusPolicy() & Qt::TabFocus) &&
+               w->isEnabled() && w->isVisibleTo(page);
     }
     // Where the focus was in the page, else its first control.
     void focus_page(page_parts& p)
     {
         if (!p.widget) return;
         QWidget* to = can_focus(p.focus, p.widget) ? p.focus.data() : nullptr;
-        // The focus chain runs through the window in the order its widgets
-        // were made: the page's first on it.
+        // The page itself, when it's the control (an entry or a button as the
+        // page); else the focus chain, which runs through the window in the
+        // order its widgets were made: the page's first on it.
+        if (!to && can_focus(p.widget, p.widget)) to = p.widget;
         for (QWidget* w = p.widget->nextInFocusChain(); !to && w && w != p.widget;
              w = w->nextInFocusChain())
             if (can_focus(w, p.widget)) to = w;

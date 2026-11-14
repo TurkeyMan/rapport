@@ -198,6 +198,15 @@ void watch_destroy(GtkWidget* w, bool* gone)
 }
 
 void activate(GtkWidget*) {}
+// No control focused in the window.
+void clear_focus(GtkWidget* top)
+{
+#if defined(RAPPORT_TEST_GTK4)
+    gtk_root_set_focus(GTK_ROOT(top), nullptr);
+#else
+    gtk_window_set_focus(GTK_WINDOW(top), nullptr);
+#endif
+}
 
 #elif defined(RAPPORT_TEST_QT6)
 
@@ -260,6 +269,10 @@ void watch_destroy(QWidget* w, bool* gone)
 void activate(QWidget* top)
 {
     top->activateWindow();
+}
+void clear_focus(QWidget* top)
+{
+    if (QWidget* f = top->focusWidget()) f->clearFocus();
 }
 
 #endif
@@ -380,7 +393,31 @@ int main(int argc, char** argv)
                    "the focus, in the page removed, moves to the page shown's");
         });
     steps.push_back(
-        [&] { expect(late_gone, "once the loop has run: the page's widgets are destroyed"); });
+        [&]
+        {
+            expect(late_gone, "once the loop has run: the page's widgets are destroyed");
+            // A page that's a control itself, and one with a dialog button
+            // whose role the window answers (its click connection the page's).
+            st->add("d", entry{"d-entry"});
+            st->add("e", vbox{buttons{{{rap::dialog_role::cancel}}}});
+            activate(top);
+            st->show("d");
+        });
+    steps.push_back(
+        [&]
+        {
+            native_widget edit_d = entry_with(stack, "d-entry");
+            expect(edit_d && focus_in(top, edit_d),
+                   "show: a page that's a control itself takes the focus");
+            clear_focus(top);
+            st->focus();
+            expect(edit_d && focus_in(top, edit_d),
+                   "focus(): a page that's a control itself takes it");
+            st->remove("e");
+        });
+    // The page with the role button destroyed by the loop; the window,
+    // destroyed after run(), mustn't reach that button.
+    steps.push_back([&] {});
 
     int waited = 0;
     auto tick = (*ui)->backend().timer(50, true,
@@ -414,6 +451,7 @@ int main(int argc, char** argv)
                                                (*ui)->quit(fails ? 1 : 0);
                                        });
     (*ui)->run();
+    win.reset();  // after a page with a role button was removed
     std::printf("%s\n", fails ? "FAILED" : "all passed");
     return fails ? 1 : 0;
 }

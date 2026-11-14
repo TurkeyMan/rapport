@@ -1040,6 +1040,18 @@ private:
     std::vector<std::pair<gpointer, gpointer>> conns_;
 };
 
+// One signal connection, owned by whichever parts list holds it, so it goes
+// with the widgets it was made with (a stack page's, or the window's).
+class signal_link : public part
+{
+public:
+    template <class F>
+    signal_link(gpointer obj, const char* signal, F* callback, gpointer data)
+    {
+        connect(obj, signal, callback, data);
+    }
+};
+
 template <class Base>
 class widget_base : public Base, public part
 {

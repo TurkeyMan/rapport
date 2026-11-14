@@ -4891,10 +4891,13 @@ private:
     bool menu_bar_wanted_ = true;
 
 public:
-    void add_role_button(GtkWidget* button, dialog_role role)
+    void add_role_button(GtkWidget* button, dialog_role role,
+                         std::vector<std::unique_ptr<part>>& owner)
     {
         g_object_set_data(G_OBJECT(button), "rapport-role", GINT_TO_POINTER(int(role)));
-        connect(
+        // The connection goes with the button's parts (a stack page's, when it's on
+        // one), not the window's: a removed page's buttons are freed before the window.
+        owner.push_back(std::make_unique<signal_link>(
             button, "clicked",
             +[](GtkButton* b, gpointer p)
             {
@@ -4902,7 +4905,7 @@ public:
                     dialog_role(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "rapport-role")));
                 static_cast<window_impl*>(p)->finish(role);
             },
-            this);
+            this));
         if (role == dialog_role::ok || role == dialog_role::yes)
         {
             gtk_style_context_add_class(gtk_widget_get_style_context(button), "suggested-action");
@@ -5487,7 +5490,7 @@ private:
             }
             auto* w = new button_impl(b.text.empty() ? stock_label(b.role) : b.text);
             parts().emplace_back(w);
-            if (!b.on_click) win_.add_role_button(w->outer(), b.role);
+            if (!b.on_click) win_.add_role_button(w->outer(), b.role, parts());
             sink_.created(b, *w);
             gtk_container_add(GTK_CONTAINER(box), w->outer());
         }
