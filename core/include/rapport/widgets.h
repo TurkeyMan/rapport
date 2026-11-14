@@ -1121,10 +1121,11 @@ public:
     // of its own across windows: the entry goes from one row to the other
     // only through the app's own calls.
     //
-    // Let go from a drag, rapport places the returned window so that its tab
-    // lands under the pointer, held where it was grabbed, kept to the work
-    // area of the monitor there (at that monitor's DPI; where the desktop
-    // lets windows be placed: not Wayland), and shows it, active. From the
+    // Let go from a drag, rapport places the returned window and shows it,
+    // active. Where, per toolkit: on Windows, so that its tab lands under
+    // the pointer, held where it was grabbed, kept to the work area of the
+    // monitor there (at that monitor's DPI); GTK 3, at a fixed offset from
+    // where it was let go; GTK 4 not at all (the desktop places it). From the
     // menu (no point), the app places the window itself before returning it,
     // with window::move (e.g. a little down and right of the source's
     // window::position(); nothing on Wayland, where the compositor places

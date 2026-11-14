@@ -7793,13 +7793,15 @@ protected:
     // doc_tabs::step_for): along the row, or away, out of it (over another
     // window's row, or out to be torn off), where the strip puts the tab
     // back where it was and leaves a gap there, and the drag image follows
-    // the pointer. Asks the app nothing.
+    // the pointer. Asks the app nothing. `letting_go`: the button's let go
+    // there, so where it is is found again, whatever the last move found
+    // (none may have come there), and no image is made for it.
     enum class there
     {
         along,
         away,
     };
-    there drag_at(const std::string& id, POINT screen);
+    there drag_at(const std::string& id, POINT screen, bool letting_go = false);
     // Let go while away, at `screen`: over another window's row in the
     // group, that window's on_receive; anywhere else, on_detach, and the
     // app's window put where it was let go and shown. The strip's drag is
@@ -8037,7 +8039,7 @@ private:
         drag_->from = i;
         SetCapture(h_);
     }
-    void drag_to(POINT p)
+    void drag_to(POINT p, bool letting_go = false)
     {
         if (!drag_->active)
         {
@@ -8050,7 +8052,7 @@ private:
         if (state.index_of(drag_->id) < 0) return;
         POINT screen = p;
         ClientToScreen(h_, &screen);
-        if (drag_at(drag_->id, screen) == there::away)
+        if (drag_at(drag_->id, screen, letting_go) == there::away)
         {
             if (!drag_->away)
             {
@@ -8091,6 +8093,9 @@ private:
     // or torn off if it's away; nothing's done after.
     void let_go(POINT p)
     {
+        // Where it's let go decides, not where the last move was: along the
+        // row (to the place there), or away.
+        if (drag_ && drag_->active) drag_to(p, true);
         const std::optional<drag_state> d = std::exchange(drag_, std::nullopt);
         if (GetCapture() == h_) ReleaseCapture();  // the drag's gone: its WM_CAPTURECHANGED is nothing
         if (!d || !d->active) return;
@@ -8665,10 +8670,11 @@ public:
         if (state.move(from, to)) follow(from, to);
     }
     void caption_reordered(int i) override { state.reordered(i); }
-    drag_there caption_drag_at(int i, POINT screen) override
+    drag_there caption_drag_at(int i, POINT screen, bool letting_go) override
     {
         if (i < 0 || i >= state.count()) return drag_there::along;
-        return drag_at(state.tabs[size_t(i)].id, screen) == there::away ? drag_there::away : drag_there::along;
+        return drag_at(state.tabs[size_t(i)].id, screen, letting_go) == there::away ? drag_there::away
+                                                                                   : drag_there::along;
     }
     void caption_drop(int i, POINT screen) override
     {
@@ -12470,7 +12476,6 @@ const wchar_t* drag_image_class()
 void window_tabs::image_at(const std::string& id, POINT screen)
 {
     tab_drags& d = tab_drag();
-    grab_ = drag_grab();
     const POINT at{screen.x - grab_.x, screen.y - grab_.y};
     if (d.dragger != this && d.dragger) d.dragger->drag_ended();  // (one drag at a time)
     d.dragger = this;
@@ -12504,8 +12509,9 @@ void window_tabs::image_at(const std::string& id, POINT screen)
     DeleteObject(bitmap);
 }
 
-window_tabs::there window_tabs::drag_at(const std::string& id, POINT screen)
+window_tabs::there window_tabs::drag_at(const std::string& id, POINT screen, bool letting_go)
 {
+    grab_ = drag_grab();
     const HWND top = GetAncestor(h_, GA_ROOT);
     window_tabs* other = strip_at(screen, state.group);
     if (other == this) other = nullptr;
@@ -12521,11 +12527,11 @@ window_tabs::there window_tabs::drag_at(const std::string& id, POINT screen)
     {
     case doc_tabs::drag_step::over_other:
         hover_strip(GetAncestor(other->hwnd(), GA_ROOT), other->drop_index_at(screen));
-        image_at(id, screen);
+        if (!letting_go) image_at(id, screen);
         return there::away;
     case doc_tabs::drag_step::out:
         clear_hover();
-        image_at(id, screen);
+        if (!letting_go) image_at(id, screen);
         return there::away;
     default: drag_ended(); return there::along;
     }
@@ -12539,17 +12545,19 @@ void window_tabs::drag_ended()
     clear_hover();
 }
 
-// Where it's let go, found again (the last move may not have been there);
-// the drag's image and marks gone first. Over another row of the group:
+// Where it's let go (drag_at, letting go, has just found it away there: not
+// over its own row); the drag's image and marks gone first. Over another
+// row of the group:
 // that window's on_receive. Anywhere else: on_detach (never for the
 // window's only tab: nothing happens), and the app's window put where the
 // tab was let go and shown. Either handler may close this window: nothing
 // of it is touched after.
 void window_tabs::let_go_away(std::string id, POINT screen)
 {
-    window_tabs* target = strip_at(screen, state.group);
+    tab_drags& d = tab_drag();
+    window_tabs* target = d.over ? tabs_of(d.over) : nullptr;
     if (target == this) target = nullptr;
-    const int index = target ? target->drop_index_at(screen) : -1;
+    const int index = target ? d.over_index : -1;
     const POINT grab = grab_;
     drag_ended();
     const int i = state.index_of(id);
