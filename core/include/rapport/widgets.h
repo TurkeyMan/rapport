@@ -1448,9 +1448,13 @@ public:
     virtual void show() = 0;
     // Brings the window to the user: shown if it isn't, restored if
     // minimised (to maximised, if it was), raised, and activated where the
-    // platform lets an app take the focus. A modal dialog of its own up
-    // over it comes with it and is what's activated (the window itself
-    // takes no input till the dialog's done). Windows: SetForegroundWindow,
+    // platform lets an app take the focus. Win32: a rapport modal dialog
+    // of its own up over it (the innermost of a chain) is what's raised and
+    // activated, as the window takes no input till it's done; a system
+    // dialog (a message box, the file dialog) isn't looked for. GTK and Qt:
+    // the window's what's asked for, its modal kept above it by the
+    // toolkit, and where the focus lands is the toolkit's and the window
+    // manager's. Windows: SetForegroundWindow,
     // which a process given AllowSetForegroundWindow may; refused, the
     // taskbar button flashes. Wayland: the compositor decides, and may only
     // mark the window as wanting attention. With RAPPORT_NO_ACTIVATE (test
