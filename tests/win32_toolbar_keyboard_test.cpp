@@ -330,11 +330,13 @@ int main(int argc, char** argv)
     steps.push_back(
         [&]
         {
+            // D first, so the focus is left on A's strip with nothing in it.
             a->focus();
-            a->set_enabled(false);
             d->set_enabled(false);
+            a->set_enabled(false);
             expect(!tab_stop(s[0]) && !tab_stop(s[1]), "no button reachable: no Tab stop");
-            expect(!a->has_focus() && !d->has_focus(), "and no button has the focus");
+            expect(focused() == s[0] && !a->has_focus() && !d->has_focus(),
+                   "the focus left on A's strip, no button current");
             // One enabled again in the other strip than the focus's: it's
             // the current button, the focus there.
             d->set_enabled(true);
