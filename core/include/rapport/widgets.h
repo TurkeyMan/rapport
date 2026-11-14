@@ -1065,18 +1065,18 @@ struct document_tab
 // doesn't take the tab out of the window.
 //
 // Tearing off and dropping (see on_detach, on_receive and set_group): a tab
-// dragged out of the row tears off into a window of its own, which the app
-// makes; dragged over another window's row in the same group, it shows
-// where it would land, and let go there it moves into that window. The
-// windows' tabs only ever change through the app's own calls (remove,
-// insert) from its handlers: rapport asks, the app does. Per toolkit:
-//  - Windows: torn off past a short distance out of the row (above, below,
-//    or past the window's sides), the new window is carried by the system's
-//    own move loop until let go, and a window's only tab drags its window
-//    the same way; Escape puts a tab back, and once it's torn off sends it
-//    home: the window it came from is asked to take it back at its old
-//    place (its on_receive, the torn-off window the source), whatever the
-//    group, and the app closes the emptied window.
+// dragged out of the row and let go outside any row tears off into a window
+// of its own, which the app makes; dragged over another window's row in the
+// same group, it shows where it would land, and let go there it moves into
+// that window. Grabbing a tab only ever drags the tab, never its window.
+// The windows' tabs only ever change through the app's own calls (remove,
+// insert) from its handlers: rapport asks, the app does, and only as the
+// tab's let go. Per toolkit:
+//  - Windows: past a short distance out of the row (above, below, or past
+//    the window's sides) the tab is shown as a drag image that follows the
+//    pointer, its row leaving the gap where it was; nothing changes until
+//    it's let go. Escape, or the drag interrupted (the mouse's capture
+//    lost, the window deactivated), puts it back and asks nothing.
 //  - GTK: GtkNotebook's own drag and drop; torn off as it's let go outside
 //    any notebook, the window shown where it was let go. GTK 4 says nothing
 //    of where: the window goes where the desktop puts it (under Wayland it
@@ -1091,11 +1091,10 @@ struct document_tab
 class document_tabs : public widget
 {
 public:
-    // A tab leaving its window, as a drag let go over another window's row
-    // or a torn-off window dropped there: what the target's on_receive is
-    // given. `index` is where in the target's row it was dropped (0 to its
-    // count); `source` the window whose tabs hold it now (a torn-off window,
-    // if the drag made one).
+    // A tab leaving its window, as a drag let go over another window's row:
+    // what the target's on_receive is given. `index` is where in the
+    // target's row it was dropped (0 to its count); `source` the window
+    // whose tabs hold it now, the one it was dragged from.
     struct transfer
     {
         std::string id;
@@ -1108,37 +1107,44 @@ public:
     // A tab torn off into a window of its own. A tab is only an entry in a
     // row: whatever it shows (a folder, a repository, a document) is the
     // app's, so the window is the app's to make, and rapport only asks.
-    // `screen` is where the pointer is, in the source window's logical px
-    // (window::position's units); nullopt for the menu's Move to new window.
+    // Asked when a dragged tab is let go outside any row (none of its own
+    // window's, none of another window's in the group), at most once a drag;
+    // or by the menu's Move to new window. `screen` is where it was let go,
+    // in the source window's logical px (window::position's units); nullopt
+    // for the menu.
     //
     // The handler makes a window for the tab's content, whose tabs spec
     // already holds a tab with this id (its title and icon as the app likes),
     // removes the tab from the source window's row (its bind's remove), and
-    // returns the new window, not yet shown. Rapport keeps no tab state of
-    // its own across windows: the entry goes from one row to the other only
-    // through the app's own calls. (A window's only tab is never torn off:
-    // dragged, it drags its window; the menu's item is disabled.)
+    // returns the new window, not yet shown. It may close the source window
+    // there and then (e.g. one it's left empty). Rapport keeps no tab state
+    // of its own across windows: the entry goes from one row to the other
+    // only through the app's own calls.
     //
-    // Dragged, rapport puts the window under the pointer, shows it and
-    // carries the drag on with it, the button still held: let go over
-    // another window's row in the group, that window's on_receive is asked
-    // to take the tab (see there); anywhere else, the window stays where it
-    // was let go. From the menu (no point), the app places the window itself
-    // before returning it, with window::move (e.g. a little down and right of
-    // the source's window::position(); nothing on Wayland, where the
-    // compositor places windows), and rapport shows it there, as it shows a
-    // dragged one. Returning nullptr refuses: nothing changes,
-    // and the drag goes on along the row. Asked at most once a drag.
+    // Let go from a drag, rapport places the returned window so that its tab
+    // lands under the pointer, held where it was grabbed, kept to the work
+    // area of the monitor there (at that monitor's DPI; where the desktop
+    // lets windows be placed: not Wayland), and shows it, active. From the
+    // menu (no point), the app places the window itself before returning it,
+    // with window::move (e.g. a little down and right of the source's
+    // window::position(); nothing on Wayland, where the compositor places
+    // windows), and rapport shows it there. Returning nullptr refuses:
+    // nothing changes, the tab staying where it was.
+    //
+    // A window's only tab is never torn off: dragged, it drags the tab, never
+    // the window; let go outside any row, nothing happens, back on its own
+    // row nothing, and over another window's row in the group it moves there
+    // (that window's on_receive; the app closes the emptied source). The
+    // menu's item is disabled for it.
     using detach_fn = std::function<rap::window*(const std::string& id, std::optional<point_f> screen)>;
     // A tab let go over this window's row, from another window in the same
-    // group (set_group), or (on Windows) one torn off from this window and
-    // sent home by Escape, group or none: `t` says which, where it was
-    // dropped (or was before), and the window it's in. Rapport changes neither row. To take it the app
+    // group (set_group): `t` says which, where it was dropped, and the
+    // window it's in. Rapport changes neither row. To take it the app
     // removes it from t.source's tabs, inserts it into this window's at
     // t.index (through the binds), and returns true; false leaves both rows
-    // as they were, and the drag ends where it was. A source left empty
-    // (a torn-off window made for the drag) is the app's to close; rapport
-    // never closes it.
+    // as they were. A source left empty (its only tab dragged here) is the
+    // app's to close, and it may close it there and then, in the handler;
+    // rapport never closes it.
     using receive_fn = std::function<bool(const transfer& t)>;
 
 

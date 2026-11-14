@@ -114,33 +114,31 @@ inline int index_after_move(int i, int from, int to)
 // -- tearing off and dropping ---------------------------------------------------
 
 // What a tab drag past its threshold does at the pointer's place, the same
-// on every backend that drags tabs itself (Windows'):
-//  - the window's only tab drags the window itself, as its caption would;
+// on every backend that drags tabs itself (Windows'). A drag only ever drags
+// the tab, never its window, the window's only tab included:
 //  - over another window's row in the same group: that row shows where the
-//    tab would land, and the tab sits where it was in its own;
+//    tab would land, and the tab's out of its own (a drag image);
 //  - over its own row, or near it (within the tear-off distance of the
 //    row, above or below, and of the window, either side): along the row;
-//  - further out, with an on_detach not yet refused: torn off;
+//  - further out, with an on_detach: out of the row (a drag image), to be
+//    torn off where it's let go;
 //  - otherwise along the row still, at its nearer end.
 enum class drag_step
 {
     reorder,
     over_other,
-    tear_off,
-    move_window,
+    out,
 };
 struct drag_place
 {
-    bool only_tab = false;       // the window has the one tab
-    bool over_other = false;     // over another window's row in the group
-    bool past_tear = false;      // out past the tear-off distance
-    bool can_detach = false;     // on_detach set, and not refused this drag
+    bool over_other = false;  // over another window's row in the group
+    bool past_tear = false;   // out past the tear-off distance
+    bool can_detach = false;  // on_detach set
 };
 inline drag_step step_for(const drag_place& p)
 {
-    if (p.only_tab) return drag_step::move_window;
     if (p.over_other) return drag_step::over_other;
-    if (p.past_tear && p.can_detach) return drag_step::tear_off;
+    if (p.past_tear && p.can_detach) return drag_step::out;
     return drag_step::reorder;
 }
 
@@ -274,9 +272,9 @@ public:
         t.source = source;
         return t;
     }
-    // Tab i torn off (dragged, `screen` where the pointer is; or the menu's
-    // Move to new window, none): the app's window, or null where it refused
-    // or there's no handler. Never for a window's only tab.
+    // Tab i torn off (a drag let go outside any row, `screen` where; or the
+    // menu's Move to new window, none): the app's window, or null where it
+    // refused or there's no handler. Never asked for a window's only tab.
     rap::window* detach_asked(int i, std::optional<point_f> screen)
     {
         if (i < 0 || i >= count() || count() < 2) return nullptr;

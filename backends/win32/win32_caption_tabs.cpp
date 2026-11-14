@@ -60,6 +60,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <optional>
 
@@ -234,8 +235,10 @@ struct caption_tabs::impl
     // strip's tabs, the owner's (caption_moved) and UIA's TabItems in their
     // new order. Let go, the owner's told once (caption_reordered), if it
     // moved; Escape, or the capture lost, puts it back. Past either end of
-    // the row it stays at that end: it never leaves the strip (a later
-    // tearing off would start from there).
+    // the row it stays at that end, unless the owner says it's away, out of
+    // the strip: then it's put back where it was and its place left empty
+    // (its rectangle empty: drawn and hit as nothing) while the owner's drag
+    // image follows the pointer.
     struct drag_state
     {
         unsigned key = 0;  // the tab's
@@ -244,7 +247,7 @@ struct caption_tabs::impl
         int grab = 0;  // the pointer's x in the tab, as pressed
         int x = 0;     // the pointer's x
         bool active = false;  // past the threshold
-        bool away = false;    // over another window's strip (caption_drag_at)
+        bool away = false;    // out of the strip (caption_drag_at)
     };
     std::optional<drag_state> drag;
     int drop = -1;  // where a tab dropped in would land, marked (show_drop)
@@ -352,6 +355,9 @@ struct caption_tabs::impl
             OffsetRect(&tab_rects[size_t(i)], dx, 0);
             if (!IsRectEmpty(&close_rects[size_t(i)])) OffsetRect(&close_rects[size_t(i)], dx, 0);
         }
+        // Away, out of the strip: its place left empty.
+        if (const int i = drag && drag->active && drag->away ? index_of_key(drag->key) : -1; i >= 0)
+            tab_rects[size_t(i)] = close_rects[size_t(i)] = RECT{};
         update_tools();
     }
 
@@ -396,30 +402,27 @@ struct caption_tabs::impl
         drag = drag_state{self.tabs_[size_t(i)].key, i, p, p.x - r.left, p.x};
         SetCapture(self.hwnd_);
     }
-    // False once the owner's taken the drag on (gone): the strip may have
-    // gone with its window, and nothing of it's touched after.
-    bool drag_to(POINT p)
+    void drag_to(POINT p)
     {
         if (!drag->active)
         {
             if (std::abs(p.x - drag->press.x) <= GetSystemMetricsForDpi(SM_CXDRAG, dpi()) &&
                 std::abs(p.y - drag->press.y) <= GetSystemMetricsForDpi(SM_CYDRAG, dpi()))
-                return true;
+                return;
             drag->active = true;
             hot = {};
         }
         drag->x = p.x;
         int at = index_of_key(drag->key);
-        if (at < 0) return true;
+        if (at < 0) return;
         // Out of the strip: the owner's to say (tearing off, dropping).
         POINT screen = p;
         ClientToScreen(self.hwnd_, &screen);
         const unsigned key = drag->key;
         const caption_tabs_owner::drag_there there = owner.caption_drag_at(at, screen);
-        if (there == caption_tabs_owner::drag_there::gone) return false;
-        if (!drag || drag->key != key) return true;
+        if (!drag || drag->key != key) return;
         at = index_of_key(key);
-        if (at < 0) return true;
+        if (at < 0) return;
         const bool away = there == caption_tabs_owner::drag_there::away;
         if (away != drag->away)
         {
@@ -429,20 +432,20 @@ struct caption_tabs::impl
                 const bool back = at != drag->from && drag->from < self.count();
                 if (back) move_tab(at, drag->from);
                 moved(back);
-                return true;
+                return;
             }
         }
-        if (away || slot_last < slot_first) return true;
+        if (away || slot_last < slot_first) return;
         // The place whose left is nearest the dragged tab's.
         const int to = std::clamp(slot_first + (dragged_left() - slot_left + slot_width / 2) / slot_width, slot_first,
                                   slot_last);
         const bool reordered = to != at;
         if (reordered) move_tab(at, to);
         moved(reordered);
-        return true;
     }
-    // Let go: the owner's told, if the tab moved; nothing's done after.
-    void let_go()
+    // Let go at `p`: the owner's told, if the tab moved, or it's dropped or
+    // torn off there if it's away; nothing's done after.
+    void let_go(POINT p)
     {
         const std::optional<drag_state> d = std::exchange(drag, std::nullopt);
         if (GetCapture() == self.hwnd_) ReleaseCapture();  // the drag's gone: its WM_CAPTURECHANGED is nothing
@@ -451,9 +454,12 @@ struct caption_tabs::impl
         const int at = index_of_key(d->key);
         if (d->away)
         {
-            owner.caption_drop(at);  // last: it may change the tabs
+            POINT screen = p;
+            ClientToScreen(self.hwnd_, &screen);
+            owner.caption_drop(at, screen);  // last: it may change the tabs, or close the window
             return;
         }
+        owner.caption_drag_ended();
         if (at >= 0 && at != d->from) owner.caption_reordered(at);  // last: it may change the tabs
     }
     void cancel()
@@ -466,7 +472,7 @@ struct caption_tabs::impl
         const bool back = at >= 0 && at != d->from && d->from < self.count();
         if (back) move_tab(at, d->from);
         moved(back);
-        owner.caption_drag_cancelled();
+        owner.caption_drag_ended();
     }
     // Where a tab dropped at x lands: by the middles of the tabs in sight.
     int drop_index_at(int x) const
@@ -1258,10 +1264,10 @@ struct caption_tabs::impl
             {
                 if (!(wp & MK_LBUTTON))  // let go where it wasn't heard
                 {
-                    d.let_go();
+                    d.let_go(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});  // the window may be gone
                     return 0;
                 }
-                if (!d.drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) return 0;  // gone: torn off, or the window's moving
+                d.drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
                 if (!d.drag || d.drag->active) return 0;
             }
             d.set_hot(s->hit_test(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}));
@@ -1295,7 +1301,7 @@ struct caption_tabs::impl
         {
             if (d.drag)
             {
-                d.let_go();
+                d.let_go(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});  // the window may be gone
                 return 0;
             }
             const hit was = d.pressed;
@@ -1523,21 +1529,60 @@ void caption_tabs::cancel_drag()
     d_->cancel();
 }
 
-void caption_tabs::put_back_drag()
+// Drawn as at rest (no drag, so the tab in its place, current as pressing
+// made it) into a buffer of the strip's size, the tab cut out and made
+// opaque on the window's colour: what's clear in the caption is Mica's.
+HBITMAP caption_tabs::tab_image(int index, SIZE& size)
 {
-    if (!d_->drag || !d_->drag->active) return;
-    const int at = d_->index_of_key(d_->drag->key);
-    const bool back = at >= 0 && at != d_->drag->from && d_->drag->from < count();
-    if (back) d_->move_tab(at, d_->drag->from);
-    d_->moved(back);
-}
-
-void caption_tabs::forget_drag()
-{
-    if (!d_->drag) return;
-    d_->drag.reset();
-    if (GetCapture() == hwnd_) ReleaseCapture();
-    d_->moved(false);
+    if (index < 0 || index >= count() || !hwnd_) return nullptr;
+    RECT c;
+    GetClientRect(hwnd_, &c);
+    const int cw = c.right, ch = c.bottom;
+    const std::optional<impl::drag_state> held = std::exchange(d_->drag, std::nullopt);
+    d_->layout();
+    RECT part = d_->tab_rects[size_t(index)];
+    IntersectRect(&part, &part, &c);
+    HBITMAP whole = nullptr, out = nullptr;
+    void *whole_bits = nullptr, *bits = nullptr;
+    auto dib = [](int w, int h, void** b)
+    {
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+        return CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, b, nullptr, 0);
+    };
+    if (!IsRectEmpty(&part) && cw > 0 && ch > 0 && (whole = dib(cw, ch, &whole_bits)) != nullptr)
+    {
+        HDC dc = CreateCompatibleDC(nullptr);
+        HGDIOBJ old = SelectObject(dc, whole);
+        std::memset(whole_bits, 0, size_t(cw) * size_t(ch) * 4);
+        d_->render(dc);
+        GdiFlush();
+        SelectObject(dc, old);
+        DeleteDC(dc);
+        const int w = part.right - part.left, h = part.bottom - part.top;
+        if ((out = dib(w, h, &bits)) != nullptr)
+        {
+            const color ground = theme_color_of(theme_color::window);
+            const auto* from = static_cast<const uint8_t*>(whole_bits);
+            auto* to = static_cast<uint8_t*>(bits);
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                {
+                    const uint8_t* s = from + (size_t(part.top + y) * size_t(cw) + size_t(part.left + x)) * 4;
+                    uint8_t* t = to + (size_t(y) * size_t(w) + size_t(x)) * 4;
+                    const int a = s[3];
+                    t[0] = uint8_t(s[0] + ground.b * (255 - a) / 255);
+                    t[1] = uint8_t(s[1] + ground.g * (255 - a) / 255);
+                    t[2] = uint8_t(s[2] + ground.r * (255 - a) / 255);
+                    t[3] = 255;
+                }
+            size = SIZE{w, h};
+        }
+        DeleteObject(whole);
+    }
+    d_->drag = held;
+    d_->layout();
+    return out;
 }
 
 POINT caption_tabs::drag_grab() const

@@ -212,14 +212,12 @@ void handlers()
 void tear_off_and_drop()
 {
     using namespace rap::doc_tabs;
-    expect(step_for({.only_tab = true, .over_other = true, .past_tear = true, .can_detach = true}) ==
-               drag_step::move_window,
-           "the only tab: its window moves, wherever it's dragged");
     expect(step_for({.over_other = true, .past_tear = true, .can_detach = true}) == drag_step::over_other,
            "over another window's row: dropped there, not torn off");
-    expect(step_for({.past_tear = true, .can_detach = true}) == drag_step::tear_off, "out past the distance: torn off");
+    expect(step_for({.past_tear = true, .can_detach = true}) == drag_step::out,
+           "out past the distance: out of the row, torn off if let go there");
     expect(step_for({.past_tear = true, .can_detach = false}) == drag_step::reorder,
-           "no on_detach, or refused: along the row still");
+           "no on_detach: along the row still");
     expect(step_for({.can_detach = true}) == drag_step::reorder, "near the row: along it");
     expect(!past_tear(50, 10, 0, 40, 0, 500, 24) && !past_tear(50, 63, 0, 40, 0, 500, 24),
            "in the row, and just under it: not torn");
