@@ -653,6 +653,11 @@ bool glass_paints(HWND c)
     return GetWindowSubclass(c, glass_proc, glass_id, &data) && on_glass(c);
 }
 
+bool glass_printing()
+{
+    return t_printing > 0;
+}
+
 HFONT glass_font(HWND c, HFONT f)
 {
     return on_glass(c) ? grayscale(f) : f;

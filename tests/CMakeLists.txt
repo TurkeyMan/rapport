@@ -564,10 +564,23 @@ if(TARGET rapport_win32)
     add_test(NAME win32-band-controls-light COMMAND rapport-win32-band-controls-test)
     set_tests_properties(win32-band-controls-light PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 TIMEOUT 120)
+    # Compact through RAPPORT_DENSITY, for a plugin build (which has no test
+    # hook): Windows 11 runners build plugins.
+    add_test(NAME win32-band-controls-compact COMMAND rapport-win32-band-controls-test)
+    set_tests_properties(win32-band-controls-compact PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 TIMEOUT 120)
+    add_test(NAME win32-band-controls-compact-light COMMAND rapport-win32-band-controls-test)
+    set_tests_properties(win32-band-controls-compact-light PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 TIMEOUT 120)
     add_test(NAME win32-band-controls-high-contrast
              COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-band-controls-test>)
     set_tests_properties(win32-band-controls-high-contrast PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    add_test(NAME win32-band-controls-compact-high-contrast
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-band-controls-test>)
+    set_tests_properties(win32-band-controls-compact-high-contrast PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
+        TIMEOUT 180)
 
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build

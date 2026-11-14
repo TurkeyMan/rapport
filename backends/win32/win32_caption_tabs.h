@@ -363,6 +363,9 @@ void free_unused_grayscale_fonts(const std::set<HFONT>& in_use);
 // `c` is on the band's glass with its subclass in place: its WM_PAINT is
 // the glass's, which prints it on the mattes (WM_PRINTCLIENT).
 bool glass_paints(HWND c);
+// A control's being printed on the glass's mattes now (its print's
+// messages, WM_PRINTCLIENT, pass through the glass's subclass).
+bool glass_printing();
 // The font `c` should draw its text in, given `f`: f's grayscale copy while
 // `c` is on the band's glass, else `f`.
 HFONT glass_font(HWND c, HFONT f);
