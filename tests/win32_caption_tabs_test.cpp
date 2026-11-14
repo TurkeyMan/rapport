@@ -938,7 +938,9 @@ void check_band(HWND top, bool band, const std::string& when)
 // glass the same as on screen) in the state `state` says: a layer control
 // (`layer`) none of its pixels below the layer's alpha, each pixel at that
 // alpha the layer's own (its background, nothing of its content lost), and
-// something drawn; an opaque one (a field) opaque throughout.
+// something drawn; an opaque one (a field) opaque throughout. (Exactly at
+// that alpha: a WinUI face's faintest fill, SubtleFillColorTertiary's 6/255,
+// a tool button pressed, comes out one above it, its own colour.)
 void check_glass_print(HWND h, bool layer, const std::string& what, const std::string& state)
 {
     const printed p = print_control(h);
@@ -956,7 +958,7 @@ void check_glass_print(HWND h, bool layer, const std::string& what, const std::s
             if (layer)
             {
                 if (a < la - 1 && below++ == 0) first_below = str(x) + "," + str(y) + " " + argb_hex(v);
-                if (std::abs(a - la) <= 1 && !near_px(v, bg, 2) && lost++ == 0)
+                if (a == la && !near_px(v, bg, 2) && lost++ == 0)
                     first_lost = str(x) + "," + str(y) + " " + argb_hex(v);
             }
             else if (a != 255 && below++ == 0)
@@ -1040,7 +1042,9 @@ void check_glass(HWND top)
         {"a tool button (owner-drawn)", child_of(top, L"Button", L"Tool"), true},
         {"a label", child_of(top, L"Static", L"Label"), true},
         {"a drop-down list", combo_list, true},
-        {"a combo box (with an edit)", combo_edit, false},
+        // Its face drawn round its edit (win32_band_face.h), printed as a
+        // layer control's: the band's layer round its rounded shape.
+        {"a combo box (with an edit)", combo_edit, true},
         {"a text field", edit, false},
         {"a text field's clear button", edit ? FindWindowExW(edit, nullptr, L"Button", nullptr) : nullptr, false},
     };

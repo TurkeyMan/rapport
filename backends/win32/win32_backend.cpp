@@ -3997,6 +3997,8 @@ public:
     {
         if (band_drawn())
             return {std::max(1, band_px(1, win_.dpi())), band_px(band_->field, win_.dpi())};
+        // Under high contrast in the band: the native line, the field's height.
+        if (band_) return {std::max(2, win_.px(2)), band_px(band_->field, win_.dpi())};
         const int t = std::max(2, win_.px(2)), pad = win_.px(4);
         return dir_ == orientation::horizontal ? SIZE{pad, t + 2 * pad} : SIZE{t + 2 * pad, pad};
     }
@@ -4021,9 +4023,10 @@ public:
     }
     void place(RECT r) override
     {
-        if (band_drawn())
+        if (band_)
         {
-            move_control(h_, r.left, r.top, r.right - r.left, r.bottom - r.top);
+            // Drawn, or (high contrast) the native line: the field's height.
+            move_control(h_, r.left, r.top, band_drawn() ? r.right - r.left : 2, r.bottom - r.top);
             return;
         }
         const int pad = win_.px(4);
