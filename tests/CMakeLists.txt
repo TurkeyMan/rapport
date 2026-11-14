@@ -565,7 +565,7 @@ if(TARGET rapport_win32)
     # for the z-order and for nothing shown (the drag image, the window let
     # go); --input, the real thing with real input, on CI only.
     add_executable(rapport-win32-document-tabs-tearoff-test win32_document_tabs_tearoff_test.cpp)
-    target_link_libraries(rapport-win32-document-tabs-tearoff-test PRIVATE rapport::rapport user32 comctl32)
+    target_link_libraries(rapport-win32-document-tabs-tearoff-test PRIVATE rapport::rapport user32 comctl32 dwmapi)
     if(RAPPORT_STATIC)
         target_link_libraries(rapport-win32-document-tabs-tearoff-test PRIVATE rapport::backend_win32)
         target_compile_definitions(rapport-win32-document-tabs-tearoff-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)

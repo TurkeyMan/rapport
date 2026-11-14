@@ -195,6 +195,7 @@ std::vector<std::unique_ptr<fixture>> fixtures;
 rap::ui* g_ui = nullptr;
 bool g_menu_bar = false;  // stage 1 (under a menu bar), or the caption's strip
 HWND g_hook_window = nullptr;  // a window kept to the end, for the test hooks
+SIZE g_size{700, 300};          // the windows' size (logical px)
 
 struct fixture
 {
@@ -329,7 +330,7 @@ fixture* make(const std::string& name, std::vector<std::string> ids, const std::
     f.name = name;
     using namespace rap::layout;
     window w{name, {label{"Content"}}};
-    w.size(700_px, 300_px);
+    w.size(rap::extent{float(g_size.cx), rap::extent::unit::px}, rap::extent{float(g_size.cy), rap::extent::unit::px});
     if (g_menu_bar) w.menu_bar({{"_File", [] { return rap::menu{}; }}});
     w.tabs(tabs_spec(f, ids, group));
     f.win = g_ui->create(std::move(w));  // never shown
@@ -393,6 +394,41 @@ RECT frame_of(HWND h)
     return r;
 }
 
+std::string where(const RECT& r)
+{
+    return std::to_string(r.left) + "," + std::to_string(r.top) + "-" + std::to_string(r.right) + "," +
+           std::to_string(r.bottom);
+}
+
+RECT work_area()
+{
+    RECT r{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &r, 0);
+    return r;
+}
+
+// Where a window's frame goes, let go with its first tab held at `grab`
+// (from the tab's top-left) at `at` on the screen, the tab's top-left
+// `off` from its frame's and the frame `size` big: before it's kept to
+// the work area, and after (as rapport keeps it: moved in, left and top
+// first).
+RECT frame_for(POINT at, POINT grab, POINT off, SIZE size)
+{
+    const LONG l = at.x - grab.x - off.x, t = at.y - grab.y - off.y;
+    return RECT{l, t, l + size.cx, t + size.cy};
+}
+RECT kept_in(RECT f, const RECT& work)
+{
+    const LONG w = f.right - f.left, h = f.bottom - f.top;
+    const LONG l = std::max(work.left, std::min(f.left, work.right - w));
+    const LONG t = std::max(work.top, std::min(f.top, work.bottom - h));
+    return RECT{l, t, l + w, t + h};
+}
+bool inside(const RECT& f, const RECT& work)
+{
+    return f.left >= work.left && f.top >= work.top && f.right <= work.right && f.bottom <= work.bottom;
+}
+
 void run(const char* stage)
 {
     const std::string at = std::string(" (") + stage + ")";
@@ -407,7 +443,11 @@ void run(const char* stage)
     if (!a.strip || !b.strip || !c.strip || !d.strip) return;
     expect(a.caption == !g_menu_bar, "the strip expected" + at);
     g_hook_window = b.top;
-    place(a, 100, 100);
+    // A at the work area's top left: a window let go from it fits in the
+    // work area as it's put, even on a small screen (a runner's 1024 x 768),
+    // so it's put exactly, not kept in.
+    const RECT work = work_area();
+    place(a, work.left + 20, work.top + 20);
     place(b, 100, 700);
     place(c, 900, 700);
     place(d, 900, 100);
@@ -527,12 +567,28 @@ void run(const char* stage)
     a.detached.clear();
 
     // Let go outside: the app's window, put with the tab under the pointer.
+    // Its frame is A's (the same window, but for its tabs), its first tab as
+    // far from its frame's corner: let go where that frame fits in the work
+    // area with room (over A's own content, out past its row), it's put
+    // exactly so, not kept in.
+    const RECT a_frame = frame_of(a.top);
+    const SIZE frame_size{a_frame.right - a_frame.left, a_frame.bottom - a_frame.top};
+    POINT off{};
+    {
+        const RECT r = a.tab(0);
+        const POINT o = a.screen(POINT{r.left, r.top});
+        off = POINT{o.x - a_frame.left, o.y - a_frame.top};
+    }
+    std::printf("     work area %s, A's frame %s, its first tab %ld,%ld in it%s\n", where(work).c_str(),
+                where(a_frame).c_str(), off.x, off.y, at.c_str());
+    const POINT dropped{work.left + 40 + off.x + grab.x, work.top + 200 + off.y + grab.y};
+    const RECT room = frame_for(dropped, grab, off, frame_size);
     p = a.start(1);
-    out = POINT{p.x + 30, below + 10};
+    out = a.client(dropped);
+    a.move(POINT{p.x, below});
     a.move(out);
     img = image();
     a.up(out);
-    const POINT dropped = a.screen(out);
     expect(a.detached.size() == 1 && a.made && a.tabs->ids() == ids{"a", "c"},
            "let go outside: on_detach(b), the app's window made, b out of A" + at + ": " + join(a.tabs->ids()));
     expect(img && !IsWindow(img) && !image(), "the image gone" + at);
@@ -540,35 +596,46 @@ void run(const char* stage)
     fixture& t = *a.made;
     expect(t.tabs && t.tabs->ids() == ids{"b"} && !IsWindowVisible(t.top), "the new window holds b, never shown" + at);
     expect(HWND(ask(b.top, 5)) == t.top, "and it's shown (here, noted)" + at);
+    if (inside(room, work))
     {
         const RECT r = t.tab(0);
         const POINT o = t.screen(POINT{r.left, r.top});
         expect(o.x + grab.x == dropped.x && o.y + grab.y == dropped.y,
                "put with its tab under the pointer, held where it was grabbed" + at + ": " +
-                   pt(POINT{o.x + grab.x, o.y + grab.y}) + " for " + pt(dropped));
+                   pt(POINT{o.x + grab.x, o.y + grab.y}) + " for " + pt(dropped) + " (frame " +
+                   where(frame_of(t.top)) + ", work area " + where(work) + ")");
     }
+    else
+        std::printf("     skipped: no room in the work area %s for the frame %s, to check the tab under the "
+                    "pointer%s\n",
+                    where(work).c_str(), where(room).c_str(), at.c_str());
 
-    // Near the work area's corner: kept to the work area.
-    a.made = nullptr;
-    MONITORINFO mi{sizeof mi};
-    GetMonitorInfoW(MonitorFromWindow(a.top, MONITOR_DEFAULTTONEAREST), &mi);
-    const POINT corner{mi.rcWork.right - 3, mi.rcWork.bottom - 3};
-    p = a.start(1);  // c
-    a.move(POINT{p.x, below});
-    a.move(a.client(corner));
-    a.up(a.client(corner));
-    if (a.made)
+    // Let go by the work area's right edge, and in its bottom right corner:
+    // kept in, where kept_in says (moved left, and up), the tab not under the
+    // pointer then.
+    const POINT edge{work.right - 3, dropped.y};
+    const POINT corner{work.right - 3, work.bottom - 3};
+    for (const POINT s : {edge, corner})
     {
-        const RECT f = frame_of(a.made->top);
-        expect(f.left >= mi.rcWork.left && f.top >= mi.rcWork.top && f.right <= mi.rcWork.right &&
-                   f.bottom <= mi.rcWork.bottom,
-               "let go in the work area's corner: the window kept to the work area" + at);
+        const std::string which = s.y == edge.y ? "by the work area's right edge" : "in the work area's corner";
+        a.made = nullptr;
+        p = a.start(1);  // c
+        a.move(POINT{p.x, below});
+        a.move(a.client(s));
+        a.up(a.client(s));
+        if (!a.made)
+        {
+            expect(false, "let go " + which + ": a window made" + at);
+            continue;
+        }
+        const RECT got = frame_of(a.made->top);
+        const RECT want = kept_in(frame_for(s, grab, off, frame_size), work);
+        expect(EqualRect(&got, &want) != FALSE, "let go " + which + ": kept in, at " + where(want) + at + ": " +
+                                                    where(got) + " (work area " + where(work) + ")");
         expect(HWND(ask(b.top, 5)) == a.made->top, "and shown (noted)" + at);
         a.made->win.reset();
         a.tabs->add({"c", "Tab c", {}, {}});
     }
-    else
-        expect(false, "let go in the corner: a window made" + at);
     expect(a.tabs->ids() == ids{"a", "c"}, "A: a, c" + at + ": " + join(a.tabs->ids()));
 
     // Over B's row: B marks where it'd land; let go there: B's on_receive.
@@ -905,14 +972,20 @@ int input_mode(rap::ui& ui)
         return 77;
     }
     g_menu_bar = windows_build() < 22000;  // the caption's strip where there is one
+    // Small enough that all three fit on a runner's 1024 x 768 screen, and
+    // a window let go has room where it's let go.
+    g_size = SIZE{460, 200};
     fixture& a = *make("Input A", {"a", "b", "c", "e"}, "g");
     fixture& b = *make("Input B", {"x", "y"}, "g");
     fixture& d = *make("Input D", {"solo"}, "g");
     if (!a.strip || !b.strip || !d.strip) return expect(false, "the windows' strips"), 1;
     for (fixture* f : {&a, &b, &d}) f->win->show();
-    place(a, 80, 80);
-    place(b, 80, 520);
-    place(d, 840, 80);
+    const RECT work = work_area();
+    place(a, work.left + 10, work.top + 10);
+    RECT r0;
+    GetWindowRect(a.top, &r0);
+    place(d, r0.right + 20, work.top + 10);
+    place(b, work.left + 10, r0.bottom + 40);
     SetForegroundWindow(a.top);
     pump();
     using ids = std::vector<std::string>;
@@ -921,12 +994,26 @@ int input_mode(rap::ui& ui)
     GetWindowRect(d.top, &dr);
     const RECT bx = b.tab(0);
     const POINT over_b = b.screen(POINT{bx.right - 6, (bx.top + bx.bottom) / 2});
-    // Below A and D, between them and B: the desktop's.
+    // Let go where the new window (A's frame, its first tab as far in) fits
+    // in the work area as it's put, its tab under the pointer: below A's
+    // row, over A's content or the desktop, and not over B.
+    const RECT a_frame = frame_of(a.top);
+    const SIZE frame_size{a_frame.right - a_frame.left, a_frame.bottom - a_frame.top};
+    const RECT a0 = a.tab(0);
+    const POINT a0s = a.screen(POINT{a0.left, a0.top});
+    const POINT off{a0s.x - a_frame.left, a0s.y - a_frame.top};
     const POINT from_b = a.screen(a.centre(1));
-    const POINT out{from_b.x + 40, ar.bottom + 60};
+    const RECT b1 = a.tab(1);
+    const POINT grab{a.centre(1).x - b1.left, a.centre(1).y - b1.top};
+    const POINT out{work.left + 30 + off.x + grab.x, a0s.y + (a0.bottom - a0.top) + 60};
+    const RECT room = frame_for(out, grab, off, frame_size);
+    const bool fits = inside(room, work);
+    std::printf("     work area %s, A's frame %s, B's %s; let go at %ld,%ld, the new frame %s%s\n",
+                where(work).c_str(), where(a_frame).c_str(), where(frame_of(b.top)).c_str(), out.x, out.y,
+                where(room).c_str(), fits ? "" : " (doesn't fit: its place not checked)");
 
     // A's b, dragged out and let go: on_detach then, the window shown there.
-    drag(a, from_b, {POINT{from_b.x + 12, from_b.y}, POINT{from_b.x, ar.bottom + 20}}, out, false);
+    drag(a, from_b, {POINT{from_b.x + 12, from_b.y}, POINT{from_b.x, out.y}}, out, false);
     check("dragged out: nothing asked before it's let go", [&] { return a.detached.empty(); }, 0);
     steps.push_back({"let go outside: on_detach(b) once", [out] { send_mouse(out, MOUSEEVENTF_LEFTUP); },
                      [&] { return a.detached.size() == 1 && a.made && a.made->win; }});
@@ -934,6 +1021,7 @@ int input_mode(rap::ui& ui)
           [&]
           {
               if (!a.made || !IsWindowVisible(a.made->top)) return false;
+              if (!fits) return true;
               RECT r = a.made->tab(0);
               MapWindowPoints(a.made->strip, nullptr, reinterpret_cast<POINT*>(&r), 2);
               return PtInRect(&r, out) != FALSE;
@@ -956,7 +1044,7 @@ int input_mode(rap::ui& ui)
     check("and the app moved it", [&] { return b.tabs->ids() == ids{"x", "c", "y"} && a.tabs->ids() == ids{"a", "e"}; });
     // Escape with a tab out: back, nothing asked.
     const POINT from_e = a.screen(a.centre(1));
-    drag(a, from_e, {POINT{from_e.x + 12, from_e.y}, POINT{from_e.x, ar.bottom + 20}}, out, false);
+    drag(a, from_e, {POINT{from_e.x + 12, from_e.y}, POINT{from_e.x, out.y}}, out, false);
     steps.push_back({"Escape", [] { send_key(VK_ESCAPE, false); }, [&] { return GetCapture() != a.strip; }});
     steps.push_back({"and let go", [out] {
                          send_key(VK_ESCAPE, true);
