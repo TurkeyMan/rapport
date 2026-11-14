@@ -1453,7 +1453,8 @@ public:
     // taskbar button flashes. Wayland: the compositor decides, and may only
     // mark the window as wanting attention. With RAPPORT_NO_ACTIVATE (test
     // runs) shown, restored and raised, the focus left where it is (GTK 4
-    // can't raise without activating: restored only).
+    // can't raise without activating: restored only; Qt on Windows restores
+    // through SW_SHOWNORMAL or SW_MAXIMIZE, which may activate it).
     virtual void present() = 0;
     virtual void close() = 0;
 

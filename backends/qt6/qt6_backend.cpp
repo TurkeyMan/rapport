@@ -4529,7 +4529,10 @@ public:
         if (!frame_->isVisible()) show();
         const bool quiet = std::getenv("RAPPORT_NO_ACTIVATE") != nullptr;
         // Minimised: back as it was, maximised if it was (showNormal would
-        // unmaximise it).
+        // unmaximise it). Quiet, WindowActive is left out, but Qt's Windows
+        // platform restores a state change with SW_SHOWNORMAL or SW_MAXIMIZE,
+        // which activate: there RAPPORT_NO_ACTIVATE can't keep the focus
+        // (widgets.h says so). Offscreen and X11/Wayland, it's not taken.
         if (frame_->windowState() & Qt::WindowMinimized)
         {
             Qt::WindowStates state = frame_->windowState() & ~Qt::WindowMinimized;
