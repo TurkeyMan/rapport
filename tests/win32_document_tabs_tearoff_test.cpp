@@ -634,6 +634,60 @@ void run(const char* stage, bool last)
                b.drop_mark() == -1,
            "and over B's row: not dropped" + at);
     a.refuse_detach = false;
+    // A tab only pressed (moved, but not past the drag threshold), then
+    // Escape by each route: the press cancelled, its release doing nothing
+    // (no reorder, nothing torn off or dropped, no click after the press's).
+    {
+        auto pressed = [&]
+        {
+            const POINT q = a.centre(1);
+            a.down(q);
+            a.move(POINT{q.x + 1, q.y});
+            return q;
+        };
+        auto nothing_after = [&](POINT q, int how, const std::string& by)
+        {
+            const bool cancelled = ask(b.top, 12) == 0 || ask(a.top, 12) == 0;
+            const int heard = route();
+            ask(b.top, 6, 0);
+            a.up(POINT{q.x + 1, q.y});
+            expect(cancelled && heard == how && timers() == 0 && a.tabs->ids() == ids{"a", "b", "c"} &&
+                       a.reordered.empty() && a.detached.empty() && !image(),
+                   "pressed, not dragged, then Escape " + by + ": the press cancelled, its release nothing" + at +
+                       " (route " + std::to_string(heard) + ")");
+        };
+        ask(b.top, 6, 0);
+        POINT q = pressed();
+        expect(ask(a.top, 12) == 1 && timers() == 1, "pressed, moved within the threshold: armed, Escape watched" + at);
+        a.escape();
+        nothing_after(q, 2, "at the strip");
+        q = pressed();
+        ask(b.top, 6, 1);
+        a.move(POINT{q.x + 2, q.y});
+        nothing_after(q, 3, "seen on a move");
+        q = pressed();
+        ask(b.top, 6, 1);
+        {
+            const DWORD until = GetTickCount() + 2000;
+            while (ask(a.top, 12) != 0 && GetTickCount() < until)
+            {
+                MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+                pump();
+            }
+        }
+        nothing_after(q, 4, "seen on the timer");
+        q = pressed();
+        ask(b.top, 6, 1);
+        a.up(POINT{q.x + 1, q.y});
+        {
+            const int heard = route();
+            ask(b.top, 6, 0);
+            expect(heard == 5 && ask(a.top, 12) == 0 && timers() == 0 && a.tabs->ids() == ids{"a", "b", "c"} &&
+                       a.reordered.empty() && a.detached.empty(),
+                   "pressed, not dragged, Escape seen as it's let go: nothing" + at + " (route " +
+                       std::to_string(heard) + ")");
+        }
+    }
     ask(b.top, 6, 0);  // up, for the rest
     expect(a.detached.empty() && ask(b.top, 7) == 0, "nothing asked, no timer" + at);
 
@@ -991,20 +1045,58 @@ void run(const char* stage, bool last)
         RECT bs;
         GetClientRect(b.strip, &bs);
         b.detached.clear();
-        p = b.start(0);
-        const POINT b_out{p.x, bs.bottom + 200};
-        b.move(b_out);
-        img = image();
+        b.reordered.clear();
+        b.received.clear();
         const ids was = b.tabs->ids();
-        PostMessageW(c.top, WM_KEYDOWN, VK_ESCAPE, 1);
-        rap::subscription done = g_ui->timer(20, false, [] { g_ui->quit(0); });
+        int step = 0;
+        POINT bp{}, b_out{};
+        HWND bimg = nullptr;
+        bool armed = false, armed_cancelled = false, armed_heard = false;
+        bool dragged = false, drag_cancelled = false, drag_heard = false;
+        auto heard_from_c = [&] { return route() == 1 && HWND(ask(b.top, 9)) == c.top && ask(b.top, 10) == WM_KEYDOWN; };
+        // Each step a tick of rapport's own loop; the posted key's taken by
+        // it before the next tick (timers come last).
+        rap::subscription seq = g_ui->timer(20, true,
+                                            [&]
+                                            {
+                                                switch (step++)
+                                                {
+                                                case 0:
+                                                    bp = b.centre(0);
+                                                    b.down(bp);
+                                                    b.move(POINT{bp.x + 1, bp.y});
+                                                    armed = ask(b.top, 12) == 1;
+                                                    PostMessageW(c.top, WM_KEYDOWN, VK_ESCAPE, 1);
+                                                    break;
+                                                case 1:
+                                                    armed_cancelled = ask(b.top, 12) == 0 && timers() == 0;
+                                                    armed_heard = heard_from_c();
+                                                    b.up(POINT{bp.x + 1, bp.y});
+                                                    break;
+                                                case 2:
+                                                    bp = b.start(0);
+                                                    b_out = POINT{bp.x, bs.bottom + 200};
+                                                    b.move(b_out);
+                                                    bimg = image();
+                                                    dragged = ask(b.top, 12) == 2 && bimg;
+                                                    PostMessageW(c.top, WM_KEYDOWN, VK_ESCAPE, 1);
+                                                    break;
+                                                case 3:
+                                                    drag_cancelled = !IsWindow(bimg) && !image() && timers() == 0 &&
+                                                                     ask(b.top, 12) == 0;
+                                                    drag_heard = heard_from_c();
+                                                    b.up(b_out);
+                                                    break;
+                                                default: g_ui->quit(0);
+                                                }
+                                            });
         g_ui->run();
-        expect(img && !IsWindow(img) && !image() && timers() == 0 && b.tabs->ids() == was,
-               "Escape for C's window, through the message loop: B's drag cancelled" + at);
-        expect(route() == 1 && HWND(ask(b.top, 9)) == c.top && ask(b.top, 10) == WM_KEYDOWN,
-               "heard by the loop, as C's WM_KEYDOWN" + at + " (" + std::to_string(route()) + ")");
-        b.up(b_out);
-        expect(b.detached.empty() && b.received.empty(), "and nothing asked" + at);
+        expect(armed && armed_cancelled && armed_heard,
+               "pressed, not dragged, Escape for C's window through the message loop: the press cancelled" + at);
+        expect(dragged && drag_cancelled && drag_heard,
+               "dragged, Escape for C's window through the message loop: the drag cancelled" + at);
+        expect(b.tabs->ids() == was && b.detached.empty() && b.reordered.empty() && b.received.empty(),
+               "and nothing asked, B as it was" + at);
     }
 
     ask(b.top, 4, 0);
@@ -1085,11 +1177,12 @@ struct step
     std::function<void()> act;
     std::function<bool()> done;
     int timeout_ms = 3000;
-    // Timed out: true if that's been accounted for (a skip), not a failure.
-    std::function<bool()> timed_out;
 };
 std::vector<step> steps;
 std::function<void()> g_on_timeout;  // more to print, if the step waiting times out
+
+key_log keys{};     // the keys rapport's loop took, from a drag's press to its release
+POINT press_at{};   // where the drag being made was pressed
 
 bool pointer_at(POINT p)
 {
@@ -1101,25 +1194,51 @@ bool pointer_at(POINT p)
 // A drag in steps: pressed at `from` on `f`'s strip (the drag's capture
 // taken), through `via`, to `to`, each move waited for (the pointer there),
 // and let go there (or not, `release` false).
-void drag(fixture& f, POINT from, std::vector<POINT> via, POINT to, bool release = true)
+void drag(fixture& f, size_t points, std::function<std::vector<POINT>()> path, bool release = true)
 {
-    steps.push_back({"the pointer on the tab", [from] { send_mouse(from, 0); }, [from] { return pointer_at(from); }});
-    steps.push_back({"pressed: the strip has the mouse", [from] { send_mouse(from, MOUSEEVENTF_LEFTDOWN); },
+    auto pts = std::make_shared<std::vector<POINT>>();
+    auto q = std::make_shared<POINT>();
+    steps.push_back({"the pointer on the tab",
+                     [pts, path, &f]
+                     {
+                         *pts = path();
+                         press_at = (*pts)[0];
+                         keys = key_log{};  // from the press to the release
+                         ask(g_hook_window, 11, reinterpret_cast<LPARAM>(&keys));
+                         send_mouse((*pts)[0], 0);
+                     },
+                     [pts] { return pointer_at((*pts)[0]); }});
+    steps.push_back({"pressed: the strip has the mouse", [pts] { send_mouse((*pts)[0], MOUSEEVENTF_LEFTDOWN); },
                      [&f] { return GetCapture() == f.strip; }});
-    via.push_back(to);
-    POINT last = from;
-    for (POINT p : via)
-    {
+    for (size_t seg = 1; seg < points; ++seg)
         for (int k = 1; k <= 6; ++k)
-        {
-            const POINT q{last.x + (p.x - last.x) * k / 6, last.y + (p.y - last.y) * k / 6};
-            steps.push_back({"the pointer moved", [q] { send_mouse(q, 0); }, [q] { return pointer_at(q); }});
-        }
-        last = p;
-    }
+            steps.push_back({"the pointer moved",
+                             [pts, q, seg, k]
+                             {
+                                 const POINT a = (*pts)[seg - 1], b = (*pts)[seg];
+                                 *q = POINT{a.x + (b.x - a.x) * k / 6, a.y + (b.y - a.y) * k / 6};
+                                 send_mouse(*q, 0);
+                             },
+                             [q] { return pointer_at(*q); }});
     if (release)
-        steps.push_back({"let go: the drag over", [to] { send_mouse(to, MOUSEEVENTF_LEFTUP); },
-                         [&f] { return !f.win || GetCapture() != f.strip; }});
+        steps.push_back({"let go: the drag over",
+                         [pts]
+                         {
+                             send_mouse(pts->back(), MOUSEEVENTF_LEFTUP);
+                         },
+                         [&f]
+                         {
+                             const bool over = !f.win || GetCapture() != f.strip;
+                             if (over) ask(g_hook_window, 11, 0);
+                             return over;
+                         }});
+}
+// A point to press tab i by, on the screen: in its left part, clear of
+// its close button (which a tab has at its right end in the caption).
+POINT grip(fixture& f, int i)
+{
+    const RECT r = f.tab(i);
+    return f.screen(POINT{r.left + std::min<LONG>(24, (r.right - r.left) / 4), (r.top + r.bottom) / 2});
 }
 void check(std::string what, std::function<bool()> ok, int timeout_ms = 3000)
 {
@@ -1145,9 +1264,27 @@ std::string window_name(HWND h)
 }
 
 // The Escape step's record.
-key_log keys{};
-bool escape_sent = false, async_seen = false, async_logged = false, escape_dropped = false;
-ULONGLONG escape_at = 0;
+bool escape_sent = false, async_logged = false;
+ULONGLONG escape_at = 0, printed_at = 0;
+
+// The drag's state as rapport has it, for the log: none, armed (pressed,
+// not yet past the drag threshold) or dragging; Escape's timer and how many
+// times it's been polled; how far the pointer is from where it was pressed,
+// against the threshold at the strip's DPI.
+std::string drag_line(fixture& f)
+{
+    static const char* phases[] = {"none", "armed", "dragging"};
+    const int phase = int(ask(f.top, 12));
+    POINT c{};
+    GetCursorPos(&c);
+    const UINT dpi = GetDpiForWindow(f.strip);
+    char s[256];
+    std::snprintf(s, sizeof s, "drag %s, Escape timers %d, polls %d, image %s; moved %ld,%ld of the threshold %d,%d",
+                  phase >= 0 && phase <= 2 ? phases[phase] : "?", int(ask(f.top, 7)), int(ask(f.top, 13)),
+                  ask(f.top, 3) ? "out" : "none", c.x - press_at.x, c.y - press_at.y,
+                  GetSystemMetricsForDpi(SM_CXDRAG, dpi), GetSystemMetricsForDpi(SM_CYDRAG, dpi));
+    return s;
+}
 
 int input_mode(rap::ui& ui)
 {
@@ -1188,18 +1325,33 @@ int input_mode(rap::ui& ui)
     const RECT a0 = a.tab(0);
     const POINT a0s = a.screen(POINT{a0.left, a0.top});
     const POINT off{a0s.x - a_frame.left, a0s.y - a_frame.top};
-    const POINT from_b = a.screen(a.centre(1));
     const RECT b1 = a.tab(1);
-    const POINT grab{a.centre(1).x - b1.left, a.centre(1).y - b1.top};
+    const POINT grip_b = grip(a, 1);
+    const POINT grab{grip_b.x - a.screen(POINT{b1.left, b1.top}).x, grip_b.y - a.screen(POINT{b1.left, b1.top}).y};
     const POINT out{work.left + 30 + off.x + grab.x, a0s.y + (a0.bottom - a0.top) + 60};
     const RECT room = frame_for(out, grab, off, frame_size);
     const bool fits = inside(room, work);
     std::printf("     work area %s, A's frame %s, B's %s; let go at %ld,%ld, the new frame %s%s\n",
                 where(work).c_str(), where(a_frame).c_str(), where(frame_of(b.top)).c_str(), out.x, out.y,
                 where(room).c_str(), fits ? "" : " (doesn't fit: its place not checked)");
+    g_hook_window = b.top;
+    // Each drag's path is worked out as it starts, from the tabs as they are
+    // then (they change: a press precomputed for four tabs lands on a
+    // close button once there are two): pressed by the tab's left part,
+    // along, out below its row, then where it's let go.
+    auto out_of = [&](fixture& f, int i, POINT to)
+    {
+        return [&f, i, to]
+        {
+            const POINT g = grip(f, i);
+            RECT r = f.tab(i);
+            MapWindowPoints(f.strip, nullptr, reinterpret_cast<POINT*>(&r), 2);
+            return std::vector<POINT>{g, POINT{g.x + 12, g.y}, POINT{g.x, r.bottom + 50}, to};
+        };
+    };
 
     // A's b, dragged out and let go: on_detach then, the window shown there.
-    drag(a, from_b, {POINT{from_b.x + 12, from_b.y}, POINT{from_b.x, out.y}}, out, false);
+    drag(a, 4, out_of(a, 1, out), false);
     check("dragged out: nothing asked before it's let go", [&] { return a.detached.empty(); }, 0);
     steps.push_back({"let go outside: on_detach(b) once", [out] { send_mouse(out, MOUSEEVENTF_LEFTUP); },
                      [&] { return a.detached.size() == 1 && a.made && a.made->win; }});
@@ -1215,12 +1367,12 @@ int input_mode(rap::ui& ui)
     check("and b out of A",
           [&] { return a.tabs->ids() == ids{"a", "c", "e"} && a.made && a.made->tabs->ids() == ids{"b"}; });
     steps.push_back({"(the new window closed)", [&] {
+                         ask(g_hook_window, 11, 0);
                          if (a.made) a.made->win.reset();
                      },
                      nullptr});
     // A's c onto B's row: B takes it, second.
-    const POINT from_c = a.screen(a.centre(1));
-    drag(a, from_c, {POINT{from_c.x + 12, from_c.y}, POINT{from_c.x, ar.bottom + 20}}, over_b);
+    drag(a, 4, out_of(a, 1, over_b));
     check("dragged onto B's row and let go: on_receive(c, 1, A)",
           [&]
           {
@@ -1228,13 +1380,15 @@ int input_mode(rap::ui& ui)
                      b.received[0].source == a.win.get();
           });
     check("and the app moved it", [&] { return b.tabs->ids() == ids{"x", "c", "y"} && a.tabs->ids() == ids{"a", "e"}; });
-    // Escape with a tab out: back, nothing asked.
-    const POINT from_e = a.screen(a.centre(1));
-    drag(a, from_e, {POINT{from_e.x + 12, from_e.y}, POINT{from_e.x, out.y}}, out, false);
+    // Escape with a tab out: back, nothing asked. The drag's seen to be on
+    // (past the threshold, its image out, Escape watched) before Escape.
+    drag(a, 4, out_of(a, 1, out), false);
+    check("dragging, before Escape: its image out, Escape watched",
+          [&] { return ask(a.top, 12) == 2 && ask(a.top, 3) != 0 && ask(a.top, 7) == 1; });
     steps.push_back({"Escape down, held",
                      [&]
                      {
-                         // Where the keys go (Escape must cancel either way).
+                         // Where the keys go, and the drag (Escape must cancel either way).
                          auto name = window_name;
                          GUITHREADINFO gi{sizeof gi};
                          GetGUIThreadInfo(0, &gi);
@@ -1244,59 +1398,40 @@ int input_mode(rap::ui& ui)
                                      name(gi.hwndActive).c_str(), name(gi.hwndCapture).c_str(),
                                      name(GetActiveWindow()).c_str(), name(GetFocus()).c_str(),
                                      name(GetCapture()).c_str(), name(a.top).c_str());
+                         std::printf("     at Escape: %s\n", drag_line(a).c_str());
                          g_on_timeout = [&, name]
                          {
                              std::printf("     at the timeout: foreground %s, this thread's focus %s, capture %s; "
-                                         "Escape heard by route %d\n",
+                                         "%s; Escape heard by route %d\n",
                                          name(GetForegroundWindow()).c_str(), name(GetFocus()).c_str(),
-                                         name(GetCapture()).c_str(), int(ask(a.top, 8)));
+                                         name(GetCapture()).c_str(), drag_line(a).c_str(), int(ask(a.top, 8)));
                          };
-                         ask(a.top, 8);
-                         keys = key_log{};
-                         ask(a.top, 11, reinterpret_cast<LPARAM>(&keys));
                          escape_sent = send_key(VK_ESCAPE, false);
-                         escape_at = GetTickCount64();
+                         escape_at = printed_at = GetTickCount64();
                          async_logged = false;
                      },
                      // Held about 200 ms (the loop pumping meanwhile), its
-                     // state looked at 100 ms in.
+                     // state looked at 100 ms in, the drag's every 50.
                      [&]
                      {
-                         const ULONGLONG held = GetTickCount64() - escape_at;
+                         const ULONGLONG now = GetTickCount64(), held = now - escape_at;
                          if (held >= 100 && !async_logged)
                          {
                              async_logged = true;
-                             const SHORT s = GetAsyncKeyState(VK_ESCAPE);
-                             async_seen = (s & 0x8000) != 0;
                              std::printf("     100 ms into the hold: GetAsyncKeyState(VK_ESCAPE) 0x%04X\n",
-                                         unsigned(USHORT(s)));
+                                         unsigned(USHORT(GetAsyncKeyState(VK_ESCAPE))));
+                         }
+                         if (now - printed_at >= 50)
+                         {
+                             printed_at = now;
+                             std::printf("     %llu ms: %s\n", held, drag_line(a).c_str());
                          }
                          return held >= 200;
                      }});
     steps.push_back({"Escape up", [&] { escape_sent = send_key(VK_ESCAPE, true) && escape_sent; }, nullptr});
-    steps.push_back({"Escape: the drag cancelled", nullptr, [&] { return GetCapture() != a.strip; }, 1500,
-                     [&]
-                     {
-                         // Proven dropped: taken by SendInput, but seen
-                         // nowhere, neither as a message nor in the key's state.
-                         bool any_escape = false;
-                         for (int k = 0; k < keys.count; ++k)
-                             any_escape = any_escape || keys.entries[k].key == VK_ESCAPE;
-                         if (g_on_timeout) g_on_timeout();
-                         if (escape_sent && !any_escape && !async_seen && ask(a.top, 8) == 0)
-                         {
-                             std::printf("     skipped: Escape by real input: SendInput took it, but it never "
-                                         "arrived (no key message on this thread, no async key state): the runner "
-                                         "drops injected keys here. The hidden tests cover Escape's routes.\n");
-                             escape_dropped = true;
-                             return true;
-                         }
-                         return false;
-                     }});
+    // How it was heard, said whatever happens.
     steps.push_back({"(how Escape was heard)", [&]
                      {
-                         g_on_timeout = nullptr;
-                         ask(a.top, 11, 0);
                          const int how = int(ask(a.top, 8));
                          static const char* routes[] = {"none",
                                                         "the message loop",
@@ -1305,9 +1440,10 @@ int input_mode(rap::ui& ui)
                                                         "the key's state, on the timer",
                                                         "the key's state, as it was let go"};
                          HWND h = HWND(ask(a.top, 9));
-                         std::printf("     Escape heard by %s%s\n", how >= 0 && how <= 5 ? routes[how] : "?",
-                                     how == 1 ? (" (WM_KEYDOWN for " + window_name(h) + ")").c_str() : "");
-                         std::printf("     keys the loop took during the hold: %d\n", keys.count);
+                         std::printf("     Escape heard by %s%s; %s\n", how >= 0 && how <= 5 ? routes[how] : "?",
+                                     how == 1 ? (" (WM_KEYDOWN for " + window_name(h) + ")").c_str() : "",
+                                     drag_line(a).c_str());
+                         std::printf("     keys the loop took since the press: %d\n", keys.count);
                          for (int k = 0; k < keys.count; ++k)
                          {
                              const auto& e = keys.entries[k];
@@ -1320,24 +1456,24 @@ int input_mode(rap::ui& ui)
                          }
                      },
                      nullptr});
+    steps.push_back({"Escape: the drag cancelled", nullptr, [&] { return GetCapture() != a.strip; }, 1500});
     steps.push_back({"and let go",
-                     [&, out, from_e]
+                     [&, out]
                      {
-                         if (escape_dropped)  // still dragged: back over its row first, so it's not torn off
-                         {
-                             send_mouse(from_e, 0);
-                             send_mouse(from_e, MOUSEEVENTF_LEFTUP);
-                         }
-                         else
-                             send_mouse(out, MOUSEEVENTF_LEFTUP);
+                         g_on_timeout = nullptr;
+                         send_mouse(out, MOUSEEVENTF_LEFTUP);
                      },
-                     [] { return GetAsyncKeyState(VK_LBUTTON) >= 0; }});
+                     [&]
+                     {
+                         const bool up = GetAsyncKeyState(VK_LBUTTON) >= 0;
+                         if (up) ask(g_hook_window, 11, 0);
+                         return up;
+                     }});
     check("Escape: nothing asked, A as it was",
           [&] { return a.detached.size() == 1 && a.tabs->ids() == ids{"a", "e"} && b.received.size() == 1; });
     // D's only tab out and let go: nothing, D where it was.
-    const POINT from_d = d.screen(d.centre(0));
-    const POINT out_d{from_d.x, dr.bottom + 60};
-    drag(d, from_d, {POINT{from_d.x + 12, from_d.y}, POINT{from_d.x, dr.bottom + 20}}, out_d);
+    const POINT out_d{grip(d, 0).x, dr.bottom + 60};
+    drag(d, 4, out_of(d, 0, out_d));
     check("the only tab dragged out and let go: nothing, D not moved",
           [&]
           {
@@ -1347,7 +1483,7 @@ int input_mode(rap::ui& ui)
           });
     // Then onto B's row: B takes it, and the app closes D.
     steps.push_back({"(B closes what it empties)", [&] { b.close_emptied = true; }, nullptr});
-    drag(d, from_d, {POINT{from_d.x + 12, from_d.y}, POINT{from_d.x, dr.bottom + 20}}, over_b);
+    drag(d, 4, out_of(d, 0, over_b));
     check("the only tab onto B's row: B takes it, D closed",
           [&]
           {
@@ -1390,12 +1526,6 @@ int input_mode(rap::ui& ui)
             const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since);
             if (waited.count() >= s.timeout_ms)
             {
-                if (s.timed_out && s.timed_out())
-                {
-                    ++at;
-                    acted = false;
-                    return;
-                }
                 expect(false, s.what + " (timed out after " + std::to_string(waited.count()) + " ms)");
                 if (g_on_timeout) g_on_timeout();
                 code = 1;

@@ -133,8 +133,10 @@ public:
     // reordered. A tab being dragged stays dragged while it's there.
     void set_tabs(std::vector<caption_tab> tabs, int current);
     void set_current(int current);
-    // A tab pressed and maybe being dragged (see caption_tabs::impl::drag).
+    // A tab pressed and maybe being dragged (see caption_tabs::impl::drag);
+    // 0 none, 1 pressed (not yet past the threshold), 2 dragged.
     bool dragging() const;
+    int drag_phase() const;
     // That drag's tab put back where it was, the owner told of its move
     // back (caption_moved) and that it's over (caption_drag_ended), and
     // nothing else; the mouse released.
@@ -266,8 +268,10 @@ public:
     void stop();
     // Escape pressed since the drag began (polled now).
     bool pressed();
-    // The timers running, across the app's strips (the tests' query 7).
+    // The timers running, across the app's strips (the tests' query 7), and
+    // how many times the key's been polled (13).
     static int running();
+    static int polls();
     // The strip whose drag is watched now (null: none).
     static HWND active();
     // How the last drag cancelled by Escape heard it, for the tests (query

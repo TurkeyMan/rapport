@@ -449,8 +449,9 @@ struct caption_tabs::impl
     // torn off there if it's away; nothing's done after.
     void let_go(POINT p)
     {
-        // Escape pressed since the last poll: cancelled, not dropped.
-        if (drag && drag->active && escape.pressed())
+        // Escape pressed since the last poll: cancelled, not dropped (and a
+        // tab only pressed: nothing done as it's let go).
+        if (drag && escape.pressed())
         {
             escape_watch::last() = {escape_watch::route::poll_release};
             cancel();
@@ -1454,7 +1455,7 @@ struct caption_tabs::impl
 
 namespace
 {
-int escape_timers = 0;
+int escape_timers = 0, escape_polls = 0;
 HWND escape_active = nullptr;
 // Down now, or pressed since the last poll (a tap between two).
 bool escape_down()
@@ -1474,6 +1475,11 @@ int& escape_watch::fake()
 int escape_watch::running()
 {
     return escape_timers;
+}
+
+int escape_watch::polls()
+{
+    return escape_polls;
 }
 
 HWND escape_watch::active()
@@ -1512,6 +1518,7 @@ void escape_watch::stop()
 
 bool escape_watch::pressed()
 {
+    ++escape_polls;
     const bool down = escape_down();
     const bool press = down && !was_down_;
     was_down_ = down;
@@ -1620,6 +1627,11 @@ void caption_tabs::set_current(int current)
 bool caption_tabs::dragging() const
 {
     return d_->drag.has_value();
+}
+
+int caption_tabs::drag_phase() const
+{
+    return !d_->drag ? 0 : d_->drag->active ? 2 : 1;
 }
 
 void caption_tabs::cancel_drag()
