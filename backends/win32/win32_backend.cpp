@@ -10759,6 +10759,11 @@ public:
         // WM_DESTROY can't see us once GWLP_USERDATA is cleared below.
         std::erase(recent(), this);
         if (hwnd_) busy_windows().erase(hwnd_);
+        // Nothing left to lay out: a layout from here on (the tabs and the
+        // controls going send messages) finds no items, and no toolbar
+        // with the band's metrics to give them back to.
+        banded_ = nullptr;
+        root = nullptr;
         items.clear();
         widgets.clear();
         doc_tabs.reset();
@@ -10990,6 +10995,7 @@ public:
     {
         std::set<const item*> mine;
         for (const item_ptr& i : part.items) mine.insert(i.get());
+        if (mine.contains(banded_)) banded_ = nullptr;  // (its metrics went with it)
         for (auto& [key, forms] : form_groups)
             std::erase_if(forms, [&](form_item* f) { return mine.contains(f); });
         std::erase_if(role_buttons, [&](button_impl* b) { return mine.contains(b); });
