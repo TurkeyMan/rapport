@@ -596,7 +596,7 @@ if(TARGET rapport_win32)
     # automatic (fluent on Windows 11, native before it), native, compact, and
     # under high contrast (CI only, as above); never shown.
     add_executable(rapport-win32-fluent-controls-test win32_fluent_controls_test.cpp)
-    target_link_libraries(rapport-win32-fluent-controls-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    target_link_libraries(rapport-win32-fluent-controls-test PRIVATE rapport::rapport user32 gdi32 comctl32 advapi32)
     if(RAPPORT_STATIC)
         target_link_libraries(rapport-win32-fluent-controls-test PRIVATE rapport::backend_win32)
         target_compile_definitions(rapport-win32-fluent-controls-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)

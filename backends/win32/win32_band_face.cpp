@@ -30,7 +30,11 @@ using winui::over;
 // TextFillColorPrimary, ...Secondary (pressed) and ...Disabled;
 // FocusStrokeColorOuter and ...Inner; TextOnAccentFillColorPrimary and
 // AccentFillColorDisabled; AccentFillColorSecondary and ...Tertiary are the
-// accent at 90% and 80%.
+// accent at 90% and 80%. AccentButtonStyle's: TextOnAccentFillColorSecondary
+// (pressed) and ...Disabled, and its border, AccentControlElevationBorderBrush
+// (rest and hovered; none pressed or disabled): a gradient over its first
+// 3 px from ControlStrokeColorOnAccentSecondary, at 1, to ...OnAccentDefault,
+// up from the bottom edge in both themes.
 struct face_colors
 {
     color fill, fill_hover, fill_pressed, fill_disabled;
@@ -39,15 +43,19 @@ struct face_colors
     color text, text_pressed, text_disabled;
     color focus_outer, focus_inner;
     color on_accent, accent_disabled;
+    color on_accent_pressed, on_accent_disabled;
+    color accent_stroke, accent_stroke_secondary;
 };
 constexpr face_colors light_faces{
     argb(0xB3FFFFFF), argb(0x80F9F9F9), argb(0x4DF9F9F9), argb(0x4DF9F9F9), argb(0x09000000),
     argb(0x06000000), argb(0x0F000000), argb(0x29000000), argb(0xE4000000), argb(0x9E000000),
-    argb(0x5C000000), argb(0xE4000000), argb(0xB3FFFFFF), argb(0xFFFFFFFF), argb(0x37000000)};
+    argb(0x5C000000), argb(0xE4000000), argb(0xB3FFFFFF), argb(0xFFFFFFFF), argb(0x37000000),
+    argb(0xB3FFFFFF), argb(0xFFFFFFFF), argb(0x14FFFFFF), argb(0x66000000)};
 constexpr face_colors dark_faces{
     argb(0x0FFFFFFF), argb(0x15FFFFFF), argb(0x08FFFFFF), argb(0x0BFFFFFF), argb(0x0FFFFFFF),
     argb(0x0AFFFFFF), argb(0x12FFFFFF), argb(0x18FFFFFF), argb(0xFFFFFFFF), argb(0xC5FFFFFF),
-    argb(0x5DFFFFFF), argb(0xFFFFFFFF), argb(0xB3000000), argb(0xFF000000), argb(0x28FFFFFF)};
+    argb(0x5DFFFFFF), argb(0xFFFFFFFF), argb(0xB3000000), argb(0xFF000000), argb(0x28FFFFFF),
+    argb(0x80000000), argb(0x87FFFFFF), argb(0x14FFFFFF), argb(0x23000000)};
 
 const face_colors& faces()
 {
@@ -149,6 +157,7 @@ struct face_paint
     color fill;  // straight alpha
     bool border = false;
     bool elevated = false;  // ControlElevationBorderBrush, else ControlStrokeColorDefault
+    bool on_accent = false;  // AccentControlElevationBorderBrush, for `elevated`
 };
 face_paint paint_of(face_kind kind, const face_state& s)
 {
@@ -171,10 +180,15 @@ face_paint paint_of(face_kind kind, const face_state& s)
                              : color{0, 0, 0, 0};
         break;
     case face_kind::accent:
+    case face_kind::default_button:
     {
         color a = accent_fill_default();
         a.a = s.pressed ? 204 : s.hot ? 230 : 255;
         f.fill = s.disabled ? p.accent_disabled : a;
+        if (kind == face_kind::default_button)
+        {
+            f.border = f.elevated = f.on_accent = !s.disabled && !s.pressed;
+        }
         break;
     }
     }
@@ -415,6 +429,13 @@ void paint_band_face(HWND h, HDC dc, const RECT& r, face_kind kind, const face_s
     // dark), ControlStrokeColorSecondary for the first of them.
     auto stroke_at = [&](int y)
     {
+        if (f.on_accent)
+        {
+            // Up from the bottom edge, in both themes.
+            const float from = (ht - (float(y) + .5f)) / scale;
+            const float k = std::clamp((from - 1.f) / 2.f, 0.f, 1.f);
+            return over(lerp(p.accent_stroke_secondary, p.accent_stroke, k), inside);
+        }
         if (!f.elevated) return over(p.stroke, inside);
         const float from = (light ? ht - (float(y) + .5f) : float(y) + .5f) / scale;
         const float k = std::clamp((from - 1.f) / 2.f, 0.f, 1.f);
@@ -495,6 +516,8 @@ color band_face_ink(HWND h, face_kind kind, const face_state& s)
     const face_colors& p = faces();
     const color inside = over(paint_of(kind, s).fill, under_of(h, kind));
     if (kind == face_kind::accent) return over(s.disabled ? p.text_disabled : p.on_accent, inside);
+    if (kind == face_kind::default_button)
+        return over(s.disabled ? p.on_accent_disabled : s.pressed ? p.on_accent_pressed : p.on_accent, inside);
     return over(s.disabled ? p.text_disabled : s.pressed ? p.text_pressed : p.text, inside);
 }
 

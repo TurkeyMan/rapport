@@ -184,6 +184,21 @@ printed print(HWND h)
     return out;
 }
 
+// AccentFillColorDefault: the accent palette's Dark1 (Light2 dark), if the
+// desktop has the palette (else unknown here: 0xFFFFFFFF).
+DWORD accent_fill(bool dark)
+{
+    BYTE p[32] = {};
+    DWORD size = sizeof p;
+    if (RegGetValueW(HKEY_CURRENT_USER,
+                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
+                     L"AccentPalette", RRF_RT_REG_BINARY, nullptr, p, &size) != ERROR_SUCCESS ||
+        size != sizeof p)
+        return 0xFFFFFFFF;
+    const BYTE* c = p + (dark ? 1 : 4) * 4;
+    return (DWORD(c[0]) << 16) | (DWORD(c[1]) << 8) | c[2];
+}
+
 // The window's own ground, as its erase paints it, at `child`'s left.
 DWORD ground_of(HWND top, HWND c)
 {
@@ -236,7 +251,7 @@ int main(int argc, char** argv)
         title,
         {vbox{toolbar{tool_button{rap::icon::named("go-previous"), "Back"},
                       tool_button{rap::icon::named("go-next"), "Forward"}},
-              hbox{entry{}.placeholder("Find").stretch(), button{"Fetch"},
+              hbox{entry{}.placeholder("Find").stretch(), button{"Fetch"}, button{"Other"},
                    menu_button{"master"}.on_menu([] { return rap::menu{}; }),
                    drop_down{{"Author Email", "Subject"}, 0}, combo{{"one", "two"}, "one"},
                    tool_button{rap::icon::named("go-up"), "Pull"}, label{"Label"}, check{"Check"}},
@@ -295,6 +310,59 @@ int main(int argc, char** argv)
             const DWORD ground = ground_of(top, pull);
             expect(t.at(3, t.h / 2) == ground, "a tool button at rest the window's ground, " +
                                                    hex(ground) + ": " + hex(t.at(3, t.h / 2)));
+            // A dialog's default push button (BS_DEFPUSHBUTTON): WinUI's
+            // AccentButtonStyle, its fill AccentFillColorDefault, beside an
+            // ordinary one in ControlFillColorDefault; the default moved to
+            // the other (as the dialog manager moves it to a focused push
+            // button) and back, each face following it.
+            HWND other = child(top, L"Button", L"Other");
+            expect(other != nullptr, "a second push button");
+            const DWORD accent = accent_fill(dark);
+            if (other && accent != 0xFFFFFFFF)
+            {
+                auto fill_of = [](HWND b)
+                {
+                    const printed p = print(b);
+                    return p.at(3, p.h / 2);
+                };
+                auto set_default = [](HWND b, bool on)
+                { SendMessageW(b, BM_SETSTYLE, on ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON, TRUE); };
+                const DWORD plain = over(fill, ground_of(top, fetch));
+                set_default(fetch, true);
+                expect(fill_of(fetch) == accent && fill_of(other) == plain,
+                       "the default button the accent, " + hex(accent) + ", the other " +
+                           hex(plain) + ": " + hex(fill_of(fetch)) + ", " + hex(fill_of(other)));
+                set_default(fetch, false);
+                set_default(other, true);
+                expect(fill_of(other) == accent && fill_of(fetch) == plain,
+                       "the default moved to the other, its face with it: " + hex(fill_of(other)) +
+                           ", " + hex(fill_of(fetch)));
+                set_default(other, false);
+                set_default(fetch, true);
+                expect(fill_of(fetch) == accent && fill_of(other) == plain,
+                       "and back: " + hex(fill_of(fetch)) + ", " + hex(fill_of(other)));
+                // Its text TextOnAccentFillColorPrimary (white light, black dark):
+                // the ink furthest from the accent.
+                const printed p = print(fetch);
+                int best = -1;
+                DWORD ink = 0;
+                for (int y = 0; y < p.h; ++y)
+                    for (int x = p.w / 4; x < p.w * 3 / 4; ++x)
+                    {
+                        const DWORD v = p.at(x, y);
+                        const int d = std::abs(channel(v, 16) - channel(accent, 16)) +
+                                      std::abs(channel(v, 8) - channel(accent, 8)) +
+                                      std::abs(channel(v, 0) - channel(accent, 0));
+                        if (d > best) best = d, ink = v;
+                    }
+                const bool on_accent = dark ? channel(ink, 8) < 0x40 : channel(ink, 8) > 0xC0;
+                expect(on_accent, std::string("its text TextOnAccentFillColorPrimary, ") +
+                                      (dark ? "black" : "white") + ": " + hex(ink));
+                set_default(fetch, false);
+            }
+            else
+                std::printf("     the accent palette unknown here: the default button's fill not "
+                            "checked\n");
             // An entry's frame: the band field's, drawn (the test tools' message).
             static const UINT query = RegisterWindowMessageW(L"rapport-band-field");
             expect((SendMessageW(entry_h, query, 0, 0) & 3) == 3,

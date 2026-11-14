@@ -2522,8 +2522,15 @@ public:
     {
         handled = hdr->code == NM_CUSTOMDRAW && band_drawn();
         if (!handled) return 0;
+        // The dialog's default (BS_DEFPUSHBUTTON, which the dialog manager
+        // moves to a focused push button and back): AccentButtonStyle, as
+        // ContentDialog's DefaultButton.
+        const bool is_default = (GetWindowLongPtrW(h_, GWL_STYLE) & BS_TYPEMASK) == BS_DEFPUSHBUTTON;
         return draw_band_button(reinterpret_cast<NMCUSTOMDRAW*>(hdr), *band_,
-                                flat_ ? face_kind::subtle : face_kind::button, content(), false);
+                                is_default ? face_kind::default_button
+                                : flat_    ? face_kind::subtle
+                                           : face_kind::button,
+                                content(), false);
     }
 
     bool is_default = false;

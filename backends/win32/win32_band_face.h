@@ -39,6 +39,9 @@ enum class face_kind
     button,  // Button: ControlFillColorDefault, the elevation border
     subtle,  // AppBarButton: transparent at rest
     accent,  // a checked AppBarToggleButton: AccentFillColorDefault
+    // AccentButtonStyle (ContentDialog's DefaultButton): a dialog's default
+    // push button, the accent with AccentControlElevationBorderBrush.
+    default_button,
 };
 struct face_state
 {
