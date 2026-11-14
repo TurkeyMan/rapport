@@ -22,11 +22,22 @@
 // window's native controls stay where UIA's HWND proxy puts them, untouched
 // by the strip's provider.
 //
-// Text. ClearType wherever what's under a glyph is opaque and ours (the
-// current tab, the whole strip where it's opaque), grayscale where the
-// compositor puts Mica under it (other tabs, hovered too: WinUI's hover
-// fill is translucent; "+"): ClearType blends each colour channel with
-// what's beneath, which a pixel the compositor fills later hasn't got.
+// Text. ClearType wherever what's under a glyph is opaque and ours,
+// grayscale where the compositor puts Mica under it, through a translucent
+// fill or none: ClearType blends each colour channel with what's beneath,
+// which a pixel the compositor fills later hasn't got.
+//
+//   where                              ground                        text
+//   another tab, hovered or not; "+"   Mica Alt (a translucent       grayscale
+//                                      hover fill)
+//   the current tab over the toolbar   LayerOnMicaBaseAltFill-       grayscale
+//   band                               ColorDefault, translucent,
+//                                      on Mica Alt
+//   the current tab, no band           the window's surface, opaque  ClearType
+//   the whole strip opaque (high       ours, opaque                  ClearType
+//   contrast, not in the caption)
+//
+// The toolbar band's own native controls: see win32_band_glass.cpp.
 // ClearType can't be drawn on a premultiplied target, so it's a second
 // pass: the strip drawn first (with its grayscale text), then each ClearType
 // run drawn in a small bitmap of its own (the opaque rectangle it sits in,
@@ -62,7 +73,7 @@ namespace
 // don't name them all.
 constexpr DWORD dwmwa_caption_button_bounds = 5;
 constexpr DWORD dwmwa_systembackdrop_type = 38;
-constexpr DWORD dwmsbt_none = 1, dwmsbt_mainwindow = 2;
+constexpr DWORD dwmsbt_none = 1, dwmsbt_mainwindow = 2, dwmsbt_tabbedwindow = 4;
 
 // UIA's ids for the strip's elements: the Tab, "New tab", then each tab and
 // its close button from its key.
@@ -86,8 +97,9 @@ int line_px(UINT dpi)
 // clear (Mica's) in the caption; opaque, the window colour, in fullscreen;
 // high contrast's window colour there. The current tab is the colour of
 // what's under the strip, so the two are one: the toolbar band's fill where
-// the window has one (win32_caption_tabs.h), else the window's surface (its
-// base colour on a base surface); in high contrast it's the selection.
+// the window has one (win32_caption_tabs.h), translucent as it is, else the
+// window's surface (its base colour on a base surface), opaque; in high
+// contrast it's the selection.
 // Its text, line and buttons are WinUI's (winui::chrome_palette), the line
 // drawn opaque, as over the band; high contrast's are the system's.
 struct strip_colors
@@ -97,6 +109,7 @@ struct strip_colors
     // "+" and the close buttons: their glyph at rest, hovered and pressed,
     // and what's under it hovered and pressed.
     color glyph, glyph_hover, glyph_pressed, button_hover, button_pressed;
+    color add;  // "+" at rest
 };
 // The strip's window has a toolbar band: its fill.
 bool in_band_window(HWND h, color& fill)
@@ -123,7 +136,7 @@ strip_colors colors_for(HWND h, bool transparent)
         c.text = sys_color(COLOR_WINDOWTEXT);
         c.current = sys_color(COLOR_HIGHLIGHT);
         c.current_text = sys_color(COLOR_HIGHLIGHTTEXT);
-        c.glyph = c.glyph_hover = c.glyph_pressed = c.text;
+        c.glyph = c.glyph_hover = c.glyph_pressed = c.add = c.text;
         c.button_hover = c.hover;
         c.button_pressed = c.pressed;
         return c;
@@ -147,6 +160,9 @@ strip_colors colors_for(HWND h, bool transparent)
     c.glyph = p.text_secondary;
     c.glyph_hover = p.text_primary;
     c.glyph_pressed = p.text_secondary;
+    // "+" is darker in Explorer than WinUI's TabView has it: the primary
+    // text colour at rest (measured about #222427 over its strip).
+    c.add = p.text_primary;
     c.button_hover = p.subtle_secondary;
     c.button_pressed = p.subtle_tertiary;
     return c;
@@ -155,6 +171,10 @@ strip_colors colors_for(HWND h, bool transparent)
 // WinUI's TabView glyphs: "+" (TabViewItemAddButtonFontSize) and a tab's
 // close button (TabViewItemHeaderCloseFontSize), both 12.
 constexpr float glyph_size = 12;
+// Explorer's "+" is bigger and heavier than that: measured at 100%, its
+// strokes span 13 px where E710 at 12 spans 10, with about twice the ink;
+// that's E710 at 16.
+constexpr float add_glyph_size = 16;
 constexpr wchar_t add_glyph[] = L"", close_glyph[] = L"";
 
 bool has_family(const wchar_t* name)
@@ -229,7 +249,7 @@ struct caption_tabs::impl
     com<ID2D1DCRenderTarget> rt;
     com<ID2D1SolidColorBrush> brush;
     com<ID2D1StrokeStyle> dotted;
-    com<IDWriteTextFormat> text, glyphs;
+    com<IDWriteTextFormat> text, glyphs, add_glyphs;
     std::wstring text_family, glyph_family;
     UINT text_dpi = 0;
     std::map<HICON, com<ID2D1Bitmap>> icons;  // the tabs' icons on rt, until set_tabs
@@ -427,6 +447,7 @@ struct caption_tabs::impl
         {
             text.reset();
             glyphs.reset();
+            add_glyphs.reset();
             rt.reset();
             params.reset();
             icons.clear();
@@ -475,17 +496,24 @@ struct caption_tabs::impl
             }
             text_dpi = dpi();
         }
-        if (!glyphs && dwrite_factory())
+        if ((!glyphs || !add_glyphs) && dwrite_factory())
         {
             glyph_family = has_family(L"Segoe Fluent Icons") ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets";
-            if (SUCCEEDED(dwrite_factory()->CreateTextFormat(glyph_family.c_str(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                                             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                                             glyph_size * float(dpi()) / 96.f, L"", glyphs.put())))
+            auto make = [&](float size, com<IDWriteTextFormat>& format)
             {
-                glyphs->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                glyphs->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                glyphs->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            }
+                format.reset();
+                if (SUCCEEDED(dwrite_factory()->CreateTextFormat(glyph_family.c_str(), nullptr,
+                                                                 DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                                                 DWRITE_FONT_STRETCH_NORMAL,
+                                                                 size * float(dpi()) / 96.f, L"", format.put())))
+                {
+                    format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                    format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                }
+            };
+            make(glyph_size, glyphs);
+            make(add_glyph_size, add_glyphs);
         }
         if (cleartype && !opaque_rt)
         {
@@ -699,7 +727,7 @@ struct caption_tabs::impl
     // A button's glyph (Segoe Fluent Icons'), centred in `r`.
     void glyph(const wchar_t* g, const RECT& r, color ink, const RECT* opaque, color under)
     {
-        draw_text(g, 1, glyphs.get(), r, ink, opaque, under);
+        draw_text(g, 1, g == add_glyph ? add_glyphs.get() : glyphs.get(), r, ink, opaque, under);
     }
     void focus_rect(const RECT& r, color c)
     {
@@ -734,8 +762,18 @@ struct caption_tabs::impl
         // Where it's all opaque (in fullscreen, in high contrast): the strip.
         const RECT* everywhere = colors.clear ? nullptr : &c;
         // The line along the bottom, between the strip and the band under
-        // it, broken only by the current tab.
-        fill(RECT{0, c.bottom - line, c.right, c.bottom}, colors.line);
+        // it, broken only by the current tab (which may be translucent: not
+        // drawn under it at all), the tab's sides its ends.
+        {
+            const RECT gap = self.current_ >= 0 && self.current_ < n ? tab_rects[size_t(self.current_)] : RECT{};
+            if (IsRectEmpty(&gap))
+                fill(RECT{0, c.bottom - line, c.right, c.bottom}, colors.line);
+            else
+            {
+                fill(RECT{0, c.bottom - line, gap.left, c.bottom}, colors.line);
+                fill(RECT{gap.right, c.bottom - line, c.right, c.bottom}, colors.line);
+            }
+        }
         const RECT clip{0, 0, add_rect.left, c.bottom};
         rt->PushAxisAlignedClip(D2D1::RectF(0, 0, float(clip.right), float(clip.bottom)), D2D1_ANTIALIAS_MODE_ALIASED);
         const int up = lifted();
@@ -748,19 +786,42 @@ struct caption_tabs::impl
             const bool current = i == self.current_;
             const bool hovered = hot.what != part::none && hot.what != part::add && hot.index == i;
             // What's opaque under the tab's text and glyph, and its colour:
-            // the current tab's fill, past its rounded corners; a hovered
-            // tab's, if that's opaque, past its own; else only an opaque
-            // strip's.
+            // the current tab's fill, if that's opaque (not the band's
+            // translucent layer), past its rounded corners; a hovered tab's,
+            // if that's opaque, past its own; else only an opaque strip's.
             RECT solid{};
             const RECT* opaque = everywhere;
             color under = colors.empty;
+            // The dragged tab hides what it's over: the strip's own ground
+            // where it'll go (the tabs under it drawn already, and its fill
+            // may be translucent), past its rounded top corners, and short
+            // of the line along the bottom unless that's broken for it.
+            if (i == up)
+            {
+                const int k = std::min(px(caption_metrics::corner), int(r.right - r.left) / 2);
+                const LONG bottom = current ? r.bottom : std::min(r.bottom, LONG(c.bottom - line));
+                const D2D1_COLOR_F ground = colors.clear ? D2D1::ColorF(0, 0, 0, 0) : d2d_color(colors.empty);
+                for (const RECT& part : {RECT{r.left + k, r.top, r.right - k, bottom},
+                                         RECT{r.left, r.top + k, r.right, bottom}})
+                {
+                    if (IsRectEmpty(&part)) continue;
+                    rt->PushAxisAlignedClip(D2D1::RectF(float(part.left), float(part.top), float(part.right),
+                                                        float(part.bottom)),
+                                            D2D1_ANTIALIAS_MODE_ALIASED);
+                    rt->Clear(ground);
+                    rt->PopAxisAlignedClip();
+                }
+            }
             if (current)
             {
                 current_tab(r, colors);
-                const int k = px(caption_metrics::corner);
-                solid = RECT{r.left + k, r.top, r.right - k, c.bottom};
-                opaque = &solid;
                 under = colors.current;
+                if (colors.current.a == 255)
+                {
+                    const int k = px(caption_metrics::corner);
+                    solid = RECT{r.left + k, r.top, r.right - k, c.bottom};
+                    opaque = &solid;
+                }
             }
             else if (hovered)
             {
@@ -837,7 +898,7 @@ struct caption_tabs::impl
                 fill_round(add_rect, float(px(4)), fill);
                 under = winui::over(fill, under);
             }
-            glyph(add_glyph, add_rect, down ? colors.glyph_pressed : on ? colors.glyph_hover : colors.glyph, everywhere,
+            glyph(add_glyph, add_rect, down ? colors.glyph_pressed : on ? colors.glyph_hover : colors.add, everywhere,
                   under);
         }
         if (focused && focus == n) focus_rect(add_rect, colors.text);
@@ -1053,6 +1114,7 @@ struct caption_tabs::impl
                     f->text_weight = int(d.text->GetFontWeight());
                 }
                 if (d.glyphs) f->glyph_size = d.glyphs->GetFontSize();
+                if (d.add_glyphs) f->add_size = d.add_glyphs->GetFontSize();
                 f->cleartype = d.cleartype;
                 return 1;
             }
@@ -1362,6 +1424,7 @@ void caption_tabs::refresh()
 {
     d_->text.reset();
     d_->glyphs.reset();
+    d_->add_glyphs.reset();
     d_->params.reset();  // the font smoothing may have changed too
     d_->text_dpi = 0;
     d_->layout();
@@ -1476,15 +1539,29 @@ RECT caption_buttons(HWND top)
 void extend_caption_frame(HWND top, int height)
 {
     // Down to the strip's bottom, which maximised is the frame's thickness
-    // further down (caption_inset).
-    const MARGINS m{0, 0, height ? height + caption_inset(top) : 0, 0};
+    // further down (caption_inset), or the toolbar band's, line and all,
+    // where the window has one (set_toolbar_band, laid out from the strip's
+    // bottom: maximised, inset as well), its layer translucent over Mica Alt.
+    // Not in high contrast, where the band's opaque: its native controls are
+    // then as they were, GDI's, off the extended frame.
+    int bottom = height ? height + caption_inset(top) : 0;
+    RECT band;
+    if (height && !high_contrast() && toolbar_band(top, band)) bottom = std::max<int>(bottom, band.bottom);
+    const MARGINS m{0, 0, bottom, 0};
     DwmExtendFrameIntoClientArea(top, &m);
-    // Mica behind the strip (22621 on, where it's named): none in high
-    // contrast, whose colours are the system's own.
+    // Mica Alt behind the strip (22621 on, where it's named), as Explorer
+    // has with its tabs (DWMSBT_TABBEDWINDOW, its window says): the
+    // wallpaper's tint stronger than Mica's, and inactive the same solid
+    // colour as Explorer's (#E8E8E8 light, #202020 dark, where Mica's is
+    // #F3F3F3). Plain Mica if the system won't have it; none in high
+    // contrast, whose colours are the system's own. Put back to Mica when
+    // the tabs leave the caption (release_caption_frame: frame_top_window).
     if (windows_build() >= 22621)
     {
-        const DWORD backdrop = high_contrast() ? dwmsbt_none : dwmsbt_mainwindow;
-        DwmSetWindowAttribute(top, dwmwa_systembackdrop_type, &backdrop, sizeof backdrop);
+        const DWORD backdrop = high_contrast() ? dwmsbt_none : dwmsbt_tabbedwindow;
+        if (FAILED(DwmSetWindowAttribute(top, dwmwa_systembackdrop_type, &backdrop, sizeof backdrop)) &&
+            backdrop == dwmsbt_tabbedwindow)
+            DwmSetWindowAttribute(top, dwmwa_systembackdrop_type, &dwmsbt_mainwindow, sizeof dwmsbt_mainwindow);
     }
 }
 
@@ -1616,26 +1693,63 @@ bool toolbar_band(HWND top, RECT& band)
 toolbar_band_colors band_colors(HWND top)
 {
     const color surface = theme_color_of(surface_of(top));
-    if (high_contrast()) return {surface, theme_color_of(theme_color::divider)};
+    if (high_contrast()) return {surface, surface, theme_color_of(theme_color::divider)};
     const winui::chrome_palette& p = dark_mode() ? winui::dark : winui::light;
-    return {p.layer, winui::over(p.stroke, surface)};
+    return {p.layer_on_mica_base_alt_default, p.layer_on_mica_base_alt_tertiary, winui::over(p.stroke, surface)};
 }
+
+namespace
+{
+// A colour as a premultiplied BGRA pixel.
+uint32_t premultiplied(color c)
+{
+    auto m = [&](uint8_t v) { return uint32_t((v * c.a + 127) / 255); };
+    return uint32_t(c.a) << 24 | m(c.r) << 16 | m(c.g) << 8 | m(c.b);
+}
+}  // namespace
 
 void paint_toolbar_band(HWND top, HDC dc)
 {
     RECT band;
     if (!toolbar_band(top, band)) return;
     const toolbar_band_colors k = band_colors(top);
-    const RECT line{band.left, band.bottom - line_px(dpi_of(top)), band.right, band.bottom};
-    const RECT fill{band.left, band.top, band.right, line.top};
+    const int line = line_px(dpi_of(top));
+    // Behind a control of it printed onto a matte (win32_band_glass.cpp:
+    // a themed button's corners, from DrawThemeParentBackground): the matte.
+    if (color matte{}; glass_matte(matte))
+    {
+        const RECT fill{band.left, band.top, band.right, band.bottom - line};
+        FillRect(dc, &fill, static_cast<HBRUSH>(GetStockObject(matte.r ? WHITE_BRUSH : BLACK_BRUSH)));
+        return;
+    }
+    // GDI's pixels would have no alpha (the frame's extended over the band:
+    // they'd be glass), so straight into a 32-bit buffer, premultiplied.
+    BP_PAINTPARAMS params{sizeof params, 0, nullptr, nullptr};
+    HDC mem = nullptr;
+    if (HPAINTBUFFER buffer = BeginBufferedPaint(dc, &band, BPBF_TOPDOWNDIB, &params, &mem))
+    {
+        RGBQUAD* bits = nullptr;
+        int row = 0;
+        if (SUCCEEDED(GetBufferedPaintBits(buffer, &bits, &row)))
+        {
+            const int w = band.right - band.left, h = band.bottom - band.top;
+            const uint32_t fill = premultiplied(k.fill), under = premultiplied(k.line);
+            for (int y = 0; y < h; ++y)
+                std::fill_n(reinterpret_cast<uint32_t*>(bits + size_t(y) * row), w, y >= h - line ? under : fill);
+            EndBufferedPaint(buffer, TRUE);
+            return;
+        }
+        EndBufferedPaint(buffer, FALSE);
+    }
+    // No buffer: opaque, then, rather than nothing.
     auto paint = [dc](const RECT& r, color c)
     {
         HBRUSH b = CreateSolidBrush(color_ref(c));
         FillRect(dc, &r, b);
         DeleteObject(b);
     };
-    paint(fill, k.fill);
-    paint(line, k.line);
+    paint(RECT{band.left, band.top, band.right, band.bottom - line}, k.solid);
+    paint(RECT{band.left, band.bottom - line, band.right, band.bottom}, k.line);
 }
 
 bool in_toolbar_band(HWND h, color& fill)
@@ -1647,7 +1761,7 @@ bool in_toolbar_band(HWND h, color& fill)
     GetWindowRect(h, &r);
     MapWindowPoints(nullptr, top, reinterpret_cast<POINT*>(&r), 2);
     if (r.top < band.top || r.bottom > band.bottom - line_px(dpi_of(top))) return false;
-    fill = band_colors(top).fill;
+    fill = band_colors(top).solid;
     return true;
 }
 

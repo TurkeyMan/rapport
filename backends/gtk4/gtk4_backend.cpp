@@ -6,6 +6,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "../common/window_chords.h"
 #include <gtk/gtk.h>
 
 #include "builtin_icons.h"
@@ -4711,6 +4712,10 @@ public:
         connect(keys, "key-released", +[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer p)
                 { static_cast<window_impl*>(p)->window_key(false, keyval, state); }, this);
         gtk_widget_add_controller(win_, keys);
+        // A field's composition is watched from when it has the focus, as
+        // well as from its first key (im_composing).
+        connect(win_, "notify::focus-widget", +[](GObject* w, GParamSpec*, gpointer)
+                { if (GtkWidget* f = gtk_window_get_focus(GTK_WINDOW(w))) im_composing(f); }, this);
         // The mouse's side buttons are back and forward, pressed anywhere in
         // the window: taken on the way down (capture), before a list or a
         // tree selects with them. A canvas has them first; those it doesn't
@@ -4741,11 +4746,24 @@ public:
         if (dialog_)
         {
             gtk_window_set_modal(win, parent != nullptr && spec.modal);
+            // Escape closes it, but not while an input method composes:
+            // Escape cancels that (the shortcut not taken, the key goes on).
+            // The action can outlive this window (a ref kept on it, or on
+            // the GtkWindow): it holds the owner token, not `this`, and does
+            // nothing once the window has disconnected.
             GtkEventController* keys = gtk_shortcut_controller_new();
             gtk_shortcut_controller_add_shortcut(
                 GTK_SHORTCUT_CONTROLLER(keys),
                 gtk_shortcut_new(gtk_keyval_trigger_new(GDK_KEY_Escape, GdkModifierType(0)),
-                                 gtk_named_action_new("window.close")));
+                                 gtk_callback_action_new(
+                                     +[](GtkWidget* w, GVariant*, gpointer p) -> gboolean
+                                     {
+                                         window_impl* self = *static_cast<owner_token*>(p)->get();
+                                         if (!self || self->field_composing()) return false;
+                                         gtk_widget_activate_action(w, "window.close", nullptr);
+                                         return true;
+                                     },
+                                     new owner_token(owner_), +[](gpointer p) { delete static_cast<owner_token*>(p); })));
             gtk_widget_add_controller(win_, keys);
         }
         connect(
@@ -4760,6 +4778,8 @@ public:
 
     ~window_impl() override
     {
+        // First, while every widget is still there; taken out, so it runs once.
+        if (auto f = std::exchange(on_destroyed_, {})) f();
         std::erase(recent(), win_);
         for (auto& part : parts) part->disconnect();
         disconnect();
@@ -4868,6 +4888,7 @@ public:
     void close() override { gtk_widget_set_visible(win_, false); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    void on_destroyed(std::function<void()> f) override { on_destroyed_ = std::move(f); }
     void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
     {
         const bool first = !on_files_dropped_;
@@ -5016,20 +5037,42 @@ public:
         ev.key = key_for(keyval);
         if (ev.key == key::character) ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval));
         ev.modifiers = modifiers(state);
+        // Asked of every key, so the field's composition is watched from
+        // before it starts (im_composing).
+        const bool composing = field_composing();
         // The document tabs' keys first, whatever has the focus (none of
         // them is typing), and while the strip is hidden too.
         if (doc_tabs && document_tabs_key(ev)) return true;
         if (!on_key_) return false;
-        GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
-        const bool typing =
-            focus && (GTK_IS_EDITABLE(focus) || (GTK_IS_TEXT_VIEW(focus) &&
-                                                 gtk_text_view_get_editable(GTK_TEXT_VIEW(focus))));
+        const bool typing = editable_field(gtk_window_get_focus(GTK_WINDOW(win_)));
+        // While an input method composes in the field every key is its
+        // (Escape cancels, the function keys convert): none is the window's.
+        if (composing) return false;
         const bool navigation = navigation_key(ev.key);
         if (navigation && !press) return false;  // presses only
         const bool not_text = navigation || keyval == GDK_KEY_Escape || (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12);
-        if (typing && !not_text) return false;
+        // A shortcut chord is the window's first, as an accelerator (this is
+        // the capture phase).
+        if (typing && !not_text) return window_chords::to_window(ev) && on_key_(ev);
         return on_key_(ev);
     }
+    // An editable text field (an entry's text, an editable text view).
+    static bool editable_field(GtkWidget* w)
+    {
+        return w && (GTK_IS_EDITABLE(w) || (GTK_IS_TEXT_VIEW(w) && gtk_text_view_get_editable(GTK_TEXT_VIEW(w))));
+    }
+    // An input method composing in the window's focused field: every key and
+    // navigation is its then, none the window's.
+    bool field_composing()
+    {
+        GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
+        return editable_field(focus) && im_composing(focus);
+    }
+    // This window for callbacks that can outlive it (GTK objects others may
+    // keep a ref on): null once it has disconnected.
+    using owner_token = std::shared_ptr<window_impl*>;
+    owner_token owner_ = std::make_shared<window_impl*>(this);
+    void on_disconnect() override { *owner_ = nullptr; }
     document_tabs_impl* doc_tabs = nullptr;  // window_spec::tabs, among the parts
     // The document tabs' keys, but Ctrl+Tab where the focus has a use for
     // it: in a page's tabs (layout::tabs) it goes round their pages, as
@@ -5079,7 +5122,8 @@ public:
             const bool held = (gdk_event_get_modifier_state(e) & held_mask) != 0;
             to_canvas_ = side_.press(int(button), held, [e] { return pressed_in_canvas(e); });
         }
-        if (!on_key_ || type != GDK_BUTTON_PRESS) return false;
+        // Not while an input method composes in the focused field.
+        if (!on_key_ || type != GDK_BUTTON_PRESS || field_composing()) return false;
         const auto k = side_button_key(button);
         if (!k || to_canvas_ != canvas_turn) return false;
         key_event ev;
@@ -5113,10 +5157,13 @@ public:
     std::vector<std::unique_ptr<bar_menu>> bars;
     bool menu_bar_wanted = true;
 
-    void add_role_button(GtkWidget* button, dialog_role role)
+    void add_role_button(GtkWidget* button, dialog_role role,
+                         std::vector<std::unique_ptr<part>>& owner)
     {
         g_object_set_data(G_OBJECT(button), "rapport-role", GINT_TO_POINTER(int(role)));
-        connect(
+        // The connection goes with the button's parts (a stack page's, when it's on
+        // one), not the window's: a removed page's buttons are freed before the window.
+        owner.push_back(std::make_unique<signal_link>(
             button, "clicked",
             +[](GtkButton* b, gpointer p)
             {
@@ -5124,7 +5171,7 @@ public:
                     dialog_role(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "rapport-role")));
                 static_cast<window_impl*>(p)->finish(role);
             },
-            this);
+            this));
         if (role == dialog_role::ok || role == dialog_role::yes)
         {
             gtk_widget_add_css_class(button, "suggested-action");
@@ -5183,6 +5230,7 @@ private:
     bool finished_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void()> on_destroyed_;
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
 };
 
@@ -5191,9 +5239,11 @@ private:
 class builder
 {
 public:
-    builder(window_impl& win, build_sink& sink)
+    // A part built apart from the window (a stack's page) is `into`'s.
+    builder(window_impl& win, build_sink& sink, std::vector<std::unique_ptr<part>>* into = nullptr)
         : win_(win)
         , sink_(sink)
+        , into_(into)
     {
     }
 
@@ -5218,21 +5268,39 @@ private:
     static bool fills_form_row(const rap::node_spec& s)
     {
         return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
-               std::holds_alternative<spec::text_view>(s) || std::holds_alternative<spec::list>(s) ||
-               std::holds_alternative<spec::tree>(s) ||
+               std::holds_alternative<spec::text_view>(s) ||
+               std::holds_alternative<spec::list>(s) || std::holds_alternative<spec::tree>(s) ||
                std::holds_alternative<spec::canvas>(s) || std::holds_alternative<spec::box>(s) ||
                std::holds_alternative<spec::form>(s) || std::holds_alternative<spec::splitter>(s) ||
                std::holds_alternative<spec::group>(s) || std::holds_alternative<spec::scroll>(s) ||
-               std::holds_alternative<spec::tabs>(s);
+               std::holds_alternative<spec::tabs>(s) || std::holds_alternative<spec::stack>(s);
     }
 
     template <class T, class... Args>
     T& add(const node& n, Args&&... args)
     {
         auto* w = new T(std::forward<Args>(args)...);
-        win_.parts.emplace_back(w);
+        parts().emplace_back(w);
         sink_.created(n, *w);
         return *w;
+    }
+    std::vector<std::unique_ptr<part>>& parts() { return into_ ? *into_ : win_.parts; }
+
+    GtkWidget* make(const node& n, const spec::stack& s, orientation)
+    {
+        GtkWidget* stack = gtk_stack_new();
+        gtk_stack_set_hhomogeneous(GTK_STACK(stack), s.homogeneous);
+        gtk_stack_set_vhomogeneous(GTK_STACK(stack), s.homogeneous);
+        auto& st = add<stack_impl>(n, stack,
+                                   [&win = win_, &sink = sink_, scrolled = scrolled_](
+                                       const node& page, std::vector<std::unique_ptr<part>>& parts)
+                                   {
+                                       builder b(win, sink, &parts);
+                                       b.scrolled_ = scrolled;
+                                       return b.build(page, orientation::vertical);
+                                   });
+        for (size_t i = 0; i < s.pages.size(); ++i) st.add(s.ids[i], s.pages[i]);
+        return stack;
     }
 
     GtkWidget* make(const node& n, const spec::box& s, orientation o)
@@ -5408,7 +5476,8 @@ private:
         auto& tabs = add<tabs_impl>(n, nb);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),
-                         [&win = win_, &sink = sink_](const node& page) { return builder(win, sink).build(page, orientation::vertical); });
+                          [&win = win_, &sink = sink_, into = into_](const node& page)
+                          { return builder(win, sink, into).build(page, orientation::vertical); });
         return nb;
     }
 
@@ -5448,7 +5517,8 @@ private:
         tabs.set_current(0);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),
-                         [&win = win_, &sink = sink_](const node& page) { return builder(win, sink).build(page, orientation::vertical); });
+                          [&win = win_, &sink = sink_, into = into_](const node& page)
+                          { return builder(win, sink, into).build(page, orientation::vertical); });
         return box;
     }
 
@@ -5609,8 +5679,8 @@ private:
                 spaced = true;
             }
             auto* w = new button_impl(b.text.empty() ? stock_label(b.role) : b.text);
-            win_.parts.emplace_back(w);
-            if (!b.on_click) win_.add_role_button(w->outer(), b.role);
+            parts().emplace_back(w);
+            if (!b.on_click) win_.add_role_button(w->outer(), b.role, parts());
             sink_.created(b, *w);
             gtk_box_append(GTK_BOX(box), w->outer());
         }
@@ -5630,8 +5700,8 @@ private:
         for (auto& b : ordered)
         {
             auto* w = new button_impl(b.text.empty() ? stock_label(b.role) : b.text);
-            win_.parts.emplace_back(w);
-            if (!b.on_click) win_.add_role_button(w->outer(), b.role);
+            parts().emplace_back(w);
+            if (!b.on_click) win_.add_role_button(w->outer(), b.role, parts());
             sink_.created(b, *w);
             const bool affirmative = b.role == dialog_role::ok || b.role == dialog_role::yes ||
                                      b.role == dialog_role::apply;
@@ -5726,6 +5796,7 @@ private:
 
     window_impl& win_;
     build_sink& sink_;
+    std::vector<std::unique_ptr<part>>* into_;
     int scrolled_ = 0;  // within a scroll, while building its content
 };
 

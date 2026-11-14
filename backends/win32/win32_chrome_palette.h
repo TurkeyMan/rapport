@@ -28,9 +28,15 @@ struct chrome_palette
     // LayerOnMicaBaseAltFillColorSecondary: a tab not current, hovered
     // (TabViewItemHeaderBackgroundPointerOver). Translucent, over Mica.
     color layer_alt_secondary;
-    // LayerFillColorDefault: the band under the tabs (Explorer's address
-    // row) and the current tab on it. Opaque: see below.
-    color layer;
+    // LayerOnMicaBaseAltFillColorDefault: the band under the tabs
+    // (Explorer's address row) and the current tab on it, at its own alpha,
+    // over the extended frame: the compositor puts Mica Alt under it, as
+    // Explorer's (TabView's selected tab is this layer, over Mica Alt).
+    color layer_on_mica_base_alt_default;
+    // LayerOnMicaBaseAltFillColorTertiary: the same family's opaque one,
+    // what the layer comes to over Mica's base, for what can't be
+    // translucent: GDI's brushes (a native control's background).
+    color layer_on_mica_base_alt_tertiary;
 };
 
 // `top` over opaque `under`, opaque.
@@ -55,23 +61,27 @@ constexpr color over(color top, color under)
 // ControlStrokeColorSecondary is the stroke resource that comes out nearest
 // drawn opaque.
 //
-// The layer: LayerFillColorDefault is #80FFFFFF, translucent, meant over
-// Mica, which the band (opaque, one with the window under it) can't be
-// over. Drawn opaque, it's what Explorer's address row measures at 100%,
-// #F8F8F8 (#80FFFFFF over SolidBackgroundFillColorBase, #F3F3F3, would be
-// #F9F9F9).
+// The layer: LayerOnMicaBaseAltFillColorDefault, #B3FFFFFF (white at 70%),
+// over the extended frame, where the compositor puts Mica Alt under it.
+// Measured on Explorer (Windows 11, active, light, 100%): its empty strip,
+// Mica Alt alone, #CEDCEC; its current tab #F0F5F9 and its address row
+// #F1F5F9. White over #CEDCEC comes to those at alpha 0.69, 0.71 and 0.68
+// by channel: 0.70, this layer. LayerFillColorDefault (#80FFFFFF), tried
+// first, came out #E8EEF6 over the same strip. Opaque:
+// LayerOnMicaBaseAltFillColorTertiary, #F9F9F9.
 inline constexpr chrome_palette light{argb(0xE4000000), argb(0x9E000000), argb(0x29000000),
                                       argb(0x09000000), argb(0x06000000), argb(0x0A000000),
-                                      argb(0xFFF8F8F8)};
+                                      argb(0xB3FFFFFF),   argb(0xFFF9F9F9)};
 
 // Dark: TextFillColorPrimary #FFFFFF, TextFillColorSecondary #C5FFFFFF,
 // ControlStrokeColorSecondary #18FFFFFF, SubtleFillColorSecondary
 // #0FFFFFFF, SubtleFillColorTertiary #0AFFFFFF,
-// LayerOnMicaBaseAltFillColorSecondary #0FFFFFFF. The layer:
-// LayerFillColorDefault #4C3A3A3A drawn opaque over Mica's dark base
-// (SolidBackgroundFillColorBase, #202020): #282828.
+// LayerOnMicaBaseAltFillColorSecondary #0FFFFFFF. The layer: dark
+// LayerOnMicaBaseAltFillColorDefault, #733A3A3A (#3A3A3A at alpha 0x73,
+// 45%), over Mica Alt; opaque, LayerOnMicaBaseAltFillColorTertiary,
+// #2C2C2C (the layer over Mica's dark base, #202020, to a level).
 inline constexpr chrome_palette dark{argb(0xFFFFFFFF), argb(0xC5FFFFFF), argb(0x18FFFFFF),
                                      argb(0x0FFFFFFF), argb(0x0AFFFFFF), argb(0x0FFFFFFF),
-                                     over(argb(0x4C3A3A3A), argb(0xFF202020))};
+                                     argb(0x733A3A3A),   argb(0xFF2C2C2C)};
 
 }  // namespace rap::win32::winui

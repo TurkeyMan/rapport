@@ -7,6 +7,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "../common/window_chords.h"
 #include "qt_painter.h"
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
@@ -16,6 +17,7 @@
 #include "gpu_readback.h"
 #include "lazy_tree.h"
 #include "list_press.h"
+#include "stack_pages.h"
 
 #include <QAbstractTableModel>
 #include <QAction>
@@ -38,6 +40,7 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QIcon>
+#include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QStyle>
@@ -1891,6 +1894,171 @@ private:
     QStackedWidget* stack_;
     std::function<void(int)> changed_;
     lazy_pages lazy_;
+};
+
+// -- stack --------------------------------------------------------------------
+
+// A stack's QStackedWidget, which asks for its largest page's size (as
+// QStackedLayout does), or, not homogeneous, for the page shown's alone:
+// its size hint and its least size both, a page's explicit minimum
+// included, which an Ignored size policy wouldn't leave out.
+class page_stack : public QStackedWidget
+{
+public:
+    explicit page_stack(bool homogeneous)
+        : homogeneous_(homogeneous)
+    {
+    }
+    QSize sizeHint() const override
+    {
+        const QWidget* w = currentWidget();
+        if (homogeneous_ || !w) return QStackedWidget::sizeHint();
+        return w->sizeHint().expandedTo(least(w)).boundedTo(w->maximumSize());
+    }
+    QSize minimumSizeHint() const override
+    {
+        const QWidget* w = currentWidget();
+        if (homogeneous_ || !w) return QStackedWidget::minimumSizeHint();
+        return least(w);
+    }
+
+private:
+    static QSize least(const QWidget* w) { return w->minimumSizeHint().expandedTo(w->minimumSize()); }
+    bool homogeneous_;
+};
+
+// Pages in one place, one shown (layout::stack): a page_stack, whose pages
+// not shown are hidden widgets (no paint, input or accessibility). A page
+// removed is out of the stack at once and destroyed once the event loop is
+// reached.
+class stack_impl : public widget_base<rap::stack>
+{
+public:
+    struct page_parts
+    {
+        QPointer<QWidget> widget;
+        std::vector<std::unique_ptr<part>> parts;
+        QPointer<QWidget> focus;  // where the focus was when it was last hidden
+
+        page_parts() = default;
+        page_parts(const page_parts&) = delete;
+        page_parts& operator=(const page_parts&) = delete;
+        // As the window's are: its Qt widgets after the parts, unheard.
+        ~page_parts()
+        {
+            if (widget)
+            {
+                for (QObject* o : widget->findChildren<QObject*>())
+                {
+                    if (auto* h = dynamic_cast<event_hook*>(o)) h->disarm();
+                    o->blockSignals(true);
+                }
+                widget->blockSignals(true);
+                widget->hide();
+                widget->deleteLater();
+            }
+            parts.clear();
+        }
+    };
+    using page_ptr = std::unique_ptr<page_parts>;
+    using build_fn = std::function<QWidget*(const node&, std::vector<std::unique_ptr<part>>&)>;
+
+    stack_impl(page_stack* stack, build_fn build)
+        : widget_base(stack)
+        , build_(std::move(build))
+    {
+    }
+
+    void add(const std::string& id, node content) override
+    {
+        if (pages_.contains(id)) return;
+        auto p = std::make_unique<page_parts>();
+        QWidget* w = build_(content, p->parts);
+        p->widget = w;
+        pages_.add(id, std::move(p));
+        stack()->addWidget(w);
+        if (pages_.size() == 1) bring(*pages_[0].page);
+    }
+    void remove(const std::string& id) override
+    {
+        const int i = pages_.index_of(id);
+        if (i < 0) return;
+        const bool had = i == pages_.shown() && holds_focus(*pages_[size_t(i)].page);
+        page_ptr gone = std::move(pages_.take(size_t(i)).page);
+        if (auto* next = pages_.shown_entry()) bring(*next->page);
+        // Out of the stack now; destroyed once this has returned, as it may
+        // be the page's own callback calling.
+        if (gone->widget) stack()->removeWidget(gone->widget);
+        grave_.bury(std::move(gone), [](std::function<void()> f)
+                    { QMetaObject::invokeMethod(qApp, std::move(f), Qt::QueuedConnection); });
+        if (had)
+            if (auto* next = pages_.shown_entry()) focus_page(*next->page);
+    }
+    void show(const std::string& id) override
+    {
+        const int i = pages_.index_of(id);
+        if (i < 0 || i == pages_.shown()) return;
+        page_parts* old = pages_.shown_entry() ? pages_.shown_entry()->page.get() : nullptr;
+        const bool had = old && holds_focus(*old);
+        pages_.set_shown(i);
+        page_parts& p = *pages_[size_t(i)].page;
+        bring(p);
+        if (had) focus_page(p);
+    }
+    std::string shown() const override { return pages_.shown_id(); }
+    std::vector<std::string> ids() const override { return pages_.ids(); }
+
+    void focus() override
+    {
+        if (auto* p = pages_.shown_entry()) focus_page(*p->page);
+    }
+
+private:
+    QStackedWidget* stack() const { return static_cast<QStackedWidget*>(w_); }
+
+    // Page `p` the one shown (and, not homogeneous, the stack's size).
+    void bring(page_parts& p)
+    {
+        if (!p.widget) return;
+        stack()->setCurrentWidget(p.widget);
+        stack()->updateGeometry();
+    }
+    // The focus is in the page (the window's, active or not): where, remembered.
+    bool holds_focus(page_parts& p)
+    {
+        if (!p.widget) return false;
+        QWidget* f = p.widget->window()->focusWidget();
+        if (!f || (f != p.widget && !p.widget->isAncestorOf(f))) return false;
+        p.focus = f;
+        return true;
+    }
+    static bool can_focus(QWidget* w, QWidget* page)
+    {
+        return w && (w == page || page->isAncestorOf(w)) && (w->focusPolicy() & Qt::TabFocus) &&
+               w->isEnabled() && w->isVisibleTo(page);
+    }
+    // Where the focus was in the page, else its first control.
+    void focus_page(page_parts& p)
+    {
+        if (!p.widget) return;
+        QWidget* to = can_focus(p.focus, p.widget) ? p.focus.data() : nullptr;
+        // The page itself, when it's the control (an entry or a button as the
+        // page); else the focus chain, which runs through the window in the
+        // order its widgets were made: the page's first on it.
+        if (!to && can_focus(p.widget, p.widget)) to = p.widget;
+        for (QWidget* w = p.widget->nextInFocusChain(); !to && w && w != p.widget;
+             w = w->nextInFocusChain())
+            if (can_focus(w, p.widget)) to = w;
+        if (to)
+            to->setFocus(Qt::TabFocusReason);
+        else if (QWidget* f = p.widget->window()->focusWidget();
+                 f && !f->isVisibleTo(p.widget->window()))
+            f->clearFocus();
+    }
+
+    build_fn build_;
+    stack_pages::graveyard<page_ptr> grave_;
+    stack_pages::pages<page_ptr> pages_;
 };
 
 // -- document tabs ------------------------------------------------------------
@@ -4251,6 +4419,8 @@ public:
     // their signals; until then nothing may reach the parts going now.
     ~window_impl() override
     {
+        // First, while every widget is still there; taken out, so it runs once.
+        if (auto f = std::exchange(on_destroyed_, {})) f();
         filter_->owner = nullptr;
         if (qApp) qApp->removeEventFilter(filter_);
         filter_->deleteLater();
@@ -4322,6 +4492,7 @@ public:
     void close() override { frame_->hide(); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    void on_destroyed(std::function<void()> f) override { on_destroyed_ = std::move(f); }
     // Drops on any widget that doesn't take them itself reach the frame.
     void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
     {
@@ -4415,9 +4586,25 @@ public:
 
     // -- from Frame and key_filter --------------------------------------------
 
+    // A dialog's Escape closes it, but not while an input method composes
+    // in its field: Escape cancels that.
     void escape()
     {
-        if (dialog_) close_requested();
+        if (dialog_ && !field_composing()) close_requested();
+    }
+
+    // An editable text field.
+    static bool editable_field(QWidget* w)
+    {
+        auto* plain = qobject_cast<QPlainTextEdit*>(w);
+        return w && (qobject_cast<QLineEdit*>(w) || qobject_cast<QAbstractSpinBox*>(w) || (plain && !plain->isReadOnly()));
+    }
+    // An input method composing in the window's focused field: every key and
+    // navigation is its then, none the window's.
+    bool field_composing() const
+    {
+        QWidget* focus = QApplication::focusWidget();
+        return composing_ && focus && focus->window() == frame_ && editable_field(focus);
     }
 
     void close_requested()
@@ -4442,6 +4629,14 @@ public:
     {
         if (e->type() == QEvent::MouseButtonPress || e->type() == QEvent::MouseButtonDblClick)
             return side_button(o, static_cast<QMouseEvent*>(e));
+        // An input method composing in a field of ours: no chord is the
+        // window's until it commits or cancels.
+        if (e->type() == QEvent::InputMethod)
+        {
+            if (auto* w = qobject_cast<QWidget*>(o); w && w->window() == frame_)
+                composing_ = !static_cast<QInputMethodEvent*>(e)->preeditString().isEmpty();
+            return false;
+        }
         if (e->type() != QEvent::KeyPress && e->type() != QEvent::KeyRelease) return false;
         auto* w = qobject_cast<QWidget*>(o);
         QWidget* focus = QApplication::focusWidget();
@@ -4476,16 +4671,18 @@ public:
         }
         if (doc_tabs && !focus_keeps && doc_tabs->key(ev)) return true;
         if (!on_key_) return false;
-        // While typing, only Escape and the function keys come here.
-        auto* plain = qobject_cast<QPlainTextEdit*>(focus);
-        const bool typing =
-            focus && (qobject_cast<QLineEdit*>(focus) || qobject_cast<QAbstractSpinBox*>(focus) ||
-                      (plain && !plain->isReadOnly()));
+        // While typing, only Escape, the function keys and the shortcut
+        // chords (window_chords.h) come here. A QLineEdit takes chords it
+        // has no use for too (as typing), so the window has them first.
+        const bool typing = editable_field(focus);
+        // While an input method composes in the field every key is its
+        // (Escape cancels, the function keys convert): none is the window's.
+        if (typing && composing_) return false;
         const bool navigation = k->key() == Qt::Key_Back || k->key() == Qt::Key_Forward;
         if (navigation && e->type() != QEvent::KeyPress) return false;  // presses only
         const bool not_text = navigation || k->key() == Qt::Key_Escape ||
                               (k->key() >= Qt::Key_F1 && k->key() <= Qt::Key_F12);
-        if (typing && !not_text) return false;
+        if (typing && !not_text) return window_chords::to_window(ev) && on_key_(ev);
         return on_key_(ev);
     }
 
@@ -4498,6 +4695,7 @@ public:
         if (m->button() != Qt::BackButton && m->button() != Qt::ForwardButton) return false;
         auto* w = qobject_cast<QWidget*>(o);
         if (!on_key_ || !w || w->window() != frame_) return false;
+        if (field_composing()) return false;  // the input method's, while it composes
         if (auto* c = dynamic_cast<canvas_widget*>(w); c && c->owner) return false;
         // Qt passes a press up to each parent until one takes it, as a new
         // event each time, which comes here again: once is enough.
@@ -4646,9 +4844,11 @@ private:
     bool was_maximized_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void()> on_destroyed_;
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     std::function<void(bool)> on_fullscreen_;
     std::function<bool(const key_event&)> on_key_;
+    bool composing_ = false;  // an input method's text not yet committed
     struct side_press
     {
         quint64 time = 0;
@@ -4710,9 +4910,11 @@ bool key_filter::eventFilter(QObject* o, QEvent* e)
 class builder
 {
 public:
-    builder(window_impl& win, build_sink& sink)
+    // A part built apart from the window (a stack's page) is `into`'s.
+    builder(window_impl& win, build_sink& sink, std::vector<std::unique_ptr<part>>* into = nullptr)
         : win_(win)
         , sink_(sink)
+        , into_(into)
     {
     }
 
@@ -4730,27 +4932,41 @@ private:
     static bool fills_form_row(const rap::node_spec& s)
     {
         return std::holds_alternative<spec::entry>(s) || std::holds_alternative<spec::combo>(s) ||
-               std::holds_alternative<spec::text_view>(s) || std::holds_alternative<spec::list>(s) ||
-               std::holds_alternative<spec::tree>(s) ||
+               std::holds_alternative<spec::text_view>(s) ||
+               std::holds_alternative<spec::list>(s) || std::holds_alternative<spec::tree>(s) ||
                std::holds_alternative<spec::canvas>(s) || std::holds_alternative<spec::box>(s) ||
                std::holds_alternative<spec::form>(s) || std::holds_alternative<spec::splitter>(s) ||
                std::holds_alternative<spec::group>(s) || std::holds_alternative<spec::scroll>(s) ||
-               std::holds_alternative<spec::tabs>(s);
+               std::holds_alternative<spec::tabs>(s) || std::holds_alternative<spec::stack>(s);
     }
 
     template <class T, class... Args>
     T& add(const node& n, Args&&... args)
     {
         auto* w = new T(std::forward<Args>(args)...);
-        win_.parts.emplace_back(w);
+        parts().emplace_back(w);
         sink_.created(n, *w);
         return *w;
     }
 
+    std::vector<std::unique_ptr<part>>& parts() { return into_ ? *into_ : win_.parts; }
+
     std::function<QWidget*(const node&)> page_builder()
     {
-        return [&win = win_, &sink = sink_](const node& page)
-        { return builder(win, sink).build(page, orientation::vertical); };
+        return [&win = win_, &sink = sink_, into = into_](const node& page)
+        { return builder(win, sink, into).build(page, orientation::vertical); };
+    }
+
+    QWidget* make(const node& n, const spec::stack& s, orientation)
+    {
+        auto* stack = new page_stack(s.homogeneous);
+        auto& st = add<stack_impl>(
+            n, stack,
+            [&win = win_, &sink = sink_](const node& page,
+                                         std::vector<std::unique_ptr<part>>& parts)
+            { return builder(win, sink, &parts).build(page, orientation::vertical); });
+        for (size_t i = 0; i < s.pages.size(); ++i) st.add(s.ids[i], s.pages[i]);
+        return stack;
     }
 
     // A page: its content with the usual margin around it.
@@ -5135,7 +5351,7 @@ private:
             }
             pb->setIcon(QIcon());  // stock labels only, as on GTK and Windows
             auto* w = new button_impl(pb);
-            win_.parts.emplace_back(w);
+            parts().emplace_back(w);
             if (!b.on_click) win_.add_role_button(pb, b.role);
             sink_.created(b, *w);
         }
@@ -5147,6 +5363,7 @@ private:
 
     window_impl& win_;
     build_sink& sink_;
+    std::vector<std::unique_ptr<part>>* into_;
 };
 
 // RAPPORT_THEME=dark|light: that scheme whatever the desktop's, for

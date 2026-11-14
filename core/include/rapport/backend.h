@@ -19,7 +19,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 78;
+inline constexpr int abi_version = 84;
 
 // Light or dark: as the desktop has it (system), or the app's own choice
 // (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for
@@ -132,7 +132,8 @@ public:
     // also get created(), with a plain Widget for the container.
     // The spec is only valid during the call, except that a Tabs' lazy page
     // builders and a deferred Box's builder may be kept and called (on the
-    // UI thread) later; the Nodes they return go through the sink the same way.
+    // UI thread) later; the Nodes they return go through the sink the same way,
+    // as do the pages given to a Stack's add().
     virtual std::unique_ptr<window> create_window(const window_spec&, window* parent, build_sink&) = 0;
 
     virtual int run() = 0;  // main loop; returns the quit() code

@@ -6,10 +6,12 @@
 #include "document_tabs.h"
 #include "lazy_tree.h"
 #include "menu_dismiss.h"
+#include "stack_pages.h"
 #include "win32_band_field.h"
 #include "win32_caption_tabs.h"
 #include "win32_common.h"
 #include "win32_shell_icons.h"
+#include "window_chords.h"
 #define RAPPORT_TRACE_SPLITTER_IMPLEMENTATION
 #include "win32_trace.h"
 
@@ -26,6 +28,7 @@
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <format>
+#include <imm.h>
 #include <ole2.h>
 #include <oleacc.h>
 #include <propsys.h>
@@ -65,6 +68,16 @@ namespace
 {
 
 constexpr UINT wm_rapport_post = WM_APP + 1;
+
+// The backend's message window, which runs what's posted to it
+// (wm_rapport_post) on the UI thread.
+HWND g_messages = nullptr;
+void post_to_ui(std::function<void()> f)
+{
+    auto* job = new std::function<void()>(std::move(f));
+    if (!g_messages || !PostMessageW(g_messages, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job)))
+        delete job;
+}
 
 BOOL traced_set_window_pos(HWND h, HWND after, int x, int y, int w, int height, UINT flags)
 {
@@ -149,6 +162,34 @@ unsigned key_modifiers()
     if (GetKeyState(VK_MENU) & 0x8000) m |= mod_alt;
     if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) m |= mod_meta;
     return m;
+}
+
+// An IME composing in `h` (its candidate text not yet committed): keys are
+// its until then. A test, with no IME to drive, says one is composing with
+// the control's "rapport-test-composing" property.
+bool ime_composing(HWND h)
+{
+    if (GetPropW(h, L"rapport-test-composing")) return true;
+    HIMC imc = ImmGetContext(h);
+    if (!imc) return false;
+    const bool composing = ImmGetCompositionStringW(imc, GCS_COMPSTR, nullptr, 0) > 0;
+    ImmReleaseContext(h, imc);
+    return composing;
+}
+
+// An editable text field: an Edit or a rich edit, not read-only.
+bool editable_field(HWND h)
+{
+    wchar_t cls[32] = {};
+    if (!h || !GetClassNameW(h, cls, 32)) return false;
+    return (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
+           !(GetWindowLongPtrW(h, GWL_STYLE) & ES_READONLY);
+}
+
+// A text field whose IME is composing: every key and navigation is its.
+bool field_composing(HWND h)
+{
+    return editable_field(h) && ime_composing(h);
 }
 
 key_event make_key_event(WPARAM vk, LPARAM lp, bool press)
@@ -877,6 +918,21 @@ struct container_state
     {
         if (outer) outer->children.push_back(this);
     }
+    container_state(const container_state&) = delete;
+    container_state& operator=(const container_state&) = delete;
+    // A part of a window that goes before it (a stack's page removed).
+    ~container_state()
+    {
+        for (auto* child : children) child->outer = nullptr;
+        if (outer) std::erase(outer->children, this);
+        if (registered && IsWindow(parent))
+            if (HWND tip =
+                    static_cast<HWND>(GetPropW(GetAncestor(parent, GA_ROOT), L"rapport-tooltip")))
+            {
+                TOOLINFOW ti = tool();
+                SendMessageW(tip, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+            }
+    }
     bool effective_enabled() const { return enabled && (!outer || outer->effective_enabled()); }
     const std::string& effective_tip() const
     {
@@ -1553,6 +1609,7 @@ public:
         build_ = nullptr;
         build();
     }
+    void cancel() { build_ = nullptr; }  // its box gone first (a stack's page removed)
 
 private:
     std::function<void()> build_;
@@ -8893,6 +8950,288 @@ private:
     bool laid_out_ = false;  // by the host's WM_SIZE, in place()
 };
 
+// -- stack --------------------------------------------------------------------
+
+// What a part of a window built apart from it (a stack's page) owns, and
+// takes with it when it goes; what's built with the window is the window's.
+struct built_part
+{
+    std::vector<std::unique_ptr<container_state>> container_states;
+    std::vector<item_ptr> items;
+    std::vector<std::unique_ptr<widget>> widgets;
+    std::vector<std::shared_ptr<deferred_build>> deferred;
+};
+
+// The first control in `h` the Tab key would stop at: shown (as far as `h`),
+// enabled, a tab stop, in the order they were made.
+HWND first_tab_stop(HWND h)
+{
+    for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
+    {
+        const LONG_PTR style = GetWindowLongPtrW(c, GWL_STYLE);
+        if (!(style & WS_VISIBLE) || (style & WS_DISABLED)) continue;
+        if (style & WS_TABSTOP) return c;
+        if (GetWindowLongPtrW(c, GWL_EXSTYLE) & WS_EX_CONTROLPARENT)
+            if (HWND f = first_tab_stop(c)) return f;
+    }
+    return nullptr;
+}
+
+// Can still take the focus, as far as `host`.
+bool takes_focus(HWND h, HWND host)
+{
+    if (!h || !IsWindow(h) || !IsChild(host, h)) return false;
+    for (HWND c = h; c && c != host; c = GetParent(c))
+    {
+        const LONG_PTR style = GetWindowLongPtrW(c, GWL_STYLE);
+        if (!(style & WS_VISIBLE) || (style & WS_DISABLED)) return false;
+    }
+    return true;
+}
+
+// Pages in one place, one shown (layout::stack): each in a host window of
+// its own, shown or hidden whole, so a hidden page's controls take no
+// input and aren't in the accessibility tree; only the shown page is laid
+// out. Homogeneous, it measures its largest page.
+class stack_impl : public rap::stack, public container_item
+{
+public:
+    struct page_parts
+    {
+        HWND host = nullptr;
+        item* content = nullptr;
+        std::unique_ptr<built_part> part;
+        HWND focus = nullptr;  // where the focus was when the page was last hidden
+        std::function<void(built_part&)> forget;  // the window's records of the part
+
+        page_parts() = default;
+        page_parts(const page_parts&) = delete;
+        page_parts& operator=(const page_parts&) = delete;
+        ~page_parts()
+        {
+            if (part)
+            {
+                if (forget) forget(*part);
+                for (auto& d : part->deferred) d->cancel();
+                part->widgets.clear();
+                if (host)
+                    EnumChildWindows(
+                        host,
+                        [](HWND h, LPARAM) -> BOOL
+                        {
+                            g_parked.erase(h);
+                            return TRUE;
+                        },
+                        0);
+                // What's in a container before it.
+                while (!part->items.empty()) part->items.pop_back();
+            }
+            if (host)
+            {
+                g_parked.erase(host);
+                DestroyWindow(host);
+            }
+            if (part)
+                while (!part->container_states.empty()) part->container_states.pop_back();
+        }
+    };
+    using page_ptr = std::unique_ptr<page_parts>;
+
+    stack_impl(win_context& win, HWND parent, bool homogeneous)
+        : win_(win)
+        , parent_(parent)
+        , homogeneous_(homogeneous)
+    {
+    }
+
+    // Builds `content` in the page's host (made), set by the builder.
+    std::function<void(page_parts&, const node&)> build;
+
+    // -- rap::stack
+
+    void add(const std::string& id, node content) override
+    {
+        if (pages_.contains(id)) return;
+        auto p = std::make_unique<page_parts>();
+        {
+            control_scope untracked(nullptr);  // the page's controls are, not its host
+            p->host = make_host(parent_);
+        }
+        build(*p, content);
+        pages_.add(id, std::move(p));
+        win_.relayout();
+    }
+    void remove(const std::string& id) override
+    {
+        const int i = pages_.index_of(id);
+        if (i < 0) return;
+        const bool was_shown = i == pages_.shown();
+        const focus_at had = was_shown ? focus_in(*pages_[size_t(i)].page) : focus_at::none;
+        page_ptr gone = std::move(pages_.take(size_t(i)).page);
+        // Hidden at once; destroyed once this has returned, as it may be the
+        // page's own callback calling.
+        show_now(gone->host, false);
+        grave_.bury(std::move(gone), post_to_ui);
+        if (was_shown)
+            bring_in(had);
+        else
+            win_.relayout();
+    }
+    void show(const std::string& id) override
+    {
+        const int i = pages_.index_of(id);
+        if (i < 0 || i == pages_.shown()) return;
+        focus_at had = focus_at::none;
+        if (auto* old = pages_.shown_entry()) had = focus_in(*old->page);
+        pages_.set_shown(i);
+        bring_in(had);
+    }
+    std::string shown() const override { return pages_.shown_id(); }
+    std::vector<std::string> ids() const override { return pages_.ids(); }
+
+    // -- rap::widget
+
+    void set_enabled(bool on) override
+    {
+        if (!state || state->enabled == on) return;
+        state->enabled = on;
+        if (!state->outer || state->outer->effective_enabled()) state->refresh_enabled();
+    }
+    void set_visible(bool v) override
+    {
+        if (visible == v) return;
+        visible = v;
+        win_.relayout();
+    }
+    void set_tooltip(const std::string& text) override
+    {
+        if (!state || state->tooltip == text) return;
+        state->tooltip = text;
+        state->refresh_tips();
+    }
+    void focus() override
+    {
+        auto* p = pages_.shown_entry();
+        if (!p) return;
+        HWND root = GetAncestor(p->page->host, GA_ROOT);
+        focus_page(*p->page, IsWindowVisible(root) ? focus_at::window : focus_at::pending);
+    }
+    bool has_focus() const override
+    {
+        const HWND f = GetFocus();
+        const int i = pages_.shown();
+        return f && i >= 0 && IsChild(pages_[size_t(i)].page->host, f);
+    }
+
+    // -- item
+
+    bool fills() const override { return true; }
+    bool expands_in_form() const override { return true; }
+    SIZE measure() override
+    {
+        SIZE n{0, 0};
+        for (size_t i = 0; i < pages_.size(); ++i)
+        {
+            if (!counts(i)) continue;
+            const SIZE s = pages_[i].page->content->natural();
+            n.cx = std::max(n.cx, s.cx);
+            n.cy = std::max(n.cy, s.cy);
+        }
+        return n;
+    }
+    long measure_height(long width) override
+    {
+        long h = 0;
+        for (size_t i = 0; i < pages_.size(); ++i)
+            if (counts(i)) h = std::max(h, pages_[i].page->content->height_at(width));
+        return h;
+    }
+    void place(RECT r) override
+    {
+        placed(r);
+        auto* p = pages_.shown_entry();
+        if (!p) return;
+        const int w = r.right - r.left, h = r.bottom - r.top;
+        move_control(p->page->host, r.left, r.top, w, h);
+        if (p->page->content) p->page->content->place({0, 0, w, h});
+    }
+    void show_all(bool shown) override
+    {
+        showing(shown);
+        for (size_t i = 0; i < pages_.size(); ++i)
+        {
+            const bool on = shown && visible && int(i) == pages_.shown();
+            show_control(pages_[i].page->host, on);
+            if (pages_[i].page->content) pages_[i].page->content->show_all(on);
+        }
+    }
+
+private:
+    // Whether page i's size is the stack's.
+    bool counts(size_t i)
+    {
+        return pages_[i].page->content && (homogeneous_ || int(i) == pages_.shown());
+    }
+
+    // Where the focus was in a page: the window's (it's active), or the one
+    // it gets when it's next active or shown.
+    enum class focus_at
+    {
+        none,
+        window,
+        pending,
+    };
+    focus_at focus_in(page_parts& p)
+    {
+        HWND root = GetAncestor(p.host, GA_ROOT);
+        if (HWND f = GetFocus(); f && IsChild(p.host, f))
+        {
+            p.focus = f;
+            return focus_at::window;
+        }
+        if (HWND f = static_cast<HWND>(GetPropW(root, L"rapport-focus")); f && IsChild(p.host, f))
+        {
+            p.focus = f;
+            return focus_at::pending;
+        }
+        return focus_at::none;
+    }
+    // The shown page, laid out now, and the focus into it if it was in the
+    // page it replaced.
+    void bring_in(focus_at had)
+    {
+        win_.relayout_at_once();
+        win_.flush_layout();
+        if (had == focus_at::none) return;
+        HWND root = GetAncestor(parent_, GA_ROOT);
+        if (auto* p = pages_.shown_entry())
+            focus_page(*p->page, had);
+        else if (had == focus_at::window)
+            SetFocus(root);  // nowhere left in the stack
+        else
+            RemovePropW(root, L"rapport-focus");
+    }
+    // Where the focus was in the page, else its first control.
+    void focus_page(page_parts& p, focus_at how)
+    {
+        HWND root = GetAncestor(p.host, GA_ROOT);
+        HWND to = takes_focus(p.focus, p.host) ? p.focus : first_tab_stop(p.host);
+        if (how == focus_at::window)
+            SetFocus(to ? to : root);
+        else if (to)
+            SetPropW(root, L"rapport-focus", to);
+        else
+            RemovePropW(root, L"rapport-focus");
+    }
+
+    win_context& win_;
+    HWND parent_;
+    bool homogeneous_;
+    // Before the pages: destroyed with the window, the pages go first.
+    stack_pages::graveyard<page_ptr> grave_;
+    stack_pages::pages<page_ptr> pages_;
+};
+
 // -- frames -------------------------------------------------------------------
 
 // One display-paced clock for every frame subscriber: a thread waits for the
@@ -10106,6 +10445,8 @@ public:
     }
     ~window_impl() override
     {
+        // First, while every widget is still there; taken out, so it runs once.
+        if (auto f = std::exchange(on_destroyed_, {})) f();
         windows().erase(this);
         // WM_DESTROY can't see us once GWLP_USERDATA is cleared below.
         std::erase(recent(), this);
@@ -10220,6 +10561,16 @@ public:
                             std::exchange(layout_cause_, 0));
         relayout_pending_ = false;
         if (!root) return;
+        place_all();
+        // The toolbar band's controls on glass, once they're where they
+        // went (the moves above are made as one, at the end); once more as
+        // the tabs leave the caption, for their own fonts back.
+        if (caption_ || glassed_) glass_band_controls(hwnd_);
+        glassed_ = caption_;
+    }
+    bool glassed_ = false;
+    void place_all()
+    {
         sync_caption();  // first: it may change the client area
         sync_band_toolbar();
         RECT r = client();
@@ -10276,6 +10627,9 @@ public:
         const bool had = toolbar_band(hwnd_, was);
         if (had ? EqualRect(&was, &band) : IsRectEmpty(&band)) return;
         set_toolbar_band(hwnd_, band);
+        // The frame extended over it (or no longer), for Mica Alt under its
+        // translucent layer.
+        if (caption_) extend_caption_frame(hwnd_, caption_height_);
         // Its fill under the toolbar's controls, the current tab's, and
         // what was band and isn't.
         RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
@@ -10323,6 +10677,22 @@ public:
     std::vector<button_impl*> role_buttons;
     std::vector<std::shared_ptr<deferred_build>> deferred;  // built when first idle (see show)
     std::map<std::string, std::vector<form_item*>> form_groups;  // forms aligned by key
+    // A part built apart (a stack's page) going: what the window keeps of it.
+    void forget(const built_part& part)
+    {
+        std::set<const item*> mine;
+        for (const item_ptr& i : part.items) mine.insert(i.get());
+        for (auto& [key, forms] : form_groups)
+            std::erase_if(forms, [&](form_item* f) { return mine.contains(f); });
+        std::erase_if(role_buttons, [&](button_impl* b) { return mine.contains(b); });
+    }
+    // Deferred boxes in a part built since the window first painted: built
+    // once it's next idle, as the first ones were.
+    void deferred_added()
+    {
+        if (painted_once_ && !deferred.empty())
+            SetTimer(hwnd_, deferred_timer, USER_TIMER_MINIMUM, nullptr);
+    }
     std::unique_ptr<window_tabs> doc_tabs;                       // window_spec::tabs
     int strip_height() const { return doc_tabs && doc_tabs->visible ? doc_tabs->height() : 0; }
 
@@ -10751,6 +11121,7 @@ public:
     void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
+    void on_destroyed(std::function<void()> f) override { on_destroyed_ = std::move(f); }
     // Drops on any child control reach the top level as WM_DROPFILES.
     void on_files_dropped(std::function<void(const std::vector<std::string>&)> f) override
     {
@@ -10786,12 +11157,18 @@ public:
         // The arrows, Enter and Delete on the focused tabs are theirs.
         if (doc_tabs && doc_tabs->owns_key(m)) return false;
         if (!on_key_) return false;
-        wchar_t cls[32] = {};
-        GetClassNameW(GetFocus(), cls, 32);
-        const bool typing = (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W")) &&
-                            !(GetWindowLongPtrW(GetFocus(), GWL_STYLE) & ES_READONLY);
+        // The control the key is going to (the focus, as it was typed).
+        const bool typing = editable_field(m.hwnd);
+        // While an IME composes in the field every key is its (Escape cancels,
+        // the function keys convert): none is the window's.
+        if (typing && ime_composing(m.hwnd)) return false;
         const bool not_text = m.wParam == VK_ESCAPE || (m.wParam >= VK_F1 && m.wParam <= VK_F12);
-        if (typing && !not_text) return false;
+        // A shortcut chord is the window's first, as an accelerator.
+        if (typing && !not_text)
+        {
+            const key_event e = make_key_event(m.wParam, m.lParam, m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN);
+            return window_chords::to_window(e) && on_key_(e);
+        }
         // The Back and Forward keys come as WM_APPCOMMAND, whatever has focus.
         if (m.wParam == VK_BROWSER_BACK || m.wParam == VK_BROWSER_FORWARD) return false;
         return on_key_(make_key_event(m.wParam, m.lParam, m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN));
@@ -11030,6 +11407,11 @@ private:
                 const int command = GET_APPCOMMAND_LPARAM(lp);
                 if (command != APPCOMMAND_BROWSER_BACKWARD && command != APPCOMMAND_BROWSER_FORWARD) break;
                 if (!self->on_key_) break;
+                // Not while an IME composes in the window's focused field (or,
+                // with no focus here, the control it came from).
+                HWND field = GetFocus();
+                if (!field || !IsChild(h, field)) field = reinterpret_cast<HWND>(wp);
+                if (field_composing(field)) break;
                 key_event e;
                 e.key = command == APPCOMMAND_BROWSER_BACKWARD ? key::back : key::forward;
                 e.modifiers = key_modifiers();
@@ -11181,6 +11563,7 @@ private:
     std::function<bool(const key_event&)> on_key_;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
+    std::function<void()> on_destroyed_;
     std::function<void(const std::vector<std::string>&)> on_files_dropped_;
     bool app_id_ = false;  // a taskbar group of its own (set_app_id), cleared before it goes
     rap::icon window_icon_;
@@ -11219,10 +11602,13 @@ int windows_order(dialog_role r)
 class builder
 {
 public:
-    builder(window_impl& win, build_sink& sink, container_state* scope = nullptr)
+    // A part built apart from the window (a stack's page) is `into`'s.
+    builder(window_impl& win, build_sink& sink, container_state* scope = nullptr,
+            built_part* into = nullptr)
         : win_(win)
         , sink_(sink)
         , scope_(scope)
+        , into_(into)
         , metrics_(metrics::for_scale(win.scale()))
     {
     }
@@ -11234,7 +11620,7 @@ public:
         {
             auto state = std::make_unique<container_state>(parent, scope);
             scope = state.get();
-            win_.container_states.push_back(std::move(state));
+            states().push_back(std::move(state));
         }
         builder nested = *this;
         nested.scope_ = scope;
@@ -11252,8 +11638,17 @@ private:
     {
         auto p = std::make_unique<T>(std::forward<Args>(args)...);
         T* raw = p.get();
-        win_.items.push_back(std::move(p));
+        items().push_back(std::move(p));
         return raw;
+    }
+    std::vector<std::unique_ptr<container_state>>& states()
+    {
+        return into_ ? into_->container_states : win_.container_states;
+    }
+    std::vector<item_ptr>& items() { return into_ ? into_->items : win_.items; }
+    std::vector<std::unique_ptr<rap::widget>>& widgets()
+    {
+        return into_ ? into_->widgets : win_.widgets;
     }
     template <class T, class... Args>
     T* widget(const node& n, Args&&... args)
@@ -11269,7 +11664,7 @@ private:
         if (container) container->state = scope_;
         auto w = std::make_unique<plain_widget>(*item, container ? scope_ : nullptr, win_, std::move(pending));
         sink_.created(n, *w);
-        win_.widgets.push_back(std::move(w));
+        widgets().push_back(std::move(w));
     }
 
     item* make(const node& n, const spec::box& s, HWND parent, orientation)
@@ -11283,9 +11678,10 @@ private:
         }
         // Built later; a first ListView alone costs ~15 ms.
         auto pending = std::make_shared<deferred_build>(
-            [&win = win_, &sink = sink_, scope = scope_, box, parent, make = s.deferred, dir = s.dir]
+            [&win = win_, &sink = sink_, scope = scope_, into = into_, box, parent,
+             make = s.deferred, dir = s.dir]
             {
-                box->children.push_back(builder(win, sink, scope).build(make(), parent, dir));
+                box->children.push_back(builder(win, sink, scope, into).build(make(), parent, dir));
                 // Showing now, the window grows if the content doesn't fit.
                 if (box->visible)
                     win.relayout_at_once();
@@ -11293,6 +11689,7 @@ private:
                     win.relayout();
             });
         win_.deferred.push_back(pending);
+        if (into_) into_->deferred.push_back(pending);
         handle(n, box, std::move(pending));
         return box;
     }
@@ -11368,9 +11765,31 @@ private:
     {
         for (const node& p : s.pages) t->pages.push_back(build(p, parent, orientation::vertical));
         t->lazy = s.lazy;
-        t->buildPage = [&win = win_, &sink = sink_, scope = scope_, parent](const node& page)
-        { return builder(win, sink, scope).build(page, parent, orientation::vertical); };
+        t->buildPage =
+            [&win = win_, &sink = sink_, scope = scope_, into = into_, parent](const node& page)
+        { return builder(win, sink, scope, into).build(page, parent, orientation::vertical); };
         return t;
+    }
+    item* make(const node& n, const spec::stack& s, HWND parent, orientation)
+    {
+        auto* st = own<stack_impl>(win_, parent, s.homogeneous);
+        // Its own scope, which its pages' controls take their enabled state
+        // and tooltip from.
+        auto state = std::make_unique<container_state>(parent, scope_);
+        st->state = state.get();
+        states().push_back(std::move(state));
+        st->build = [&win = win_, &sink = sink_, scope = st->state](stack_impl::page_parts& p,
+                                                                    const node& content)
+        {
+            p.part = std::make_unique<built_part>();
+            p.forget = [&win](built_part& part) { win.forget(part); };
+            p.content = builder(win, sink, scope, p.part.get())
+                            .build(content, p.host, orientation::vertical);
+            if (!p.part->deferred.empty()) win.deferred_added();
+        };
+        for (size_t i = 0; i < s.pages.size(); ++i) st->add(s.ids[i], s.pages[i]);
+        sink_.created(n, *st);
+        return st;
     }
     item* make(const node&, const spec::spacer&, HWND, orientation)
     {
@@ -11405,7 +11824,7 @@ private:
                 if (b)
                 {
                     strip_button* button = strip->add_button(*b);
-                    win_.items.emplace_back(static_cast<strip_entry*>(button));
+                    items().emplace_back(static_cast<strip_entry*>(button));
                     sink_.created(c, *button);
                 }
                 else
@@ -11497,6 +11916,7 @@ private:
     window_impl& win_;
     build_sink& sink_;
     container_state* scope_;
+    built_part* into_;
     metrics metrics_;
 };
 
@@ -11538,6 +11958,7 @@ public:
         wc.lpszClassName = L"rapportMessages";
         RegisterClassExW(&wc);
         messages_ = make_window(0, L"rapportMessages", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance(), this);
+        g_messages = messages_;
         // Paths' own icons are found in the background (win32_shell_icons.h):
         // each found is told here, on this thread, and what paints them
         // (from what was found, never asking) paints again.
@@ -11570,6 +11991,7 @@ public:
         remove_path_icon_listener(path_repaint_);
         g_frames = nullptr;
         frames_.reset();
+        g_messages = nullptr;
         DestroyWindow(messages_);
     }
 
@@ -11626,7 +12048,11 @@ public:
                 if (consumed) continue;
             }
             HWND top = GetAncestor(m.hwnd, GA_ROOT);
-            if (top && IsDialogMessageW(top, &m)) continue;
+            // A field whose IME composes has its keys, not the dialog's
+            // handling (Escape closing it, Enter, Tab), as an IME's own keys
+            // never reach it.
+            const bool composing = m.message >= WM_KEYFIRST && m.message <= WM_KEYLAST && field_composing(m.hwnd);
+            if (top && !composing && IsDialogMessageW(top, &m)) continue;
             TranslateMessage(&m);
             DispatchMessageW(&m);
         }

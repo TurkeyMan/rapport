@@ -1004,6 +1004,34 @@ public:
     virtual void on_changed(std::function<void(int)>) = 0;
 };
 
+struct node;  // layout.h
+
+// Pages in one place, one shown at a time, chosen by the app (layout::stack):
+// a wizard's steps, a view swapped for another. Pages are named by the app's
+// own ids. Hidden pages keep their widgets and state, but take no layout,
+// paint or input, and aren't exposed to accessibility. Unknown ids are
+// ignored.
+class stack : public widget
+{
+public:
+    // Builds `content` now, through the window's build, with its binds and
+    // callbacks set as for the window's first content, and adds it last.
+    // Hidden unless the stack was empty. An id already there is ignored
+    // (nothing is built).
+    virtual void add(const std::string& id, node content) = 0;
+    // Destroys that page's widgets; pointers bound inside it dangle after.
+    // The page is hidden, out of layout and out of ids() at once; its
+    // widgets are destroyed when control is next back in the event loop, so
+    // this may be called from one of the page's own callbacks. Removing the
+    // shown page shows the next, or the previous if it was last.
+    virtual void remove(const std::string& id) = 0;
+    // No callback. The focus, if it was in the page that was shown, moves to
+    // the new page's control that last had it, or else its first.
+    virtual void show(const std::string& id) = 0;
+    virtual std::string shown() const = 0;  // empty when there are no pages
+    virtual std::vector<std::string> ids() const = 0;
+};
+
 // One of a window's document tabs (window_spec::tabs): a folder in a file
 // manager, a file in an editor.
 struct document_tab
@@ -1117,7 +1145,8 @@ enum class key
     f12,
     // Navigation: the mouse's side buttons (the X buttons), and the keys
     // some keyboards have. Only presses are reported, and only to the
-    // window's on_key, whatever has focus. A canvas taking a side button
+    // window's on_key, whatever has focus (but an input method composing in
+    // a focused text field: see window::on_key). A canvas taking a side button
     // itself (on_pointer returning true for button 4 or 5) produces none.
     back,
     forward,
@@ -1353,7 +1382,20 @@ public:
     // Keys reach this before the focused widget; return true to consume. For
     // app-wide keys (navigation, fullscreen, find) that must work whatever
     // has focus. While an editable text field has focus only Escape, the
-    // function keys and back/forward come here; the rest are typing.
+    // function keys, back/forward and shortcut chords come here; the rest
+    // are typing. A chord (Ctrl or Alt held) comes here first, as an
+    // accelerator, unless it's one of the field's editing keys: Ctrl+A, C,
+    // V, X, Z, Y, Ctrl+Left, Right, Home, End, Backspace, Delete, each with
+    // Shift too, Shift+Insert, Shift+Delete and Ctrl+Insert. Only presses;
+    // Ctrl+Alt with a character is typing (AltGr). One not taken (false)
+    // goes on to the field unchanged, and Alt+letter from there to the menu
+    // bar's access keys (on Qt those come first, before this, as its
+    // shortcuts). While an input method is composing in the focused field
+    // nothing comes here - no chord, no Escape, no function key, no back or
+    // forward (key or side button): they're the input method's (Escape
+    // cancels, Japanese ones convert with F6-F10), and a dialog's Escape
+    // doesn't close it then. Once it commits or cancels, the rules above
+    // apply again.
     // Read-only text views don't count as editable.
     virtual void on_key(std::function<bool(const key_event&)>) = 0;
     // Dialogs: fired once with the role of the button that ended it
@@ -1362,6 +1404,13 @@ public:
     virtual void on_finished(std::function<void(dialog_role)>) = 0;
     // Return false to veto closing (e.g. unsaved commit message).
     virtual void on_close_request(std::function<bool()>) = 0;
+    // Runs once, on the UI thread, at the start of the window's destructor,
+    // before any of its widgets go, so it may still read them. That holds
+    // whoever destroys the window: the app resetting its pointer, or the
+    // backend after a close. It must not destroy this window again or
+    // re-enter its own destruction; making or destroying other windows is
+    // fine. Setting it again replaces it; an empty function clears it.
+    virtual void on_destroyed(std::function<void()>) = 0;
     // Files dragged in (from a file manager) and dropped anywhere on the
     // window, as local paths in UTF-8, in the order given. Setting it is
     // what makes the window accept them; other drags are refused.

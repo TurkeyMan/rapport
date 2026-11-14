@@ -141,6 +141,7 @@ int main(int argc, char** argv)
     rap::list* log = nullptr;
     rap::text_view* details = nullptr;
     rap::tree* refs = nullptr;
+    rap::stack* pages = nullptr;
 
     auto say = [&](const std::string& s) { status->set_text(s); };
 
@@ -225,10 +226,9 @@ int main(int argc, char** argv)
                          {"Entry", entry{"some text"}.placeholder("type here")},
                          {"Read-only",
                           entry{"selectable, without a frame"}.read_only().frame(false)},
-                         {"Link",
-                          label{"with an icon"}
-                              .link([&] { say("link"); })
-                              .icon(rap::icon{.name = "go-next"})},
+                         {"Link", label{"with an icon"}
+                                      .link([&] { say("link"); })
+                                      .icon(rap::icon{.name = "go-next"})},
                          {"Select",
                           drop_down{{"pick", "reword", "edit", "squash", "fixup", "drop"}, 0}
                               .on_changed([&](int i) { say("select " + std::to_string(i)); })},
@@ -273,7 +273,8 @@ int main(int argc, char** argv)
                  hbox{
                      tree{refs_tree()}
                          .bind(refs)
-                         .on_selection_changed([&] { say("selected " + refs->selected().value_or("(none)")); })
+                         .on_selection_changed(
+                             [&] { say("selected " + refs->selected().value_or("(none)")); })
                          .on_activate([&](const std::string& id) { say("activated " + id); })
                          .on_context_menu(
                              [&](std::optional<std::string> id) -> rap::menu
@@ -284,10 +285,22 @@ int main(int argc, char** argv)
                              })
                          .stretch(),
                      vbox{
-                         button{"Select heads/feature/x"}.on_click([&] { refs->select("refs/heads/feature/x"); }),
-                         button{"Rebuild (keeps state)"}.on_click([&] { refs->set_items(refs_tree()); }),
+                         button{"Select heads/feature/x"}.on_click(
+                             [&] { refs->select("refs/heads/feature/x"); }),
+                         button{"Rebuild (keeps state)"}.on_click(
+                             [&] { refs->set_items(refs_tree()); }),
                          button{"Select nothing"}.on_click([&] { refs->select(""); }),
                      },
+                 }},
+                {"_Stack",
+                 vbox{
+                     drop_down{{"Welcome", "Details"}, 0}.on_changed(
+                         [&](int i) { pages->show(i ? "details" : "welcome"); }),
+                     stack{{"welcome", label{"One page at a time, chosen by the app."}},
+                           {"details", form{{"Name", entry{"on the second page"}},
+                                            {"", check{"Sized to the largest page"}}}}}
+                         .bind(pages)
+                         .stretch(),
                  }},
             }
                 .stretch(),

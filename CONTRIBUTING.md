@@ -43,11 +43,14 @@ which makes checking a layout on each backend quick.
   such as Windows 11's caption tabs) is ClearType unless the background is
   composed by DWM; grayscale everywhere when the system has ClearType off.
   ClearType blends each colour channel with what's beneath, so it needs an
-  opaque background rapport has drawn: over Mica, or anything else the
-  compositor fills in later, text is grayscale. Use the monitor's rendering
-  parameters (its ClearType level, gamma and pixel order, RGB or BGR) and
-  the system's font smoothing setting, and make them again when the settings,
-  the monitor or the DPI change.
+  opaque background rapport has drawn: over Mica, through a translucent fill
+  too (WinUI's layers, as the caption tabs' current tab on the toolbar band),
+  or anything else the compositor fills in later, text is grayscale (a
+  native control's too, over the extended frame: the toolbar band's give
+  theirs a grayscale font). Use the
+  monitor's rendering parameters (its ClearType level, gamma and pixel
+  order, RGB or BGR) and the system's font smoothing setting, and make them
+  again when the settings, the monitor or the DPI change.
 - Changing a public header (`widgets.h`, `layout.h`, `backend.h`,
   `rapport.h`) bumps `abi_version` in `backend.h`, so mismatched plugins
   refuse to load.
