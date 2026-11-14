@@ -792,6 +792,26 @@ struct caption_tabs::impl
             RECT solid{};
             const RECT* opaque = everywhere;
             color under = colors.empty;
+            // The dragged tab hides what it's over: the strip's own ground
+            // where it'll go (the tabs under it drawn already, and its fill
+            // may be translucent), past its rounded top corners, and short
+            // of the line along the bottom unless that's broken for it.
+            if (i == up)
+            {
+                const int k = std::min(px(caption_metrics::corner), int(r.right - r.left) / 2);
+                const LONG bottom = current ? r.bottom : std::min(r.bottom, LONG(c.bottom - line));
+                const D2D1_COLOR_F ground = colors.clear ? D2D1::ColorF(0, 0, 0, 0) : d2d_color(colors.empty);
+                for (const RECT& part : {RECT{r.left + k, r.top, r.right - k, bottom},
+                                         RECT{r.left, r.top + k, r.right, bottom}})
+                {
+                    if (IsRectEmpty(&part)) continue;
+                    rt->PushAxisAlignedClip(D2D1::RectF(float(part.left), float(part.top), float(part.right),
+                                                        float(part.bottom)),
+                                            D2D1_ANTIALIAS_MODE_ALIASED);
+                    rt->Clear(ground);
+                    rt->PopAxisAlignedClip();
+                }
+            }
             if (current)
             {
                 current_tab(r, colors);

@@ -773,6 +773,41 @@ void check_band(HWND top, bool band, const std::string& when)
         expect(ask(strip, q_current) == current && part(strip, q_tab, current).left == tab.left,
                "and put back by Escape" + at);
     }
+    // Dragged part way over the next tab (Beta, not far enough to swap them),
+    // the current tab hides Beta's icon: its translucent fill over the
+    // strip's ground, not over that icon.
+    {
+        const UINT dpi = GetDpiForWindow(strip);
+        const int current = ask(strip, q_current);
+        const RECT tab = part(strip, q_tab, current), next = part(strip, q_tab, current + 1);
+        const int w = tab.right - tab.left, icon = px(16, dpi);
+        // Beta's icon, where the strip draws it: inset, centred down the tab.
+        const int line = std::max(1, px(1, dpi)), il = next.left + px(12, dpi);
+        const printed before = print(strip);
+        const int it = (next.top + before.h - line - icon) / 2;
+        // Under the dragged tab, left of its close button (24 px, 6 in).
+        const int moved = il + icon - (tab.right - px(6 + 24 + 8, dpi));
+        expect(moved > 0 && moved < w / 2, "a drag of " + str(moved) + " px, less than half the tab's " + str(w) +
+                                               " (no swap)" + at);
+        const POINT a = centre(tab);
+        SendMessageW(strip, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(a.x, a.y));
+        SendMessageW(strip, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(a.x + moved, a.y));
+        const printed p = print(strip);
+        SendMessageW(strip, WM_KEYDOWN, VK_ESCAPE, 0);
+        pump(2);
+        const DWORD ground = before.at(next.left + px(4, dpi), it);
+        int drawn = 0, shown = 0;
+        for (int y = it; y < it + icon; ++y)
+            for (int x = il; x < il + icon; ++x)
+            {
+                drawn += before.at(x, y) != ground;
+                shown += p.at(x, y) != pal.current_px;
+            }
+        expect(drawn > 0, "Beta's icon drawn where it's looked for" + at + ": " + str(drawn) + " px");
+        expect(shown == 0, "the current tab dragged " + str(moved) + " px over Beta's icon hides it" + at + ": " +
+                               str(shown) + " of its pixels not " + argb_hex(pal.current_px));
+        expect(ask(strip, q_current) == current, "and put back by Escape, over Beta" + at);
+    }
     if (band && toolbar)
     {
         // Printed as on screen: on glass, the band's layer (premultiplied)
@@ -1304,7 +1339,9 @@ void check_text(HWND strip, const palette& pal, const std::string& when)
     // TextFillColorSecondary (WinUI's TabViewItemHeaderForeground).
     const int other_i = current == 0 ? 1 : 0;
     const RECT other = part(strip, q_tab, other_i);
-    const RECT other_box{other.left + px(12, dpi), other.top + px(4, dpi), other.left + px(120, dpi), p.h - line};
+    // (Alpha and Beta have icons: the title after its icon.)
+    const RECT other_box{other.left + px(12 + 16 + 8, dpi), other.top + px(4, dpi), other.left + px(120, dpi),
+                         p.h - line};
     if (pal.clear)
     {
         const ink_stats o = ink_in(p, other_box, pal.other, -1);
@@ -2294,7 +2331,7 @@ int main(int argc, char** argv)
     auto doc_tabs = [&]
     {
         return document_tabs{{{"a", "Alpha", rap::icon::named("folder"), "/home/me/alpha"},
-                              {"b", "Beta", {}, {}},
+                              {"b", "Beta", rap::icon::named("folder"), {}},
                               {"c", "Gamma", {}, {}}}}
             .current("a")
             .on_select(
