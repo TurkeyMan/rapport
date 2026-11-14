@@ -33,8 +33,6 @@
 #include <oleacc.h>
 #include <propsys.h>
 #include <richedit.h>
-#include <richole.h>
-#include <tom.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -57,6 +55,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <numeric>
 #include <set>
 #include <future>
 #include <thread>
@@ -3046,9 +3045,18 @@ public:
     // of a notch, which add up.
     static LRESULT CALLBACK wheel_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
+        auto* self = reinterpret_cast<text_view_impl*>(data);
+        // A font for a new DPI (refont): RichEdit makes all its text that
+        // font, at the message font's size now, so that's the size it's made
+        // at and no zoom is wanted for the text size.
+        if (msg == WM_SETFONT)
+        {
+            const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+            self->rebased();
+            return r;
+        }
         if (msg != WM_MOUSEWHEEL || (GET_KEYSTATE_WPARAM(wp) & (MK_CONTROL | MK_SHIFT)))
             return DefSubclassProc(h, msg, wp, lp);  // Ctrl zooms, Shift scrolls sideways
-        auto* self = reinterpret_cast<text_view_impl*>(data);
         UINT per_notch = 3;
         SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &per_notch, 0);
         if (per_notch == WHEEL_PAGESCROLL)
@@ -3061,6 +3069,44 @@ public:
         self->wheel_ -= lines * WHEEL_DELTA;
         if (lines) SendMessageW(h, EM_LINESCROLL, 0, -lines);
         return 0;
+    }
+    // A zoom as RichEdit takes it: num/den reduced, within 1/64..64, 0/0
+    // for none (1).
+    static void zoom_to(HWND h, long long num, long long den)
+    {
+        if (num <= 0 || den <= 0) num = den = 1;
+        const long long g = std::gcd(num, den);
+        num /= g;
+        den /= g;
+        while (num > 0x7fff || den > 0x7fff)  // small enough for RichEdit's arithmetic
+        {
+            num = std::max(1LL, (num + 1) / 2);
+            den = std::max(1LL, (den + 1) / 2);
+        }
+        num = std::min(num, 64 * den);
+        den = std::min(den, 64 * num);
+        if (num == den) num = den = 0;
+        SendMessageW(h, EM_SETZOOM, WPARAM(num), LPARAM(den));
+    }
+    // The zoom the text is shown at, and the user's own part of it
+    // (Ctrl+wheel): what's shown over the text size's part, last applied
+    // as text_num_/text_den_.
+    std::pair<long long, long long> user_zoom() const
+    {
+        int num = 0, den = 0;
+        SendMessageW(h_, EM_GETZOOM, reinterpret_cast<WPARAM>(&num), reinterpret_cast<LPARAM>(&den));
+        if (num <= 0 || den <= 0) num = den = 1;  // 0/0: none
+        return {1LL * num * text_den_, 1LL * den * text_num_};
+    }
+    // A font for a new DPI (refont): RichEdit makes all its text that font,
+    // at the message font's size now, which is then the size the text is
+    // made at; the text size's zoom goes, the user's stays.
+    void rebased()
+    {
+        const auto [num, den] = user_zoom();
+        base_px_ = std::max(1L, std::lround(ui_font_size_dip()));
+        text_num_ = text_den_ = 1;
+        zoom_to(h_, num, den);
     }
     std::string text() const override
     {
@@ -3126,65 +3172,22 @@ public:
         const SIZE m = font_metrics(win_.dpi());
         return {m.cx * 40, m.cy * 6 + px(8)};
     }
-    // A new text size (renew_ui_fonts): RichEdit isn't given the new font
-    // (WM_GETFONT says nothing of its own, and WM_SETFONT would make all
-    // its text one font, styled runs and all, and tell EN_CHANGE). Each run
-    // of its text, and the size typed text takes, is made larger or
-    // smaller by as much as the message font was (the size its text was
-    // made for, text_dip_), CFM_SIZE only: faces (Consolas), bold, italic
-    // and colours kept. Quietly (no on_changed), not as an edit to undo
-    // (the user's own edits still undo as they did), the selection as it
-    // was and the same text at the top.
+    // A new text size (renew_ui_fonts): RichEdit's zoom, the text shown
+    // larger or smaller by as much as the message font is now than at the
+    // size the text was made at (base_px_), its content untouched. Its
+    // formats, the size typed text takes and its undo history all stay at
+    // that base, so an undo brings text back as it was, shown at the zoom
+    // with the rest; zooming isn't an edit (no EN_CHANGE, nothing to undo),
+    // and the selection stays. The user's own zoom (Ctrl+wheel) is kept:
+    // the zoom shown is the user's times the text size's.
     void fonts_changed() override
     {
-        const float now = ui_font_size_dip();
-        const float ratio = text_dip_ > 0 ? now / text_dip_ : 1.f;
-        text_dip_ = now;
-        if (std::abs(ratio - 1.f) < 0.001f) return;
-        const bool was_quiet = std::exchange(quiet_, true);
-        const LRESULT events = SendMessageW(h_, EM_SETEVENTMASK, 0, 0);
-        CHARRANGE sel{};
-        SendMessageW(h_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&sel));
-        const LRESULT first_line = SendMessageW(h_, EM_GETFIRSTVISIBLELINE, 0, 0);
-        const long top = long(SendMessageW(h_, EM_LINEINDEX, first_line, 0));  // its first character
-        POINT scroll{};
-        SendMessageW(h_, EM_GETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll));
-        SendMessageW(h_, WM_SETREDRAW, FALSE, 0);
-        com<ITextDocument> doc = tom();
-        if (doc) doc->Undo(tomSuspend, nullptr);
-        CHARFORMAT2W cf{};
-        cf.cbSize = sizeof cf;
-        SendMessageW(h_, EM_GETCHARFORMAT, SCF_DEFAULT, reinterpret_cast<LPARAM>(&cf));
-        cf.dwMask = CFM_SIZE;
-        cf.yHeight = LONG(std::lround(cf.yHeight * ratio));
-        SendMessageW(h_, EM_SETCHARFORMAT, SCF_DEFAULT, reinterpret_cast<LPARAM>(&cf));
-        if (doc)
-            scale_runs(doc.get(), ratio);
-        else  // no TOM: all the text the typed size
-            SendMessageW(h_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
-        if (doc) doc->Undo(tomResume, nullptr);
-        // The selection as it was (setting it, as it is, would scroll to it).
-        CHARRANGE now_sel{};
-        SendMessageW(h_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&now_sel));
-        if (now_sel.cpMin != sel.cpMin || now_sel.cpMax != sel.cpMax)
-            SendMessageW(h_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&sel));
-        // The line that was at the top at the top again (the same scroll in
-        // pixels would show other text, the lines now taller or shorter),
-        // and across as far, in the new size.
-        const long line = long(SendMessageW(h_, EM_EXLINEFROMCHAR, 0, top));
-        const long first = long(SendMessageW(h_, EM_GETFIRSTVISIBLELINE, 0, 0));
-        if (line != first) SendMessageW(h_, EM_LINESCROLL, 0, line - first);
-        if (scroll.x)
-        {
-            POINT now_scroll{};
-            SendMessageW(h_, EM_GETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&now_scroll));
-            now_scroll.x = LONG(std::lround(scroll.x * ratio));
-            SendMessageW(h_, EM_SETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&now_scroll));
-        }
-        SendMessageW(h_, WM_SETREDRAW, TRUE, 0);
-        InvalidateRect(h_, nullptr, TRUE);
-        SendMessageW(h_, EM_SETEVENTMASK, 0, events);
-        quiet_ = was_quiet;
+        const long now = std::max(1L, std::lround(ui_font_size_dip()));
+        if (1LL * now * text_den_ == 1LL * base_px_ * text_num_) return;  // the ratio it has
+        const auto [user_num, user_den] = user_zoom();
+        text_num_ = now;
+        text_den_ = base_px_;
+        zoom_to(h_, user_num * text_num_, user_den * text_den_);
     }
 
 private:
@@ -3231,7 +3234,9 @@ private:
         // The control's own font, so styled text looks like plain text.
         LOGFONTW lf{};
         GetObjectW(ui_font(win_.dpi(), false, mono_), sizeof lf, &lf);
-        const int half_points = lf.lfHeight ? int(std::lround(std::abs(lf.lfHeight) * 144.0 / win_.dpi())) : 18;
+        // At the size the text is made at: a new text size since is the
+        // zoom's (fonts_changed).
+        const int half_points = int((base_px_ * 3 + 1) / 2);
         std::vector<COLORREF> colours;
         auto colour_index = [&](const paint& p)
         {
@@ -3323,40 +3328,6 @@ private:
         SendMessageW(h_, EM_STREAMIN, SF_RTF, reinterpret_cast<LPARAM>(&es));
     }
 
-    // RichEdit's Text Object Model, if it has one.
-    com<ITextDocument> tom() const
-    {
-        com<IRichEditOle> ole;
-        com<ITextDocument> doc;
-        if (SendMessageW(h_, EM_GETOLEINTERFACE, 0, reinterpret_cast<LPARAM>(ole.put())) && ole)
-            ole->QueryInterface(__uuidof(ITextDocument), reinterpret_cast<void**>(doc.put()));
-        return doc;
-    }
-    // Each run of like characters (TOM's tomCharFormat) its size times
-    // `ratio`, nothing else of it changed. A run may have a size of its own
-    // (pasted, say), so each is scaled, not all set to one size.
-    static void scale_runs(ITextDocument* doc, float ratio)
-    {
-        com<ITextRange> run;
-        if (FAILED(doc->Range(0, 0, run.put())) || !run) return;
-        long frozen = 0;
-        doc->Freeze(&frozen);
-        for (long end = 0;;)
-        {
-            long moved = 0, now = 0;
-            if (FAILED(run->MoveEnd(tomCharFormat, 1, &moved)) || !moved || FAILED(run->GetEnd(&now)) ||
-                now <= end)
-                break;
-            end = now;
-            com<ITextFont> font;
-            float size = 0;
-            if (SUCCEEDED(run->GetFont(font.put())) && font && SUCCEEDED(font->GetSize(&size)) && size > 0)
-                font->SetSize(size * ratio);
-            run->Collapse(tomEnd);
-        }
-        doc->Unfreeze(&frozen);
-    }
-
     void format(long a, long b, const text_style& st)
     {
         if (b <= a) return;
@@ -3423,7 +3394,11 @@ private:
         InvalidateRect(h_, nullptr, TRUE);
     }
 
-    float text_dip_ = ui_font_size_dip();  // the message font's size its text was made for
+    // The message font's height (px at 96 dpi) the text is made at: its
+    // formats stay at it. And the text size's part of the zoom, as last
+    // applied (now's height over that).
+    long base_px_ = std::max(1L, std::lround(ui_font_size_dip()));
+    long long text_num_ = 1, text_den_ = 1;
     int wheel_ = 0;  // wheel delta × lines per notch not yet scrolled
     bool mono_;
     bool quiet_ = false;
@@ -11098,7 +11073,7 @@ public:
             HFONT f = glass_given_font(c);
             return f ? f : reinterpret_cast<HFONT>(SendMessageW(c, WM_GETFONT, 0, 0));
         };
-        // Not RichEdit (a text view): fonts_changed scales its runs.
+        // Not RichEdit (a text view): fonts_changed zooms it, its content untouched.
         auto rich = [](HWND c)
         {
             wchar_t cls[16]{};
