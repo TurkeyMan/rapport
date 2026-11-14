@@ -1,43 +1,54 @@
-// A window's document tabs torn off into windows of their own and dropped
-// into other windows, on Windows: stage 1's tab control (under a menu bar)
-// and Windows 11's strip in the caption where there is one. The windows are
-// never shown: the strips are sent the mouse's messages and keys, nothing
-// else. Two test hooks (the "rapport-document-tabs-drag" message) stand in
-// for what needs shown windows: the drop lookup's z-order (WindowFromPoint
-// and EnumWindows see only shown windows) is a list of the test's windows,
-// and a window a tab drag moves isn't put into the system's move loop (which
-// needs the real mouse) but moved here with SetWindowPos, as the loop would,
-// and its end sent (WM_EXITSIZEMOVE, its wParam 1 for an Escape: the thread's
-// key state is no witness here, where real input may come in meanwhile).
+// A window's document tabs dragged out of their windows and dropped, on
+// Windows: stage 1's tab control (under a menu bar) and Windows 11's strip in
+// the caption where there is one. A tab dragged is only ever the tab: along
+// its row it reorders; past it, it's a drag image (a layered, topmost popup
+// that never takes activation and that hit tests pass through) that follows
+// the pointer, its row showing the gap where it was; nothing is asked until
+// it's let go. Let go over another window's row in the group, that window's
+// on_receive; anywhere else, on_detach, and the app's window put so its tab
+// lands under the pointer (kept to the monitor's work area), then shown. No
+// window is ever moved by the drag, nor put in the system's move loop.
 //
-// Checked, in each strip: on_detach once with the tab's id and the pointer's
-// place, a null return refusing it (the drag going on along the row, not
-// asked again); a tab torn off, its window moved by the drag (the window's
-// own WM_WINDOWPOSCHANGED finding the strip under the pointer, which marks
-// where it would land) and let go over another window's strip: on_receive
-// there once with the id, the index and the torn-off window as the source;
-// a false return changing nothing; a strip of another group neither marked
-// nor asked; a tab dragged straight onto another window's strip (no tearing
-// off) dropped there; Escape mid-drag putting it back and asking nothing,
-// and Escape at a torn-off window's move sending the tab home (group or none) to where it
-// was; the only tab of a window moving its window, on_detach not asked; the
-// right-click menu with the app's items after the fixed ones, its Move to
-// new window asking on_detach with no point; and in the caption, Shift+F10
-// and the Menu key opening it.
+// The windows are never shown: the strips are sent the mouse's messages and
+// keys, nothing else. Test hooks (the "rapport-document-tabs-drag" message)
+// stand in for what needs shown windows: the drop lookup's z-order
+// (WindowFromPoint sees only shown windows) is a list of the test's windows,
+// and in their test mode the drag image is made but never shown, and the
+// window let go outside the rows is placed but not shown, noted instead.
 //
-// The real thing (the move loop, the z-order, a menu shown) is CI's:
-// rapport-win32-document-tabs-tearoff-test --input, with real input, runs
-// only on a CI runner (GITHUB_ACTIONS=true and RAPPORT_TEST_SEND_INPUT=1).
+// Checked, in each strip: a drag along the row reordering, on_reorder once;
+// dragged out, the image made (its styles), following the pointer, the tab
+// not yet out of its window and nothing asked; back along the row, the image
+// gone; let go outside with a window returned: on_detach once then, with the
+// pointer's place, the window put with the tab under the pointer (where it
+// was held), shown (noted), the image gone; near the work area's corner, the
+// window kept to the work area; a null return: nothing changed, nothing
+// shown; let go over another window's row in the group: its on_receive with
+// the index and the source, the app moving it; another group's row not
+// marked; Escape, the capture lost and the window deactivated each putting
+// the tab back, the image gone and nothing asked; a window's only tab
+// dragged out and let go: nothing (the window not moved), back on its own
+// row nothing, onto another row moved there, the app closing the emptied
+// window in on_receive; on_detach closing its own window; never the move
+// loop (no WM_ENTERSIZEMOVE, no SC_MOVE). And the right-click menu, as
+// before: the app's items after the fixed ones, its Move to new window
+// asking on_detach with no point; in the caption, Shift+F10 and the Menu key.
+//
+// The real thing (shown windows, the desktop's z-order, real input) is CI's:
+// rapport-win32-document-tabs-tearoff-test --input runs only on a CI runner
+// (GITHUB_ACTIONS=true and RAPPORT_TEST_SEND_INPUT=1).
 //   rapport-win32-document-tabs-tearoff-test
 #include <rapport/rapport.h>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
-// After windows.h, which it needs.
+// After windows.h, which they need.
 #include <commctrl.h>
+#include <dwmapi.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -149,6 +160,29 @@ HWND tab_control_of(HWND top)
     return found;
 }
 
+// The system's move loop, entered by any window of this thread: never, by a
+// tab drag.
+int loop_seen = 0;
+LRESULT CALLBACK watch_sent(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION)
+    {
+        const auto* c = reinterpret_cast<const CWPSTRUCT*>(lp);
+        if (c->message == WM_ENTERSIZEMOVE || (c->message == WM_SYSCOMMAND && (c->wParam & 0xFFF0) == SC_MOVE))
+            ++loop_seen;
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+LRESULT CALLBACK watch_posted(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION)
+    {
+        const auto* m = reinterpret_cast<const MSG*>(lp);
+        if (m->message == WM_SYSCOMMAND && (m->wParam & 0xFFF0) == SC_MOVE) ++loop_seen;
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+
 // One window: its tabs, what its handlers were told, and how they answer.
 struct told_receive
 {
@@ -160,6 +194,7 @@ struct fixture;
 std::vector<std::unique_ptr<fixture>> fixtures;
 rap::ui* g_ui = nullptr;
 bool g_menu_bar = false;  // stage 1 (under a menu bar), or the caption's strip
+HWND g_hook_window = nullptr;  // a window kept to the end, for the test hooks
 
 struct fixture
 {
@@ -171,11 +206,12 @@ struct fixture
     // What it was told.
     std::vector<std::pair<std::string, std::optional<rap::point_f>>> detached;
     std::vector<told_receive> received;
+    std::vector<std::pair<std::string, int>> reordered;
     // How it answers.
     bool refuse_detach = false, accept = true;
-    bool close_emptied = false;  // on_receive closes the source it empties, there and then
+    bool close_emptied = false;    // on_receive closes the source it empties, there and then
     bool close_on_detach = false;  // on_detach closes this window once it's made the new one
-    fixture* made = nullptr;  // the window on_detach made last
+    fixture* made = nullptr;       // the window on_detach made last
 
     RECT tab(int i) const
     {
@@ -194,7 +230,7 @@ struct fixture
         const RECT r = tab(i);
         return {(r.left + r.right) / 2, (r.top + r.bottom) / 2};
     }
-    // A tab's point on the screen.
+    // A strip's point on the screen.
     POINT screen(POINT client) const
     {
         ClientToScreen(strip, &client);
@@ -212,6 +248,20 @@ struct fixture
     void escape() { SendMessageW(strip, WM_KEYDOWN, VK_ESCAPE, 1); }
     int drop_mark() const { return int(ask(top, 2)); }
     int threshold() const { return GetSystemMetricsForDpi(SM_CXDRAG, GetDpiForWindow(top)); }
+    RECT window_rect() const
+    {
+        RECT r{};
+        GetWindowRect(top, &r);
+        return r;
+    }
+    // Pressed on tab i and moved past the threshold, along the row.
+    POINT start(int i)
+    {
+        const POINT p = centre(i);
+        down(p);
+        move(POINT{p.x + threshold() + 1, p.y});
+        return p;
+    }
 };
 
 fixture* make(const std::string& name, std::vector<std::string> ids, const std::string& group);
@@ -226,6 +276,7 @@ rap::layout::document_tabs tabs_spec(fixture& f, const std::vector<std::string>&
     return rap::layout::document_tabs{items}
         .current(ids.empty() ? std::string() : ids[0])
         .group(group)
+        .on_reorder([self](const std::string& id, int index) { self->reordered.push_back({id, index}); })
         .on_detach(
             [self, group](const std::string& id, std::optional<rap::point_f> at) -> rap::window*
             {
@@ -300,26 +351,53 @@ void place(fixture& f, int x, int y)
 void stack(std::vector<HWND> v)
 {
     v.push_back(nullptr);
-    ask(v[0] ? v[0] : fixtures[0]->top, 1, reinterpret_cast<LPARAM>(v.data()));
-}
-
-// A window moved by a tab drag, as the move loop would: the pointer, at
-// `from` on the screen as it took the window, now at `to`.
-void move_window(HWND w, POINT from, POINT to, POINT window_at)
-{
-    SetWindowPos(w, nullptr, window_at.x + (to.x - from.x), window_at.y + (to.y - from.y), 0, 0,
-                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    ask(g_hook_window, 1, reinterpret_cast<LPARAM>(v.data()));
 }
 
 std::string pt(std::optional<rap::point_f> p)
 {
     return p ? std::to_string(int(p->x)) + "," + std::to_string(int(p->y)) : "none";
 }
+std::string pt(POINT p)
+{
+    return std::to_string(p.x) + "," + std::to_string(p.y);
+}
+
+// The drag image now (none: null).
+HWND image()
+{
+    return HWND(ask(g_hook_window, 3));
+}
+// As the spec has it: a popup, layered, topmost, never activated, a tool
+// window (not on the taskbar), transparent to hit tests; and never shown
+// here.
+bool image_styled(HWND h)
+{
+    const LONG_PTR need = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT;
+    return h && IsWindow(h) && (GetWindowLongPtrW(h, GWL_EXSTYLE) & need) == need &&
+           (GetWindowLongPtrW(h, GWL_STYLE) & WS_POPUP) && !IsWindowVisible(h);
+}
+
+bool same(const RECT& x, const RECT& y)
+{
+    return EqualRect(&x, &y) != FALSE;
+}
+
+// A window's frame as the desktop shows it (its invisible resize borders
+// not counted), as rapport keeps it to the work area.
+RECT frame_of(HWND h)
+{
+    RECT r{};
+    if (FAILED(DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof r)) || IsRectEmpty(&r))
+        GetWindowRect(h, &r);
+    return r;
+}
 
 void run(const char* stage)
 {
     const std::string at = std::string(" (") + stage + ")";
     const std::string tag = g_menu_bar ? "1" : "2";
+    using ids = std::vector<std::string>;
     fixture& a = *make("A" + tag, {"a", "b", "c"}, "g");
     fixture& b = *make("B" + tag, {"x", "y"}, "g");
     fixture& c = *make("C" + tag, {"p", "q"}, "other");
@@ -328,284 +406,299 @@ void run(const char* stage)
            "the windows and their strips, never shown" + at);
     if (!a.strip || !b.strip || !c.strip || !d.strip) return;
     expect(a.caption == !g_menu_bar, "the strip expected" + at);
+    g_hook_window = b.top;
     place(a, 100, 100);
     place(b, 100, 700);
     place(c, 900, 700);
     place(d, 900, 100);
     stack({a.top, b.top, c.top, d.top});
-    ask(a.top, 0, 1);  // no move loop
-    using ids = std::vector<std::string>;
+    ask(b.top, 0, 1);  // test mode: nothing shown
+    loop_seen = 0;
     const int th = a.threshold();
     RECT strip_rect;
     GetClientRect(a.strip, &strip_rect);
-    const POINT below{0, strip_rect.bottom + 200};  // past the tear-off distance, under A's strip
+    const int below = strip_rect.bottom + 200;  // past the tear-off distance, under A's strip
+    const RECT a_was = a.window_rect();
 
-    // Refused: on_detach once, nothing changes, the drag goes on.
+    // Along the row: reordered, on_reorder once, no image.
+    POINT p = a.start(0);
+    a.move(a.centre(1));
+    expect(a.tabs->ids() == ids{"b", "a", "c"} && !image(), "along the row: the others make room, no image" + at);
+    a.up(a.centre(1));
+    expect(a.reordered.size() == 1 && a.reordered[0].first == "a" && a.reordered[0].second == 1,
+           "let go: on_reorder(a, 1) once" + at);
+    a.reordered.clear();
+    // Back as it was: a, b, c.
+    a.start(1);
+    a.move(a.centre(0));
+    a.up(a.centre(0));
+    expect(a.tabs->ids() == ids{"a", "b", "c"}, "and back" + at + ": " + join(a.tabs->ids()));
+    a.reordered.clear();
+
+    // Out of the row: the drag image, nothing asked yet.
+    const RECT b_tab = a.tab(1);
+    p = a.start(1);
+    const POINT grab{p.x - b_tab.left, p.y - b_tab.top};
+    POINT out{p.x, below};
+    a.move(out);
+    HWND img = image();
+    expect(img != nullptr, "dragged out of the row: a drag image" + at);
+    expect(image_styled(img), "layered, topmost, no activation, a tool window, hit tests through; not shown here" + at);
+    expect(a.detached.empty() && a.tabs->ids() == ids{"a", "b", "c"},
+           "nothing asked yet, the tab still in its window" + at + ": " + join(a.tabs->ids()));
+    if (img)
+    {
+        RECT ir;
+        GetWindowRect(img, &ir);
+        const POINT s = a.screen(out);
+        expect(ir.left == s.x - grab.x && ir.top == s.y - grab.y,
+               "the image held under the pointer where the tab was grabbed" + at + ": " + pt(POINT{ir.left, ir.top}) +
+                   " for " + pt(POINT{s.x - grab.x, s.y - grab.y}));
+        expect(ir.right - ir.left == b_tab.right - b_tab.left, "the tab's width" + at);
+    }
+    out = POINT{p.x + 40, below + 30};
+    a.move(out);
+    if (img && IsWindow(img))
+    {
+        RECT ir;
+        GetWindowRect(img, &ir);
+        const POINT s = a.screen(out);
+        expect(ir.left == s.x - grab.x && ir.top == s.y - grab.y, "and following it" + at);
+    }
+    // Back along the row: no image, reordering again.
+    a.move(a.centre(2));
+    expect(!image() && !IsWindow(img) && a.tabs->ids() == ids{"a", "c", "b"},
+           "back along the row: the image gone, reordering" + at + ": " + join(a.tabs->ids()));
+    a.escape();
+    expect(a.tabs->ids() == ids{"a", "b", "c"}, "Escape: back where it was" + at);
+    a.up(a.centre(2));
+    expect(a.detached.empty() && a.reordered.empty(), "and nothing told" + at);
+
+    // Escape with the image out: back, the image gone, nothing asked, then or
+    // as it's let go.
+    p = a.start(1);
+    a.move(POINT{p.x, below});
+    img = image();
+    a.escape();
+    expect(img && !IsWindow(img) && !image() && a.tabs->ids() == ids{"a", "b", "c"},
+           "Escape out of the row: the image gone, the tab back" + at);
+    a.up(POINT{p.x, below});
+    expect(a.detached.empty() && a.reordered.empty() && !ask(b.top, 5), "and let go after: nothing asked" + at);
+
+    // The capture lost: the same.
+    p = a.start(2);
+    a.move(POINT{p.x, below});
+    img = image();
+    SendMessageW(a.strip, WM_CAPTURECHANGED, 0, 0);
+    expect(img && !IsWindow(img) && !image() && a.tabs->ids() == ids{"a", "b", "c"},
+           "the capture lost: the image gone, the tab back" + at);
+    a.up(POINT{p.x, below});
+    expect(a.detached.empty() && a.reordered.empty(), "and nothing asked" + at);
+    // The window deactivated: the same.
+    p = a.start(0);
+    a.move(a.centre(2));
+    a.move(POINT{p.x, below});
+    img = image();
+    SendMessageW(a.top, WM_ACTIVATE, MAKEWPARAM(WA_INACTIVE, 0), 0);
+    expect(img && !IsWindow(img) && !image() && a.tabs->ids() == ids{"a", "b", "c"},
+           "the window deactivated: the image gone, the tab back" + at + ": " + join(a.tabs->ids()));
+    a.up(POINT{p.x, below});
+    expect(a.detached.empty() && a.reordered.empty(), "and nothing asked" + at);
+
+    // Let go outside, refused: on_detach once, nothing changes.
     a.refuse_detach = true;
-    POINT p = a.centre(1);
-    a.down(p);
-    a.move(POINT{p.x + th + 1, p.y});
-    a.move(POINT{p.x, below.y});
-    const POINT torn_at = a.screen(POINT{p.x, below.y});
+    p = a.start(1);
+    a.move(POINT{p.x, below});
+    img = image();
+    a.up(POINT{p.x, below});
+    const POINT let_go = a.screen(POINT{p.x, below});
     expect(a.detached.size() == 1 && a.detached[0].first == "b",
-           "dragged out: on_detach(b) once" + at + " (" + std::to_string(a.detached.size()) + ")");
+           "let go outside: on_detach(b) once, as it's let go" + at + " (" + std::to_string(a.detached.size()) + ")");
     if (!a.detached.empty())
     {
         const float s = float(GetDpiForWindow(a.top)) / 96.f;
         const auto& q = a.detached[0].second;
-        expect(q && std::abs(q->x - torn_at.x / s) < 1 && std::abs(q->y - torn_at.y / s) < 1,
+        expect(q && std::abs(q->x - let_go.x / s) < 1 && std::abs(q->y - let_go.y / s) < 1,
                "with the pointer's place, in the window's logical px" + at + ": " + pt(q));
     }
-    a.move(POINT{p.x + 5, below.y + 50});
-    expect(a.detached.size() == 1, "refused: not asked again this drag" + at);
-    expect(a.tabs->ids() == ids{"a", "b", "c"} && !ask(a.top, 3), "refused: nothing changed, nothing moving" + at);
-    a.move(a.centre(2));
-    expect(a.tabs->ids() == ids{"a", "c", "b"}, "and the drag goes on along the row" + at + ": " + join(a.tabs->ids()));
-    a.escape();
-    expect(a.tabs->ids() == ids{"a", "b", "c"}, "Escape: back where it was" + at + ": " + join(a.tabs->ids()));
-    a.up(a.centre(2));
+    expect(a.tabs->ids() == ids{"a", "b", "c"} && !ask(b.top, 5) && img && !IsWindow(img) && !image(),
+           "null: nothing changed, nothing shown, the image gone" + at);
     a.refuse_detach = false;
     a.detached.clear();
 
-    // Escape before tearing off: back, and no detach.
-    p = a.centre(0);
-    a.down(p);
-    a.move(POINT{p.x + th + 1, p.y});
-    a.move(a.centre(2));
-    a.escape();
-    a.move(POINT{p.x, below.y});
-    a.up(POINT{p.x, below.y});
-    expect(a.detached.empty() && a.tabs->ids() == ids{"a", "b", "c"},
-           "Escape mid-drag: back at its index, and nothing torn off after" + at);
-
-    // Torn off, then dropped on B's strip.
-    p = a.centre(1);
-    a.down(p);
-    a.move(POINT{p.x + th + 1, p.y});
-    a.move(POINT{p.x, below.y});
+    // Let go outside: the app's window, put with the tab under the pointer.
+    p = a.start(1);
+    out = POINT{p.x + 30, below + 10};
+    a.move(out);
+    img = image();
+    a.up(out);
+    const POINT dropped = a.screen(out);
     expect(a.detached.size() == 1 && a.made && a.tabs->ids() == ids{"a", "c"},
-           "torn off: on_detach(b), the app's window made, b out of A" + at + ": " + join(a.tabs->ids()));
+           "let go outside: on_detach(b), the app's window made, b out of A" + at + ": " + join(a.tabs->ids()));
+    expect(img && !IsWindow(img) && !image(), "the image gone" + at);
     if (!a.made) return;
     fixture& t = *a.made;
     expect(t.tabs && t.tabs->ids() == ids{"b"} && !IsWindowVisible(t.top), "the new window holds b, never shown" + at);
-    expect(HWND(ask(a.top, 3)) == t.top, "and it's the window the drag moves" + at);
-    RECT tr;
-    GetWindowRect(t.top, &tr);
-    const POINT t_at{tr.left, tr.top};
-    POINT tab_screen = t.screen(t.centre(0));
-    expect(std::abs(tab_screen.x - torn_at.x) <= t.tab(0).right - t.tab(0).left &&
-               std::abs(tab_screen.y - torn_at.y) <= t.tab(0).bottom - t.tab(0).top,
-           "put with its tab under the pointer" + at);
-    // Over B's first tab's right half: it'd land second.
+    expect(HWND(ask(b.top, 5)) == t.top, "and it's shown (here, noted)" + at);
+    {
+        const RECT r = t.tab(0);
+        const POINT o = t.screen(POINT{r.left, r.top});
+        expect(o.x + grab.x == dropped.x && o.y + grab.y == dropped.y,
+               "put with its tab under the pointer, held where it was grabbed" + at + ": " +
+                   pt(POINT{o.x + grab.x, o.y + grab.y}) + " for " + pt(dropped));
+    }
+
+    // Near the work area's corner: kept to the work area.
+    a.made = nullptr;
+    MONITORINFO mi{sizeof mi};
+    GetMonitorInfoW(MonitorFromWindow(a.top, MONITOR_DEFAULTTONEAREST), &mi);
+    const POINT corner{mi.rcWork.right - 3, mi.rcWork.bottom - 3};
+    p = a.start(1);  // c
+    a.move(POINT{p.x, below});
+    a.move(a.client(corner));
+    a.up(a.client(corner));
+    if (a.made)
+    {
+        const RECT f = frame_of(a.made->top);
+        expect(f.left >= mi.rcWork.left && f.top >= mi.rcWork.top && f.right <= mi.rcWork.right &&
+                   f.bottom <= mi.rcWork.bottom,
+               "let go in the work area's corner: the window kept to the work area" + at);
+        expect(HWND(ask(b.top, 5)) == a.made->top, "and shown (noted)" + at);
+        a.made->win.reset();
+        a.tabs->add({"c", "Tab c", {}, {}});
+    }
+    else
+        expect(false, "let go in the corner: a window made" + at);
+    expect(a.tabs->ids() == ids{"a", "c"}, "A: a, c" + at + ": " + join(a.tabs->ids()));
+
+    // Over B's row: B marks where it'd land; let go there: B's on_receive.
+    a.detached.clear();
+    a.tabs->add({"m", "Tab m", {}, {}});
     const RECT bx = b.tab(0);
     const POINT over_b = b.screen(POINT{bx.right - 4, (bx.top + bx.bottom) / 2});
-    move_window(t.top, torn_at, over_b, t_at);
-    expect(b.drop_mark() == 1, "moved over B's strip: B marks index 1" + at + " (" + std::to_string(b.drop_mark()) + ")");
-    expect(c.drop_mark() == -1 && a.drop_mark() == -1, "and no other strip" + at);
-    // On to C (another group): no mark there, none on B.
+    p = a.start(2);  // m
+    a.move(POINT{p.x, below});
+    a.move(a.client(over_b));
+    expect(b.drop_mark() == 1 && image() && a.tabs->ids() == ids{"a", "c", "m"} && a.detached.empty(),
+           "over B's first tab's right half: B marks 1, the image out, A as it was" + at + " (" +
+               std::to_string(b.drop_mark()) + ")");
+    expect(c.drop_mark() == -1 && a.drop_mark() == -1 && d.drop_mark() == -1, "and no other row" + at);
+    // Over C's row, another group: no mark.
     const POINT over_c = c.screen(c.centre(0));
-    GetWindowRect(t.top, &tr);
-    move_window(t.top, over_b, over_c, POINT{tr.left, tr.top});
-    expect(c.drop_mark() == -1 && b.drop_mark() == -1, "over C's strip, another group: nothing marked" + at);
-    // Back over B, let go.
-    GetWindowRect(t.top, &tr);
-    move_window(t.top, over_c, over_b, POINT{tr.left, tr.top});
-    expect(b.drop_mark() == 1, "back over B: marked again" + at + " (" + std::to_string(b.drop_mark()) + ")");
-    set_keys({});
-    SendMessageW(t.top, WM_EXITSIZEMOVE, 0, 0);
-    expect(b.received.size() == 1 && b.received[0].id == "b" && b.received[0].index == 1 &&
-               b.received[0].source == t.win.get(),
-           "let go over B: on_receive(b, 1, the torn-off window) once" + at + " (" +
-               std::to_string(b.received.size()) + (b.received.empty() ? "" : ", " + b.received[0].id + " " + std::to_string(b.received[0].index)) + ")");
-    expect(b.tabs->ids() == ids{"x", "b", "y"} && t.tabs->ids().empty() && b.drop_mark() == -1 && !ask(a.top, 3),
-           "the app moved it: B has it second, the torn-off window's empty, nothing marked or moving" + at + ": " +
-               join(b.tabs->ids()));
+    a.move(a.client(over_c));
+    expect(c.drop_mark() == -1 && b.drop_mark() == -1, "over C's row, another group: nothing marked" + at);
+    a.move(a.client(over_b));
+    img = image();
+    a.up(a.client(over_b));
+    expect(b.received.size() == 1 && b.received[0].id == "m" && b.received[0].index == 1 &&
+               b.received[0].source == a.win.get(),
+           "let go over B: on_receive(m, 1, A) once" + at);
+    expect(b.tabs->ids() == ids{"x", "m", "y"} && a.tabs->ids() == ids{"a", "c"} && b.drop_mark() == -1 &&
+               a.detached.empty() && img && !IsWindow(img),
+           "the app moved it; nothing marked, nothing detached, the image gone" + at + ": " + join(b.tabs->ids()));
     expect(c.received.empty(), "and C was asked nothing" + at);
-
-    // Torn off again, refused by B: nothing changes.
+    // Refused by B: both as they were.
     b.received.clear();
     b.accept = false;
-    a.made = nullptr;
-    p = a.centre(1);  // c
-    a.down(p);
-    a.move(POINT{p.x + th + 1, p.y});
-    a.move(POINT{p.x, below.y});
-    if (!a.made) return expect(false, "torn off again" + at);
-    fixture& t2 = *a.made;
-    GetWindowRect(t2.top, &tr);
-    const RECT b0 = b.tab(0);
-    const POINT b_first = b.screen(POINT{b0.left + 4, (b0.top + b0.bottom) / 2});
-    move_window(t2.top, a.screen(POINT{p.x, below.y}), b_first, POINT{tr.left, tr.top});
-    expect(b.drop_mark() == 0, "over B's first tab's left half: index 0" + at + " (" + std::to_string(b.drop_mark()) + ")");
-    SendMessageW(t2.top, WM_EXITSIZEMOVE, 0, 0);
-    expect(b.received.size() == 1 && b.received[0].id == "c" && b.tabs->ids() == ids{"x", "b", "y"} &&
-               t2.tabs->ids() == ids{"c"},
+    p = a.start(1);  // c
+    a.move(a.client(over_b));
+    a.up(a.client(over_b));
+    expect(b.received.size() == 1 && b.tabs->ids() == ids{"x", "m", "y"} && a.tabs->ids() == ids{"a", "c"} &&
+               a.detached.empty() && !image(),
            "B's on_receive says no: both rows as they were" + at);
     b.accept = true;
-
-    // Escape at a torn-off window's move: the tab offered back where it was.
-    p = t2.centre(0);
-    a.received.clear();
-    // t2 has the one tab: dragging it moves t2 itself.
-    t2.down(p);
-    t2.move(POINT{p.x + th + 1, p.y});
-    expect(HWND(ask(a.top, 3)) == t2.top && t2.detached.empty(),
-           "the only tab, dragged: its window moves, nothing torn off" + at);
-    SendMessageW(t2.top, WM_EXITSIZEMOVE, 1, 0);  // the move loop ended by Escape
-    expect(a.received.empty(), "its own move cancelled: nothing offered (it wasn't torn off by this drag)" + at);
-
-    // Torn off from A and cancelled with Escape: offered back to A at its index.
-    a.tabs->add({"k", "Tab k", {}, {}});
-    a.made = nullptr;
-    p = a.centre(0);  // a
-    a.down(p);
-    a.move(POINT{p.x + th + 1, p.y});
-    a.move(POINT{p.x, below.y});
-    if (!a.made) return expect(false, "torn off a third time" + at);
-    fixture& t3 = *a.made;
-    SendMessageW(t3.top, WM_EXITSIZEMOVE, 1, 0);  // the move loop ended by Escape
-    expect(a.received.size() == 1 && a.received[0].id == "a" && a.received[0].index == 0 &&
-               a.received[0].source == t3.win.get(),
-           "Escape at the torn-off window's move: offered back to A at index 0" + at);
-    expect(a.tabs->ids() == ids{"a", "k"} && t3.tabs->ids().empty(), "and taken back" + at + ": " + join(a.tabs->ids()));
-
-    // No group: Escape sends it home all the same (a group limits drops on
-    // other windows' strips, not going back).
-    fixture& e = *make("E" + tag, {"e1", "e2"}, "");
-    p = e.centre(0);
-    e.down(p);
-    e.move(POINT{p.x + th + 1, p.y});
-    e.move(POINT{p.x, below.y});
-    if (!e.made) return expect(false, "torn off with no group" + at);
-    fixture& te = *e.made;
-    expect(e.tabs->ids() == ids{"e2"} && HWND(ask(a.top, 3)) == te.top,
-           "no group: torn off all the same, its window moving" + at);
-    SendMessageW(te.top, WM_EXITSIZEMOVE, 1, 0);  // the move loop ended by Escape
-    expect(e.received.size() == 1 && e.received[0].id == "e1" && e.received[0].index == 0 &&
-               e.received[0].source == te.win.get(),
-           "no group, Escape: sent home, E's on_receive(e1, 0, the torn-off window)" + at);
-    expect(e.tabs->ids() == ids{"e1", "e2"} && te.tabs->ids().empty(),
-           "and back in E, the torn-off window empty (the app's to close)" + at + ": " + join(e.tabs->ids()));
-
-    // Straight onto another window's strip, no tearing off.
-    a.tabs->add({"m", "Tab m", {}, {}});
     b.received.clear();
-    a.detached.clear();
-    p = a.centre(2);  // m
-    a.down(p);
-    a.move(POINT{p.x + th + 1, p.y});
-    const RECT by = b.tab(1);
-    a.move(a.client(b.screen(POINT{by.right - 2, (by.top + by.bottom) / 2})));
-    expect(b.drop_mark() == 2 && a.tabs->ids() == ids{"a", "k", "m"} && a.detached.empty(),
-           "dragged onto B's strip: B marks index 2, A keeps it in place, nothing torn off" + at + " (" +
-               std::to_string(b.drop_mark()) + ")");
-    a.move(a.centre(0));
-    expect(b.drop_mark() == -1 && a.tabs->ids() == ids{"m", "a", "k"},
-           "back over its own: along its row again" + at + ": " + join(a.tabs->ids()));
-    a.move(a.client(b.screen(POINT{by.right - 2, (by.top + by.bottom) / 2})));
-    a.up(a.client(b.screen(POINT{by.right - 2, (by.top + by.bottom) / 2})));
-    expect(b.received.size() == 1 && b.received[0].id == "m" && b.received[0].index == 2 &&
-               b.received[0].source == a.win.get(),
-           "let go there: B's on_receive(m, 2, A)" + at);
-    expect(b.tabs->ids() == ids{"x", "b", "m", "y"} && a.tabs->ids() == ids{"a", "k"} && b.drop_mark() == -1,
-           "and the app moved it" + at + ": " + join(b.tabs->ids()));
-
-    // Onto C, another group: nothing marked (it'd be torn off there: refused).
-    a.tabs->add({"n", "Tab n", {}, {}});
+    // Let go over C's row (another group): outside every row of the group,
+    // so on_detach; refused here.
     a.refuse_detach = true;
-    p = a.centre(1);
-    a.down(p);
-    a.move(POINT{p.x + th + 1, p.y});
-    const POINT on_c = a.client(c.screen(c.centre(0)));
-    a.move(on_c);
-    expect(c.drop_mark() == -1, "dragged onto C's strip, another group: not marked" + at);
-    a.escape();
-    a.up(on_c);
-    expect(c.received.empty() && a.tabs->ids() == ids{"a", "k", "n"}, "and asked nothing" + at);
+    p = a.start(1);
+    a.move(a.client(over_c));
+    a.up(a.client(over_c));
+    expect(c.received.empty() && a.detached.size() == 1 && a.tabs->ids() == ids{"a", "c"},
+           "let go over another group's row: C asked nothing, on_detach asked" + at);
     a.refuse_detach = false;
+    a.detached.clear();
 
-    // The only tab: its window moves, and it's dropped on B.
-    b.received.clear();
-    p = d.centre(0);
-    d.down(p);
-    d.move(POINT{p.x + th + 1, p.y});
-    expect(HWND(ask(a.top, 3)) == d.top && d.detached.empty(),
-           "the only tab dragged: D itself moves (no on_detach)" + at);
-    GetWindowRect(d.top, &tr);
-    move_window(d.top, d.screen(POINT{p.x + th + 1, p.y}), b_first, POINT{tr.left, tr.top});
-    expect(b.drop_mark() == 0, "D over B's strip: marked" + at);
-    SendMessageW(d.top, WM_EXITSIZEMOVE, 0, 0);
-    expect(b.received.size() == 1 && b.received[0].id == "solo" && b.received[0].source == d.win.get() &&
-               d.tabs->ids().empty(),
-           "let go: B takes solo from D, D left empty (the app's to close)" + at);
-    expect(IsWindow(d.top), "rapport doesn't close it" + at);
-
-    // The app closing the emptied window in its on_receive, there and then,
-    // as the drag's end asks it: nothing of that window touched after (its
-    // window proc carries on with nothing).
-    b.received.clear();
+    // A window's only tab: dragged, it's only the tab.
+    const RECT d_was = d.window_rect();
+    p = d.start(0);
+    d.move(POINT{p.x, below});
+    img = image();
+    expect(img && image_styled(img) && same(d.window_rect(), d_was),
+           "the only tab dragged out: the drag image, the window where it was" + at);
+    d.up(POINT{p.x, below});
+    expect(d.detached.empty() && d.tabs->ids() == ids{"solo"} && same(d.window_rect(), d_was) && !IsWindow(img) &&
+               !ask(b.top, 5),
+           "let go outside: nothing (no on_detach, the window not moved), the image gone" + at);
+    // Back on its own row: nothing.
+    p = d.start(0);
+    d.move(POINT{p.x, below});
+    d.move(p);
+    d.up(p);
+    expect(d.detached.empty() && d.reordered.empty() && d.received.empty() && d.tabs->ids() == ids{"solo"} &&
+               same(d.window_rect(), d_was) && !image(),
+           "let go on its own row: nothing" + at);
+    // Onto B's row: moved there, the app closing the emptied window there
+    // and then.
     b.close_emptied = true;
-    a.made = nullptr;
-    p = a.centre(1);  // k
-    a.down(p);
-    a.move(POINT{p.x + th + 1, p.y});
-    a.move(POINT{p.x, below.y});
-    if (!a.made) return expect(false, "torn off to be closed" + at);
-    fixture& tc = *a.made;
-    const HWND tc_top = tc.top;
-    GetWindowRect(tc_top, &tr);
-    move_window(tc_top, a.screen(POINT{p.x, below.y}), b_first, POINT{tr.left, tr.top});
-    set_keys({});
-    SendMessageW(tc_top, WM_EXITSIZEMOVE, 0, 0);
-    expect(b.received.size() == 1 && b.received[0].id == "k" && !tc.win && !IsWindow(tc_top) && !ask(a.top, 3),
-           "let go over B, whose on_receive closes the emptied window: closed, nothing moving" + at);
-    expect(a.tabs->ids() == ids{"a", "n"} && b.tabs->ids().front() == "k", "and B has k first" + at);
+    const RECT b0 = b.tab(0);
+    const POINT b_first = b.screen(POINT{b0.left + 4, (b0.top + b0.bottom) / 2});
+    const HWND d_top = d.top;
+    p = d.start(0);
+    d.move(d.client(b_first));
+    expect(b.drop_mark() == 0, "the only tab over B's first tab's left half: B marks 0" + at);
+    img = image();
+    d.up(d.client(b_first));
+    expect(b.received.size() == 1 && b.received[0].id == "solo" && b.received[0].index == 0 && !d.win &&
+               !IsWindow(d_top) && img && !IsWindow(img) && !image(),
+           "let go over B: B takes solo, the app closing D in on_receive; the image gone" + at);
+    expect(b.tabs->ids() == ids{"solo", "x", "m", "y"}, "B has it first" + at + ": " + join(b.tabs->ids()));
     b.close_emptied = false;
-    // Escape: sent home, and A's on_receive closing it likewise.
-    a.close_emptied = true;
-    a.received.clear();
-    a.made = nullptr;
-    p = a.centre(0);  // a
-    a.down(p);
-    a.move(POINT{p.x + th + 1, p.y});
-    a.move(POINT{p.x, below.y});
-    if (!a.made) return expect(false, "torn off to be sent home and closed" + at);
-    fixture& th2 = *a.made;
-    const HWND th2_top = th2.top;
-    SendMessageW(th2_top, WM_EXITSIZEMOVE, 1, 0);  // the move loop ended by Escape
-    expect(a.received.size() == 1 && a.received[0].id == "a" && !th2.win && !IsWindow(th2_top) && !ask(a.top, 3),
-           "Escape, A's on_receive taking it home and closing the emptied window: closed" + at);
-    expect(a.tabs->ids() == ids{"a", "n"}, "and A has it back where it was" + at + ": " + join(a.tabs->ids()));
-    a.close_emptied = false;
+    b.received.clear();
 
-    // on_detach making the window and closing its own there and then: the
-    // app's window shown and carried all the same, holding the tab.
+    // A torn off window's tab, the source closed in on_receive likewise.
+    a.made = nullptr;
+    p = a.start(1);  // c
+    a.move(POINT{p.x, below});
+    a.up(POINT{p.x, below});
+    if (!a.made) return expect(false, "torn off again" + at);
+    fixture& t2 = *a.made;
+    const HWND t2_top = t2.top;
+    b.close_emptied = true;
+    const rap::window* t2_win = t2.win.get();
+    p = t2.start(0);
+    t2.move(t2.client(b_first));
+    t2.up(t2.client(b_first));
+    expect(b.received.size() == 1 && b.received[0].id == "c" && b.received[0].source == t2_win && !t2.win &&
+               !IsWindow(t2_top) && b.tabs->ids().front() == "c",
+           "a torn-off window's only tab onto B: on_receive(c, 0, it), its window closed by the app" + at);
+    b.close_emptied = false;
+
+    // on_detach closing its own window there and then: the app's window put
+    // and shown all the same.
     fixture& s = *make("S" + tag, {"s1", "s2"}, "g");
     place(s, 500, 400);
     s.close_on_detach = true;
     const HWND s_top = s.top;
-    ask(a.top, 5);
+    ask(b.top, 5);
     RECT s_strip;
     GetClientRect(s.strip, &s_strip);
-    p = s.centre(0);
-    s.down(p);
-    s.move(POINT{p.x + th + 1, p.y});
-    s.move(POINT{p.x, s_strip.bottom + 200});  // torn off, and S closed
+    p = s.start(0);
+    s.move(POINT{p.x, s_strip.bottom + 200});
+    img = image();
+    s.up(POINT{p.x, s_strip.bottom + 200});
     fixture* sm = s.made;
     expect(!s.win && !IsWindow(s_top) && sm && sm->tabs && sm->tabs->ids() == ids{"s1"},
            "on_detach closing its own window: closed, the app's window holds s1" + at);
-    expect(sm && HWND(ask(a.top, 5)) == sm->top && HWND(ask(a.top, 3)) == sm->top && !IsWindowVisible(sm->top),
-           "and it's shown (the tests' noted) and the drag carries it" + at);
-    if (sm)
-    {
-        SendMessageW(sm->top, WM_EXITSIZEMOVE, 1, 0);  // Escape: no home to go back to
-        expect(sm->tabs->ids() == ids{"s1"} && !ask(a.top, 3), "Escape: it stays, nothing moving" + at);
-    }
+    expect(sm && HWND(ask(b.top, 5)) == sm->top && !IsWindowVisible(sm->top) && img && !IsWindow(img),
+           "and it's shown (noted), the image gone" + at);
+
+    expect(loop_seen == 0 && same(a.window_rect(), a_was), "never the move loop, no window moved by a drag" + at);
 
     // The right-click menu: the fixed items, then the app's.
     tab_menu_capture cap{};
     cap.choose = -1;
-    ask(a.top, 4, reinterpret_cast<LPARAM>(&cap));
+    ask(b.top, 4, reinterpret_cast<LPARAM>(&cap));
     a.tabs->add({"o", "Tab o", {}, {}});
     const POINT o_at = a.screen(a.centre(0));
     SendMessageW(a.strip, WM_CONTEXTMENU, WPARAM(a.strip), MAKELPARAM(o_at.x, o_at.y));
@@ -619,23 +712,25 @@ void run(const char* stage)
     // Move to new window: on_detach with no point.
     a.detached.clear();
     a.made = nullptr;
-    ask(a.top, 5);
+    ask(b.top, 5);
     cap = tab_menu_capture{};
     cap.choose = 3;
     SendMessageW(a.strip, WM_CONTEXTMENU, WPARAM(a.strip), MAKELPARAM(o_at.x, o_at.y));
     expect(a.detached.size() == 1 && a.detached[0].first == "a" && !a.detached[0].second,
            "Move to new window: on_detach(a) with no point" + at);
-    expect(!ask(a.top, 3), "and nothing's moving: the app places the window" + at);
     // Shown, as the handler returns it unshown (here, never shown: noted).
-    expect(a.made && HWND(ask(a.top, 5)) == a.made->top && !IsWindowVisible(a.made->top),
+    expect(a.made && HWND(ask(b.top, 5)) == a.made->top && !IsWindowVisible(a.made->top),
            "and the app's window shown (the tests' noted, not shown)" + at);
     // A window's only tab: the item disabled.
     cap = tab_menu_capture{};
     cap.choose = -1;
-    fixture& lone = *a.made;
-    const POINT lone_at = lone.screen(lone.centre(0));
-    SendMessageW(lone.strip, WM_CONTEXTMENU, WPARAM(lone.strip), MAKELPARAM(lone_at.x, lone_at.y));
-    expect(cap.count > 3 && !cap.enabled[3], "the only tab: Move to new window disabled" + at);
+    if (a.made)
+    {
+        fixture& lone = *a.made;
+        const POINT lone_at = lone.screen(lone.centre(0));
+        SendMessageW(lone.strip, WM_CONTEXTMENU, WPARAM(lone.strip), MAKELPARAM(lone_at.x, lone_at.y));
+        expect(cap.count > 3 && !cap.enabled[3], "the only tab: Move to new window disabled" + at);
+    }
     // The keys, where the strip takes the focus (the caption's).
     if (a.caption)
     {
@@ -653,22 +748,24 @@ void run(const char* stage)
         set_keys({});
         expect(cap.count == 7 && cap.opened == 1, "Shift+F10: the menu, once" + at);
     }
-    ask(a.top, 4, 0);
-    ask(a.top, 0, 0);
+    ask(b.top, 4, 0);
+    ask(b.top, 0, 0);
     stack({});
-    ask(a.top, 1, 0);
+    ask(b.top, 1, 0);
 }
 
 // -- --input: the real thing, CI only ----------------------------------------
 //
-// Shown windows, the real mouse and keys (SendInput): a tab dragged out of
-// A tears off into the app's window, which the system's move loop carries
-// with the pointer onto B's strip, where it's let go: B's on_receive; one
-// torn off and Escape pressed mid-move: offered back to A; a window's only
-// tab dragged: the window moves, and dropped on B. The z-order is the
-// desktop's (no stand-in), and nothing's simulated. Real input moves the
-// pointer and presses keys on whatever desktop it runs on, so it runs only
-// on a CI runner: GITHUB_ACTIONS=true and RAPPORT_TEST_SEND_INPUT=1.
+// Shown windows, the real mouse and keys (SendInput), the desktop's z-order:
+// A's tab dragged out and let go on the desktop: on_detach then, and the
+// app's window shown with its tab where it was let go; one dragged onto B's
+// row: B takes it; D's only tab dragged out and let go: nothing, D not
+// moved; then onto B's row: B takes it and the app closes D; Escape with a
+// tab out: back, nothing asked. Each step waits for what it's after (the
+// pointer there, the drag's capture, the handler's call) with a bounded
+// timeout, and a step that fails or times out ends the test then. Real input
+// moves the pointer and presses keys on whatever desktop it runs on, so it
+// runs only on a CI runner: GITHUB_ACTIONS=true and RAPPORT_TEST_SEND_INPUT=1.
 
 bool env_is(const char* name, const char* value)
 {
@@ -682,8 +779,8 @@ void send_mouse(POINT screen, DWORD flags)
     const int w = std::max(2, GetSystemMetrics(SM_CXVIRTUALSCREEN)), h = std::max(2, GetSystemMetrics(SM_CYVIRTUALSCREEN));
     INPUT in{};
     in.type = INPUT_MOUSE;
-    in.mi.dx = LONG((int64_t(screen.x - x0) * 65535) / (w - 1));
-    in.mi.dy = LONG((int64_t(screen.y - y0) * 65535) / (h - 1));
+    in.mi.dx = LONG((int64_t(screen.x - x0) * 65535 + (w - 1) / 2) / (w - 1));
+    in.mi.dy = LONG((int64_t(screen.y - y0) * 65535 + (h - 1) / 2) / (h - 1));
     in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | flags;
     SendInput(1, &in, sizeof in);
 }
@@ -696,16 +793,33 @@ void send_key(WORD vk, bool up)
     SendInput(1, &in, sizeof in);
 }
 
-// Steps, one a timer tick: the input's taken by the loop (or the move
-// loop, which dispatches the timer too) between them.
-std::vector<std::function<void()>> steps;
-
-// A drag in steps: pressed at `from`, through `via`, let go at `to`
-// (or not, `release` false), each move a step of its own.
-void drag(POINT from, std::vector<POINT> via, POINT to, bool release = true)
+// The steps: each an action, then a condition it waits for (true at once if
+// none), with a timeout; a step whose condition isn't met in time fails the
+// test and ends it.
+struct step
 {
-    steps.push_back([from] { send_mouse(from, 0); });
-    steps.push_back([from] { send_mouse(from, MOUSEEVENTF_LEFTDOWN); });
+    std::string what;
+    std::function<void()> act;
+    std::function<bool()> done;
+    int timeout_ms = 3000;
+};
+std::vector<step> steps;
+
+bool pointer_at(POINT p)
+{
+    POINT c{};
+    GetCursorPos(&c);
+    return std::abs(c.x - p.x) <= 1 && std::abs(c.y - p.y) <= 1;
+}
+
+// A drag in steps: pressed at `from` on `f`'s strip (the drag's capture
+// taken), through `via`, to `to`, each move waited for (the pointer there),
+// and let go there (or not, `release` false).
+void drag(fixture& f, POINT from, std::vector<POINT> via, POINT to, bool release = true)
+{
+    steps.push_back({"the pointer on the tab", [from] { send_mouse(from, 0); }, [from] { return pointer_at(from); }});
+    steps.push_back({"pressed: the strip has the mouse", [from] { send_mouse(from, MOUSEEVENTF_LEFTDOWN); },
+                     [&f] { return GetCapture() == f.strip; }});
     via.push_back(to);
     POINT last = from;
     for (POINT p : via)
@@ -713,12 +827,17 @@ void drag(POINT from, std::vector<POINT> via, POINT to, bool release = true)
         for (int k = 1; k <= 6; ++k)
         {
             const POINT q{last.x + (p.x - last.x) * k / 6, last.y + (p.y - last.y) * k / 6};
-            steps.push_back([q] { send_mouse(q, 0); });
+            steps.push_back({"the pointer moved", [q] { send_mouse(q, 0); }, [q] { return pointer_at(q); }});
         }
         last = p;
     }
-    if (release) steps.push_back([to] { send_mouse(to, MOUSEEVENTF_LEFTUP); });
-    steps.push_back([] {});  // the drop's handled
+    if (release)
+        steps.push_back({"let go: the drag over", [to] { send_mouse(to, MOUSEEVENTF_LEFTUP); },
+                         [&f] { return !f.win || GetCapture() != f.strip; }});
+}
+void check(std::string what, std::function<bool()> ok, int timeout_ms = 3000)
+{
+    steps.push_back({std::move(what), [] {}, std::move(ok), timeout_ms});
 }
 
 int input_mode(rap::ui& ui)
@@ -730,103 +849,133 @@ int input_mode(rap::ui& ui)
         return 77;
     }
     g_menu_bar = windows_build() < 22000;  // the caption's strip where there is one
-    fixture& a = *make("Input A", {"a", "b", "c"}, "g");
+    fixture& a = *make("Input A", {"a", "b", "c", "e"}, "g");
     fixture& b = *make("Input B", {"x", "y"}, "g");
     fixture& d = *make("Input D", {"solo"}, "g");
-    fixture& u = *make("Input U", {"u1", "u2"}, "");  // no group
     if (!a.strip || !b.strip || !d.strip) return expect(false, "the windows' strips"), 1;
-    for (fixture* f : {&a, &b, &d, &u}) f->win->show();
+    for (fixture* f : {&a, &b, &d}) f->win->show();
     place(a, 80, 80);
     place(b, 80, 520);
     place(d, 840, 80);
-    place(u, 840, 520);
     SetForegroundWindow(a.top);
     pump();
     using ids = std::vector<std::string>;
-    // A's b, torn off downward, carried onto B's first tab's right half.
-    const POINT from = a.screen(a.centre(1));
-    RECT ar;
+    RECT ar, dr;
     GetWindowRect(a.top, &ar);
+    GetWindowRect(d.top, &dr);
     const RECT bx = b.tab(0);
     const POINT over_b = b.screen(POINT{bx.right - 6, (bx.top + bx.bottom) / 2});
-    const POINT on_b = b.screen(POINT{bx.left + 6, (bx.top + bx.bottom) / 2});
-    const POINT out{from.x, ar.bottom - 40}, out2{from.x, ar.bottom + 60};
-    steps.push_back([] {});
-    drag(from, {POINT{from.x + 12, from.y}, out}, over_b);
-    steps.push_back(
+    // Below A and D, between them and B: the desktop's.
+    const POINT from_b = a.screen(a.centre(1));
+    const POINT out{from_b.x + 40, ar.bottom + 60};
+
+    // A's b, dragged out and let go: on_detach then, the window shown there.
+    drag(a, from_b, {POINT{from_b.x + 12, from_b.y}, POINT{from_b.x, ar.bottom + 20}}, out, false);
+    check("dragged out: nothing asked before it's let go", [&] { return a.detached.empty(); }, 0);
+    steps.push_back({"let go outside: on_detach(b) once", [out] { send_mouse(out, MOUSEEVENTF_LEFTUP); },
+                     [&] { return a.detached.size() == 1 && a.made && a.made->win; }});
+    check("its window shown with its tab where it was let go",
+          [&]
+          {
+              if (!a.made || !IsWindowVisible(a.made->top)) return false;
+              RECT r = a.made->tab(0);
+              MapWindowPoints(a.made->strip, nullptr, reinterpret_cast<POINT*>(&r), 2);
+              return PtInRect(&r, out) != FALSE;
+          });
+    check("and b out of A",
+          [&] { return a.tabs->ids() == ids{"a", "c", "e"} && a.made && a.made->tabs->ids() == ids{"b"}; });
+    steps.push_back({"(the new window closed)", [&] {
+                         if (a.made) a.made->win.reset();
+                     },
+                     nullptr});
+    // A's c onto B's row: B takes it, second.
+    const POINT from_c = a.screen(a.centre(1));
+    drag(a, from_c, {POINT{from_c.x + 12, from_c.y}, POINT{from_c.x, ar.bottom + 20}}, over_b);
+    check("dragged onto B's row and let go: on_receive(c, 1, A)",
+          [&]
+          {
+              return b.received.size() == 1 && b.received[0].id == "c" && b.received[0].index == 1 &&
+                     b.received[0].source == a.win.get();
+          });
+    check("and the app moved it", [&] { return b.tabs->ids() == ids{"x", "c", "y"} && a.tabs->ids() == ids{"a", "e"}; });
+    // Escape with a tab out: back, nothing asked.
+    const POINT from_e = a.screen(a.centre(1));
+    drag(a, from_e, {POINT{from_e.x + 12, from_e.y}, POINT{from_e.x, ar.bottom + 20}}, out, false);
+    steps.push_back({"Escape", [] { send_key(VK_ESCAPE, false); }, [&] { return GetCapture() != a.strip; }});
+    steps.push_back({"and let go", [out] {
+                         send_key(VK_ESCAPE, true);
+                         send_mouse(out, MOUSEEVENTF_LEFTUP);
+                     },
+                     [] { return GetAsyncKeyState(VK_LBUTTON) >= 0; }});
+    check("Escape: nothing asked, A as it was",
+          [&] { return a.detached.size() == 1 && a.tabs->ids() == ids{"a", "e"} && b.received.size() == 1; });
+    // D's only tab out and let go: nothing, D where it was.
+    const POINT from_d = d.screen(d.centre(0));
+    const POINT out_d{from_d.x, dr.bottom + 60};
+    drag(d, from_d, {POINT{from_d.x + 12, from_d.y}, POINT{from_d.x, dr.bottom + 20}}, out_d);
+    check("the only tab dragged out and let go: nothing, D not moved",
+          [&]
+          {
+              RECT now;
+              GetWindowRect(d.top, &now);
+              return d.detached.empty() && d.tabs->ids() == ids{"solo"} && EqualRect(&now, &dr);
+          });
+    // Then onto B's row: B takes it, and the app closes D.
+    steps.push_back({"(B closes what it empties)", [&] { b.close_emptied = true; }, nullptr});
+    drag(d, from_d, {POINT{from_d.x + 12, from_d.y}, POINT{from_d.x, dr.bottom + 20}}, over_b);
+    check("the only tab onto B's row: B takes it, D closed",
+          [&]
+          {
+              const std::vector<std::string> now = b.tabs->ids();
+              return b.received.size() == 2 && b.received[1].id == "solo" && !d.win &&
+                     std::find(now.begin(), now.end(), "solo") != now.end();
+          });
+
+    size_t at = 0;
+    bool acted = false;
+    auto since = std::chrono::steady_clock::now();
+    const auto started = since;
+    int code = 0;
+    rap::subscription tick = ui.timer(
+        30, true,
         [&]
         {
-            expect(a.detached.size() == 1 && a.detached[0].first == "b", "real input: torn off, on_detach(b) once");
-            expect(a.made && b.received.size() == 1 && b.received[0].id == "b" && b.received[0].index == 1 &&
-                       b.received[0].source == a.made->win.get(),
-                   "carried by the move loop onto B and let go: on_receive(b, 1, the torn-off window)");
-            expect(b.tabs->ids() == ids{"x", "b", "y"} && a.tabs->ids() == ids{"a", "c"},
-                   "and the app moved it: " + join(b.tabs->ids()));
-            if (a.made) a.made->win->close();  // empty: the app's to close
-            a.made = nullptr;
+            // The whole run's bound, past any one step's.
+            if (std::chrono::steady_clock::now() - started > std::chrono::seconds(60))
+            {
+                expect(false, "the run finished within 60 s");
+                code = 1;
+                return ui.quit(1);
+            }
+            if (at >= steps.size()) return ui.quit(0);
+            step& s = steps[at];
+            if (!acted)
+            {
+                acted = true;
+                since = std::chrono::steady_clock::now();
+                if (s.act) s.act();
+            }
+            if (!s.done || s.done())
+            {
+                if (s.done) expect(true, s.what);
+                ++at;
+                acted = false;
+                return;
+            }
+            const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since);
+            if (waited.count() >= s.timeout_ms)
+            {
+                expect(false, s.what + " (timed out after " + std::to_string(waited.count()) + " ms)");
+                code = 1;
+                ui.quit(1);
+            }
         });
-    // Then c (where b was) torn off, and Escape pressed mid-move: offered
-    // back to A.
-    drag(from, {POINT{from.x + 12, from.y}}, out2, false);
-    steps.push_back([] { send_key(VK_ESCAPE, false); });
-    steps.push_back([] { send_key(VK_ESCAPE, true); });
-    steps.push_back([out2] { send_mouse(out2, MOUSEEVENTF_LEFTUP); });
-    steps.push_back([] {});
-    steps.push_back(
-        [&]
-        {
-            expect(a.received.size() == 1 && a.received[0].id == "c" && a.received[0].index == 1,
-                   "Escape mid-move: offered back to A at its index");
-            expect(a.tabs->ids() == ids{"a", "c"}, "and taken back: " + join(a.tabs->ids()));
-            if (a.made) a.made->win->close();
-            b.received.clear();
-        });
-    // U's u1 (no group) torn off and Escape pressed mid-move: sent home all
-    // the same.
-    const POINT from_u = u.screen(u.centre(0));
-    RECT ur;
-    GetWindowRect(u.top, &ur);
-    const POINT out_u{from_u.x, ur.bottom + 60};
-    drag(from_u, {POINT{from_u.x + 12, from_u.y}}, out_u, false);
-    steps.push_back([] { send_key(VK_ESCAPE, false); });
-    steps.push_back([] { send_key(VK_ESCAPE, true); });
-    steps.push_back([out_u] { send_mouse(out_u, MOUSEEVENTF_LEFTUP); });
-    steps.push_back([] {});
-    steps.push_back(
-        [&]
-        {
-            expect(u.received.size() == 1 && u.received[0].id == "u1" && u.received[0].index == 0,
-                   "no group, Escape mid-move: sent home to U at its index");
-            expect(u.tabs->ids() == ids{"u1", "u2"}, "and taken back: " + join(u.tabs->ids()));
-            if (u.made) u.made->win->close();
-        });
-    // D's only tab: D itself moves, and it's dropped on B.
-    const POINT from3 = d.screen(d.centre(0));
-    drag(from3, {POINT{from3.x + 12, from3.y}}, on_b);
-    steps.push_back(
-        [&]
-        {
-            expect(d.detached.empty() && b.received.size() == 1 && b.received[0].id == "solo" &&
-                       b.received[0].source == d.win.get(),
-                   "the only tab dragged: its window moved onto B, which takes it");
-        });
-    size_t step = 0;
-    rap::subscription tick = ui.timer(60, true,
-                                      [&]
-                                      {
-                                          if (step < steps.size())
-                                          {
-                                              auto s = steps[step++];
-                                              s();
-                                              return;
-                                          }
-                                          ui.quit(0);
-                                      });
     ui.run();
     send_mouse(POINT{0, 0}, MOUSEEVENTF_LEFTUP);
+    send_key(VK_ESCAPE, true);
     fixtures.clear();
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
-    return fails ? 1 : 0;
+    return fails || code ? 1 : 0;
 }
 
 }  // namespace
@@ -840,6 +989,8 @@ int main(int argc, char** argv)
     std::printf("build %lu\n", windows_build());
     for (int i = 1; i < argc; ++i)
         if (std::strcmp(argv[i], "--input") == 0) return input_mode(**ui);
+    HHOOK sent = SetWindowsHookExW(WH_CALLWNDPROC, watch_sent, nullptr, GetCurrentThreadId());
+    HHOOK posted = SetWindowsHookExW(WH_GETMESSAGE, watch_posted, nullptr, GetCurrentThreadId());
     g_menu_bar = true;
     run("stage 1, under a menu bar");
     if (windows_build() >= 22000)
@@ -851,7 +1002,10 @@ int main(int argc, char** argv)
         std::printf("     no caption strip before Windows 11: stage 1 only\n");
     pump();
     set_keys({});
-    for (auto& f : fixtures) expect(f->top && !IsWindowVisible(f->top), "never shown, to the end: " + f->name);
+    for (auto& f : fixtures)
+        expect(!f->win || (f->top && !IsWindowVisible(f->top)), "never shown, to the end: " + f->name);
+    if (sent) UnhookWindowsHookEx(sent);
+    if (posted) UnhookWindowsHookEx(posted);
     fixtures.clear();
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
