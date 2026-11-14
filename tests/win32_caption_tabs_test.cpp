@@ -11,7 +11,9 @@
 // button and "+" are the strip's. rapport's own pixels, printed (as a pane's
 // copy is) and, shown, on screen: the strip's empty part clear (alpha 0) for
 // the backdrop, opaque in high contrast; the current tab the band's colour
-// with its edge the divider's, one with the band under the strip; the line
+// with its edge the divider's, one with the band under the strip (a toolbar
+// band's: WinUI's LayerOnMicaBaseAltFillColorDefault at its own alpha, premultiplied, its
+// title grey; on screen, that over the backdrop); the line
 // between strip and band elsewhere, under the caption buttons too. Its
 // text: the titles in the UI font (Segoe UI Variable Text, else Segoe UI),
 // as heavy as that face is, the current one in WinUI's TextFillColorPrimary,
@@ -19,9 +21,12 @@
 // runner's own font smoothing is ClearType (read, never changed), grey over
 // the backdrop, a hovered tab too (its fill WinUI's translucent
 // LayerOnMicaBaseAltFillColorSecondary; the hover a WM_MOUSEMOVE sent to
-// the strip, not input); "+" and the close button
-// Segoe Fluent Icons' glyphs in TextFillColorSecondary; the rendering
-// parameters read again on a WM_SETTINGCHANGE. UI
+// the strip, not input); "+" Segoe Fluent Icons' at 16 in
+// TextFillColorPrimary, as Explorer's, the close button its glyph at 12 in
+// TextFillColorSecondary; the rendering
+// parameters read again on a WM_SETTINGCHANGE. The backdrop (22621 on):
+// Mica Alt with the tabs in the caption, as Explorer's, none in high
+// contrast, Mica once they leave it. UI
 // Automation, from a client on a thread of its own: the Tab, its TabItems by
 // name, Select, each Close tab and New tab invoked, each handler once; the
 // window's native controls still reached; a tab dragged to the front (the
@@ -206,9 +211,14 @@ struct palette
     DWORD empty = 0;  // the strip's empty part, where it's opaque
     bool clear = true;
     DWORD band = 0, line = 0, current = 0;
+    // The current tab's fill as printed, premultiplied ARGB: `current`,
+    // opaque, or the toolbar band's translucent layer (current_opaque false).
+    DWORD current_px = 0;
+    bool current_opaque = true;
     // The current tab's title; "+" at rest; the current tab's close button;
     // another tab's title; a tab not current hovered (none in high contrast).
     argb title{}, glyph{}, close{}, other{}, hover{};
+    argb add{};  // "+" at rest
 };
 palette expected(bool hc)
 {
@@ -221,28 +231,64 @@ palette expected(bool hc)
         p.line = rgb(GetSysColor(COLOR_WINDOWTEXT));
         p.current = rgb(GetSysColor(COLOR_HIGHLIGHT));
         p.title = {rgb(GetSysColor(COLOR_HIGHLIGHTTEXT)), 255};
-        p.glyph = {rgb(GetSysColor(COLOR_WINDOWTEXT)), 255};
+        p.glyph = p.add = {rgb(GetSysColor(COLOR_WINDOWTEXT)), 255};
         p.close = p.title;
         p.other = {rgb(GetSysColor(COLOR_WINDOWTEXT)), 255};
+        p.current_px = 0xFF000000u | p.current;
         return p;
     }
     p.band = g_base ? (g_dark ? 0x191919 : rgb(GetSysColor(COLOR_WINDOW)))
                     : (g_dark ? 0x202020 : rgb(GetSysColor(COLOR_BTNFACE)));
     p.line = over(g_dark ? dark_stroke : light_stroke, p.band);
     p.current = p.band;
+    p.current_px = 0xFF000000u | p.current;
     p.title = g_dark ? dark_primary : light_primary;
     p.glyph = p.close = p.other = g_dark ? dark_secondary : light_secondary;
+    // "+", as Explorer's: TextFillColorPrimary.
+    p.add = g_dark ? dark_primary : light_primary;
     p.hover = g_dark ? dark_hover : light_hover;
     return p;
 }
 
-// The toolbar band (Explorer's address row): WinUI's LayerFillColorDefault
-// drawn opaque (#F8F8F8, as Explorer's measures; dark #4C3A3A3A over Mica's
-// #202020), high contrast's window colour; its line the strip's.
+// The toolbar band (Explorer's address row): WinUI's
+// LayerOnMicaBaseAltFillColorDefault, #B3FFFFFF (dark #733A3A3A), at its own
+// alpha over the extended frame, where the compositor puts Mica Alt under
+// it, as Explorer's measures (#F0F5F9 and #F1F5F9 over a strip of #CEDCEC:
+// alpha 0.70); high contrast's window colour, opaque; its line the strip's,
+// opaque.
+constexpr argb light_layer{0xFFFFFF, 0xB3}, dark_layer{0x3A3A3A, 0x73};
+argb layer()
+{
+    return g_dark ? dark_layer : light_layer;
+}
+// Its premultiplied ARGB, as printed into a 32-bit bitmap, exactly:
+// 0xB3B3B3B3, and 0x731A1A1A (0x3A * 0x73 / 255, 26.2).
+constexpr DWORD light_layer_px = 0xB3B3B3B3, dark_layer_px = 0x731A1A1A;
+// The band's fill as printed.
+DWORD band_px(bool hc)
+{
+    return hc ? 0xFF000000u | rgb(GetSysColor(COLOR_WINDOW)) : g_dark ? dark_layer_px : light_layer_px;
+}
+// The same family's opaque one, where GDI paints it (a native control's
+// background before its glass): LayerOnMicaBaseAltFillColorTertiary,
+// #F9F9F9, dark #2C2C2C.
 DWORD band_fill(bool hc)
 {
     if (hc) return rgb(GetSysColor(COLOR_WINDOW));
-    return g_dark ? over({0x3A3A3A, 0x4C}, 0x202020) : 0xF8F8F8;
+    return g_dark ? 0x2C2C2C : 0xF9F9F9;
+}
+// Two pixels the same, each channel (alpha too) within `tolerance` levels.
+bool near_px(DWORD a, DWORD b, int tolerance = 1)
+{
+    for (int shift : {24, 16, 8, 0})
+        if (std::abs(channel(a, shift) - channel(b, shift)) > tolerance) return false;
+    return true;
+}
+std::string argb_hex(DWORD v)
+{
+    char b[16];
+    std::snprintf(b, sizeof b, "%08lx", v);
+    return b;
 }
 
 // -- the windows ----------------------------------------------------------
@@ -319,6 +365,7 @@ struct strip_fonts
     float text_size, glyph_size;
     int text_weight;
     int cleartype;
+    float add_size;
 };
 
 // The title bar's height: the client area's top below the window's.
@@ -491,16 +538,19 @@ void check_pixels(HWND strip, const palette& pal, const std::string& when)
                                          str(long(alpha(v))));
     }
     // The current tab: filled, to the bottom row (one with the band under
-    // it, no line), its sides the divider's.
+    // it, no line), its sides the divider's. Over the toolbar band, its
+    // layer at its own alpha (premultiplied), translucent.
     const DWORD inside = p.at(tab.left + px(4, dpi), mid), bottom = p.at(tab.left + px(4, dpi), h - 1);
-    expect(is(inside, pal.current), "the current tab is " + hex(pal.current) + at + ": " + hex(colour(inside)) +
-                                        " alpha " + str(long(alpha(inside))));
-    expect(is(bottom, pal.current), "and so is its bottom row, where the line isn't" + at + ": " +
-                                        hex(colour(bottom)));
-    if (pal.current == pal.band)
+    const std::string fill_is = pal.current_opaque ? hex(pal.current) + ", opaque"
+                                                   : argb_hex(pal.current_px) + " (premultiplied ARGB), translucent";
+    expect(inside == pal.current_px, "the current tab is " + fill_is + at + ": " + argb_hex(inside));
+    expect(bottom == pal.current_px, "and so is its bottom row, where the line isn't" + at + ": " +
+                                                argb_hex(bottom));
+    if (pal.current == pal.band || !pal.current_opaque)
     {
         const DWORD side = p.at(tab.left, mid);
-        expect(is(side, pal.line), "its sides are the divider's, " + hex(pal.line) + at + ": " + hex(colour(side)));
+        expect(is(side, pal.line), "its sides are the divider's, " + hex(pal.line) + ", opaque" + at + ": " +
+                                       argb_hex(side));
     }
     // The line along the bottom elsewhere: past "+", under another tab.
     for (const int x : {past, current == 0 ? int(part(strip, q_tab, 1).left) + px(20, dpi) : px(16, dpi)})
@@ -514,7 +564,7 @@ void check_pixels(HWND strip, const palette& pal, const std::string& when)
     int ink = 0;
     for (int y = mid - px(5, dpi); y <= mid + px(5, dpi); ++y)
         for (int x = tab.left + px(12, dpi); x < tab.left + px(120, dpi); ++x)
-            if (colour(p.at(x, y)) != pal.current) ++ink;
+            if (!near_px(p.at(x, y), pal.current_px, 0)) ++ink;
     expect(ink > 10, "the current tab's title is drawn" + at + " (" + str(ink) + " pixels)");
 }
 
@@ -607,23 +657,27 @@ void check_band_rows(HWND top, int from, bool band, const palette& pal, HWND too
                               (y < last ? ": " + hex(colour(y)) + " at " + str(y) : std::string()));
         return;
     }
-    const DWORD fill = band_fill(high_contrast());
+    // Its fill at the layer's alpha, premultiplied (opaque in high
+    // contrast); the line opaque.
+    const DWORD fill = band_px(high_contrast()), line_px = 0xFF000000u | pal.line;
     int y = from;
-    while (y < p.h && colour(y) == fill) ++y;
+    while (y < p.h && p.at(x, y) == fill) ++y;
     const int fill_end = y;
     const RECT tb = toolbar ? rect_in(top, toolbar) : RECT{};
     expect(fill_end > from && (!toolbar || (fill_end >= tb.bottom && fill_end <= tb.bottom + px(4, dpi))),
-           "the band " + hex(fill) + " from the strip's bottom, " + str(from) + ", to the toolbar's, " +
-               str(long(tb.bottom)) + at + ": to " + str(fill_end) + ", then " + hex(colour(fill_end)));
-    while (y < p.h && colour(y) == pal.line) ++y;
-    expect(y - fill_end == line, "and under it the line, " + hex(pal.line) + ", " + str(line) + " px" + at + ": " +
-                                     str(y - fill_end) + " px");
+           "the band " + argb_hex(fill) + " (premultiplied ARGB) from the strip's bottom, " + str(from) +
+               ", to the toolbar's, " + str(long(tb.bottom)) + at + ": to " + str(fill_end) + ", then " +
+               argb_hex(p.at(x, fill_end)));
+    while (y < p.h && p.at(x, y) == line_px) ++y;
+    expect(y - fill_end == line, "and under it the line, " + hex(pal.line) + ", opaque, " + str(line) + " px" + at +
+                                     ": " + str(y - fill_end) + " px");
     expect(colour(y) == pal.band, "then the window's surface, " + hex(pal.band) + at + ": " + hex(colour(y)) +
                                       " at " + str(y));
     // Across the window, edge to edge.
     for (const int across : {0, p.w / 2, p.w - 1})
-        expect((p.at(across, from) & 0xffffff) == fill && (p.at(across, fill_end) & 0xffffff) == pal.line,
-               "the band and its line at x " + str(across) + at);
+        expect(p.at(across, from) == fill && p.at(across, fill_end) == line_px,
+               "the band and its line at x " + str(across) + at + ": " + argb_hex(p.at(across, from)) + ", " +
+                   argb_hex(p.at(across, fill_end)));
 }
 
 // The child of `top` with the WS_VISIBLE style whose rectangle holds `p`
@@ -660,10 +714,10 @@ bool window_own(HWND top, POINT p, const std::string& what)
 POINT band_point(HWND top, int from)
 {
     const printed p = print_erase(top);
-    const DWORD fill = band_fill(high_contrast());
-    for (int y = from; y < p.h && (p.at(0, y) & 0xffffff) == fill; ++y)
+    const DWORD fill = band_px(high_contrast());
+    for (int y = from; y < p.h && near_px(p.at(0, y), fill); ++y)
         for (int x = p.w - 1; x >= 0; --x)
-            if ((p.at(x, y) & 0xffffff) == fill && !covering_child(top, POINT{x, y})) return POINT{x, y};
+            if (near_px(p.at(x, y), fill) && !covering_child(top, POINT{x, y})) return POINT{x, y};
     return POINT{-1, -1};
 }
 
@@ -678,7 +732,13 @@ void check_band(HWND top, bool band, const std::string& when)
     HWND toolbar = FindWindowExW(top, nullptr, TOOLBARCLASSNAMEW, nullptr);
     expect(toolbar != nullptr, "the toolbar's native control" + at);
     palette pal = expected(hc);
-    if (band && !hc) pal.current = band_fill(false);
+    // On the band, the current tab its layer, translucent.
+    if (band && !hc)
+    {
+        pal.current = band_fill(false);
+        pal.current_px = band_px(false);
+        pal.current_opaque = false;
+    }
     const int from = strip ? int(rect_in(top, strip).bottom) : 0;
     check_band_rows(top, from, band, pal, toolbar, when);
     if (band)
@@ -705,21 +765,289 @@ void check_band(HWND top, bool band, const std::string& when)
         SendMessageW(strip, WM_KEYDOWN, VK_ESCAPE, 0);
         pump(2);
         const int line = std::max(1, px(1, dpi)), mid = (tab.top + p.h - line) / 2;
-        const DWORD inside = p.at(tab.left + moved + px(4, dpi), mid) & 0xffffff,
-                    bottom = p.at(tab.left + moved + px(4, dpi), p.h - 1) & 0xffffff;
-        expect(inside == pal.current && bottom == pal.current,
-               "the current tab dragged " + str(moved) + " px is still " + hex(pal.current) + ", to its bottom row" + at +
-                   ": " + hex(inside) + ", " + hex(bottom));
+        const DWORD inside = p.at(tab.left + moved + px(4, dpi), mid),
+                    bottom = p.at(tab.left + moved + px(4, dpi), p.h - 1);
+        expect(inside == pal.current_px && bottom == pal.current_px,
+               "the current tab dragged " + str(moved) + " px is still " + argb_hex(pal.current_px) +
+                   ", to its bottom row" + at + ": " + argb_hex(inside) + ", " + argb_hex(bottom));
         expect(ask(strip, q_current) == current && part(strip, q_tab, current).left == tab.left,
                "and put back by Escape" + at);
     }
+    // Dragged part way over the next tab (Beta, not far enough to swap them),
+    // the current tab hides Beta's icon: its translucent fill over the
+    // strip's ground, not over that icon.
+    {
+        const UINT dpi = GetDpiForWindow(strip);
+        const int current = ask(strip, q_current);
+        const RECT tab = part(strip, q_tab, current), next = part(strip, q_tab, current + 1);
+        const int w = tab.right - tab.left, icon = px(16, dpi);
+        // Beta's icon, where the strip draws it: inset, centred down the tab.
+        const int line = std::max(1, px(1, dpi)), il = next.left + px(12, dpi);
+        const printed before = print(strip);
+        const int it = (next.top + before.h - line - icon) / 2;
+        // Under the dragged tab, left of its close button (24 px, 6 in).
+        const int moved = il + icon - (tab.right - px(6 + 24 + 8, dpi));
+        expect(moved > 0 && moved < w / 2, "a drag of " + str(moved) + " px, less than half the tab's " + str(w) +
+                                               " (no swap)" + at);
+        const POINT a = centre(tab);
+        SendMessageW(strip, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(a.x, a.y));
+        SendMessageW(strip, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(a.x + moved, a.y));
+        const printed p = print(strip);
+        SendMessageW(strip, WM_KEYDOWN, VK_ESCAPE, 0);
+        pump(2);
+        const DWORD ground = before.at(next.left + px(4, dpi), it);
+        int drawn = 0, shown = 0;
+        for (int y = it; y < it + icon; ++y)
+            for (int x = il; x < il + icon; ++x)
+            {
+                drawn += before.at(x, y) != ground;
+                shown += p.at(x, y) != pal.current_px;
+            }
+        expect(drawn > 0, "Beta's icon drawn where it's looked for" + at + ": " + str(drawn) + " px");
+        expect(shown == 0, "the current tab dragged " + str(moved) + " px over Beta's icon hides it" + at + ": " +
+                               str(shown) + " of its pixels not " + argb_hex(pal.current_px));
+        expect(ask(strip, q_current) == current, "and put back by Escape, over Beta" + at);
+    }
     if (band && toolbar)
     {
+        // Printed as on screen: on glass, the band's layer (premultiplied)
+        // where it draws nothing; in high contrast, GDI's, opaque.
         const printed t = print_control(toolbar);
-        const DWORD v = t.at(1, 1) & 0xffffff;
-        expect(v == band_fill(hc), "the toolbar's background is the band's, " + hex(band_fill(hc)) + at + ": " +
-                                       hex(v));
+        const DWORD v = t.at(1, 1);
+        if (hc)
+            expect((v & 0xffffff) == band_fill(hc), "the toolbar's background is the band's, " + hex(band_fill(hc)) +
+                                                        at + ": " + hex(v & 0xffffff));
+        else
+            expect(near_px(v, band_px(false)), "the toolbar's background is the band's layer, " +
+                                                   argb_hex(band_px(false)) + at + ": " + argb_hex(v));
     }
+}
+
+// -- the band's native controls on glass -----------------------------------
+
+// A control of the band printed (WM_PRINTCLIENT, as a pane's copy is, its
+// glass the same as on screen) in the state `state` says: a layer control
+// (`layer`) none of its pixels below the layer's alpha, each pixel at that
+// alpha the layer's own (its background, nothing of its content lost), and
+// something drawn; an opaque one (a field) opaque throughout.
+void check_glass_print(HWND h, bool layer, const std::string& what, const std::string& state)
+{
+    const printed p = print_control(h);
+    const DWORD bg = band_px(false);
+    const int la = int(bg >> 24);
+    long below = 0, lost = 0, drawn = 0, transparent = 0;
+    std::string first_below, first_lost;
+    for (int y = 0; y < p.h; ++y)
+        for (int x = 0; x < p.w; ++x)
+        {
+            const DWORD v = p.at(x, y);
+            const int a = int(v >> 24);
+            if (a == 0) ++transparent;
+            if (!near_px(v, bg, 2)) ++drawn;
+            if (layer)
+            {
+                if (a < la - 1 && below++ == 0) first_below = str(x) + "," + str(y) + " " + argb_hex(v);
+                if (std::abs(a - la) <= 1 && !near_px(v, bg, 2) && lost++ == 0)
+                    first_lost = str(x) + "," + str(y) + " " + argb_hex(v);
+            }
+            else if (a != 255 && below++ == 0)
+                first_below = str(x) + "," + str(y) + " " + argb_hex(v);
+        }
+    const std::string at = what + ", " + state + " (" + str(p.w) + "x" + str(p.h) + ")";
+    expect(p.w > 0 && p.h > 0 && transparent == 0, "no pixel at alpha 0: " + at + " (" + str(transparent) + ")");
+    if (layer)
+    {
+        expect(below == 0, "none below the layer's alpha, " + str(la) + ": " + at +
+                               (below ? " (" + str(below) + ", first " + first_below + ")" : std::string()));
+        expect(lost == 0, "each at the layer's alpha is the layer, " + argb_hex(bg) + ": " + at +
+                              (lost ? " (" + str(lost) + ", first " + first_lost + ")" : std::string()));
+    }
+    else
+        expect(below == 0, "opaque throughout: " + at +
+                               (below ? " (" + str(below) + " not, first " + first_below + ")" : std::string()));
+    expect(drawn > 0, "and it drew something: " + at + " (" + str(drawn) + " pixels)");
+}
+
+std::wstring class_name(HWND h)
+{
+    wchar_t c[64]{};
+    GetClassNameW(h, c, 64);
+    return c;
+}
+
+// `h` lies wholly in the band's fill: from the strip's bottom to the line,
+// as the window's background prints them.
+void color_in_band(HWND top, HWND h, const char* what)
+{
+    const printed p = print_erase(top);
+    const int from = strip_of(top) ? int(rect_in(top, strip_of(top)).bottom) : 0;
+    int to = from;
+    while (to < p.h && near_px(p.at(p.w - 1, to), band_px(false))) ++to;
+    const RECT r = rect_in(top, h);
+    expect(r.top >= from && r.bottom <= to && r.right > r.left,
+           std::string("and wholly in the band's fill, ") + str(from) + ".." + str(to) + ": " + what + ", " +
+               str(long(r.top)) + ".." + str(long(r.bottom)));
+}
+
+// The child of `top` of class `cls` whose text starts with `text` (null:
+// any), the `skip`th such.
+HWND child_of(HWND top, const wchar_t* cls, const wchar_t* text = nullptr, int skip = 0)
+{
+    for (HWND c = FindWindowExW(top, nullptr, cls, nullptr); c; c = FindWindowExW(top, c, cls, nullptr))
+    {
+        wchar_t t[64]{};
+        GetWindowTextW(c, t, 64);
+        if (text && std::wcsncmp(t, text, std::wcslen(text))) continue;
+        if (skip-- == 0) return c;
+    }
+    return nullptr;
+}
+
+// Every kind of control a toolbar can hold, in the band, each printed at
+// rest, hovered, pressed, focused and disabled (messages, no input).
+void check_glass(HWND top)
+{
+    const bool hc = high_contrast();
+    if (hc)
+    {
+        note("high contrast: the band's opaque and off the extended frame; its controls GDI's, as before");
+        return;
+    }
+    struct control
+    {
+        const char* what;
+        HWND h;
+        bool layer;
+    };
+    HWND combo_list = nullptr, combo_edit = nullptr;
+    for (HWND c = FindWindowExW(top, nullptr, L"ComboBox", nullptr); c; c = FindWindowExW(top, c, L"ComboBox", nullptr))
+        ((GetWindowLongPtrW(c, GWL_STYLE) & 3) == CBS_DROPDOWNLIST ? combo_list : combo_edit) = c;
+    HWND edit = FindWindowExW(top, nullptr, L"Edit", nullptr);
+    const control controls[] = {
+        {"the tool strip (a native toolbar)", FindWindowExW(top, nullptr, TOOLBARCLASSNAMEW, nullptr), true},
+        {"a push button", child_of(top, L"Button", L"Go"), true},
+        {"a menu button", child_of(top, L"Button", L"Menu"), true},
+        {"a check box", child_of(top, L"Button", L"Check"), true},
+        {"a tool button (owner-drawn)", child_of(top, L"Button", L"Tool"), true},
+        {"a label", child_of(top, L"Static", L"Label"), true},
+        {"a drop-down list", combo_list, true},
+        {"a combo box (with an edit)", combo_edit, false},
+        {"a text field", edit, false},
+        {"a text field's clear button", edit ? FindWindowExW(edit, nullptr, L"Button", nullptr) : nullptr, false},
+    };
+    for (const control& c : controls)
+    {
+        expect(c.h != nullptr, std::string("in the band: ") + c.what);
+        if (!c.h) continue;
+        color_in_band(top, c.h, c.what);
+        check_glass_print(c.h, c.layer, c.what, "at rest");
+        // Hovered: the mouse's move sent (a toolbar's hot item set).
+        RECT r;
+        GetClientRect(c.h, &r);
+        if (!std::wcscmp(class_name(c.h).c_str(), TOOLBARCLASSNAMEW))
+            SendMessageW(c.h, TB_SETHOTITEM, 0, 0);
+        else
+            SendMessageW(c.h, WM_MOUSEMOVE, 0, MAKELPARAM(r.right / 2, r.bottom / 2));
+        check_glass_print(c.h, c.layer, c.what, "hovered");
+        if (!std::wcscmp(class_name(c.h).c_str(), TOOLBARCLASSNAMEW))
+            SendMessageW(c.h, TB_SETHOTITEM, WPARAM(-1), 0);
+        SendMessageW(c.h, WM_MOUSELEAVE, 0, 0);
+        // Pressed: a button's state, a toolbar's first button.
+        if (!std::wcscmp(class_name(c.h).c_str(), TOOLBARCLASSNAMEW))
+        {
+            TBBUTTON b{};
+            SendMessageW(c.h, TB_GETBUTTON, 0, reinterpret_cast<LPARAM>(&b));
+            SendMessageW(c.h, TB_PRESSBUTTON, WPARAM(b.idCommand), TRUE);
+            check_glass_print(c.h, c.layer, c.what, "pressed");
+            SendMessageW(c.h, TB_PRESSBUTTON, WPARAM(b.idCommand), FALSE);
+        }
+        else if (class_name(c.h) == L"Button")
+        {
+            SendMessageW(c.h, BM_SETSTATE, TRUE, 0);
+            check_glass_print(c.h, c.layer, c.what, "pressed");
+            SendMessageW(c.h, BM_SETSTATE, FALSE, 0);
+        }
+        // Focused, its focus rectangle shown.
+        SendMessageW(c.h, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), 0);
+        SendMessageW(c.h, WM_SETFOCUS, 0, 0);
+        check_glass_print(c.h, c.layer, c.what, "focused");
+        SendMessageW(c.h, WM_KILLFOCUS, 0, 0);
+        // Disabled.
+        EnableWindow(c.h, FALSE);
+        check_glass_print(c.h, c.layer, c.what, "disabled");
+        EnableWindow(c.h, TRUE);
+    }
+    // The text field's border, printed with its frame (WM_PRINT): the
+    // theme's edit border drawn off the screen and put over the band's
+    // layer, as on screen. None of it below the layer's alpha (GDI's would
+    // be 0), its edge lines opaque. (That it never touches the window's own
+    // DC on the way can't be watched from here: GDI's calls on another
+    // window's DC can't be counted without hooking GDI itself. paint_border
+    // only ever writes to the DC it's given once, through one buffer.)
+    if (edit)
+    {
+        RECT w;
+        GetWindowRect(edit, &w);
+        const int ww = w.right - w.left, wh = w.bottom - w.top;
+        POINT o{0, 0};
+        ClientToScreen(edit, &o);
+        RECT c;
+        GetClientRect(edit, &c);
+        OffsetRect(&c, o.x - w.left, o.y - w.top);
+        HDC screen = GetDC(nullptr);
+        HDC mem = CreateCompatibleDC(screen);
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), ww, -wh, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+        void* bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ old = SelectObject(mem, bmp);
+        std::fill_n(static_cast<DWORD*>(bits), size_t(ww) * wh, 0x00ABCDEFu);
+        SendMessageW(edit, WM_PRINT, reinterpret_cast<WPARAM>(mem), PRF_NONCLIENT | PRF_CLIENT | PRF_ERASEBKGND);
+        GdiFlush();
+        const auto* px = static_cast<const DWORD*>(bits);
+        const int la = int(band_px(false) >> 24);
+        long ring = 0, below = 0, opaque = 0, translucent = 0;
+        for (int y = 0; y < wh; ++y)
+            for (int x = 0; x < ww; ++x)
+            {
+                if (PtInRect(&c, POINT{x, y})) continue;
+                const int a = int(px[size_t(y) * ww + x] >> 24);
+                ++ring;
+                below += a < la - 1;
+                opaque += a >= 250;
+                translucent += a < 250;
+            }
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+        // (Light, its rounded corners are translucent; dark's DarkMode_CFD
+        // border is square, opaque throughout.)
+        expect(ring > 0 && below == 0 && opaque > 0 && (g_dark || translucent > 0),
+               "the text field's border printed on glass: the theme's, over the layer (" + str(ring) + " pixels: " +
+                   str(below) + " below its alpha, " + str(opaque) + " opaque, " + str(translucent) + " translucent)");
+    }
+    // A label's text grey on the layer (CONTRIBUTING.md), not ClearType.
+    if (HWND label = child_of(top, L"Static", L"Label"))
+    {
+        const printed p = print_control(label);
+        int chroma = 0;
+        long ink = 0;
+        for (const DWORD v : p.px)
+        {
+            const int hi = std::max({channel(v, 16), channel(v, 8), channel(v, 0)});
+            const int lo = std::min({channel(v, 16), channel(v, 8), channel(v, 0)});
+            chroma = std::max(chroma, hi - lo);
+            if (!near_px(v, band_px(false), 2)) ++ink;
+        }
+        expect(ink > 10 && chroma <= 1, "the label's text on the band is grey, not ClearType: chroma " + str(chroma) +
+                                            ", ink " + str(ink));
+    }
+    // Tooltips: top-level windows of their own, never in the band's frame.
+    if (HWND bar = FindWindowExW(top, nullptr, TOOLBARCLASSNAMEW, nullptr))
+        if (HWND tip = reinterpret_cast<HWND>(SendMessageW(bar, TB_GETTOOLTIPS, 0, 0)))
+            expect(GetAncestor(tip, GA_ROOT) == tip && (GetWindowLongPtrW(tip, GWL_STYLE) & WS_POPUP),
+                   "the toolbar's tooltip is a top-level popup, with its own surface");
 }
 
 // -- the text ---------------------------------------------------------------
@@ -889,6 +1217,46 @@ ink_stats ink_in(const printed& p, RECT r, argb ink, long long bg)
     return s;
 }
 
+// Ink in a rectangle of the printed strip over a translucent fill, `bg` as
+// printed (premultiplied ARGB): each channel's way, alpha too, from bg
+// towards `ink` over it; its chroma the most a pixel's colour channels part
+// (premultiplied grey is equal in all three).
+ink_stats ink_on(const printed& p, RECT r, argb ink, DWORD bg)
+{
+    ink_stats s;
+    // ink over bg, premultiplied.
+    DWORD full = 0;
+    full |= DWORD(ink.a + (channel(bg, 24) * (255 - ink.a) + 127) / 255) << 24;
+    for (int shift : {16, 8, 0})
+        full |= DWORD((channel(ink.rgb, shift) * ink.a + channel(bg, shift) * (255 - ink.a) + 127) / 255) << shift;
+    for (int y = r.top; y < r.bottom; ++y)
+        for (int x = r.left; x < r.right; ++x)
+        {
+            const DWORD v = p.at(x, y);
+            if (v == 0xDEADBEEF) continue;
+            for (int shift : {24, 16, 8, 0})
+            {
+                const int b = channel(bg, shift), f = channel(full, shift), c = channel(v, shift);
+                if ((c < std::min(b, f) - 2 || c > std::max(b, f) + 2) && s.within)
+                {
+                    s.within = false;
+                    s.worst = str(x) + "," + str(y) + " " + argb_hex(v);
+                }
+            }
+            const int hi = std::max({channel(v, 16), channel(v, 8), channel(v, 0)});
+            const int lo = std::min({channel(v, 16), channel(v, 8), channel(v, 0)});
+            s.chroma = std::max(s.chroma, hi - lo);
+            // The coverage from alpha, which "over" makes linear in it
+            // whatever the colours (as for text over the clear strip).
+            const int b = channel(bg, 24), f = channel(full, 24);
+            if (f == b) continue;
+            const double cov = std::clamp(double(channel(v, 24) - b) / (f - b), 0.0, 1.5);
+            s.mass += cov;
+            s.peak = std::max(s.peak, cov);
+        }
+    return s;
+}
+
 void check_text(HWND strip, const palette& pal, const std::string& when)
 {
     const UINT dpi = GetDpiForWindow(strip);
@@ -925,7 +1293,8 @@ void check_text(HWND strip, const palette& pal, const std::string& when)
     // The current tab's title (past its icon, before its close button), on
     // its fill.
     const RECT title{tab.left + px(36, dpi), tab.top + px(4, dpi), close.left - px(2, dpi), p.h - line};
-    const ink_stats t = ink_in(p, title, pal.title, pal.current);
+    const ink_stats t =
+        pal.current_opaque ? ink_in(p, title, pal.title, pal.current) : ink_on(p, title, pal.title, pal.current_px);
     // Either family's weight: the band spans both (and the user's face, if
     // that's what it is), with room for gamma and ClearType's contrast.
     std::vector<double> refs;
@@ -938,8 +1307,9 @@ void check_text(HWND strip, const palette& pal, const std::string& when)
                                              str(std::lround(lo)) + ".." + str(std::lround(hi)) + at + ": " +
                                              str(std::lround(t.mass)));
     expect(t.within && t.peak >= 0.6,
-           "the title in " + hex(over(pal.title, pal.current)) + " (TextFillColorPrimary on the tab), never past it" +
-               at + ": peak " + str(std::lround(t.peak * 100)) + "%" + (t.within ? "" : ", past at " + t.worst));
+           "the title in " + hex(pal.title.rgb) + " at alpha " + str(pal.title.a) +
+               " (TextFillColorPrimary) on the tab, never past it" + at + ": peak " +
+               str(std::lround(t.peak * 100)) + "%" + (t.within ? "" : ", past at " + t.worst));
     // A monitor with no subpixel order (FLAT: a virtual display's, say) has
     // ClearType drawn without colour.
     DWRITE_PIXEL_GEOMETRY geometry = DWRITE_PIXEL_GEOMETRY_RGB;
@@ -952,7 +1322,12 @@ void check_text(HWND strip, const palette& pal, const std::string& when)
     }
     note(std::string("the monitor's pixel order: ") +
          (geometry == DWRITE_PIXEL_GEOMETRY_BGR ? "BGR" : geometry == DWRITE_PIXEL_GEOMETRY_RGB ? "RGB" : "flat"));
-    if (cleartype && geometry == DWRITE_PIXEL_GEOMETRY_FLAT)
+    if (!pal.current_opaque)
+        // Its layer's translucent, Mica Alt under it the compositor's: grey,
+        // ClearType or not (CONTRIBUTING.md).
+        expect(t.chroma == 0, "the current tab's title is grey on the band's translucent layer, ClearType or not" +
+                                  at + ": chroma " + str(t.chroma));
+    else if (cleartype && geometry == DWRITE_PIXEL_GEOMETRY_FLAT)
         note("ClearType on a flat monitor: no colour to look for" + at);
     else if (cleartype)
         expect(t.chroma > 2, "the current tab's title is ClearType (its ink has colour)" + at + ": chroma " +
@@ -964,7 +1339,9 @@ void check_text(HWND strip, const palette& pal, const std::string& when)
     // TextFillColorSecondary (WinUI's TabViewItemHeaderForeground).
     const int other_i = current == 0 ? 1 : 0;
     const RECT other = part(strip, q_tab, other_i);
-    const RECT other_box{other.left + px(12, dpi), other.top + px(4, dpi), other.left + px(120, dpi), p.h - line};
+    // (Alpha and Beta have icons: the title after its icon.)
+    const RECT other_box{other.left + px(12 + 16 + 8, dpi), other.top + px(4, dpi), other.left + px(120, dpi),
+                         p.h - line};
     if (pal.clear)
     {
         const ink_stats o = ink_in(p, other_box, pal.other, -1);
@@ -1003,22 +1380,36 @@ void check_text(HWND strip, const palette& pal, const std::string& when)
     else
         note("no clear area to see grey text over" + at + ": the strip's opaque");
 
-    // The glyphs: "+" and the current tab's close button, Segoe Fluent
-    // Icons' in the secondary text colour.
-    const double plus_ref = reference_ink(icons, glyph, 400, L""),
+    // The glyphs: "+" as Explorer's, Segoe Fluent Icons' E710 at 16 (its
+    // strokes 13 px across at 100%, where WinUI's 12 makes 10) in the
+    // primary text colour; the current tab's close button WinUI's, E711 at
+    // 12 in the secondary.
+    const float add_size = 16.f * float(dpi) / 96.f;
+    expect(std::fabs(f.add_size - add_size) < 0.01f,
+           "\"+\" in " + narrow(icons) + " at " + str(std::lround(add_size)) + " px, Explorer's" + at + ": " +
+               str(std::lround(f.add_size)));
+    const double plus_ref = reference_ink(icons, add_size, 400, L""),
                  x_ref = reference_ink(icons, glyph, 400, L"");
-    const ink_stats a = ink_in(p, add, pal.glyph, pal.clear ? -1 : (long long)pal.empty);
+    const ink_stats a = ink_in(p, add, pal.add, pal.clear ? -1 : (long long)pal.empty);
     expect(a.within && a.peak >= 0.6 && (!pal.clear || a.chroma == 0),
-           "\"+\" in " + hex(pal.glyph.rgb) + " at alpha " + str(pal.glyph.a) + at + ": peak "+ str(std::lround(a.peak * 100)) + "%, chroma " + str(a.chroma) +
+           "\"+\" in " + hex(pal.add.rgb) + " at alpha " + str(pal.add.a) + " (TextFillColorPrimary)" + at +
+               ": peak " + str(std::lround(a.peak * 100)) + "%, chroma " + str(a.chroma) +
                (a.within ? "" : ", past at " + a.worst));
     expect(a.mass >= plus_ref * 0.8 && a.mass <= plus_ref * 1.5,
-           "\"+\" as light as Segoe Fluent Icons' E710, about " + str(std::lround(plus_ref)) + at + ": " +
+           "\"+\" as heavy as Segoe Fluent Icons' E710 at that size, about " + str(std::lround(plus_ref)) + at + ": " +
                str(std::lround(a.mass)));
-    const ink_stats x = ink_in(p, close, pal.close, pal.current);
-    expect(x.within && x.peak >= 0.6,
-           "the close button's X in " + hex(over(pal.close, pal.current)) + " on the tab" + at + ": peak " +
-               str(std::lround(x.peak * 100)) + "%" + (x.within ? "" : ", past at " + x.worst));
-    expect(x.mass >= x_ref * 0.8 && x.mass <= x_ref * 1.5,
+    const ink_stats x =
+        pal.current_opaque ? ink_in(p, close, pal.close, pal.current) : ink_on(p, close, pal.close, pal.current_px);
+    expect(x.within && x.peak >= 0.6 && (pal.current_opaque || x.chroma == 0),
+           "the close button's X in " + hex(pal.close.rgb) + " at alpha " + str(pal.close.a) + " on the tab" +
+               (pal.current_opaque ? "" : ", grey") + at + ": peak " + str(std::lround(x.peak * 100)) +
+               "%, chroma " + str(x.chroma) + (x.within ? "" : ", past at " + x.worst));
+    // Over a translucent fill Direct2D blends grayscale text with what's
+    // there, its gamma and contrast and all, where over the clear strip it
+    // can't: light ink on the dark layer comes out heavier (measured about
+    // 1.6 times the reference there, 1.2 times on the light one).
+    const double x_most = pal.current_opaque ? 1.5 : 1.7;
+    expect(x.mass >= x_ref * 0.8 && x.mass <= x_ref * x_most,
            "and as light as E711, about " + str(std::lround(x_ref)) + at + ": " + str(std::lround(x.mass)));
 }
 
@@ -1829,6 +2220,39 @@ int dpi_transition(HWND top, HWND strip)
     return 0;
 }
 
+// The window's backdrop (DWMWA_SYSTEMBACKDROP_TYPE, 38): 0 if it can't be read.
+DWORD backdrop_of(HWND top)
+{
+    DWORD b = 0;
+    return SUCCEEDED(DwmGetWindowAttribute(top, 38, &b, sizeof b)) ? b : 0;
+}
+
+// Mica Alt (DWMSBT_TABBEDWINDOW, 4) behind the tabs in the caption, as
+// Explorer's window has; none (1) in high contrast; and Mica (2) again once
+// the tabs leave the caption (hidden), then Mica Alt as they come back.
+// 22621 on, where the attribute's named.
+void check_backdrop(HWND top, rap::document_tabs* tabs)
+{
+    if (windows_build() < 22621)
+    {
+        note("no backdrop attribute before build 22621: not checked");
+        return;
+    }
+    const bool hc = high_contrast();
+    const DWORD with = hc ? 1 : 4;
+    expect(backdrop_of(top) == with, std::string("the tabs in the caption: the backdrop ") +
+                                         (hc ? "none (1), high contrast" : "Mica Alt (4), as Explorer's") + ": " +
+                                         str(long(backdrop_of(top))));
+    if (!tabs) return;
+    tabs->set_visible(false);
+    pump(2);
+    expect(!strip_of(top) || !(GetWindowLongPtrW(strip_of(top), GWL_STYLE) & WS_VISIBLE), "the tabs hidden");
+    expect(backdrop_of(top) == 2, "the tabs gone from the caption: Mica (2) again: " + str(long(backdrop_of(top))));
+    tabs->set_visible(true);
+    pump(2);
+    expect(backdrop_of(top) == with, "and back in it: " + str(long(with)) + " again: " + str(long(backdrop_of(top))));
+}
+
 // High contrast on and off with the window open.
 int contrast_transition(HWND top, HWND strip)
 {
@@ -1877,7 +2301,7 @@ int contrast_transition(HWND top, HWND strip)
     expect(back, "high contrast off: the strip clear again");
     check_pixels(strip, expected(false), "high contrast turned off");
     check_text(strip, expected(false), "high contrast turned off");
-    if (mica) expect(backdrop() == 2, "Mica again (" + str(long(backdrop())) + ")");
+    if (mica) expect(backdrop() == 4, "Mica Alt again (" + str(long(backdrop())) + ")");
     return 0;
 }
 
@@ -1907,7 +2331,7 @@ int main(int argc, char** argv)
     auto doc_tabs = [&]
     {
         return document_tabs{{{"a", "Alpha", rap::icon::named("folder"), "/home/me/alpha"},
-                              {"b", "Beta", {}, {}},
+                              {"b", "Beta", rap::icon::named("folder"), {}},
                               {"c", "Gamma", {}, {}}}}
             .current("a")
             .on_select(
@@ -2014,6 +2438,7 @@ int main(int argc, char** argv)
     check_rebuild(top, strip);
     check_clipped_prints(strip);
     check_copy_failure(strip, expected(hc));
+    check_backdrop(top, tabs);
     // Its first item a text field, no toolbar: no band, no line, the current
     // tab the window's surface (check_pixels).
     check_band_rows(top, int(rect_in(top, strip).bottom), false, expected(hc), nullptr, "no toolbar");
@@ -2083,11 +2508,23 @@ int main(int argc, char** argv)
                 expect(at.x >= 0 && window_own(b, at, "on screen, the band's sample"),
                        "an uncovered point of the band to sample on screen");
                 expect(ChildWindowFromPointEx(b, tab_at, CWP_SKIPINVISIBLE) == s, "the tab's sample is the strip's");
-                const DWORD fill = band_fill(hc), u = on_screen(b, tab_at),
+                // The band's layer over whatever the compositor has there
+                // (Mica Alt, or its solid colour inactive): the strip's
+                // empty part past "+" on screen, which is that alone.
+                const int past = past_add(s, "on screen");
+                const DWORD backdrop = past >= 0 ? on_screen(s, POINT{past, h / 2}) : 0xDEADBEEF;
+                const DWORD fill = hc ? band_fill(true) : over(layer(), backdrop), u = on_screen(b, tab_at),
                             under = at.x >= 0 ? on_screen(b, at) : 0xDEADBEEF;
-                expect(under == fill, "on screen, the band is " + hex(fill) + " at " + str(at.x) + "," + str(at.y) +
-                                          ": " + hex(under));
-                expect(u == (hc ? expected(true).current : fill),
+                note("on screen, the backdrop past \"+\": " + hex(backdrop));
+                auto close_to = [](DWORD a, DWORD b)
+                {
+                    for (int shift : {16, 8, 0})
+                        if (std::abs(channel(a, shift) - channel(b, shift)) > 3) return false;
+                    return true;
+                };
+                expect(close_to(under, fill), "on screen, the band is its layer over the backdrop, " + hex(fill) +
+                                                  " at " + str(at.x) + "," + str(at.y) + ": " + hex(under));
+                expect(hc ? u == expected(true).current : close_to(u, under),
                        "and the current tab's bottom row one with it: " + hex(u));
                 SetWindowPos(b, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
             }
@@ -2115,6 +2552,29 @@ int main(int argc, char** argv)
         }
         else
             expect(false, "the second toolbar's window, its tabs in the caption");
+    }
+
+    // Every kind of control a toolbar holds, in the band, on glass (a base
+    // surface's only: no band otherwise).
+    if (g_base)
+    {
+        const char* glass_title = "Caption tabs, glass";
+        auto glassy = (*ui)->create(
+            window{glass_title,
+                   {toolbar{tool_button{rap::icon::named("go-previous"), "Back"},
+                            tool_button{rap::icon::named("go-next"), "Forward"}, separator{}, button{"Go"},
+                            menu_button{"Menu"}, check{"Check"}, label{"Label"}, drop_down{{"One", "Two"}},
+                            combo{{"One", "Two"}, "One"}, hbox{tool_button{rap::icon::named("go-up"), "Tool"}},
+                            entry{"Text"}.clearable().stretch()},
+                    label{"Content"}}}
+                .size(1300_px, 300_px)
+                .base_surface(true)
+                .tabs(doc_tabs()));
+        show(*glassy);
+        pump();
+        HWND g = top_of(glass_title);
+        expect(g && strip_of(g), "the glass window, its tabs in the caption");
+        if (g) check_glass(g);
     }
 
     // Under a menu bar, and in a dialog: stage 1's, under the title bar.
