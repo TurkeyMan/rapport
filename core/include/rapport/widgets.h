@@ -1145,7 +1145,8 @@ public:
     // t.index (through the binds), and returns true; false leaves both rows
     // as they were. A source left empty (its only tab dragged here) is the
     // app's to close, and it may close it there and then, in the handler;
-    // rapport never closes it.
+    // rapport never closes it. A strip with no tabs may not accept drops;
+    // an app that keeps a window with no tabs should add one or close it.
     using receive_fn = std::function<bool(const transfer& t)>;
 
 
