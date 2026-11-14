@@ -1004,6 +1004,7 @@ public:
     virtual void on_changed(std::function<void(int)>) = 0;
 };
 
+class window;
 struct node;  // layout.h
 
 // Pages in one place, one shown at a time, chosen by the app (layout::stack):
@@ -1059,12 +1060,88 @@ struct document_tab
 // the dragged one passes (Escape puts it back, where the toolkit allows: on
 // Windows). Moved, the tab is already where the user put it: on_reorder
 // tells the app its id and new index, once, as the drag is let go (or for
-// each key), and only if its index changed; ids() says the new order. A
-// drag that leaves the row keeps the tab at its end; it doesn't take the
-// tab out of the window.
+// each key), and only if its index changed; ids() says the new order.
+// Without on_detach, a drag that leaves the row keeps the tab at its end; it
+// doesn't take the tab out of the window.
+//
+// Tearing off and dropping (see on_detach, on_receive and set_group): a tab
+// dragged out of the row tears off into a window of its own, which the app
+// makes; dragged over another window's row in the same group, it shows
+// where it would land, and let go there it moves into that window. The
+// windows' tabs only ever change through the app's own calls (remove,
+// insert) from its handlers: rapport asks, the app does. Per toolkit:
+//  - Windows: torn off past a short distance out of the row (above, below,
+//    or past the window's sides), the new window is carried by the system's
+//    own move loop until let go, and a window's only tab drags its window
+//    the same way; Escape puts a tab back, and once it's torn off sends it
+//    home: the window it came from is asked to take it back at its old
+//    place (its on_receive, the torn-off window the source), whatever the
+//    group, and the app closes the emptied window.
+//  - GTK: GtkNotebook's own drag and drop; torn off as it's let go outside
+//    any notebook, the window shown where it was let go. GTK 4 says nothing
+//    of where: the window goes where the desktop puts it (under Wayland it
+//    can't be put at the pointer at all).
+//  - Qt: not by dragging yet; the menu's Move to new window works.
+//
+// The right-click menu: New tab, Close tab, Move to new window (with
+// on_detach), then the app's own items (on_context_menu) after a separator.
+// From the keys too (Shift+F10, the Menu key) on a focused tab: where the
+// strip takes the focus, as Windows 11's in the caption does from F6; the
+// others never take it.
 class document_tabs : public widget
 {
 public:
+    // A tab leaving its window, as a drag let go over another window's row
+    // or a torn-off window dropped there: what the target's on_receive is
+    // given. `index` is where in the target's row it was dropped (0 to its
+    // count); `source` the window whose tabs hold it now (a torn-off window,
+    // if the drag made one).
+    struct transfer
+    {
+        std::string id;
+        std::string title;
+        rap::icon icon;
+        std::string tooltip;
+        int index = -1;
+        rap::window* source = nullptr;
+    };
+    // A tab torn off into a window of its own. A tab is only an entry in a
+    // row: whatever it shows (a folder, a repository, a document) is the
+    // app's, so the window is the app's to make, and rapport only asks.
+    // `screen` is where the pointer is, in the source window's logical px
+    // (window::position's units); nullopt for the menu's Move to new window.
+    //
+    // The handler makes a window for the tab's content, whose tabs spec
+    // already holds a tab with this id (its title and icon as the app likes),
+    // removes the tab from the source window's row (its bind's remove), and
+    // returns the new window, not yet shown. Rapport keeps no tab state of
+    // its own across windows: the entry goes from one row to the other only
+    // through the app's own calls. (A window's only tab is never torn off:
+    // dragged, it drags its window; the menu's item is disabled.)
+    //
+    // Dragged, rapport puts the window under the pointer, shows it and
+    // carries the drag on with it, the button still held: let go over
+    // another window's row in the group, that window's on_receive is asked
+    // to take the tab (see there); anywhere else, the window stays where it
+    // was let go. From the menu (no point), the app places the window itself
+    // before returning it, with window::move (e.g. a little down and right of
+    // the source's window::position(); nothing on Wayland, where the
+    // compositor places windows), and rapport shows it there, as it shows a
+    // dragged one. Returning nullptr refuses: nothing changes,
+    // and the drag goes on along the row. Asked at most once a drag.
+    using detach_fn = std::function<rap::window*(const std::string& id, std::optional<point_f> screen)>;
+    // A tab let go over this window's row, from another window in the same
+    // group (set_group), or (on Windows) one torn off from this window and
+    // sent home by Escape, group or none: `t` says which, where it was
+    // dropped (or was before), and the window it's in. Rapport changes neither row. To take it the app
+    // removes it from t.source's tabs, inserts it into this window's at
+    // t.index (through the binds), and returns true; false leaves both rows
+    // as they were, and the drag ends where it was. A source left empty
+    // (a torn-off window made for the drag) is the app's to close; rapport
+    // never closes it.
+    using receive_fn = std::function<bool(const transfer& t)>;
+
+
     // At `index` (-1 or past the end: last). Not made current.
     virtual void insert(int index, const document_tab&) = 0;
     void add(const document_tab& t) { insert(-1, t); }
@@ -1080,6 +1157,18 @@ public:
     virtual void on_close(std::function<void(const std::string& id)>) = 0;
     virtual void on_new(std::function<void()>) = 0;
     virtual void on_reorder(std::function<void(const std::string& id, int new_index)>) = 0;
+    // Tearing off: see detach_fn. Unset, a tab dragged out stays in the row
+    // and the menu has no Move to new window.
+    virtual void on_detach(detach_fn) = 0;
+    // Dropping in from another window: see receive_fn.
+    virtual void on_receive(receive_fn) = 0;
+    // The windows whose rows may trade tabs: those of the same, non-empty
+    // group. Empty (the default): none, though tearing off still works.
+    virtual void set_group(const std::string& group) = 0;
+    // The right-click menu's own items, for the tab with `id`, after the
+    // fixed ones and a separator; built each time it opens. Unset or empty:
+    // the fixed ones alone.
+    virtual void on_context_menu(std::function<rap::menu(const std::string& id)>) = 0;
 };
 
 // -- canvas -------------------------------------------------------------------

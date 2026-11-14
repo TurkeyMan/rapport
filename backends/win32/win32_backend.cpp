@@ -7583,6 +7583,96 @@ HICON tab_icon_handle(const rap::icon& icon, int size, UINT dpi, float scale)
     return render_icon_handle(icon, size, scale);
 }
 
+// -- tearing off and dropping tabs ----------------------------------------------
+
+class window_tabs;
+
+// One tab drag at a time, across the app's windows. A tab dragged out of its
+// strip either hovers another window's strip in its group (that strip marks
+// where it would land) or tears off into a window the app makes, which is
+// then moved with the pointer by the system's own move loop (as its caption
+// would be) until it's let go; a window's only tab moves its window that way
+// at once. While a window's moved, where it's over is found from its own
+// WM_MOVING and WM_WINDOWPOSCHANGED (the pointer at the same place in it),
+// not WindowFromPoint, which would find the window being moved.
+struct tab_drags
+{
+    // The strips by group (window_tabs::set_group), for the drop lookup.
+    std::map<std::string, std::set<window_tabs*>> groups;
+    // Over another window's strip: that window, and where the tab would land.
+    HWND over = nullptr;
+    int over_index = -1;
+    // A window moved by a tab drag: torn off, or the only tab's own.
+    struct moving_window
+    {
+        HWND hwnd = nullptr;
+        std::string id;           // the tab's
+        POINT grab{};             // the pointer, from the window's top-left
+        bool torn = false;        // made for the drag (on_detach)
+        HWND source = nullptr;    // torn: the window it was torn from
+        int from = -1;            // torn: its index there
+        bool in_loop = false;     // the system's move loop running
+        bool simulated = false;   // tests: no move loop (moved and ended by messages)
+    };
+    std::optional<moving_window> moving;
+    // Test hooks (tab_drag_message): no move loop, and windows to look in
+    // for the drop, in z-order, as if shown.
+    bool test_no_loop = false;
+    bool test_stack_set = false;
+    std::vector<HWND> test_stack;
+    // With no move loop, the window a tab torn off or the menu's Move to new
+    // window would have shown last (it isn't: the tests' windows are never
+    // shown).
+    HWND test_shown = nullptr;
+};
+tab_drags& tab_drag()
+{
+    static tab_drags d;
+    return d;
+}
+
+// The test tools' message to a top-level window (RegisterWindowMessage
+// "rapport-document-tabs-drag"), wParam's low word what to do: 0 no move
+// loop for a tab drag's window (lParam 1; 0 back to the loop): the caller
+// moves it (SetWindowPos) and ends it (WM_EXITSIZEMOVE), and it's never
+// shown; 1 the windows the drop lookup looks in, in z-order, as if shown
+// (lParam a null-terminated HWND array; 0 the desktop's again); 2 the drop
+// mark the window's strip shows (-1 none); 3 the window a tab drag is moving
+// (0 none); 4 the tabs' right-click menus captured, not shown (lParam a
+// tab_menu_capture; 0 shown again); 5 with no move loop, the window a tab
+// torn off or the menu's Move to new window would have shown last (0 none),
+// forgotten.
+UINT tab_drag_message()
+{
+    static const UINT m = RegisterWindowMessageW(L"rapport-document-tabs-drag");
+    return m;
+}
+// A tab menu, captured for the tests: its items' labels ('_' marks and all;
+// separators empty) and whether each is enabled; item `choose` (-1 none)
+// then chosen. The test tools have the same layout.
+struct tab_menu_capture
+{
+    int choose;
+    int count;
+    wchar_t labels[16][64];
+    int enabled[16];
+    int opened;  // how many times a menu's been captured
+};
+tab_menu_capture* g_tab_menu_capture = nullptr;
+
+constexpr UINT wm_rapport_tab_move = WM_APP + 7;  // a tab drag's window: into the move loop
+
+// Below, once the window's known.
+window_tabs* tabs_of(HWND top);
+window_tabs* strip_at(POINT screen, HWND skip, const std::string& group);
+void hover_strip(HWND top, int index);
+void clear_hover();
+void begin_window_drag(window_impl* w, const std::string& id, POINT screen, POINT grab, bool torn, HWND source,
+                       int from);
+void moving_at(POINT screen);
+void end_window_drag(bool cancelled);
+void show_moved_window(rap::window* w);
+
 // A window's document tabs, as the window lays them out and gives them its
 // keys: stage 1's strip in the client area (document_tabs_impl), or Windows
 // 11's in the caption (caption_tabs_impl).
@@ -7601,8 +7691,18 @@ public:
                 for (const document_tab& t : state.tabs)
                     if (!t.icon.path.empty() && path_icon_key(t.icon.path) == key) return path_icon_found();
             });
+        state.show_moved = show_moved_window;
     }
-    ~window_tabs() override { remove_path_icon_listener(path_listener_); }
+    ~window_tabs() override
+    {
+        remove_path_icon_listener(path_listener_);
+        auto& g = tab_drag().groups;
+        if (auto it = g.find(state.group); it != g.end())
+        {
+            it->second.erase(this);
+            if (it->second.empty()) g.erase(it);
+        }
+    }
     // A key from the window, before the focused control has it: the
     // browser's keys (Ctrl+T, Ctrl+W, Ctrl+Tab...).
     virtual bool key(const key_event& e) = 0;
@@ -7623,30 +7723,83 @@ public:
     virtual void moved() {}
 
     void on_reorder(std::function<void(const std::string&, int)> f) override { state.on_reorder = std::move(f); }
+    void on_detach(detach_fn f) override { state.on_detach = std::move(f); }
+    void on_receive(receive_fn f) override { state.on_receive = std::move(f); }
+    void on_context_menu(std::function<rap::menu(const std::string&)> f) override
+    {
+        state.on_context_menu = std::move(f);
+    }
+    // In the registry under its group, for drops (tab_drags::groups).
+    void set_group(const std::string& group) override
+    {
+        auto& g = tab_drag().groups;
+        if (auto it = g.find(state.group); it != g.end())
+        {
+            it->second.erase(this);
+            if (it->second.empty()) g.erase(it);
+        }
+        state.group = group;
+        if (!group.empty()) g[group].insert(this);
+    }
+
+    // Tearing off and dropping: each strip's part.
+    // The top-left of tab `id` on the screen; false if it's not there.
+    virtual bool tab_origin(const std::string& id, POINT& screen) = 0;
+    // Where a tab dropped at `screen` would land: 0 to the count.
+    virtual int drop_index_at(POINT screen) = 0;
+    // The mark where a dropped tab would land (-1: none).
+    virtual void show_drop(int index) = 0;
+    virtual int drop_shown() const = 0;
+    // The dragged tab back where it was (quietly), the drag held; the drag
+    // ended without a word; a drag still on; where it's held, from the tab's
+    // top-left.
+    virtual void put_back_drag() = 0;
+    virtual void forget_drag() = 0;
+    virtual bool dragging() const = 0;
+    virtual POINT drag_grab() const = 0;
 
     doc_tabs::state state;
 
 protected:
+    // A drag past its threshold, the pointer at `screen` (see
+    // doc_tabs::step_for): along the row, away over another window's (where
+    // the tab's put back and held), or gone (the drag's ended and taken on
+    // by a window's move: the strip does nothing more).
+    enum class there
+    {
+        along,
+        away,
+        gone,
+    };
+    there drag_at(std::string id, POINT screen);  // (copies: the app may remove the tab)
+    // Let go while away: dropped on the strip it's over.
+    void drop_dragged(std::string id);
+    // A drag pressed: tearing off may be asked again.
+    void drag_pressed() { detach_refused_ = false; }
+    // A drag cancelled: no strip marked.
+    void drag_cancelled() { clear_hover(); }
+
     // A tab's path icon was found: its icon made again from it.
     virtual void path_icon_found() = 0;
 
-    // A right click's menu: New tab, and Close tab for tab `i` (none: -1),
-    // as the keys do.
+    // A right click's menu, for tab `i` (none: -1): New tab, Close tab and
+    // Move to new window, as the keys do, then the app's own
+    // (doc_tabs::state::context_menu). The tests may capture it instead.
     void tab_menu(int i, POINT screen)
     {
-        menu items;
-        items.push_back({rap::i18n::tr("rapport", "_New tab"),
-                         [this] { state.new_asked(); },
-                         {},
-                         rap::i18n::shortcut_label("Ctrl+T")});
-        if (i >= 0 && i < state.count())
+        menu items = state.context_menu(i);
+        if (tab_menu_capture* c = g_tab_menu_capture)
         {
-            const std::string id = state.tabs[size_t(i)].id;
-            items.push_back(menu_item::separator());
-            items.push_back({rap::i18n::tr("rapport", "_Close tab"),
-                             [this, id] { state.close_asked(state.index_of(id)); },
-                             {},
-                             rap::i18n::shortcut_label("Ctrl+W")});
+            ++c->opened;
+            c->count = std::min(int(items.size()), 16);
+            for (int k = 0; k < c->count; ++k)
+            {
+                wcsncpy_s(c->labels[k], wide(items[size_t(k)].label).c_str(), _TRUNCATE);
+                c->enabled[k] = items[size_t(k)].enabled;
+            }
+            const int pick = c->choose;
+            if (pick >= 0 && pick < int(items.size()) && items[size_t(pick)].action) items[size_t(pick)].action();
+            return;
         }
         show_popup_menu(GetAncestor(h_, GA_ROOT), items, screen);
     }
@@ -7668,7 +7821,11 @@ protected:
     }
 
 private:
+    there tear_off(std::string id, POINT screen);
+
     size_t path_listener_ = 0;
+    bool detach_refused_ = false;  // this drag's on_detach said no
+    std::shared_ptr<int> alive_ = std::make_shared<int>(0);  // gone with the strip
 };
 
 // A window's document tabs (window_spec::tabs): the tab control as a strip,
@@ -7810,19 +7967,31 @@ private:
     // and all; let go, the app's told once, if it moved. Escape, or the
     // capture lost, puts it back. Past either end of the row it stays at
     // that end.
+    //
+    // Out of the row it may leave the window (window_tabs::drag_at): over
+    // another window's row in its group the tab's put back and held there,
+    // that row marking where it would land, and let go it's dropped there;
+    // further out it's torn off.
     struct drag_state
     {
         std::string id;
         int from = -1;  // where it was
         POINT press{};
         bool active = false;  // past the threshold
+        POINT grab{};         // the pointer in the tab, as pressed
+        bool away = false;    // over another window's row
     };
     std::optional<drag_state> drag_;
+    int drop_ = -1;               // the drop mark's index (show_drop)
+    bool drop_painting_ = false;  // painting under the mark
 
     void press(POINT at, int i)
     {
         cancel_drag();
-        drag_ = drag_state{state.tabs[size_t(i)].id, i, at};
+        RECT r{};
+        TabCtrl_GetItemRect(h_, i, &r);
+        drag_ = drag_state{state.tabs[size_t(i)].id, i, at, false, POINT{at.x - r.left, at.y - r.top}};
+        drag_pressed();
     }
     // After the press's own handling (the app told of a new current tab,
     // which may have changed the tabs): the drag held while its tab's there.
@@ -7838,18 +8007,36 @@ private:
         drag_->from = i;
         SetCapture(h_);
     }
-    void drag_to(POINT p)
+    // False once the drag's gone to a window's move (the strip may be gone).
+    bool drag_to(POINT p)
     {
         if (!drag_->active)
         {
             const UINT dpi = win_.dpi();
             if (std::abs(p.x - drag_->press.x) <= GetSystemMetricsForDpi(SM_CXDRAG, dpi) &&
                 std::abs(p.y - drag_->press.y) <= GetSystemMetricsForDpi(SM_CYDRAG, dpi))
-                return;
+                return true;
             drag_->active = true;
         }
+        if (state.index_of(drag_->id) < 0) return true;
+        POINT screen = p;
+        ClientToScreen(h_, &screen);
+        const std::string id = drag_->id;
+        const there t = drag_at(id, screen);
+        if (t == there::gone) return false;
+        if (!drag_ || drag_->id != id) return true;
+        if (t == there::away)
+        {
+            if (!drag_->away)
+            {
+                put_back_drag();
+                drag_->away = true;
+            }
+            return true;
+        }
+        drag_->away = false;
         const int at = state.index_of(drag_->id);
-        if (at < 0) return;
+        if (at < 0) return true;
         // The place in sight whose middle is nearest the pointer: the tabs
         // are all as wide, so the one under it, else the end's.
         RECT c;
@@ -7868,6 +8055,7 @@ private:
             }
         }
         if (to >= 0 && state.move(at, to)) move_items(at, to);
+        return true;
     }
     // Let go: the app's told, if the tab moved; nothing's done after.
     void let_go()
@@ -7875,6 +8063,11 @@ private:
         const std::optional<drag_state> d = std::exchange(drag_, std::nullopt);
         if (GetCapture() == h_) ReleaseCapture();  // the drag's gone: its WM_CAPTURECHANGED is nothing
         if (!d || !d->active) return;
+        if (d->away)
+        {
+            drop_dragged(d->id);  // last: the app may change the tabs
+            return;
+        }
         const int at = state.index_of(d->id);
         if (at >= 0 && at != d->from) state.reordered(at);  // last: the app may change the tabs
     }
@@ -7886,6 +8079,68 @@ private:
         if (GetCapture() == h_) ReleaseCapture();
         const int at = state.index_of(d->id);
         if (d->active && at >= 0 && state.move(at, d->from)) move_items(at, d->from);
+        if (d->active) drag_cancelled();
+    }
+
+public:
+    bool tab_origin(const std::string& id, POINT& screen) override
+    {
+        RECT r{};
+        const int i = state.index_of(id);
+        if (i < 0 || !TabCtrl_GetItemRect(h_, i, &r)) return false;
+        screen = POINT{r.left, r.top};
+        ClientToScreen(h_, &screen);
+        return true;
+    }
+    int drop_index_at(POINT screen) override
+    {
+        ScreenToClient(h_, &screen);
+        std::vector<int> middles;
+        for (int i = 0; i < state.count(); ++i)
+        {
+            RECT r{};
+            TabCtrl_GetItemRect(h_, i, &r);
+            middles.push_back((r.left + r.right) / 2);
+        }
+        return doc_tabs::drop_index(middles, screen.x);
+    }
+    void show_drop(int index) override
+    {
+        if (index == drop_) return;
+        drop_ = index;
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+    int drop_shown() const override { return drop_; }
+    void put_back_drag() override
+    {
+        if (!drag_ || !drag_->active) return;
+        const int at = state.index_of(drag_->id);
+        if (at >= 0 && state.move(at, drag_->from)) move_items(at, drag_->from);
+    }
+    void forget_drag() override
+    {
+        if (!drag_) return;
+        drag_.reset();
+        if (GetCapture() == h_) ReleaseCapture();
+    }
+    bool dragging() const override { return drag_.has_value(); }
+    POINT drag_grab() const override { return drag_ ? drag_->grab : POINT{}; }
+
+private:
+    // The drop mark over what's painted: a bar where the tab would land.
+    void paint_drop()
+    {
+        RECT r{};
+        int x = 0;
+        if (drop_ < state.count() && TabCtrl_GetItemRect(h_, drop_, &r))
+            x = r.left;
+        else if (state.count() > 0 && TabCtrl_GetItemRect(h_, state.count() - 1, &r))
+            x = r.right;
+        const int w = std::max(2, px(2));
+        RECT bar{x - w / 2, r.top, x - w / 2 + w, r.bottom};
+        HDC dc = GetDC(h_);
+        FillRect(dc, &bar, high_contrast() ? GetSysColorBrush(COLOR_HIGHLIGHT) : theme_brush(theme_color::accent));
+        ReleaseDC(h_, dc);
     }
     // The control's tabs (their titles and images) as the bookkeeping has
     // them, once the tab at `from` has moved to `to` there.
@@ -7990,8 +8245,8 @@ private:
                 self->let_go();
                 return 0;
             }
-            self->drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
-            if (self->drag_->active) return 0;
+            if (!self->drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) return 0;
+            if (!self->drag_ || self->drag_->active) return 0;
             break;
         case WM_LBUTTONUP:
             if (!self->drag_) break;
@@ -8039,6 +8294,14 @@ private:
         case WM_PAINT:
         case WM_PRINTCLIENT:
         {
+            if (msg == WM_PAINT && self->drop_ >= 0 && !self->drop_painting_)
+            {
+                self->drop_painting_ = true;
+                const LRESULT r = proc(h, msg, wp, lp, 0, data);
+                self->drop_painting_ = false;
+                self->paint_drop();
+                return r;
+            }
             if (!dark_mode() && surface_of(h) != theme_color::base) break;
             if (msg == WM_PRINTCLIENT && !(lp & PRF_CLIENT)) return 0;
             PAINTSTRUCT ps{};
@@ -8290,7 +8553,11 @@ public:
     }
     bool owns_key(const MSG& m) const override
     {
-        if (!strip_->has_focus() || (m.message != WM_KEYDOWN && m.message != WM_KEYUP)) return false;
+        if (!strip_->has_focus()) return false;
+        // Shift+F10, the menu, comes as a system key.
+        if ((m.message == WM_SYSKEYDOWN || m.message == WM_SYSKEYUP) && m.wParam == VK_F10)
+            return (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (m.message != WM_KEYDOWN && m.message != WM_KEYUP) return false;
         switch (m.wParam)
         {
         case VK_LEFT:
@@ -8326,6 +8593,7 @@ public:
     // 1's control does; the app's handler is last, as it may remove tabs.
     void caption_select(int i) override
     {
+        drag_pressed();  // a press on a tab comes here: tearing off may be asked again
         if (i == state.current || i < 0 || i >= state.count()) return;
         strip_->set_current(i);
         state.picked(i);
@@ -8339,6 +8607,44 @@ public:
         if (state.move(from, to)) follow(from, to);
     }
     void caption_reordered(int i) override { state.reordered(i); }
+    drag_there caption_drag_at(int i, POINT screen) override
+    {
+        if (i < 0 || i >= state.count()) return drag_there::along;
+        switch (drag_at(state.tabs[size_t(i)].id, screen))
+        {
+        case there::away: return drag_there::away;
+        case there::gone: return drag_there::gone;
+        default: return drag_there::along;
+        }
+    }
+    void caption_drop(int i) override
+    {
+        if (i >= 0 && i < state.count()) drop_dragged(state.tabs[size_t(i)].id);
+    }
+    void caption_drag_cancelled() override { drag_cancelled(); }
+
+    bool tab_origin(const std::string& id, POINT& screen) override
+    {
+        RECT r{};
+        if (!strip_->part_rect(caption_tabs::part::tab, state.index_of(id), r)) return false;
+        screen = POINT{r.left, r.top};
+        ClientToScreen(h_, &screen);
+        return true;
+    }
+    int drop_index_at(POINT screen) override
+    {
+        ScreenToClient(h_, &screen);
+        return strip_->drop_index_at(screen);
+    }
+    void show_drop(int index) override { strip_->show_drop(index); }
+    int drop_shown() const override
+    {
+        return int(SendMessageW(h_, caption_tabs::query_message(), MAKEWPARAM(9, 0), 0));
+    }
+    void put_back_drag() override { strip_->put_back_drag(); }
+    void forget_drag() override { strip_->forget_drag(); }
+    bool dragging() const override { return strip_->dragging(); }
+    POINT drag_grab() const override { return strip_->drag_grab(); }
 
 private:
     // The tabs' icons and keys after the bookkeeping's move.
@@ -10448,6 +10754,8 @@ public:
         // First, while every widget is still there; taken out, so it runs once.
         if (auto f = std::exchange(on_destroyed_, {})) f();
         windows().erase(this);
+        if (tab_drag().moving && tab_drag().moving->hwnd == hwnd_) tab_drag().moving.reset();
+        if (tab_drag().over == hwnd_) tab_drag().over = nullptr;
         // WM_DESTROY can't see us once GWLP_USERDATA is cleared below.
         std::erase(recent(), this);
         if (hwnd_) busy_windows().erase(hwnd_);
@@ -11287,6 +11595,123 @@ private:
             close();
     }
 
+    // A tab drag moving this window (see tab_drags): where the pointer is as
+    // it moves, the move loop's start and end; and the tests' message.
+    //
+    // A drag's end asks the app (on_receive), which may take this window's
+    // last tab and close it there and then: past end_window_drag (and the
+    // move loop, which ends in it) nothing of this is touched unless it's
+    // still here. True when the message is done with, as it is then.
+    bool tab_drag_seen(UINT msg, WPARAM wp, LPARAM lp, LRESULT& result)
+    {
+        tab_drags& d = tab_drag();
+        const HWND h = hwnd_;
+        const bool mine = d.moving && d.moving->hwnd == h;
+        const std::weak_ptr<int> alive = alive_;
+        switch (msg)
+        {
+        case wm_rapport_tab_move:
+        {
+            result = 0;
+            if (!mine || d.moving->in_loop) return true;
+            POINT c{};
+            GetCursorPos(&c);
+            if (GetKeyState(VK_LBUTTON) >= 0)  // let go already
+            {
+                moving_at(c);
+                end_window_drag(false);
+                return true;
+            }
+            d.moving->in_loop = true;
+            ReleaseCapture();
+            SendMessageW(h, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, MAKELPARAM(c.x, c.y));
+            // No loop after all (no WM_EXITSIZEMOVE): ended here.
+            if (!alive.expired() && d.moving && d.moving->hwnd == h) end_window_drag(GetKeyState(VK_ESCAPE) < 0);
+            return true;
+        }
+        case WM_MOVING:
+            if (mine && (d.moving->in_loop || d.moving->simulated))
+            {
+                const auto* r = reinterpret_cast<const RECT*>(lp);
+                moving_at(POINT{r->left + d.moving->grab.x, r->top + d.moving->grab.y});
+            }
+            return false;
+        case WM_WINDOWPOSCHANGED:
+            if (mine && (d.moving->in_loop || d.moving->simulated))
+            {
+                const auto* p = reinterpret_cast<const WINDOWPOS*>(lp);
+                if (!(p->flags & SWP_NOMOVE)) moving_at(POINT{p->x + d.moving->grab.x, p->y + d.moving->grab.y});
+            }
+            return false;
+        // The loop's end: let go, or Escape (or the capture taken), when the
+        // button's still down. The tests' (no loop) say which: wParam 1 for
+        // Escape, as no real input reaches their never-shown windows.
+        case WM_EXITSIZEMOVE:
+            if (mine && d.moving->simulated)
+                end_window_drag(wp == 1);
+            else if (mine && d.moving->in_loop)
+                end_window_drag(GetKeyState(VK_ESCAPE) < 0 || GetKeyState(VK_LBUTTON) < 0);
+            else
+                return false;
+            // Closed by the app's on_receive: done, the window proc's
+            // caption and children gone with it.
+            if (alive.expired())
+            {
+                result = 0;
+                return true;
+            }
+            return false;
+        default: break;
+        }
+        if (msg != tab_drag_message()) return false;
+        switch (LOWORD(wp))
+        {
+        case 0:  // and WM_EXITSIZEMOVE's wParam 1 for Escape (see above)
+            d.test_no_loop = lp != 0;
+            result = 1;
+            break;
+        case 1:
+            d.test_stack.clear();
+            d.test_stack_set = lp != 0;
+            for (auto* h = reinterpret_cast<const HWND*>(lp); h && *h; ++h) d.test_stack.push_back(*h);
+            result = 1;
+            break;
+        case 2: result = doc_tabs ? doc_tabs->drop_shown() : -1; break;
+        case 3: result = d.moving ? reinterpret_cast<LRESULT>(d.moving->hwnd) : 0; break;
+        case 4:
+            g_tab_menu_capture = reinterpret_cast<tab_menu_capture*>(lp);
+            result = 1;
+            break;
+        case 5: result = reinterpret_cast<LRESULT>(std::exchange(d.test_shown, nullptr)); break;
+        default: result = 0; break;
+        }
+        return true;
+    }
+
+public:
+    // A torn-off tab's window, put with its tab under the pointer at
+    // `screen`, held at `grab` from the tab's top-left; then shown (not for
+    // the tests), and put right again once its first size is known.
+    void place_for_tab_drag(POINT screen, const std::string& id, POINT grab, bool show_it)
+    {
+        placed_ = true;
+        auto put = [&]
+        {
+            POINT o{};
+            RECT wr;
+            GetWindowRect(hwnd_, &wr);
+            if (!doc_tabs || !doc_tabs->tab_origin(id, o)) o = POINT{wr.left, wr.top};
+            const int x = screen.x - grab.x - (o.x - wr.left), y = screen.y - grab.y - (o.y - wr.top);
+            if (x != wr.left || y != wr.top)
+                SetWindowPos(hwnd_, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        };
+        put();
+        if (!show_it) return;
+        show();
+        put();
+    }
+
+private:
     // RAPPORT_SNAPSHOT=file.png: after RAPPORT_SNAPSHOT_DELAY ms (default 500),
     // save the window shown last as PNG and quit. For checking without a screen grabber.
     void snapshot_if_asked()
@@ -11342,6 +11767,7 @@ private:
                               reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams));
         auto* self = reinterpret_cast<window_impl*>(GetWindowLongPtrW(h, GWLP_USERDATA));
         LRESULT r = 0;
+        if (self && self->tab_drag_seen(msg, wp, lp, r)) return r;
         // The tabs in the caption: the compositor's caption buttons first,
         // then the frame's size and hit tests; the strip's row painted with
         // the window's background.
@@ -11545,6 +11971,8 @@ private:
     static constexpr UINT_PTR deferred_timer = 0xDEF;
     std::optional<SIZE> requested_;  // client size from resize() before the first show
     bool placed_ = false;            // move()d by the app: left where it put it
+    // Gone with the window: a tab drag's end asks the app, which may close it.
+    std::shared_ptr<int> alive_ = std::make_shared<int>(0);
     struct bar_menu
     {
         menu_bar_item item;
@@ -11919,6 +12347,245 @@ private:
     built_part* into_;
     metrics metrics_;
 };
+
+// -- tearing off and dropping tabs: the windows' side ---------------------------
+
+window_impl* impl_of(HWND top)
+{
+    if (!top) return nullptr;
+    for (window_impl* w : window_impl::windows())
+        if (w->hwnd() == top) return w;
+    return nullptr;
+}
+
+window_tabs* tabs_of(HWND top)
+{
+    window_impl* w = impl_of(top);
+    return w ? w->doc_tabs.get() : nullptr;
+}
+
+// The strip of `group` under `screen`: the app's windows looked at in
+// z-order (EnumWindows'), as the desktop shows them, `skip` (the window being
+// moved) and what it owns passed over; the first window there, if it's one
+// with a strip in the group and the point's in its strip.
+window_tabs* strip_at(POINT screen, HWND skip, const std::string& group)
+{
+    if (group.empty()) return nullptr;
+    tab_drags& d = tab_drag();
+    const auto members = d.groups.find(group);
+    if (members == d.groups.end()) return nullptr;
+    auto strip_in = [&](HWND top) -> window_tabs*
+    {
+        for (window_tabs* t : members->second)
+        {
+            if (GetAncestor(t->hwnd(), GA_ROOT) != top || !t->visible) continue;
+            RECT r;
+            GetWindowRect(t->hwnd(), &r);
+            return PtInRect(&r, screen) ? t : nullptr;
+        }
+        return nullptr;
+    };
+    if (d.test_stack_set)
+    {
+        for (HWND h : d.test_stack)
+        {
+            if (h == skip) continue;
+            RECT r;
+            if (GetWindowRect(h, &r) && PtInRect(&r, screen)) return strip_in(h);
+        }
+        return nullptr;
+    }
+    struct search
+    {
+        POINT at;
+        HWND skip, found;
+    } s{screen, skip, nullptr};
+    EnumWindows(
+        [](HWND h, LPARAM p) -> BOOL
+        {
+            auto& s = *reinterpret_cast<search*>(p);
+            if (h == s.skip || (s.skip && GetWindow(h, GW_OWNER) == s.skip)) return TRUE;
+            if (!IsWindowVisible(h) || IsIconic(h)) return TRUE;
+            if (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TRANSPARENT) return TRUE;
+            BOOL cloaked = FALSE;
+            if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked)
+                return TRUE;
+            RECT r;
+            if (!GetWindowRect(h, &r) || !PtInRect(&r, s.at)) return TRUE;
+            s.found = h;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&s));
+    return s.found ? strip_in(s.found) : nullptr;
+}
+
+void hover_strip(HWND top, int index)
+{
+    tab_drags& d = tab_drag();
+    if (d.over != top)
+        if (window_tabs* was = tabs_of(d.over)) was->show_drop(-1);
+    d.over = top;
+    d.over_index = index;
+    if (window_tabs* t = tabs_of(top)) t->show_drop(index);
+}
+
+void clear_hover()
+{
+    tab_drags& d = tab_drag();
+    if (window_tabs* was = tabs_of(d.over)) was->show_drop(-1);
+    d.over = nullptr;
+    d.over_index = -1;
+}
+
+// A window to move with the pointer, the button held: a torn-off one first
+// put under it, its tab where the pointer held the one torn off. Then the
+// system's move loop, posted, so the strip that started it is done first;
+// for the tests, none.
+void begin_window_drag(window_impl* w, const std::string& id, POINT screen, POINT grab, bool torn, HWND source,
+                       int from)
+{
+    tab_drags& d = tab_drag();
+    clear_hover();
+    if (torn) w->place_for_tab_drag(screen, id, grab, !d.test_no_loop);
+    RECT wr;
+    GetWindowRect(w->hwnd(), &wr);
+    d.moving = tab_drags::moving_window{w->hwnd(), id, POINT{screen.x - wr.left, screen.y - wr.top}, torn, source, from};
+    if (d.test_no_loop)
+    {
+        d.moving->simulated = true;
+        if (torn) d.test_shown = w->hwnd();  // shown, but for the tests
+        return;
+    }
+    if (!IsWindowVisible(w->hwnd()))  // never into a move loop for a window not shown
+    {
+        d.moving.reset();
+        return;
+    }
+    PostMessageW(w->hwnd(), wm_rapport_tab_move, 0, 0);
+}
+
+// The moved window's pointer at `screen`: the strip there marked.
+void moving_at(POINT screen)
+{
+    tab_drags& d = tab_drag();
+    if (!d.moving) return;
+    window_tabs* mine = tabs_of(d.moving->hwnd);
+    window_tabs* t = mine ? strip_at(screen, d.moving->hwnd, mine->state.group) : nullptr;
+    if (t && t != mine)
+        hover_strip(GetAncestor(t->hwnd(), GA_ROOT), t->drop_index_at(screen));
+    else
+        clear_hover();
+}
+
+// The move ended: let go over a strip, that window's asked to take the tab;
+// cancelled (Escape), a torn-off tab goes home: the window it was torn from
+// is asked to take it back at its old place, group or none (a group limits
+// drops on other windows' strips, not going back), and the app closes the
+// emptied window.
+void end_window_drag(bool cancelled)
+{
+    tab_drags& d = tab_drag();
+    if (!d.moving) return;
+    const tab_drags::moving_window m = *d.moving;
+    d.moving.reset();
+    const HWND over = d.over;
+    const int index = d.over_index;
+    clear_hover();
+    window_impl* mw = impl_of(m.hwnd);
+    window_tabs* mine = mw ? mw->doc_tabs.get() : nullptr;
+    const int i = mine ? mine->state.index_of(m.id) : -1;
+    if (i < 0) return;
+    if (cancelled)
+    {
+        if (window_tabs* home = m.torn ? tabs_of(m.source) : nullptr)
+            home->state.received(mine->state.transfer_of(i, m.from, mw));
+        return;
+    }
+    window_tabs* target = tabs_of(over);
+    if (target && target != mine && target->state.same_group(mine->state))
+        target->state.received(mine->state.transfer_of(i, index, mw));
+}
+
+// The menu's Move to new window: the app's window, placed and unshown,
+// shown (doc_tabs::state::show_moved); the tests' (no move loop) noted
+// instead, as their windows are never shown.
+void show_moved_window(rap::window* w)
+{
+    tab_drags& d = tab_drag();
+    if (!d.test_no_loop) return w->show();
+    if (auto* i = dynamic_cast<window_impl*>(w)) d.test_shown = i->hwnd();
+}
+
+window_tabs::there window_tabs::drag_at(std::string id, POINT screen)
+{
+    const HWND top = GetAncestor(h_, GA_ROOT);
+    doc_tabs::drag_place p;
+    p.only_tab = state.count() == 1;
+    window_tabs* other = nullptr;
+    if (!p.only_tab)
+    {
+        other = strip_at(screen, nullptr, state.group);
+        if (other == this) other = nullptr;
+        p.over_other = other != nullptr;
+        RECT strip, win;
+        GetWindowRect(h_, &strip);
+        GetWindowRect(top, &win);
+        p.past_tear = doc_tabs::past_tear(screen.x, screen.y, strip.top, strip.bottom, win.left, win.right,
+                                          px(doc_tabs::tear_distance));
+        p.can_detach = bool(state.on_detach) && !detach_refused_;
+    }
+    switch (doc_tabs::step_for(p))
+    {
+    case doc_tabs::drag_step::move_window:
+        forget_drag();
+        if (window_impl* w = impl_of(top)) begin_window_drag(w, id, screen, POINT{}, false, nullptr, -1);
+        return there::gone;
+    case doc_tabs::drag_step::over_other:
+        hover_strip(GetAncestor(other->hwnd(), GA_ROOT), other->drop_index_at(screen));
+        return there::away;
+    case doc_tabs::drag_step::tear_off: clear_hover(); return tear_off(id, screen);
+    default: clear_hover(); return there::along;
+    }
+}
+
+// The tab put back where it was, then the app's window for it: refused, the
+// drag goes on along the row (and tearing off isn't asked again); made, the
+// drag's carried on by that window's move.
+window_tabs::there window_tabs::tear_off(std::string id, POINT screen)
+{
+    const POINT grab = drag_grab();
+    put_back_drag();
+    const int from = state.index_of(id);
+    const HWND top = GetAncestor(h_, GA_ROOT);
+    const std::weak_ptr<int> alive = alive_;
+    const float s = win_.scale();
+    rap::window* made = state.detach_asked(from, point_f{float(screen.x) / s, float(screen.y) / s});
+    // The handler may have closed this window (the strip with it): nothing
+    // of it touched then, but the app's window is shown and carried all the
+    // same, with no home for Escape to send the tab back to.
+    const bool gone = alive.expired();
+    if (!made)
+    {
+        if (gone) return there::gone;
+        detach_refused_ = true;
+        return dragging() ? there::along : there::gone;
+    }
+    if (!gone) forget_drag();
+    if (auto* w = dynamic_cast<window_impl*>(made); w && (gone || w->hwnd() != top))
+        begin_window_drag(w, id, screen, grab, true, gone ? nullptr : top, from);
+    return there::gone;
+}
+
+void window_tabs::drop_dragged(std::string id)
+{
+    tab_drags& d = tab_drag();
+    window_tabs* target = tabs_of(d.over);
+    const int index = d.over_index;
+    clear_hover();
+    const int i = state.index_of(id);
+    if (!target || target == this || i < 0 || !target->state.same_group(state)) return;
+    target->state.received(state.transfer_of(i, index, dynamic_cast<rap::window*>(&win_)));
+}
 
 // -- backend ------------------------------------------------------------------
 

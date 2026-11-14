@@ -238,6 +238,9 @@ msgstr "_Neuer Tab"
 msgid "_Close tab"
 msgstr "Tab _schließen"
 
+msgid "_Move to new window"
+msgstr "In neues _Fenster verschieben"
+
 msgid "Tabs"
 msgstr "Tabs"
 

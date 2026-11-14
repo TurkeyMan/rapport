@@ -115,6 +115,10 @@ public:
         if (s.on_close) t.on_close(s.on_close);
         if (s.on_new) t.on_new(s.on_new);
         if (s.on_reorder) t.on_reorder(s.on_reorder);
+        if (s.on_detach) t.on_detach(s.on_detach);
+        if (s.on_receive) t.on_receive(s.on_receive);
+        if (!s.group.empty()) t.set_group(s.group);
+        if (s.on_context_menu) t.on_context_menu(s.on_context_menu);
         if (s.bind) *s.bind = &t;
     }
 

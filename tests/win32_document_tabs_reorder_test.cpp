@@ -153,24 +153,33 @@ private:
     bool caption_;
 };
 
-// Ctrl (and Shift) held in the thread's key state, the key posted to the
-// window, as the backend's loop takes typing; then let go.
-void ctrl_shift_key(HWND top, WPARAM vk)
+// The thread's key state with exactly these modifiers down: every other
+// modifier (Alt, the Windows key, the right-hand ones) and the mouse buttons
+// cleared, so nothing left over from before can change what a posted key is.
+void set_modifiers(bool ctrl, bool shift)
 {
     BYTE state[256] = {};
     GetKeyboardState(state);
-    state[VK_CONTROL] = state[VK_LCONTROL] = state[VK_SHIFT] = state[VK_LSHIFT] = 0x80;
+    for (int vk : {VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU,
+                   VK_LWIN, VK_RWIN, VK_LBUTTON, VK_RBUTTON, VK_MBUTTON})
+        state[vk] = 0;
+    if (ctrl) state[VK_CONTROL] = state[VK_LCONTROL] = 0x80;
+    if (shift) state[VK_SHIFT] = state[VK_LSHIFT] = 0x80;
     SetKeyboardState(state);
+}
+
+// Ctrl and Shift held in the thread's key state (and nothing else), the key
+// posted to the window, as the backend's loop takes typing; then let go.
+void ctrl_shift_key(HWND top, WPARAM vk)
+{
+    set_modifiers(true, true);
     const LPARAM lp = 1 | (LPARAM(MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC)) << 16) | (LPARAM(1) << 24);
     PostMessageW(top, WM_KEYDOWN, vk, lp);
     PostMessageW(top, WM_KEYUP, vk, lp | (LPARAM(3) << 30));
 }
 void keys_up()
 {
-    BYTE state[256] = {};
-    GetKeyboardState(state);
-    state[VK_CONTROL] = state[VK_LCONTROL] = state[VK_SHIFT] = state[VK_LSHIFT] = 0;
-    SetKeyboardState(state);
+    set_modifiers(false, false);
 }
 
 struct told

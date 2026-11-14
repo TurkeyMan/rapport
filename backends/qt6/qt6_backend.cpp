@@ -2077,9 +2077,26 @@ public:
     // handling: a drag's start and end.
     std::function<void(int)> pressed_on;
     std::function<void()> press_handled, released;
+    // A right click on tab i (-1: none), or the menu key; `global` where the
+    // menu goes.
+    std::function<void(int, QPoint)> menu_asked;
     bool pressed = false;  // the left button's down on it
 
 protected:
+    void contextMenuEvent(QContextMenuEvent* e) override
+    {
+        if (!menu_asked) return;
+        int i = -1;
+        QPoint at = e->globalPos();
+        if (e->reason() == QContextMenuEvent::Keyboard)
+        {
+            i = currentIndex();
+            if (i >= 0) at = mapToGlobal(tabRect(i).bottomLeft());
+        }
+        else
+            i = tabAt(e->pos());
+        menu_asked(i, at);
+    }
     QSize tabSizeHint(int i) const override
     {
         QSize s = QTabBar::tabSizeHint(i);
@@ -2125,6 +2142,13 @@ protected:
 // A window's document tabs (window_spec::tabs): a QTabBar across the top in
 // document mode, each tab with its close button, as Dolphin's are, movable.
 // It never takes the focus: the window's keys work it.
+//
+// Not yet torn off or dropped by dragging (a tracked gap): the handlers are
+// kept, and the right-click menu's Move to new window asks on_detach, but a
+// tab dragged out of the bar stays in it, and nothing's dropped in. QDrag
+// can't tell a drop on nothing (tearing off) from Escape (exec returns
+// IgnoreAction for both), and QTabBar's own live move would have to be
+// handed over to it mid-drag.
 class document_tabs_impl : public widget_base<rap::document_tabs>
 {
 public:
@@ -2139,6 +2163,7 @@ public:
         bar_->setElideMode(Qt::ElideRight);
         bar_->setFocusPolicy(Qt::NoFocus);
         bar_->middle_clicked = [this](int i) { state.close_asked(i); };
+        bar_->menu_asked = [this](int i, QPoint at) { show_popup_menu(state.context_menu(i), bar_, at); };
         QObject::connect(bar_, &QTabBar::currentChanged, bar_,
                          [this](int i)
                          {
@@ -2196,6 +2221,7 @@ public:
         if (bar_)
         {
             bar_->middle_clicked = nullptr;
+            bar_->menu_asked = nullptr;
             bar_->pressed_on = nullptr;
             bar_->press_handled = nullptr;
             bar_->released = nullptr;
@@ -2255,6 +2281,15 @@ public:
     void on_reorder(std::function<void(const std::string&, int)> f) override
     {
         state.on_reorder = std::move(f);
+    }
+    // Kept: the menu's Move to new window asks on_detach; dragging doesn't
+    // tear off or drop here yet (see above).
+    void on_detach(detach_fn f) override { state.on_detach = std::move(f); }
+    void on_receive(receive_fn f) override { state.on_receive = std::move(f); }
+    void set_group(const std::string& g) override { state.group = g; }
+    void on_context_menu(std::function<rap::menu(const std::string&)> f) override
+    {
+        state.on_context_menu = std::move(f);
     }
 
     bool key(const key_event& e)
