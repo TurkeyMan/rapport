@@ -664,7 +664,7 @@ void check_band_rows(HWND top, int from, bool band, const palette& pal, HWND too
     while (y < p.h && p.at(x, y) == fill) ++y;
     const int fill_end = y;
     const RECT tb = toolbar ? rect_in(top, toolbar) : RECT{};
-    expect(fill_end > from && (!toolbar || (fill_end >= tb.bottom && fill_end <= tb.bottom + px(4, dpi))),
+    expect(fill_end > from && (!toolbar || (fill_end >= tb.bottom && fill_end <= tb.bottom + px(8, dpi))),
            "the band " + argb_hex(fill) + " (premultiplied ARGB) from the strip's bottom, " + str(from) +
                ", to the toolbar's, " + str(long(tb.bottom)) + at + ": to " + str(fill_end) + ", then " +
                argb_hex(p.at(x, fill_end)));

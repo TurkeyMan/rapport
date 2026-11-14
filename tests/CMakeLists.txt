@@ -522,6 +522,32 @@ if(TARGET rapport_win32)
             ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
     endif()
 
+    # The toolbar band's metrics and fields (Windows 11, the tabs in the
+    # caption, a base surface): never shown but for UIA's part, light and
+    # dark, and under high contrast (CI only, as above).
+    add_executable(rapport-win32-band-fields-test win32_band_fields_test.cpp)
+    target_link_libraries(rapport-win32-band-fields-test PRIVATE rapport::rapport user32 gdi32 comctl32 advapi32
+                                                                 ole32 oleaut32 uiautomationcore)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-band-fields-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-band-fields-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-band-fields-test rapport_win32)
+    add_test(NAME win32-band-fields COMMAND rapport-win32-band-fields-test)
+    set_tests_properties(win32-band-fields PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 120)
+    add_test(NAME win32-band-fields-light COMMAND rapport-win32-band-fields-test)
+    set_tests_properties(win32-band-fields-light PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" TIMEOUT 120)
+    add_test(NAME win32-band-fields-high-contrast
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-band-fields-test>)
+    set_tests_properties(win32-band-fields-high-contrast PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    # The display's scale really changed (125%, 150% where the runner
+    # reaches it) and put back: CI only, as win32-caption-tabs-transitions.
+    add_test(NAME win32-band-fields-transitions COMMAND rapport-win32-band-fields-test --transitions)
+    set_tests_properties(win32-band-fields-transitions PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+
     # The document tabs reordered by dragging and by the keys, in both strips:
     # never-shown windows, given the mouse's messages and the keys.
     add_executable(rapport-win32-document-tabs-reorder-test win32_document_tabs_reorder_test.cpp)

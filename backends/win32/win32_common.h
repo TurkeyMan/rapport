@@ -102,6 +102,12 @@ SIZE font_metrics(UINT dpi);
 // The UI font family name and size in DIPs (for DirectWrite text).
 std::wstring ui_font_family();
 float ui_font_size_dip();
+// The desktop's text size (Settings > Accessibility > Text size): 1 at 100%,
+// up to 2.25; what the message font is enlarged by from its 9 pt.
+float text_scale();
+// For tests: the text size taken to be `scale` (0: the desktop's again),
+// without changing the setting; the message font itself stays as it is.
+void set_text_scale_for_tests(float scale);
 
 // Extent -> device pixels for a window.
 int extent_px(HWND h, extent e, bool vertical);
@@ -117,6 +123,9 @@ void forget_theme_colors();
 // Windows' dark app mode (palette::windows_dark), and high contrast.
 bool dark_mode();
 bool high_contrast();
+// WinUI's AccentFillColorDefault: the user's accent's Dark1 shade (Light2 in
+// dark mode), from its palette, else the accent itself.
+color accent_fill_default();
 // A solid brush of a role, kept until the colours change.
 HBRUSH theme_brush(theme_color role);
 // What the background of `h`'s window is painted in, wherever rapport paints
@@ -311,6 +320,9 @@ public:
     // Width beyond its natural size that it would show to advantage, given
     // from a row's spare space: an ellipsized label's full text.
     virtual long wants_wider() const { return 0; }
+    // In the toolbar band's toolbar, or out of it (win32_band_field.h): its
+    // metrics and, for a field, its look. Set before it's measured.
+    virtual void set_in_band(bool) {}
 
     bool visible = true;
     int stretch = 0;

@@ -7,6 +7,7 @@
 #include "lazy_tree.h"
 #include "menu_dismiss.h"
 #include "stack_pages.h"
+#include "win32_band_field.h"
 #include "win32_caption_tabs.h"
 #include "win32_common.h"
 #include "win32_shell_icons.h"
@@ -482,6 +483,10 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         result = 0;
         return true;
     }
+    // A field in the toolbar band: its own fill and text (win32_band_field.h).
+    if ((msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORSTATIC) &&
+        band_field_ctlcolor(reinterpret_cast<HWND>(lp), reinterpret_cast<HDC>(wp), result))
+        return true;
     switch (msg)
     {
     case WM_COMMAND:
@@ -1772,6 +1777,9 @@ public:
         for (item* c : children) c->show_all(shown && visible);
     }
 
+protected:
+    void set_spacing(int spacing) { spacing_ = spacing; }
+
 private:
     SIZE size_of(item* c)
     {
@@ -1876,17 +1884,60 @@ private:
 };
 
 // A toolbar's row: a box that knows it's one, and where it was placed (the
-// toolbar band's, win32_caption_tabs.h).
+// toolbar band's, win32_caption_tabs.h). The band's toolbar takes its
+// metrics (win32_band_field.h): the row band_metrics::row tall, its items
+// centred in it, from `start` in to `end` before the other end, `gap`
+// apart; its items theirs (set_in_band).
 class toolbar_item final : public box_item
 {
 public:
-    using box_item::box_item;
+    explicit toolbar_item(win_context& win)
+        : box_item(orientation::horizontal, win.px(2))
+        , win_(win)
+    {
+    }
     RECT rect{};
+    bool banded() const { return banded_; }
+    void set_banded(bool on)
+    {
+        if (banded_ == on) return;
+        banded_ = on;
+        for (item* c : children) c->set_in_band(on);
+    }
+    SIZE measure() override
+    {
+        const UINT dpi = win_.dpi();
+        set_spacing(banded_ ? band_px(band_metrics::gap, dpi) : win_.px(2));
+        SIZE s = box_item::measure();
+        if (!banded_) return s;
+        const long around = band_px(band_metrics::row, dpi) - band_px(band_metrics::field, dpi);
+        return {s.cx + band_px(band_metrics::start, dpi) + band_px(band_metrics::end, dpi),
+                std::max<long>(band_px(band_metrics::row, dpi), s.cy + around)};
+    }
+    long measure_height(long width) override
+    {
+        if (!banded_) return box_item::measure_height(width);
+        return natural().cy;
+    }
     void place(RECT r) override
     {
         rect = r;
+        if (banded_)
+        {
+            // The items in the field's height, (row - field) / 2 above them.
+            const UINT dpi = win_.dpi();
+            const long field = band_px(band_metrics::field, dpi);
+            const long inner = std::max(field, natural().cy - (band_px(band_metrics::row, dpi) - field));
+            const long top = std::max<long>(0, (r.bottom - r.top - inner) / 2);
+            r = RECT{r.left + band_px(band_metrics::start, dpi), r.top + top,
+                     std::max(r.left, r.right - band_px(band_metrics::end, dpi)), r.top + top + inner};
+        }
         box_item::place(r);
     }
+
+private:
+    win_context& win_;
+    bool banded_ = false;
 };
 
 // Labels right-aligned in the first column, fields in the second; an empty
@@ -2534,9 +2585,19 @@ public:
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
         RECT r = d->rcItem;
-        FillRect(d->hDC, &r, theme_brush(theme_color::base));
         const bool pressed = d->itemState & ODS_SELECTED;
         const bool disabled = d->itemState & ODS_DISABLED;
+        // In a band field (win32_band_field.h): on its fill, WinUI's.
+        color fill, ink;
+        if (band_field_button_colors(GetParent(h_), pressed, checked_ || hot_, fill, ink))
+        {
+            HBRUSH b = CreateSolidBrush(color_ref(fill));
+            FillRect(d->hDC, &r, b);
+            DeleteObject(b);
+            draw_glyph(d->hDC, r, ink);
+            return true;
+        }
+        FillRect(d->hDC, &r, theme_brush(theme_color::base));
         if (pressed || checked_ || hot_)
         {
             const color tint = theme_color_of(theme_color::highlight);
@@ -2550,15 +2611,24 @@ public:
             FillRect(d->hDC, &in, b);
             DeleteObject(b);
         }
+        draw_glyph(d->hDC, r,
+                   disabled ? theme_color_of(theme_color::placeholder_text) : theme_color_of(theme_color::text));
+        return true;
+    }
+    HWND hwnd() const { return h_; }
+
+private:
+    // The icon centred in `r` (left of centre for a menu's arrow), and the
+    // arrow after it.
+    void draw_glyph(HDC dc, RECT r, color ink)
+    {
         const int size = win_.px(16);
         const int arrow = menu_ ? win_.px(8) : 0;
         RECT ir{r.left + (r.right - r.left - size - arrow) / 2,
                 r.top + (r.bottom - r.top - size) / 2, 0, 0};
         ir.right = ir.left + size;
         ir.bottom = ir.top + size;
-        const color ink = disabled ? theme_color_of(theme_color::placeholder_text)
-                                   : theme_color_of(theme_color::text);
-        draw_icon_on_dc(d->hDC, ir, icon_, win_.scale(), ink);
+        draw_icon_on_dc(dc, ir, icon_, win_.scale(), ink);
         if (menu_)
         {
             // A small down-pointing triangle after the icon.
@@ -2568,18 +2638,15 @@ public:
                                   {cx + half + 1, cy - half / 2},
                                   {cx, cy + half - half / 2}};
             HBRUSH b = CreateSolidBrush(RGB(ink.r, ink.g, ink.b));
-            HGDIOBJ old_brush = SelectObject(d->hDC, b);
-            HGDIOBJ old_pen = SelectObject(d->hDC, GetStockObject(NULL_PEN));
-            Polygon(d->hDC, tri, 3);
-            SelectObject(d->hDC, old_pen);
-            SelectObject(d->hDC, old_brush);
+            HGDIOBJ old_brush = SelectObject(dc, b);
+            HGDIOBJ old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+            Polygon(dc, tri, 3);
+            SelectObject(dc, old_pen);
+            SelectObject(dc, old_brush);
             DeleteObject(b);
         }
-        return true;
     }
-    HWND hwnd() const { return h_; }
 
-private:
     static LRESULT CALLBACK hover_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
                                        DWORD_PTR data)
     {
@@ -2638,6 +2705,7 @@ public:
         if (clear_ || !actions_.empty() || !leading_.empty())
         {
             SetWindowSubclass(h_, edit_buttons_subclass, 3, reinterpret_cast<DWORD_PTR>(this));
+            buttons_hooked_ = true;
             place_buttons();
         }
     }
@@ -2655,11 +2723,28 @@ public:
     // (WM_CTLCOLORSTATIC).
     void set_frame(bool v) override
     {
+        frame_ = v;
         if (v)
             RemoveWindowSubclass(h_, frameless_subclass, 2);
         else
             SetWindowSubclass(h_, frameless_subclass, 2, 0);
+        apply_band();
         RedrawWindow(h_, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE | RDW_ERASE);
+    }
+    // In the toolbar band, a framed entry is a band field (win32_band_field.h).
+    void set_in_band(bool on) override
+    {
+        in_band_ = on;
+        apply_band();
+    }
+    // High contrast on or off: a band field's frame drawn or native; its
+    // font and height measured again.
+    void theme_changed() override
+    {
+        if (!is_band_field(h_)) return;
+        refresh_band_field(h_);
+        place_buttons();
+        win_.relayout();
     }
     void set_placeholder(const std::string& p) override
     {
@@ -2676,21 +2761,42 @@ public:
     SIZE measure() override
     {
         const SIZE m = font_metrics(win_.dpi());
+        if (is_band_field(h_)) return {m.cx * 20 + px(8), band_field_height(h_)};
         return {m.cx * 20 + px(8), m.cy + px(9)};
     }
 
 private:
+    void apply_band()
+    {
+        const bool want = in_band_ && frame_;
+        if (want == is_band_field(h_)) return;
+        set_band_field(h_, want);
+        if (want && !buttons_hooked_)
+        {
+            // Its text's margins, buttons or none, follow its size and font.
+            SetWindowSubclass(h_, edit_buttons_subclass, 3, reinterpret_cast<DWORD_PTR>(this));
+            buttons_hooked_ = true;
+        }
+        if (!want) SendMessageW(h_, EM_SETMARGINS, EC_USEFONTINFO, 0);
+        place_buttons();
+    }
+
     // Square buttons the client area's height (a menu's wider, for its
     // arrow): the leading ones at its left end, the trailing ones at its
     // right end outermost, the clear button (while there's text) inside
-    // them; the text kept clear of them.
+    // them; the text kept clear of them. In a drawn band field, each
+    // band_metrics::button wide, and the text kept TextControlThemePadding
+    // in from the border where there's no button.
     void place_buttons()
     {
-        if (!clear_ && actions_.empty() && leading_.empty()) return;
+        const bool band = band_field_drawn(h_);
+        if (!band && !clear_ && actions_.empty() && leading_.empty()) return;
         RECT c{};
         GetClientRect(h_, &c);
         const int size = c.bottom - c.top;
-        auto width = [&](const edit_button& b) { return size + (b.has_menu() ? px(8) : 0); };
+        const UINT dpi = win_.dpi();
+        const int across = band ? band_px(band_metrics::button, dpi) : size;
+        auto width = [&](const edit_button& b) { return across + (b.has_menu() ? px(8) : 0); };
         int left = 0;
         for (const auto& b : leading_)
         {
@@ -2708,13 +2814,20 @@ private:
             const bool any = GetWindowTextLengthW(h_) > 0;
             if (any)
             {
-                x -= size;
-                MoveWindow(clear_->hwnd(), x, 0, size, size, TRUE);
+                x -= across;
+                MoveWindow(clear_->hwnd(), x, 0, across, size, TRUE);
             }
             ShowWindow(clear_->hwnd(), any ? SW_SHOWNA : SW_HIDE);
         }
-        SendMessageW(h_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
-                     MAKELPARAM(left, c.right - x));
+        int right = c.right - x;
+        if (band)
+        {
+            // Past the buttons, or from the border's inside edge.
+            const int side = band_field_side(dpi), border = band_px(band_metrics::border, dpi);
+            if (!left) left = std::max(0, border + band_px(band_metrics::text_start, dpi) - side);
+            if (!right) right = std::max(0, border + band_px(band_metrics::text_end, dpi) - side);
+        }
+        SendMessageW(h_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(left, right));
     }
     static LRESULT CALLBACK edit_buttons_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
                                                   DWORD_PTR data)
@@ -2752,6 +2865,8 @@ private:
     std::unique_ptr<edit_button> clear_;
     std::vector<std::unique_ptr<edit_button>> leading_, actions_;
     bool quiet_ = false;
+    bool frame_ = true, in_band_ = false;
+    bool buttons_hooked_ = false;  // edit_buttons_subclass installed
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
@@ -4944,7 +5059,14 @@ public:
         sync();
         SIZE s{0, 0};
         SendMessageW(h_, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&s));
-        return {s.cx, std::max<long>(s.cy, button_px())};
+        return {s.cx, std::max<long>(s.cy, button_size().cy)};
+    }
+    // In the toolbar band: Explorer's navigation buttons' size and spacing.
+    void set_in_band(bool on) override
+    {
+        if (band_ == on) return;
+        band_ = on;
+        size_buttons();
     }
     void place(RECT r) override
     {
@@ -4966,7 +5088,13 @@ private:
         std::wstring text;
     };
 
-    int button_px() const { return px(28); }
+    // Square, or in the band band_metrics' navigation buttons.
+    SIZE button_size() const
+    {
+        if (!band_) return {px(28), px(28)};
+        const UINT dpi = win_.dpi();
+        return {band_px(band_metrics::nav_width, dpi), band_px(band_metrics::nav_height, dpi)};
+    }
 
     // Hides the entries whose items are hidden.
     void sync()
@@ -5028,15 +5156,25 @@ private:
         rescale();
         InvalidateRect(h_, nullptr, FALSE);
     }
-    // Square buttons, sized once they're in (adding them resizes them).
+    // The buttons sized once they're in (adding them resizes them), and in
+    // the band spaced as Explorer's.
     void size_buttons()
     {
         // The padding is what the icon leaves of a button.
-        const int pad = button_px() - px(16);
-        SendMessageW(h_, TB_SETPADDING, 0, MAKELPARAM(pad, pad));
-        SendMessageW(h_, TB_SETBUTTONSIZE, 0, MAKELPARAM(button_px(), button_px()));
+        const SIZE b = button_size();
+        SendMessageW(h_, TB_SETPADDING, 0, MAKELPARAM(b.cx - px(16), b.cy - px(16)));
+        SendMessageW(h_, TB_SETBUTTONSIZE, 0, MAKELPARAM(b.cx, b.cy));
+        TBMETRICS m{sizeof m, TBMF_BUTTONSPACING};
+        SendMessageW(h_, TB_GETMETRICS, 0, reinterpret_cast<LPARAM>(&m));
+        if (!usual_spacing_) usual_spacing_ = SIZE{m.cxButtonSpacing, m.cyButtonSpacing};
+        m.dwMask = TBMF_BUTTONSPACING;
+        m.cxButtonSpacing = band_ ? band_px(band_metrics::nav_gap, win_.dpi()) : usual_spacing_->cx;
+        m.cyButtonSpacing = usual_spacing_->cy;
+        SendMessageW(h_, TB_SETMETRICS, 0, reinterpret_cast<LPARAM>(&m));
     }
 
+    bool band_ = false;
+    std::optional<SIZE> usual_spacing_;  // the control's own, out of the band
     std::vector<entry> entries_;
     std::vector<bool> shown_;
     HIMAGELIST images_[2] = {};
@@ -10621,6 +10759,11 @@ public:
         // WM_DESTROY can't see us once GWLP_USERDATA is cleared below.
         std::erase(recent(), this);
         if (hwnd_) busy_windows().erase(hwnd_);
+        // Nothing left to lay out: a layout from here on (the tabs and the
+        // controls going send messages) finds no items, and no toolbar
+        // with the band's metrics to give them back to.
+        banded_ = nullptr;
+        root = nullptr;
         items.clear();
         widgets.clear();
         doc_tabs.reset();
@@ -10742,6 +10885,7 @@ public:
     void place_all()
     {
         sync_caption();  // first: it may change the client area
+        sync_band_toolbar();
         RECT r = client();
         const int m = margin();
         moves_in_one_pass batch(ahead_.has_value() && !grow_ahead_);
@@ -10784,28 +10928,13 @@ public:
     void place_band(LONG top, const RECT& content)
     {
         RECT band{};
-        if (caption_ && surface_of(hwnd_) == theme_color::base)
+        if (const toolbar_item* bar = band_toolbar(); bar && bar->rect.left == content.left &&
+                                                       bar->rect.right == content.right &&
+                                                       bar->rect.bottom > bar->rect.top)
         {
-            item* first = root;
-            if (auto* box = dynamic_cast<box_item*>(root); box && !dynamic_cast<toolbar_item*>(root))
-            {
-                first = nullptr;
-                if (box->direction() == orientation::vertical)
-                    for (item* c : box->children)
-                        if (c->visible)
-                        {
-                            first = c;
-                            break;
-                        }
-            }
-            const auto* bar = dynamic_cast<toolbar_item*>(first);
-            if (bar && bar->visible && bar->rect.left == content.left && bar->rect.right == content.right &&
-                bar->rect.bottom > bar->rect.top)
-            {
-                RECT c;
-                GetClientRect(hwnd_, &c);
-                band = RECT{c.left, top, c.right, bar->rect.bottom + caption_line_px(dpi_of(hwnd_))};
-            }
+            RECT c;
+            GetClientRect(hwnd_, &c);
+            band = RECT{c.left, top, c.right, bar->rect.bottom + caption_line_px(dpi_of(hwnd_))};
         }
         RECT was{};
         const bool had = toolbar_band(hwnd_, was);
@@ -10818,6 +10947,40 @@ public:
         // what was band and isn't.
         RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
+    // The toolbar that's the band's, where there is one, whatever its size
+    // (place_band then checks it spans the content): on a base surface
+    // window with the tabs in the caption, its first content item (the
+    // content itself, or a column's first shown item).
+    toolbar_item* band_toolbar() const
+    {
+        if (!caption_ || surface_of(hwnd_) != theme_color::base) return nullptr;
+        item* first = root;
+        if (auto* box = dynamic_cast<box_item*>(root); box && !dynamic_cast<toolbar_item*>(root))
+        {
+            first = nullptr;
+            if (box->direction() == orientation::vertical)
+                for (item* c : box->children)
+                    if (c->visible)
+                    {
+                        first = c;
+                        break;
+                    }
+        }
+        auto* bar = dynamic_cast<toolbar_item*>(first);
+        return bar && bar->visible ? bar : nullptr;
+    }
+    // The band's toolbar takes the band's metrics (win32_band_field.h), and
+    // one that no longer is gives them up, before either is measured.
+    void sync_band_toolbar()
+    {
+        toolbar_item* bar = band_toolbar();
+        if (bar == banded_) return;
+        if (banded_) banded_->set_banded(false);
+        if (bar) bar->set_banded(true);
+        banded_ = bar;
+        ++g_layout_pass;  // new sizes
+    }
+    toolbar_item* banded_ = nullptr;  // the toolbar with the band's metrics
 
     // Owned parts of the window.
     std::vector<std::unique_ptr<container_state>> container_states;
@@ -10832,6 +10995,7 @@ public:
     {
         std::set<const item*> mine;
         for (const item_ptr& i : part.items) mine.insert(i.get());
+        if (mine.contains(banded_)) banded_ = nullptr;  // (its metrics went with it)
         for (auto& [key, forms] : form_groups)
             std::erase_if(forms, [&](form_item* f) { return mine.contains(f); });
         std::erase_if(role_buttons, [&](button_impl* b) { return mine.contains(b); });
@@ -10898,6 +11062,7 @@ public:
     // size before the window shows (a program fitting the window to its content).
     void lay_out_hidden()
     {
+        sync_band_toolbar();  // its metrics in the first size
         const SIZE s = first_size();
         RECT r{0, 0, s.cx, s.cy};
         adjust(r);
@@ -12081,7 +12246,7 @@ private:
     }
     item* make(const node& n, const spec::toolbar& s, HWND parent, orientation)
     {
-        auto* box = own<toolbar_item>(orientation::horizontal, win_.px(2));
+        auto* box = own<toolbar_item>(win_);
         // Each run of buttons and separators is one native toolbar.
         tool_strip* strip = nullptr;
         for (const node& c : s.items)

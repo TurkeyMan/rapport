@@ -126,15 +126,17 @@ jobs:
           }
           Remove-Item Env:RAPPORT_THEME
 
-      # Server 2025's runner also runs the base surface and caption tabs
-      # tests under high contrast (win32-base-surface-high-contrast,
-      # win32-caption-tabs-high-contrast), and the caption tabs with the
-      # display's scale and high contrast changed while they're open
-      # (win32-caption-tabs-transitions): system settings, so only on a
-      # throwaway runner, and only this job. Every Windows job drives the
-      # document tabs' tearing off with real input (SendInput: the move loop
-      # needs the real mouse), win32-document-tabs-tearoff-input, as it
-      # moves the pointer and presses keys: only on a runner.
+      # Server 2025's runner also runs the base surface, caption tabs and
+      # band fields tests under high contrast (win32-base-surface-high-contrast,
+      # win32-caption-tabs-high-contrast, win32-band-fields-high-contrast),
+      # and the caption tabs and band fields with the display's scale (and
+      # the tabs' high contrast) changed while they're open
+      # (win32-caption-tabs-transitions, win32-band-fields-transitions):
+      # system settings, so only on a throwaway runner, and only this job.
+      # Every Windows job drives the document tabs' tearing off with real
+      # input (SendInput: the move loop needs the real mouse),
+      # win32-document-tabs-tearoff-input, as it moves the pointer and
+      # presses keys: only on a runner.
       - name: Portable tests
         env:
           RAPPORT_TEST_SET_HIGH_CONTRAST: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
