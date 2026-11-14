@@ -504,7 +504,10 @@ void paint_band_field_face(HWND h, HDC dc, const RECT& r, const band_field_look&
                         const float in =
                             cover(x, y, border, border, w - border, ht - bottom, radius - border);
                         m.add(face, in);
-                        m.add(l.focused && float(y) >= ht - line ? l.accent : l.stroke,
+                        m.add(l.focused && float(y) >= ht - line
+                                  ? l.accent
+                                  : band_field_ring_at(l.stroke, l.stroke_strong, l.elevated, ht,
+                                                       float(y), scale),
                               std::max(0.f, outer - in));
                     }
                     return m.pixel();

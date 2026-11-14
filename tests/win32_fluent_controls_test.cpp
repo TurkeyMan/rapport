@@ -392,6 +392,26 @@ int main(int argc, char** argv)
                 expect(fill_of(go) == accent && fill_of(stop) == plain,
                        "and back to OK: " + hex(fill_of(go)) + ", " + hex(fill_of(stop)));
             }
+            // A field's border at rest, out of the band as in it: WinUI's
+            // TextControlElevationBorderBrush, ControlStrokeColorDefault along
+            // its top and sides, ControlStrongStrokeColorDefault along its
+            // bottom; its fill ControlFillColorDefault. An entry and an
+            // editable combo box alike.
+            for (const control& c : {controls[0], controls[4]})
+            {
+                const printed p = print(c.h);
+                const DWORD ground = ground_of(top, c.h);
+                const DWORD edge = over(dark ? 0x12FFFFFFu : 0x0F000000u, ground);
+                const DWORD strong = over(dark ? 0x8BFFFFFFu : 0x72000000u, ground);
+                const DWORD face = over(fill, ground);
+                const int x = p.w / 3;
+                expect(p.at(x, 0) == edge && p.at(0, p.h / 2) == edge &&
+                           p.at(x, p.h - 1) == strong && p.at(x, 2) == face,
+                       std::string(c.what) + " at rest: its border " + hex(edge) + ", its bottom " +
+                           hex(strong) + ", its fill " + hex(face) + ": " + hex(p.at(x, 0)) + ", " +
+                           hex(p.at(0, p.h / 2)) + ", " + hex(p.at(x, p.h - 1)) + ", " +
+                           hex(p.at(x, 2)));
+            }
             // An entry's frame: the band field's, drawn (the test tools' message).
             static const UINT query = RegisterWindowMessageW(L"rapport-band-field");
             expect((SendMessageW(entry_h, query, 0, 0) & 3) == 3,

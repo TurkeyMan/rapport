@@ -12,7 +12,9 @@
 // cues are shown), its corners the band's layer; a menu button as its
 // DropDownButton (the same, with a chevron); a drop-down list as ComboBox's
 // closed face (the same fill, a chevron at its right); an editable combo
-// box as a band field (ControlFillColorDefault, no border at rest; focused,
+// box as a band field (ControlFillColorDefault, at rest WinUI's
+// TextControlElevationBorderBrush round it, its bottom ControlStrong-
+// StrokeColorDefault; focused,
 // ControlFillColorInputActive and the accent along its bottom); a tool
 // button as an AppBarButton (the band's layer at rest, SubtleFillColor-
 // Secondary over it hovered), a checked toggle in the accent; a separator a
@@ -486,16 +488,24 @@ void check_combo_fill(HWND combo, const std::string& what)
     expect(in == face, "its edit's ground the face's, " + hex(face) + what + ": " + hex(in));
 }
 
-// An editable combo box: a band field (no border at rest), focused the
-// accent along its bottom.
+// An editable combo box: a band field (at rest ControlStrokeColorDefault
+// along its top, ControlStrongStrokeColorDefault along its bottom), focused
+// the accent along its bottom.
 void check_combo(HWND combo, const std::string& at)
 {
     const face_colors c = colours();
     const DWORD rest = over(c.fill, band_fill());
     printed p = print(combo);
     check_face(p, rest, " (an editable combo box" + at + ")");
-    expect(p.at(p.w / 3, 0) == rest,
-           "at rest no border, as a band field's" + at + ": " + hex(p.at(p.w / 3, 0)));
+    // TextControlElevationBorderBrush, as a band field's: ControlStroke-
+    // ColorDefault along its top and sides, ControlStrongStrokeColorDefault
+    // along its bottom (#72000000 light, #8BFFFFFF dark).
+    const DWORD edge = over(c.stroke, band_fill());
+    const DWORD strong = over(from(g_dark ? 0x8BFFFFFF : 0x72000000), band_fill());
+    expect(p.at(p.w / 3, 0) == edge && p.at(0, p.h / 2) == edge && p.at(p.w / 3, p.h - 1) == strong,
+           "at rest its border " + hex(edge) + " along its top and sides, " + hex(strong) +
+               " along its bottom" + at + ": " + hex(p.at(p.w / 3, 0)) + ", " +
+               hex(p.at(0, p.h / 2)) + ", " + hex(p.at(p.w / 3, p.h - 1)));
     COMBOBOXINFO info{};
     info.cbSize = sizeof info;
     GetComboBoxInfo(combo, &info);
@@ -510,6 +520,10 @@ void check_combo(HWND combo, const std::string& at)
     EnableWindow(combo, FALSE);
     p = print(combo);
     check_face(p, over(c.disabled, band_fill()), " (an editable combo box, disabled" + at + ")");
+    // Disabled: ControlStrokeColorDefault all round, no strong bottom.
+    expect(p.at(p.w / 3, p.h - 1) == over(c.stroke, band_fill()),
+           "disabled, its bottom ControlStrokeColorDefault" + at + ": " +
+               hex(p.at(p.w / 3, p.h - 1)));
     check_combo_fill(combo, " (an editable combo box, disabled" + at + ")");
     EnableWindow(combo, TRUE);
     const DWORD accent = accent_fill();
@@ -989,6 +1003,19 @@ void run(rap::ui& ui, const density& d, bool hc)
         check_tool_button(pull, false, at);
         check_tool_button(toggle, true, at);
         check_combo(editable, at);
+        // An entry in the band at rest: TextControlElevationBorderBrush, as
+        // the combo box's (the window never shown, so never active).
+        {
+            const face_colors c = colours();
+            const printed p = print(entry_h);
+            const DWORD edge = over(c.stroke, band_fill());
+            const DWORD strong = over(from(g_dark ? 0x8BFFFFFF : 0x72000000), band_fill());
+            const int x = p.w * 3 / 4;
+            expect(p.at(x, 0) == edge && p.at(0, p.h / 2) == edge && p.at(x, p.h - 1) == strong,
+                   "an entry at rest its border " + hex(edge) + " along its top and sides, " +
+                       hex(strong) + " along its bottom" + at + ": " + hex(p.at(x, 0)) + ", " +
+                       hex(p.at(0, p.h / 2)) + ", " + hex(p.at(x, p.h - 1)));
+        }
         // Out of the band and back (its tabs hidden: no band; shown again):
         // each face printed through the band's glass still, its corners the
         // band's layer, not opaque.
