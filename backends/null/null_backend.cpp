@@ -4,6 +4,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/lazy_tree.h"
+#include "../common/stack_pages.h"
 #include "rapport/backend.h"
 
 #include <algorithm>
@@ -267,10 +268,26 @@ public:
     std::pair<size_t, size_t> selected{0, 0};
 };
 
-class null_list : public stub<rap::list>
+// Observes its model as a real list does, reading the row count again on a
+// reset (which tests can see), and stops when it goes.
+class null_list : public stub<rap::list>, public list_observer
 {
 public:
-    void set_model(list_model* m) override { model = m; }
+    ~null_list() override
+    {
+        if (model) model->remove_observer(this);
+    }
+    void set_model(list_model* m) override
+    {
+        if (model) model->remove_observer(this);
+        model = m;
+        if (model) model->add_observer(this);
+    }
+    void model_reset() override { rows = model ? model->row_count() : 0; }
+    void rows_changed(size_t, size_t) override {}
+    void rows_inserted(size_t, size_t) override {}
+    void rows_removed(size_t, size_t) override {}
+    size_t rows = 0;
     std::vector<size_t> selection() const override { return {}; }
     std::optional<size_t> current() const override { return {}; }
     void select(const std::vector<size_t>&) override {}
@@ -332,6 +349,42 @@ public:
 
 private:
     int current_ = 0;
+};
+
+using widget_list = std::vector<std::unique_ptr<rap::widget>>;
+
+// The pages' bookkeeping, and their widgets: a page removed is destroyed
+// when the queue next runs.
+class null_stack : public stub<rap::stack>
+{
+public:
+    void add(const std::string& id, node content) override
+    {
+        if (pages_.contains(id)) return;
+        auto widgets = std::make_unique<widget_list>();
+        build_page(content, id, *widgets);
+        pages_.add(id, std::move(widgets));
+    }
+    void remove(const std::string& id) override
+    {
+        const int i = pages_.index_of(id);
+        if (i < 0) return;
+        grave_.bury(std::move(pages_.take(size_t(i)).page), post);
+    }
+    void show(const std::string& id) override
+    {
+        if (const int i = pages_.index_of(id); i >= 0) pages_.set_shown(i);
+    }
+    std::string shown() const override { return pages_.shown_id(); }
+    std::vector<std::string> ids() const override { return pages_.ids(); }
+
+    // Builds a page's content into `widgets`, printing it.
+    std::function<void(const node&, const std::string&, widget_list&)> build_page;
+    std::function<void(std::function<void()>)> post;
+
+private:
+    stack_pages::pages<std::unique_ptr<widget_list>> pages_;
+    stack_pages::graveyard<std::unique_ptr<widget_list>> grave_;
 };
 
 class null_tool_button : public stub<rap::tool_button>
@@ -511,9 +564,11 @@ const char* role_name(dialog_role r)
 class builder
 {
 public:
-    builder(null_window& w, build_sink& sink)
-        : win_(w)
+    using post_fn = std::function<void(std::function<void()>)>;
+    builder(widget_list& out, build_sink& sink, post_fn post)
+        : out_(out)
         , sink_(sink)
+        , post_(std::move(post))
     {
     }
 
@@ -532,7 +587,7 @@ private:
         auto w = std::make_unique<W>();
         W* raw = w.get();
         sink_.created(n, *w);
-        win_.widgets.push_back(std::move(w));
+        out_.push_back(std::move(w));
         return raw;
     }
 
@@ -600,11 +655,22 @@ private:
         if (!s.lazy.empty())
         {
             tabs->lazy = s.lazy;
-            tabs->build_page =
-                [&win = win_, &sink = sink_, d, titles = s.titles](const node& page, size_t i)
-            { builder(win, sink).build(page, d + 1, titles[i]); };
+            tabs->build_page = [&out = out_, &sink = sink_, post = post_, d,
+                                titles = s.titles](const node& page, size_t i)
+            { builder(out, sink, post).build(page, d + 1, titles[i]); };
             tabs->set_current(0);
         }
+    }
+    void visit(const node& n, const spec::stack& s, int d)
+    {
+        std::printf(s.homogeneous ? "stack" : "stack (sized to the page shown)");
+        suffix(n);
+        auto* stack = make<null_stack>(n);
+        stack->post = post_;
+        stack->build_page = [&sink = sink_, post = post_,
+                             d](const node& page, const std::string& id, widget_list& out)
+        { builder(out, sink, post).build(page, d + 1, id); };
+        for (size_t i = 0; i < s.pages.size(); ++i) stack->add(s.ids[i], s.pages[i]);
     }
     void visit(const node& n, const spec::spacer&, int)
     {
@@ -747,12 +813,13 @@ private:
         {
             auto w = std::make_unique<null_button>();
             sink_.created(b, *w);
-            win_.widgets.push_back(std::move(w));
+            out_.push_back(std::move(w));
         }
     }
 
-    null_window& win_;
+    widget_list& out_;
     build_sink& sink_;
+    post_fn post_;
 };
 
 class null_backend : public backend
@@ -776,7 +843,8 @@ public:
             sink.created(*spec.tabs, *tabs);
             w->widgets.push_back(std::move(tabs));
         }
-        builder(*w, sink).build(spec.content, 1);
+        builder(w->widgets, sink, [this](std::function<void()> f) { post(std::move(f)); })
+            .build(spec.content, 1);
         return w;
     }
 
