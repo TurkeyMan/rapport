@@ -42,6 +42,8 @@
 // Tooltips are top-level windows with their own surface: nothing to do.
 #include "win32_caption_tabs.h"
 
+#include "win32_band_field.h"
+
 #include <uxtheme.h>
 #include <vssym32.h>
 
@@ -313,7 +315,10 @@ bool paint_border(HWND h, HDC dc, bool hot)
 // An opaque control made opaque where it drew, within its visible region
 // (not over its children): its client area read back and written again at
 // alpha 255, the caret's pixels as drawn; its border drawn again
-// (paint_border), its state may have changed.
+// (paint_border), its state may have changed. A band field's frame
+// (win32_band_field.h) is left as it drew it: premultiplied already, the
+// band's layer at its own alpha round its rounded shape, which 255 would
+// turn into opaque square corners.
 void make_opaque(HWND h, bool hot)
 {
     if (!IsWindowVisible(h)) return;
@@ -332,6 +337,7 @@ void make_opaque(HWND h, bool hot)
             }
             ReleaseDC(h, dc);
         }
+    if (band_field_drawn(h)) return;
     if (HDC dc = GetWindowDC(h))
     {
         if (!paint_border(h, dc, hot))
@@ -517,6 +523,12 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
     }
     // Printed with its frame: the client area as on glass (WM_PRINTCLIENT,
     // above), the border ours.
+    // A band field's frame is its own (win32_band_field.h), drawn with its
+    // alpha: printed whole, as any window is, the client area past the frame
+    // (WM_PRINTCLIENT, above) and its buttons where they are. (Printed
+    // without PRF_NONCLIENT, DefWindowProc would put the client area at the
+    // DC's origin, under the frame.)
+    if (msg == WM_PRINT && (lp & PRF_NONCLIENT) && band_field_drawn(h)) return DefSubclassProc(h, msg, wp, lp);
     if (msg == WM_PRINT && (lp & PRF_NONCLIENT))
     {
         const bool hot = g->hot;

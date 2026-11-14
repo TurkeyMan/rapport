@@ -5,6 +5,7 @@
 
 #include <dwmapi.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -280,6 +281,27 @@ float ui_font_size_dip()
     return h < 0 ? float(-h) : float(h) * 0.8f;
 }
 
+namespace
+{
+float g_text_scale_for_tests = 0;
+}
+
+void set_text_scale_for_tests(float scale)
+{
+    g_text_scale_for_tests = scale;
+}
+
+float text_scale()
+{
+    if (g_text_scale_for_tests > 0) return g_text_scale_for_tests;
+    // TextScaleFactor, in percent (100 to 225); absent at 100%.
+    DWORD percent = 0, size = sizeof percent;
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Accessibility", L"TextScaleFactor", RRF_RT_REG_DWORD,
+                     nullptr, &percent, &size) != ERROR_SUCCESS)
+        return 1.f;
+    return float(std::clamp<DWORD>(percent, 100, 225)) / 100.f;
+}
+
 int extent_px(HWND h, extent e, bool vertical)
 {
     const UINT dpi = dpi_of(h);
@@ -391,6 +413,13 @@ bool dark_mode()
 bool high_contrast()
 {
     return desktop().high_contrast;
+}
+
+color accent_fill_default()
+{
+    const desktop_colors& d = desktop();
+    if (!d.shades) return d.accent;
+    return d.dark ? d.shades->light(2) : d.shades->dark(1);
 }
 
 HBRUSH theme_brush(theme_color role)
