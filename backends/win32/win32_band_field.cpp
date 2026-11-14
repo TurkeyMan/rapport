@@ -32,8 +32,13 @@ using winui::over;
 // what's under it. The fills by state: TextControlBackground (rest),
 // ...PointerOver, ...Focused and ...Disabled, which are ControlFillColorDefault,
 // ControlFillColorSecondary, ControlFillColorInputActive and
-// ControlFillColorDisabled; the border's ControlStrokeColorDefault (hovered,
-// focused, disabled: Explorer's boxes have none at rest); the text
+// ControlFillColorDisabled; the border, at rest and hovered
+// TextControlElevationBorderBrush (TextBox_themeresources.xaml: its bottom
+// 1 px ControlStrongStrokeColorDefault, blending to ControlStrokeColorDefault
+// by 2 px up, the rest ControlStrokeColorDefault), focused
+// ControlStrokeColorDefault with the accent along its bottom, disabled
+// ControlStrokeColorDefault all round. (Explorer's address boxes have none
+// at rest; a field is a field everywhere, the band's too.) The text
 // TextFillColorPrimary, the placeholder TextFillColorSecondary (Tertiary
 // focused: TextControlPlaceholderForegroundFocused), disabled
 // TextFillColorDisabled; a button inside, hovered and pressed,
@@ -44,18 +49,21 @@ struct field_colors
     color stroke;
     color text, placeholder, placeholder_focused, text_disabled;
     color button_hover, button_pressed;
+    color stroke_strong;  // ControlStrongStrokeColorDefault
 };
 // Light: #B3FFFFFF (Explorer's boxes at rest measure #FDFDFD on the band's
 // #F8F8F8: 70% white), #80F9F9F9, #FFFFFFFF, #4DF9F9F9; #0F000000; #E4000000,
-// #9E000000, #72000000, #5C000000; #09000000, #06000000.
-constexpr field_colors light_fields{argb(0xB3FFFFFF), argb(0x80F9F9F9), argb(0xFFFFFFFF), argb(0x4DF9F9F9),
-                                    argb(0x0F000000), argb(0xE4000000), argb(0x9E000000), argb(0x72000000),
-                                    argb(0x5C000000), argb(0x09000000), argb(0x06000000)};
+// #9E000000, #72000000, #5C000000; #09000000, #06000000; #72000000.
+constexpr field_colors light_fields{argb(0xB3FFFFFF), argb(0x80F9F9F9), argb(0xFFFFFFFF),
+                                    argb(0x4DF9F9F9), argb(0x0F000000), argb(0xE4000000),
+                                    argb(0x9E000000), argb(0x72000000), argb(0x5C000000),
+                                    argb(0x09000000), argb(0x06000000), argb(0x72000000)};
 // Dark: #0FFFFFFF, #15FFFFFF, #B31E1E1E, #0BFFFFFF; #12FFFFFF; #FFFFFFFF,
-// #C5FFFFFF, #87FFFFFF, #5DFFFFFF; #0FFFFFFF, #0AFFFFFF.
-constexpr field_colors dark_fields{argb(0x0FFFFFFF), argb(0x15FFFFFF), argb(0xB31E1E1E), argb(0x0BFFFFFF),
-                                   argb(0x12FFFFFF), argb(0xFFFFFFFF), argb(0xC5FFFFFF), argb(0x87FFFFFF),
-                                   argb(0x5DFFFFFF), argb(0x0FFFFFFF), argb(0x0AFFFFFF)};
+// #C5FFFFFF, #87FFFFFF, #5DFFFFFF; #0FFFFFFF, #0AFFFFFF; #8BFFFFFF.
+constexpr field_colors dark_fields{argb(0x0FFFFFFF), argb(0x15FFFFFF), argb(0xB31E1E1E),
+                                   argb(0x0BFFFFFF), argb(0x12FFFFFF), argb(0xFFFFFFFF),
+                                   argb(0xC5FFFFFF), argb(0x87FFFFFF), argb(0x5DFFFFFF),
+                                   argb(0x0FFFFFFF), argb(0x0AFFFFFF), argb(0x8BFFFFFF)};
 
 constexpr UINT_PTR subclass_id = 0xBA4D;
 constexpr UINT_PTR hover_timer = 0xBA4D;
@@ -136,8 +144,10 @@ struct look
     color behind;  // the band under it
     color face;    // its fill, opaque
     color stroke;  // its border, opaque (when ringed)
-    color accent;  // the focused line
+    color stroke_strong;  // the elevation border's bottom, opaque
+    color accent;         // the focused line
     bool ringed = false, focused = false;
+    bool elevated = false;  // TextControlElevationBorderBrush: at rest and hovered
     color text, placeholder;
     const field_colors* colors = nullptr;
 };
@@ -152,9 +162,11 @@ look look_at(color behind, bool enabled, bool focused, bool hot)
     l.behind.a = 255;
     l.face = over(!enabled ? p.disabled : l.focused ? p.focus : hot ? p.hover : p.rest, l.behind);
     l.stroke = over(p.stroke, l.behind);
+    l.stroke_strong = over(p.stroke_strong, l.behind);
     l.accent = accent_fill_default();
     l.accent.a = 255;
-    l.ringed = !enabled || l.focused || hot;
+    l.ringed = true;
+    l.elevated = enabled && !l.focused;
     l.text = over(enabled ? p.text : p.text_disabled, l.face);
     l.placeholder = over(!enabled ? p.text_disabled : l.focused ? p.placeholder_focused : p.placeholder, l.face);
     return l;
@@ -242,6 +254,10 @@ void paint_frame(HWND h, HDC dc)
     };
     const float fw = float(w), fh = float(ht);
     const float bottom = l.focused ? line : border;
+    // The border's colour at row `y`: the elevation border's gradient up from
+    // the bottom edge where it's elevated, else the one stroke.
+    auto ring_at = [&](int y)
+    { return band_field_ring_at(l.stroke, l.stroke_strong, l.elevated, fh, float(y), scale); };
     // Premultiplied, alpha and all: outside the rounded shape the band's
     // layer as the band draws it, the shape's own pixels (its fill, border,
     // accent) opaque over it, an antialiased edge between the two. (On a
@@ -277,7 +293,8 @@ void paint_frame(HWND h, HDC dc)
                     // as much of the pixel as it covers.
                     const float inner = cover(x, y, border, border, fw - border, fh - bottom, radius - border);
                     c = add(c, l.face, inner);
-                    c = add(c, l.focused && float(y) >= fh - line ? l.accent : l.stroke, std::max(0.f, outer - inner));
+                    c = add(c, l.focused && float(y) >= fh - line ? l.accent : ring_at(y),
+                            std::max(0.f, outer - inner));
                 }
             }
             pixels[size_t(y) * size_t(w) + size_t(x)] =
@@ -692,6 +709,20 @@ bool band_field_button_colors(HWND edit, bool pressed, bool hot, color& fill, co
     return true;
 }
 
+color band_field_ring_at(color stroke, color strong, bool elevated, float height, float y,
+                         float scale)
+{
+    if (!elevated) return stroke;
+    // TextControlElevationBorderBrush: absolute, 0 to 2 px, flipped (from
+    // the bottom up): ControlStrongStrokeColorDefault to 1 px (its 0.5),
+    // ControlStrokeColorDefault from 2.
+    const float from = (height - (y + .5f)) / scale;
+    const float k = std::clamp(from - 1.f, 0.f, 1.f);
+    auto m = [k](uint8_t a, uint8_t b)
+    { return uint8_t(std::lround(float(a) + (float(b) - float(a)) * k)); };
+    return color{m(strong.r, stroke.r), m(strong.g, stroke.g), m(strong.b, stroke.b), 255};
+}
+
 band_field_look band_field_look_at(color behind, bool enabled, bool focused, bool hot,
                                    bool pressed_button, bool hot_button)
 {
@@ -702,6 +733,8 @@ band_field_look band_field_look_at(color behind, bool enabled, bool focused, boo
     out.accent = l.accent;
     out.text = l.text;
     out.ringed = l.ringed;
+    out.stroke_strong = l.stroke_strong;
+    out.elevated = l.elevated;
     out.focused = l.focused;
     out.button = pressed_button ? over(l.colors->button_pressed, l.face)
                  : hot_button   ? over(l.colors->button_hover, l.face)

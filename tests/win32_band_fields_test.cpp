@@ -7,9 +7,11 @@
 // 32 and 8 apart. Each field is still the native EDIT, its frame and fill
 // drawn as WinUI's text box: printed (WM_PRINT, its client area through
 // WM_PRINTCLIENT) into a 32-bit bitmap, never shown, each state, light and
-// dark (RAPPORT_THEME): at rest (no border, ControlFillColorDefault over the
-// band, its corners rounded to the band), hovered (a WM_MOUSEMOVE sent: its
-// fill ControlFillColorSecondary and the ControlStrokeColorDefault border),
+// dark (RAPPORT_THEME): at rest (ControlFillColorDefault over the band, its
+// corners rounded to the band, WinUI's TextControlElevationBorderBrush round
+// it: ControlStrokeColorDefault along its top and sides,
+// ControlStrongStrokeColorDefault along its bottom), hovered (a WM_MOUSEMOVE
+// sent: its fill ControlFillColorSecondary, the same border),
 // focused (WM_SETFOCUS sent: ControlFillColorInputActive, the border, and
 // the accent's AccentFillColorDefault along its bottom 2 px), disabled,
 // read-only (as at rest: WinUI draws it as it does an editable box) and
@@ -186,18 +188,21 @@ argb from(DWORD v)
 }
 struct field_colors
 {
-    argb rest, hover, focus, disabled, stroke, text, placeholder, placeholder_focused, text_disabled;
+    argb rest, hover, focus, disabled, stroke, text, placeholder, placeholder_focused,
+        text_disabled, strong;
 };
 // ControlFillColorDefault, ...Secondary, ...InputActive, ...Disabled;
 // ControlStrokeColorDefault; TextFillColorPrimary, ...Secondary, ...Tertiary,
-// ...Disabled.
+// ...Disabled; ControlStrongStrokeColorDefault.
 field_colors colours()
 {
     if (g_dark)
-        return {from(0x0FFFFFFF), from(0x15FFFFFF), from(0xB31E1E1E), from(0x0BFFFFFF), from(0x12FFFFFF),
-                from(0xFFFFFFFF), from(0xC5FFFFFF), from(0x87FFFFFF), from(0x5DFFFFFF)};
-    return {from(0xB3FFFFFF), from(0x80F9F9F9), from(0xFFFFFFFF), from(0x4DF9F9F9), from(0x0F000000),
-            from(0xE4000000), from(0x9E000000), from(0x72000000), from(0x5C000000)};
+        return {from(0x0FFFFFFF), from(0x15FFFFFF), from(0xB31E1E1E), from(0x0BFFFFFF),
+                from(0x12FFFFFF), from(0xFFFFFFFF), from(0xC5FFFFFF), from(0x87FFFFFF),
+                from(0x5DFFFFFF), from(0x8BFFFFFF)};
+    return {from(0xB3FFFFFF), from(0x80F9F9F9), from(0xFFFFFFFF), from(0x4DF9F9F9),
+            from(0x0F000000), from(0xE4000000), from(0x9E000000), from(0x72000000),
+            from(0x5C000000), from(0x72000000)};
 }
 
 // The band (win32-caption-tabs): WinUI's LayerOnMicaBaseAltFillColorDefault,
@@ -499,9 +504,9 @@ void check_corners(const printed& p, DWORD face, const std::string& what)
                ", " + argb_hex(middle));
 }
 
-// A field's printed look: its corners the band's (rounded to it), its edge
-// the border or the fill, its fill, its bottom the accent when focused; the
-// text's ink as expected.
+// A field's printed look: its corners the band's (rounded to it), its top
+// and sides `edge`, its fill, its bottom `bottom` (the accent's 2 px when
+// focused); the text's ink as expected.
 struct look
 {
     DWORD face, edge, bottom;
@@ -514,6 +519,9 @@ void check_look(HWND edit, const look& want, const std::string& what)
     const int mid = p.w * 3 / 4;  // past the text, before a button
     check_corners(p, want.face, what);
     expect(p.at(mid, 0) == want.edge, "its top edge " + hex(want.edge) + what + ": " + hex(p.at(mid, 0)));
+    expect(p.at(0, p.h / 2) == want.edge && p.at(p.w - 1, p.h / 2) == want.edge,
+           "its sides " + hex(want.edge) + what + ": " + hex(p.at(0, p.h / 2)) + ", " +
+               hex(p.at(p.w - 1, p.h / 2)));
     expect(p.at(mid, 2) == want.face && p.at(mid, p.h / 2) == want.face,
            "its fill " + hex(want.face) + ", opaque" + what + ": " + hex(p.at(mid, 2)) + ", " +
                hex(p.at(mid, p.h / 2)));
@@ -542,19 +550,19 @@ void check_states(HWND top, rap::entry* address, HWND edit, HWND search)
     const DWORD behind = band_fill();
     const DWORD rest = over(k.rest, behind), hover = over(k.hover, behind), focus = over(k.focus, behind),
                 disabled = over(k.disabled, behind);
-    const DWORD stroke = over(k.stroke, behind);
+    const DWORD stroke = over(k.stroke, behind), strong = over(k.strong, behind);
     const std::string theme = g_dark ? "dark" : "light";
     expect(field_state(edit) == 3 && field_state(search) == 3, "both fields drawn band fields (" + theme + ")");
     expect(!(GetWindowLongPtrW(edit, GWL_EXSTYLE) & WS_EX_CLIENTEDGE), "with no native edge (" + theme + ")");
 
-    check_look(edit, {rest, rest, rest, over(k.text, rest)}, " (at rest, " + theme + ")");
+    check_look(edit, {rest, stroke, strong, over(k.text, rest)}, " (at rest, " + theme + ")");
     check_centred(edit, rest, " (at rest, " + theme + ")");
 
     // Hovered: a WM_MOUSEMOVE sent, printed before the pointer's found
     // elsewhere (the leave that follows is posted).
     SendMessageW(edit, WM_MOUSEMOVE, 0, MAKELPARAM(4, 4));
     expect((field_state(edit) & 4) != 0, "hovered (" + theme + ")");
-    check_look(edit, {hover, stroke, stroke, over(k.text, hover)}, " (hovered, " + theme + ")");
+    check_look(edit, {hover, stroke, strong, over(k.text, hover)}, " (hovered, " + theme + ")");
     pump(2);
     SendMessageW(edit, WM_MOUSELEAVE, 0, 0);
     expect((field_state(edit) & 4) == 0, "and not, the pointer elsewhere (" + theme + ")");
@@ -570,7 +578,7 @@ void check_states(HWND top, rap::entry* address, HWND edit, HWND search)
 
     // Read-only: as at rest.
     address->set_read_only(true);
-    check_look(edit, {rest, rest, rest, over(k.text, rest)}, " (read-only, " + theme + ")");
+    check_look(edit, {rest, stroke, strong, over(k.text, rest)}, " (read-only, " + theme + ")");
     address->set_read_only(false);
 
     // Disabled: its fill, the border, the text TextFillColorDisabled.
@@ -580,7 +588,8 @@ void check_states(HWND top, rap::entry* address, HWND edit, HWND search)
     address->set_enabled(true);
 
     // Empty, its placeholder in TextFillColorSecondary (Tertiary focused).
-    check_look(search, {rest, rest, rest, over(k.placeholder, rest)}, " (placeholder, " + theme + ")");
+    check_look(search, {rest, stroke, strong, over(k.placeholder, rest)},
+               " (placeholder, " + theme + ")");
     check_centred(search, rest, " (placeholder, " + theme + ")");
     SendMessageW(search, WM_SETFOCUS, 0, 0);
     check_look(search, {focus, stroke, accent_fill(), over(k.placeholder_focused, focus), true},

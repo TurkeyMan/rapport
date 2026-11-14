@@ -167,8 +167,15 @@ bool band_field_button_colors(HWND edit, bool pressed, bool hot, color& fill, co
 struct band_field_look
 {
     color face, stroke, accent, text, button;
+    color stroke_strong;  // the elevation border's bottom (ControlStrongStrokeColorDefault)
     bool ringed = false, focused = false;
+    bool elevated = false;  // its border TextControlElevationBorderBrush (at rest, hovered)
 };
+// A field's border's colour at row `y` (device px, from its top) of a field
+// `height` tall: TextControlElevationBorderBrush's gradient where elevated
+// (`strong` along the bottom px, `stroke` from 2 px up), else `stroke`.
+color band_field_ring_at(color stroke, color strong, bool elevated, float height, float y,
+                         float scale);
 band_field_look band_field_look_at(color behind, bool enabled, bool focused, bool hot,
                                    bool pressed_button, bool hot_button);
 
