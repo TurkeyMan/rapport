@@ -449,6 +449,13 @@ struct caption_tabs::impl
     // torn off there if it's away; nothing's done after.
     void let_go(POINT p)
     {
+        // Escape pressed since the last poll: cancelled, not dropped.
+        if (drag && drag->active && escape.pressed())
+        {
+            escape_watch::last() = {escape_watch::route::poll_release};
+            cancel();
+            return;
+        }
         // Where it's let go decides, not where the last move was: along the
         // strip (to the place there), or away.
         if (drag && drag->active) drag_to(p, true);
