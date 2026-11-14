@@ -3,8 +3,8 @@
 // pressed, then a move (messages, no input) changes its value, whose
 // on_changed destroys the window, the slider with it, inside the glass's
 // subclass passing the move on. Nothing of the glass's state may be touched
-// after that: built with AddressSanitizer (MSVC's /fsanitize=address in
-// CMAKE_CXX_FLAGS) a read of it freed is reported and the process fails;
+// after that: built with AddressSanitizer (RAPPORT_ASAN, CI's asan job)
+// a read of it freed is reported and the process fails;
 // without it, it at least mustn't crash. Never shown.
 //
 // Then a window going lays out nothing of what it's freed: its caption tabs'
