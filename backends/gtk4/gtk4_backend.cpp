@@ -5083,6 +5083,16 @@ public:
             gtk_window_present(GTK_WINDOW(win_));
         snapshot_if_asked();
     }
+    void present() override
+    {
+        if (!gtk_widget_get_visible(win_)) show();
+        // GTK 4 raises only by presenting, which asks for the focus: test
+        // runs (RAPPORT_NO_ACTIVATE) are restored, not raised.
+        if (std::getenv("RAPPORT_NO_ACTIVATE"))
+            gtk_window_unminimize(GTK_WINDOW(win_));
+        else
+            gtk_window_present(GTK_WINDOW(win_));
+    }
 
     // Development aid, as in gtk3: RAPPORT_SNAPSHOT=file.png saves the window
     // shown last RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears,

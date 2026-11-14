@@ -4990,6 +4990,18 @@ public:
             gtk_window_present(GTK_WINDOW(win_));
         snapshot_if_asked();
     }
+    void present() override
+    {
+        if (!gtk_widget_get_visible(win_)) show();
+        if (!std::getenv("RAPPORT_NO_ACTIVATE"))
+        {
+            // Shows, deiconifies, raises and asks for the focus.
+            gtk_window_present(GTK_WINDOW(win_));
+            return;
+        }
+        gtk_window_deiconify(GTK_WINDOW(win_));
+        if (GdkWindow* w = gtk_widget_get_window(win_)) gdk_window_raise(w);
+    }
     void close() override { gtk_widget_hide(win_); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }

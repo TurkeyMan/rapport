@@ -11486,6 +11486,26 @@ public:
         recent().push_back(this);
         snapshot_if_asked();
     }
+    void present() override
+    {
+        if (!IsWindowVisible(hwnd_)) show();
+        const bool quiet = std::getenv("RAPPORT_SNAPSHOT") != nullptr || std::getenv("RAPPORT_NO_ACTIVATE") != nullptr;
+        // Minimised: back to its size before, maximised if it was.
+        // SW_SHOWNOACTIVATE restores as SW_RESTORE does, without the focus.
+        if (IsIconic(hwnd_)) ShowWindow(hwnd_, quiet ? SW_SHOWNOACTIVATE : SW_RESTORE);
+        if (quiet)
+        {
+            SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            return;
+        }
+        // Refused (another app has the user's input, and this process wasn't
+        // let take it): the taskbar button flashes till the window's chosen.
+        if (!SetForegroundWindow(hwnd_))
+        {
+            FLASHWINFO fi{sizeof fi, hwnd_, FLASHW_TRAY | FLASHW_TIMERNOFG, 0, 0};
+            FlashWindowEx(&fi);
+        }
+    }
     void close() override
     {
         if (modal_ && parent)

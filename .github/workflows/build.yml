@@ -80,6 +80,9 @@ jobs:
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-on-destroyed-test-gtk3
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-on-destroyed-test-gtk4
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-on-destroyed-test-qt6
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-present-test-gtk3
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-present-test-gtk4
+          QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-present-test-qt6
 
   # MSVC with the static runtime, as the apps ship: as plugins and statically
   # linked. The examples must run, and the shell extension must load into
@@ -148,7 +151,9 @@ jobs:
       # Every Windows job drives the document tabs' dragging out and
       # dropping with real input (SendInput: shown windows, the desktop's
       # z-order), win32-document-tabs-tearoff-input, as it moves the pointer
-      # and presses keys: only on a runner.
+      # and presses keys: only on a runner. So does window::present's
+      # (win32-present, win32-present-activate), which shows, minimises and
+      # restores windows.
       - name: Portable tests
         env:
           RAPPORT_TEST_SET_HIGH_CONTRAST: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
