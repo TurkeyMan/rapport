@@ -65,6 +65,38 @@
 
 namespace rap::win32
 {
+
+std::pair<int, int> richedit_zoom(long long num, long long den)
+{
+    if (num <= 0 || den <= 0) return {0, 0};
+    auto reduce = [&]
+    {
+        const long long g = std::gcd(num, den);
+        num /= g;
+        den /= g;
+    };
+    reduce();
+    // Into RichEdit's parts first, rounded toward 1 (so a ratio inside the
+    // range stays inside it): both divided by the least k that fits.
+    constexpr long long most = 65535;
+    if (num > most || den > most)
+    {
+        const long long k = (std::max(num, den) + most - 1) / most;
+        if (num > den)
+            num = num / k, den = (den + k - 1) / k;
+        else
+            num = (num + k - 1) / k, den = den / k;
+        num = std::max(1LL, num);
+        den = std::max(1LL, den);
+        reduce();
+    }
+    // Then strictly inside 1/64..64.
+    if (num >= 64 * den) return {6399, 100};
+    if (den >= 64 * num) return {100, 6399};
+    if (num == den) return {0, 0};
+    return {int(num), int(den)};
+}
+
 namespace
 {
 
@@ -3055,6 +3087,22 @@ public:
             self->rebased();
             return r;
         }
+        // For the tests (win32-text-size): the zoom's parts, as
+        // {base_px, user num, den, text num, den, applied num, den}, into
+        // the long long[7] at lp.
+        static const UINT query = RegisterWindowMessageW(L"rapport-text-view-zoom");
+        if (msg == query && lp)
+        {
+            long long* out = reinterpret_cast<long long*>(lp);
+            out[0] = self->base_px_;
+            out[1] = self->zoom_user_.first;
+            out[2] = self->zoom_user_.second;
+            out[3] = self->zoom_text_.first;
+            out[4] = self->zoom_text_.second;
+            out[5] = self->zoom_applied_.first;
+            out[6] = self->zoom_applied_.second;
+            return 1;
+        }
         if (msg != WM_MOUSEWHEEL || (GET_KEYSTATE_WPARAM(wp) & (MK_CONTROL | MK_SHIFT)))
             return DefSubclassProc(h, msg, wp, lp);  // Ctrl zooms, Shift scrolls sideways
         UINT per_notch = 3;
@@ -3102,18 +3150,9 @@ public:
     // whole again).
     void apply_zoom()
     {
-        auto [num, den] = reduced(zoom_user_.first * zoom_text_.first, zoom_user_.second * zoom_text_.second);
-        if (num >= 64 * den)
-            num = 6399, den = 100;
-        else if (den >= 64 * num)
-            num = 100, den = 6399;
-        while (num > 65535 || den > 65535)  // inside the range, in RichEdit's parts
-        {
-            num = std::max(1LL, (num + 1) / 2);
-            den = std::max(1LL, (den + 1) / 2);
-        }
-        if (num == den) num = den = 0;  // none
-        if (SendMessageW(h_, EM_SETZOOM, WPARAM(num), LPARAM(den))) zoom_applied_ = {int(num), int(den)};
+        const auto [num, den] =
+            richedit_zoom(zoom_user_.first * zoom_text_.first, zoom_user_.second * zoom_text_.second);
+        if (SendMessageW(h_, EM_SETZOOM, WPARAM(num), LPARAM(den))) zoom_applied_ = {num, den};
     }
     // A font for a new DPI (refont): RichEdit makes all its text that font,
     // at the message font's size now, which is then the size the text is

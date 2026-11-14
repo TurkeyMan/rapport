@@ -60,6 +60,7 @@ void set_text_scale_for_tests(float scale);
 void set_dpi_for_tests(UINT dpi);
 void set_message_font_size_for_tests(float dip);
 size_t retired_ui_font_count();
+std::pair<int, int> richedit_zoom(long long num, long long den);
 }  // namespace rap::win32
 #endif
 
@@ -357,11 +358,79 @@ long line_height(HWND rich, long line)
     SendMessageW(rich, EM_POSFROMCHAR, reinterpret_cast<WPARAM>(&b), SendMessageW(rich, EM_LINEINDEX, line + 1, 0));
     return b.y - a.y;
 }
-void expect_taller(long was, long now, float ratio, const std::string& what)
+// The text view's zoom as it keeps it (its test query): the base size
+// and the user's, text size's and applied parts.
+std::string zoom_parts(HWND rich)
 {
-    const float r = was > 0 ? float(now) / float(was) : 0.f;
-    expect(std::abs(r - ratio) <= 0.1f * ratio, what + " about " + std::to_string(ratio).substr(0, 4) +
-                                                    " times as tall: " + str(was) + " -> " + str(now) + " px");
+    static const UINT query = RegisterWindowMessageW(L"rapport-text-view-zoom");
+    long long z[7]{};
+    if (!SendMessageW(rich, query, 0, reinterpret_cast<LPARAM>(z))) return "(no zoom query)";
+    char b[160];
+    std::snprintf(b, sizeof b, "base %lld px, user %lld/%lld, text %lld/%lld, applied %lld/%lld", z[0], z[1], z[2],
+                  z[3], z[4], z[5], z[6]);
+    return b;
+}
+
+// An unzoomed RichEdit of our own (hidden), the oracle for what a zoomed
+// one shows: the same text at the zoomed size as a format.
+HWND native_rich(int which)
+{
+    static HWND parent = CreateWindowExW(0, L"STATIC", L"oracle", WS_POPUP, 0, 0, 600, 400, nullptr, nullptr,
+                                         GetModuleHandleW(nullptr), nullptr);
+    static HWND rich[2]{};
+    if (!rich[which])
+        rich[which] = CreateWindowExW(0, L"RICHEDIT50W", L"", WS_CHILD | ES_MULTILINE | WS_VSCROLL, 0, 0, 600, 400,
+                                      parent, nullptr, GetModuleHandleW(nullptr), nullptr);
+    return rich[which];
+}
+HWND oracle_rich()
+{
+    return native_rich(0);
+}
+// Line 0's step in the oracle, holding three lines in `cf` (a view's
+// own character format) at `twips`, at RichEdit's zoom `num`/`den` (0/0:
+// none).
+long oracle_line(CHARFORMAT2W cf, long twips, int num = 0, int den = 0)
+{
+    HWND o = oracle_rich();
+    SetWindowTextW(o, L"line 29\rline 30\rline 31");
+    cf.dwMask = CFM_FACE | CFM_SIZE | CFM_CHARSET | CFM_BOLD | CFM_ITALIC | CFM_WEIGHT;
+    cf.yHeight = twips;
+    SendMessageW(o, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
+    SendMessageW(o, EM_SETZOOM, WPARAM(std::max(num, 0)), LPARAM(std::max(den, 0)));
+    const long step = line_height(o, 0);
+    SendMessageW(o, EM_SETZOOM, 0, 0);
+    return step;
+}
+// Line `line` of a zoomed view exactly as tall as a native RichEdit shows
+// the same text in the same format at the same zoom: whatever a RichEdit
+// version and a font round a zoomed line to (Segoe UI at 12 px, 3/2:
+// 15 -> 25 px on Windows Server 2022), the two agree. Printed: the zoom,
+// the view's parts of it, the line's format, its step, the oracle's, and
+// for the log, unzoomed RichEdits at the zoomed size and the next point.
+void expect_line_as_zoomed(HWND rich, long line, const std::string& what)
+{
+    const auto [num, den] = zoom_of(rich);
+    CHARFORMAT2W cf{};
+    cf.cbSize = sizeof cf;
+    const LRESULT at = SendMessageW(rich, EM_LINEINDEX, line, 0);
+    CHARRANGE was{};
+    SendMessageW(rich, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&was));
+    const long top = first_line(rich);
+    CHARRANGE cr{long(at), long(at) + 1};
+    SendMessageW(rich, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&cr));
+    SendMessageW(rich, EM_GETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+    put_back(rich, was, top);  // the selection and the line at the top as they were
+    const double zoom = num > 0 && den > 0 ? double(num) / den : 1.0;
+    const long twips = std::lround(cf.yHeight * zoom), point = std::lround(twips / 20.0) * 20;
+    const long step = line_height(rich, line);
+    const long oracle = oracle_line(cf, cf.yHeight, num, den);
+    std::printf("     %s: zoom %d/%d (%s), line %ld %ld twips %ls, step %ld px; a native RichEdit at that zoom "
+                "%ld px; unzoomed at %ld twips %ld px, at %ld twips %ld px\n",
+                what.c_str(), num, den, zoom_parts(rich).c_str(), line, cf.yHeight, cf.szFaceName, step, oracle,
+                twips, oracle_line(cf, twips), point, oracle_line(cf, point));
+    expect(step == oracle, what + " as tall as a native RichEdit shows them at zoom " + str(num) + "/" + str(den) +
+                               ": " + str(step) + " px, " + str(oracle) + " px");
 }
 
 void setting_changed(HWND top)
@@ -501,6 +570,8 @@ int main(int argc, char** argv)
     const long styled_line = line_height(rich, 30);
     const SIZE other_least = least_of(other_top);
     std::printf("     line heights %ld px (styled), %ld px (plain, zoomed 5/4)\n", styled_line, plain_line);
+    expect_line_as_zoomed(rich, 30, "at 100%, its lines");
+    expect_line_as_zoomed(plain.rich, 0, "at 100%, the plain text view's lines (the user's 5/4)");
     expect(before.label_text == px(12, dpi), "the label's text " + str(px(12, dpi)) + " px: " + str(before.label_text));
     if (band)
         expect(before.field_text == px(14, dpi),
@@ -520,7 +591,8 @@ int main(int argc, char** argv)
     const seen larger = look(top, other_top);
     check_text(text_before, look_text(rich), " at 150%");
     expect_zoom(rich, 3, 2, "the text view's");
-    expect_taller(styled_line, line_height(rich, 30), 1.5f, "its lines");
+    expect_line_as_zoomed(rich, 30, "its lines");
+    expect(line_height(rich, 30) > styled_line, "and taller than they were: " + str(styled_line) + " px");
     expect(least_of(other_top).cy > other_least.cy, "its window's least height larger: " + str(other_least.cy) +
                                                         " -> " + str(least_of(other_top).cy));
     expect(changes == 0, "on_changed not called: " + str(changes));
@@ -541,7 +613,8 @@ int main(int argc, char** argv)
     // 3/2; one undo undoes the user's edit.
     check_plain(plain, 1.f, " at 150%", plain.before.size());
     expect_zoom(plain.rich, 15, 8, "the plain text view's (the user's 5/4 times 3/2)");
-    expect_taller(plain_line, line_height(plain.rich, 0), 1.5f, "the plain text view's lines");
+    expect_line_as_zoomed(plain.rich, 0, "the plain text view's lines");
+    expect(line_height(plain.rich, 0) > plain_line, "and taller than they were: " + str(plain_line) + " px");
     expect(plain.changes == 0, "the plain text view: on_changed not called: " + str(plain.changes));
     expect(SendMessageW(plain.rich, EM_UNDO, 0, 0) != 0, "the plain text view: an undo");
     expect(text_of(plain.rich).find(L" typed") == std::wstring::npos,
@@ -602,6 +675,8 @@ int main(int argc, char** argv)
     check_plain(plain, 1.f, " at 100% again", plain.before.size() - 6);
     expect_zoom(plain.rich, 5, 4, "the plain text view's (the user's)");
     expect(line_height(plain.rich, 0) == plain_line, "its lines as tall as they were");
+    expect_line_as_zoomed(rich, 30, "at 100% again, its lines");
+    expect_line_as_zoomed(plain.rich, 0, "at 100% again, the plain text view's lines");
     expect(plain.changes == plain_undo_changes, "the plain text view: on_changed not called by the change back");
     check_plain(mixed, 1.f, " at 100% again", mixed.before.size());
     expect_zoom(mixed.rich, 0, 0, "the mixed text view's");
@@ -620,6 +695,53 @@ int main(int argc, char** argv)
            "EM_SETZOOM refuses 64/1, the zoom left 5/4");
     expect(SendMessageW(plain.rich, EM_SETZOOM, 1, 64) == 0 && zoom_of(plain.rich) == std::pair{5, 4},
            "and 1/64");
+    // For the log: what a native RichEdit, rapport aside, does with a
+    // font's lines at 3/2 (Segoe UI at 12 px: 15 -> 25 on Windows Server
+    // 2022, not 22.5; its zoomed font is quantized), against an unzoomed
+    // one at 1.5 times the size and at the next whole point.
+    for (const wchar_t* face : {L"Segoe UI", L"Segoe UI Variable Text", L"Consolas", L"Arial"})
+    {
+        HWND zoomed = native_rich(1);
+        SetWindowTextW(zoomed, L"line 29\rline 30\rline 31");
+        CHARFORMAT2W cf{};
+        cf.cbSize = sizeof cf;
+        cf.dwMask = CFM_FACE | CFM_SIZE | CFM_CHARSET;
+        cf.yHeight = 180;
+        cf.bCharSet = DEFAULT_CHARSET;
+        wcscpy_s(cf.szFaceName, face);
+        SendMessageW(zoomed, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
+        SendMessageW(zoomed, EM_SETZOOM, 0, 0);
+        const long unzoomed_step = line_height(zoomed, 0);
+        SendMessageW(zoomed, EM_SETZOOM, 3, 2);
+        const long zoomed_step = line_height(zoomed, 0);
+        SendMessageW(zoomed, EM_SETZOOM, 0, 0);
+        const long at_270 = oracle_line(cf, 270), at_280 = oracle_line(cf, 280);
+        const double ratio = unzoomed_step > 0 ? double(zoomed_step) / unzoomed_step : 0;
+        std::printf("     native %ls 180 twips: %ld px; zoomed 3/2 %ld px (x%.2f%s); unzoomed at 270 twips %ld px, "
+                    "at 280 %ld px\n",
+                    face, unzoomed_step, zoomed_step, ratio, std::abs(ratio - 1.5) <= 0.15 ? "" : ", not about 1.5",
+                    at_270, at_280);
+    }
+
+    // Zooms with parts over 65535 brought into RichEdit's, the ratio kept
+    // inside its range: just below 64 (a user's 29127/1024 at 27 px over
+    // 12), its mirror near 1/64, one well inside, and the ends. Each one
+    // RichEdit takes, within a part's rounding of what was wanted.
+    for (const auto& [n, d] : std::vector<std::pair<long long, long long>>{
+             {262143, 4096}, {4096, 262143}, {300007, 100003}, {100003, 300007}, {64, 1}, {1, 64}, {3, 2}, {5, 5},
+             {65535, 1024}, {29127LL * 27, 1024LL * 12}})
+    {
+        const auto [zn, zd] = rap::win32::richedit_zoom(n, d);
+        const double want = std::clamp(double(n) / double(d), 100.0 / 6399.0, 6399.0 / 100.0);
+        const double got = zn > 0 && zd > 0 ? double(zn) / zd : 1.0;
+        const LRESULT taken = SendMessageW(oracle_rich(), EM_SETZOOM, WPARAM(zn), LPARAM(zd));
+        const double slack = zn > 0 && zd > 0 ? 2.0 / std::min(zn, zd) : 1e-9;
+        expect(taken != 0 && zoom_of(oracle_rich()) == std::pair{zn, zd} &&
+                   std::abs(got - want) <= want * slack + 1e-12,
+               "zoom " + std::to_string(n) + "/" + std::to_string(d) + " sent as " + str(zn) + "/" + str(zd) +
+                   ", taken: " + str(long(taken)));
+    }
+    SendMessageW(oracle_rich(), EM_SETZOOM, 0, 0);
     // The text size at a message font of `px` (12 its base).
     auto text_at = [&](float px)
     {

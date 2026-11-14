@@ -132,6 +132,12 @@ size_t retired_ui_font_count();  // for the tests
 // font is made again when it's moved on since.
 unsigned ui_fonts_generation();
 
+// A zoom RichEdit's EM_SETZOOM takes, nearest num/den: both parts at most
+// 65535 (rounded toward 1 to fit), the ratio strictly between 1/64 and 64
+// (6399/100 and 100/6399 at the ends: 64/1 and 1/64 it refuses), 0/0 for 1
+// or for nothing (a part 0 or less).
+std::pair<int, int> richedit_zoom(long long num, long long den);
+
 // Extent -> device pixels for a window.
 int extent_px(HWND h, extent e, bool vertical);
 
