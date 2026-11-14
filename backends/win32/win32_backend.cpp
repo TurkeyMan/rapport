@@ -55,6 +55,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <numeric>
 #include <set>
 #include <future>
 #include <thread>
@@ -64,6 +65,38 @@
 
 namespace rap::win32
 {
+
+std::pair<int, int> richedit_zoom(long long num, long long den)
+{
+    if (num <= 0 || den <= 0) return {0, 0};
+    auto reduce = [&]
+    {
+        const long long g = std::gcd(num, den);
+        num /= g;
+        den /= g;
+    };
+    reduce();
+    // Into RichEdit's parts first, rounded toward 1 (so a ratio inside the
+    // range stays inside it): both divided by the least k that fits.
+    constexpr long long most = 65535;
+    if (num > most || den > most)
+    {
+        const long long k = (std::max(num, den) + most - 1) / most;
+        if (num > den)
+            num = num / k, den = (den + k - 1) / k;
+        else
+            num = (num + k - 1) / k, den = den / k;
+        num = std::max(1LL, num);
+        den = std::max(1LL, den);
+        reduce();
+    }
+    // Then strictly inside 1/64..64.
+    if (num >= 64 * den) return {6399, 100};
+    if (den >= 64 * num) return {100, 6399};
+    if (num == den) return {0, 0};
+    return {int(num), int(den)};
+}
+
 namespace
 {
 
@@ -329,6 +362,10 @@ public:
     virtual bool draw_item(DRAWITEMSTRUCT*) { return false; }
     // The desktop's colours or dark mode changed (after theme_control).
     virtual void theme_changed() {}
+    // The UI fonts were made anew (renew_ui_fonts: a new text size), and
+    // every control given its new one (WM_SETFONT): what else was measured
+    // from the old, measured again. The window lays out after.
+    virtual void fonts_changed() {}
 };
 
 std::unordered_map<HWND, handler*>& handlers()
@@ -2746,6 +2783,9 @@ public:
         place_buttons();
         win_.relayout();
     }
+    // A band field's font is its own size (field_font, from the text size):
+    // it's measured again, as for a new theme.
+    void fonts_changed() override { theme_changed(); }
     void set_placeholder(const std::string& p) override
     {
         SendMessageW(h_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(wide(p).c_str()));
@@ -3037,9 +3077,34 @@ public:
     // of a notch, which add up.
     static LRESULT CALLBACK wheel_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
+        auto* self = reinterpret_cast<text_view_impl*>(data);
+        // A font for a new DPI (refont): RichEdit makes all its text that
+        // font, at the message font's size now, so that's the size it's made
+        // at and no zoom is wanted for the text size.
+        if (msg == WM_SETFONT)
+        {
+            const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+            self->rebased();
+            return r;
+        }
+        // For the tests (win32-text-size): the zoom's parts, as
+        // {base_px, user num, den, text num, den, applied num, den}, into
+        // the long long[7] at lp.
+        static const UINT query = RegisterWindowMessageW(L"rapport-text-view-zoom");
+        if (msg == query && lp)
+        {
+            long long* out = reinterpret_cast<long long*>(lp);
+            out[0] = self->base_px_;
+            out[1] = self->zoom_user_.first;
+            out[2] = self->zoom_user_.second;
+            out[3] = self->zoom_text_.first;
+            out[4] = self->zoom_text_.second;
+            out[5] = self->zoom_applied_.first;
+            out[6] = self->zoom_applied_.second;
+            return 1;
+        }
         if (msg != WM_MOUSEWHEEL || (GET_KEYSTATE_WPARAM(wp) & (MK_CONTROL | MK_SHIFT)))
             return DefSubclassProc(h, msg, wp, lp);  // Ctrl zooms, Shift scrolls sideways
-        auto* self = reinterpret_cast<text_view_impl*>(data);
         UINT per_notch = 3;
         SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &per_notch, 0);
         if (per_notch == WHEEL_PAGESCROLL)
@@ -3052,6 +3117,52 @@ public:
         self->wheel_ -= lines * WHEEL_DELTA;
         if (lines) SendMessageW(h, EM_LINESCROLL, 0, -lines);
         return 0;
+    }
+    // A fraction, reduced (0/0 and the like: 1/1).
+    using ratio = std::pair<long long, long long>;
+    static ratio reduced(long long num, long long den)
+    {
+        if (num <= 0 || den <= 0) return {1, 1};
+        const long long g = std::gcd(num, den);
+        return {num / g, den / g};
+    }
+    // The zoom (Ctrl+wheel and the text size's) is three fractions: the
+    // user's own, the text size's (the message font's height now over
+    // base_px_), and what EM_SETZOOM last took (0/0: none). RichEdit takes
+    // a ratio strictly between 1/64 and 64 (64/1 and 1/64 it refuses,
+    // 6399/100 and 100/6399 it takes), each part at most 65535.
+    //
+    // The user's part, as it is now: if the zoom isn't what was last
+    // applied, the user has zoomed since, and theirs is what's shown over
+    // the text size's; otherwise it's as kept, even where what was applied
+    // was clipped (50 times, at 150%, shown at 63.99, is 50 again at 100%).
+    void read_user_zoom()
+    {
+        int num = 0, den = 0;
+        SendMessageW(h_, EM_GETZOOM, reinterpret_cast<WPARAM>(&num), reinterpret_cast<LPARAM>(&den));
+        if (num == zoom_applied_.first && den == zoom_applied_.second) return;
+        const ratio shown = num > 0 && den > 0 ? ratio{num, den} : ratio{1, 1};
+        zoom_user_ = reduced(shown.first * zoom_text_.second, shown.second * zoom_text_.first);
+    }
+    // The zoom the user's part times the text size's: clamped into what
+    // RichEdit takes, 0/0 for 1; zoom_applied_ what it took (on a refusal,
+    // the zoom and zoom_applied_ as they were, and the next change aims at the
+    // whole again).
+    void apply_zoom()
+    {
+        const auto [num, den] =
+            richedit_zoom(zoom_user_.first * zoom_text_.first, zoom_user_.second * zoom_text_.second);
+        if (SendMessageW(h_, EM_SETZOOM, WPARAM(num), LPARAM(den))) zoom_applied_ = {num, den};
+    }
+    // A font for a new DPI (refont): RichEdit makes all its text that font,
+    // at the message font's size now, which is then the size the text is
+    // made at; the text size's part of the zoom goes, the user's stays.
+    void rebased()
+    {
+        read_user_zoom();
+        base_px_ = std::max(1L, std::lround(ui_font_size_dip()));
+        zoom_text_ = {1, 1};
+        apply_zoom();
     }
     std::string text() const override
     {
@@ -3117,6 +3228,22 @@ public:
         const SIZE m = font_metrics(win_.dpi());
         return {m.cx * 40, m.cy * 6 + px(8)};
     }
+    // A new text size (renew_ui_fonts): RichEdit's zoom, the text shown
+    // larger or smaller by as much as the message font is now than at the
+    // size the text was made at (base_px_), its content untouched. Its
+    // formats, the size typed text takes and its undo history all stay at
+    // that base, so an undo brings text back as it was, shown at the zoom
+    // with the rest; zooming isn't an edit (no EN_CHANGE, nothing to undo),
+    // and the selection stays. The user's own zoom (Ctrl+wheel) is kept:
+    // the zoom shown is the user's times the text size's.
+    void fonts_changed() override
+    {
+        const ratio now = reduced(std::max(1L, std::lround(ui_font_size_dip())), base_px_);
+        if (now == zoom_text_) return;
+        read_user_zoom();
+        zoom_text_ = now;
+        apply_zoom();
+    }
 
 private:
     // RichEdit positions count UTF-16 units, with CR LF as one.
@@ -3162,7 +3289,9 @@ private:
         // The control's own font, so styled text looks like plain text.
         LOGFONTW lf{};
         GetObjectW(ui_font(win_.dpi(), false, mono_), sizeof lf, &lf);
-        const int half_points = lf.lfHeight ? int(std::lround(std::abs(lf.lfHeight) * 144.0 / win_.dpi())) : 18;
+        // At the size the text is made at: a new text size since is the
+        // zoom's (fonts_changed).
+        const int half_points = int((base_px_ * 3 + 1) / 2);
         std::vector<COLORREF> colours;
         auto colour_index = [&](const paint& p)
         {
@@ -3320,6 +3449,12 @@ private:
         InvalidateRect(h_, nullptr, TRUE);
     }
 
+    // The message font's height (px at 96 dpi) the text is made at: its
+    // formats stay at it. The zoom's parts (read_user_zoom, apply_zoom):
+    // the user's, the text size's, and what RichEdit last took.
+    long base_px_ = std::max(1L, std::lround(ui_font_size_dip()));
+    std::pair<long long, long long> zoom_user_{1, 1}, zoom_text_{1, 1};
+    std::pair<int, int> zoom_applied_{0, 0};
     int wheel_ = 0;  // wheel delta × lines per notch not yet scrolled
     bool mono_;
     bool quiet_ = false;
@@ -6032,6 +6167,11 @@ private:
     IDWriteTextFormat* text_format(const text_style& st, align align)
     {
         const int key = (st.bold ? 1 : 0) | (st.italic ? 2 : 0) | (st.monospace ? 4 : 0) | (int(align) << 3);
+        if (formats_generation_ != ui_fonts_generation())  // made from the old UI font: made again
+        {
+            formats_.clear();
+            formats_generation_ = ui_fonts_generation();
+        }
         com<IDWriteTextFormat>& f = formats_[key];
         if (!f)
         {
@@ -7135,6 +7275,7 @@ private:
     int header_images_w_ = 0;
     std::array<com<ID2D1Bitmap>, 3> check_bitmaps_;       // per check_state, for row_target_
     std::map<int, com<IDWriteTextFormat>> formats_;  // by style and alignment
+    unsigned formats_generation_ = ui_fonts_generation();  // the UI fonts formats_ was made from
     bool soft_ = false;
     int hot_ = -1;  // the row under the pointer
     int sort_column_ = -1;
@@ -7450,6 +7591,12 @@ public:
         }
         SendMessageW(h_, LB_SETITEMHEIGHT, 0, font_metrics(win.dpi()).cy + px(12));
         SendMessageW(h_, LB_SETCURSEL, 0, 0);
+    }
+    // Its rows as tall as the new font's line, as they were made for the old.
+    void fonts_changed() override
+    {
+        SendMessageW(h_, LB_SETITEMHEIGHT, 0, font_metrics(win_.dpi()).cy + px(12));
+        InvalidateRect(h_, nullptr, TRUE);
     }
     std::vector<item*> pages;
     std::vector<std::function<node()>> lazy;
@@ -10940,6 +11087,89 @@ public:
         RedrawWindow(hwnd_, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
     }
+    // The desktop's message font or text size changed (Settings >
+    // Accessibility > Text size, while windows are open): the UI fonts made
+    // again, and every window of the thread given them. Once for all the
+    // windows, by the first to hear of it (the rest find nothing changed),
+    // as the old fonts are freed only once every control has its new one.
+    static void renew_fonts()
+    {
+        if (!renew_ui_fonts()) return;
+        ++g_layout_pass;  // new fonts, new sizes
+        // Every window of the thread, its controls and theirs (a combo box's
+        // list, a tooltip) as well as rapport's own windows.
+        auto every_window = []
+        {
+            std::vector<HWND> all;
+            EnumThreadWindows(
+                GetCurrentThreadId(),
+                [](HWND top, LPARAM p) -> BOOL
+                {
+                    auto& all = *reinterpret_cast<std::vector<HWND>*>(p);
+                    all.push_back(top);
+                    EnumChildWindows(
+                        top,
+                        [](HWND c, LPARAM p) -> BOOL
+                        {
+                            reinterpret_cast<std::vector<HWND>*>(p)->push_back(c);
+                            return TRUE;
+                        },
+                        p);
+                    return TRUE;
+                },
+                reinterpret_cast<LPARAM>(&all));
+            return all;
+        };
+        // The font each was given, as it was given: a glass control's (on
+        // the band, it has the grayscale copy), a band field's or a mono
+        // text view's, each the same kind again (a band field's subclass
+        // makes it its own size from the new text size).
+        auto given = [](HWND c)
+        {
+            HFONT f = glass_given_font(c);
+            return f ? f : reinterpret_cast<HFONT>(SendMessageW(c, WM_GETFONT, 0, 0));
+        };
+        // Not RichEdit (a text view): fonts_changed zooms it, its content untouched.
+        auto rich = [](HWND c)
+        {
+            wchar_t cls[16]{};
+            GetClassNameW(c, cls, 16);
+            return !_wcsicmp(cls, L"RICHEDIT50W");
+        };
+        for (HWND c : every_window())
+        {
+            HFONT f = IsWindow(c) && !rich(c) ? renewed_ui_font(given(c)) : nullptr;
+            if (f) SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(f), TRUE);
+        }
+        for (window_impl* w : windows()) w->fonts_renewed();
+        // Only then the old fonts freed, those no window has any more.
+        std::set<HFONT> in_use;
+        for (HWND c : every_window())
+        {
+            in_use.insert(reinterpret_cast<HFONT>(SendMessageW(c, WM_GETFONT, 0, 0)));
+            in_use.insert(glass_given_font(c));
+        }
+        free_unused_grayscale_fonts(in_use);
+        free_retired_ui_fonts(in_use);
+    }
+    // This window's part, once its controls have their new fonts: what was
+    // measured from the old measured again, the caption's tabs' text made
+    // again, and all laid out and drawn again (its natural and least sizes
+    // with it).
+    void fonts_renewed()
+    {
+        EnumChildWindows(
+            hwnd_,
+            [](HWND c, LPARAM) -> BOOL
+            {
+                if (handler* h = handler_of(c)) h->fonts_changed();
+                return TRUE;
+            },
+            0);
+        if (doc_tabs) doc_tabs->settings_changed();
+        relayout();
+        RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
+    }
     bool dark_ = false;  // the mode the frame and controls were last styled for
     std::array<color, theme_color_count> palette_{};  // the colours they were last given
 
@@ -11953,6 +12183,9 @@ private:
             case WM_SYSCOLORCHANGE:
             case WM_DWMCOLORIZATIONCOLORCHANGED:
             case WM_THEMECHANGED:
+                // A new text size (SPI_SETNONCLIENTMETRICS, "WindowMetrics"
+                // and others): the fonts made again if it changed them.
+                if (msg == WM_SETTINGCHANGE) renew_fonts();
                 forget_theme_colors();
                 self->retheme();
                 // The tabs in the caption: its frame for high contrast, or

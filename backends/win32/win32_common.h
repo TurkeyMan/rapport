@@ -22,6 +22,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -108,6 +109,34 @@ float text_scale();
 // For tests: the text size taken to be `scale` (0: the desktop's again),
 // without changing the setting; the message font itself stays as it is.
 void set_text_scale_for_tests(float scale);
+// For tests: the message font taken to be `dip` DIPs high (0: the desktop's
+// again), as a text size changes it, without changing the setting.
+void set_message_font_size_for_tests(float dip);
+
+// The desktop's message font or text size changed since the UI fonts were
+// made (Settings > Accessibility > Text size, while windows are open)?
+// Compared as the palette is, as most WM_SETTINGCHANGEs change neither.
+// If so, the fonts are made anew from here on (ui_font, font_metrics, and
+// ui_fonts_generation() moves on for the DirectWrite formats made from
+// them), the old ones kept (retired) for the controls that still have
+// them, and true. UI thread only.
+bool renew_ui_fonts();
+// The font a retired one `f` stands for, made anew: the same style, DPI
+// and scale (null: `f` isn't a retired UI font).
+HFONT renewed_ui_font(HFONT f);
+// The retired fonts no control has (none in `in_use`) deleted; the rest
+// kept for later.
+void free_retired_ui_fonts(const std::set<HFONT>& in_use);
+size_t retired_ui_font_count();  // for the tests
+// Moves on as renew_ui_fonts() renews: a cache of formats made from the UI
+// font is made again when it's moved on since.
+unsigned ui_fonts_generation();
+
+// A zoom RichEdit's EM_SETZOOM takes, nearest num/den: both parts at most
+// 65535 (rounded toward 1 to fit), the ratio strictly between 1/64 and 64
+// (6399/100 and 100/6399 at the ends: 64/1 and 1/64 it refuses), 0/0 for 1
+// or for nothing (a part 0 or less).
+std::pair<int, int> richedit_zoom(long long num, long long den);
 
 // Extent -> device pixels for a window.
 int extent_px(HWND h, extent e, bool vertical);

@@ -354,6 +354,12 @@ bool in_toolbar_band(HWND h, color& fill);
 // layer, an opaque one (a field) its pixels made opaque; called as the band
 // is laid out, once the children are where they go.
 void glass_band_controls(HWND top);
+// The font a layer control on glass was given (it has the grayscale copy of
+// it): null for any other window, whose font is WM_GETFONT's.
+HFONT glass_given_font(HWND c);
+// The grayscale copies no control has (none in `in_use`) deleted, as the UI
+// fonts are renewed (renew_ui_fonts); they're made again as they're wanted.
+void free_unused_grayscale_fonts(const std::set<HFONT>& in_use);
 // While a layer control is printed onto a matte for that: the matte, which
 // its background (surface_color_of, surface_brush_of, paint_toolbar_band)
 // is instead of the band's.

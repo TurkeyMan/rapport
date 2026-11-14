@@ -215,6 +215,9 @@ bool has_variable_font()
     return found;
 }
 
+// The message font's size for the tests, in DIPs (0: the desktop's).
+float g_message_font_for_tests = 0;
+
 // The message font, in Segoe UI Variable where it's Segoe UI (Windows 10's
 // and 11's own); another, a locale's or the user's, is kept as it is.
 NONCLIENTMETRICSW metrics_for(UINT dpi)
@@ -231,17 +234,57 @@ NONCLIENTMETRICSW metrics_for(UINT dpi)
         SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0);
         ncm.lfMessageFont.lfHeight = MulDiv(ncm.lfMessageFont.lfHeight, int(dpi), 96);
     }
+    if (g_message_font_for_tests > 0)
+        ncm.lfMessageFont.lfHeight = -LONG(std::lround(g_message_font_for_tests * float(dpi) / 96.f));
     if (!_wcsicmp(ncm.lfMessageFont.lfFaceName, L"Segoe UI") && has_variable_font())
         wcscpy(ncm.lfMessageFont.lfFaceName, L"Segoe UI Variable Text");
     return ncm;
 }
 
+// What the UI fonts are made from: the message font (at 96 dpi) and the
+// text size. Taken as the first of them is made, and again as they're
+// renewed (renew_ui_fonts).
+struct font_basis
+{
+    LOGFONTW message{};
+    float text_scale = 1.f;
+};
+font_basis basis_now()
+{
+    return {metrics_for(96).lfMessageFont, text_scale()};
+}
+font_basis& made_from()
+{
+    static font_basis b = basis_now();
+    return b;
+}
+
+using font_key = std::tuple<UINT, bool, bool, int>;  // DPI, bold, mono, scale in percent
+std::map<font_key, HFONT>& font_cache()
+{
+    static std::map<font_key, HFONT> cache;
+    return cache;
+}
+// Fonts renewed but maybe still a control's: freed once none has them.
+std::map<HFONT, font_key>& retired_fonts()
+{
+    static std::map<HFONT, font_key> retired;
+    return retired;
+}
+std::map<UINT, SIZE>& metrics_cache()
+{
+    static std::map<UINT, SIZE> cache;
+    return cache;
+}
+unsigned g_fonts_generation = 0;
+
 }  // namespace
 
 HFONT ui_font(UINT dpi, bool bold, bool mono, float scale)
 {
-    static std::map<std::tuple<UINT, bool, bool, int>, HFONT> cache;
-    const auto key = std::make_tuple(dpi, bold, mono, int(scale * 100));
+    made_from();
+    auto& cache = font_cache();
+    const font_key key = std::make_tuple(dpi, bold, mono, int(scale * 100));
     if (auto it = cache.find(key); it != cache.end()) return it->second;
     LOGFONTW lf = metrics_for(dpi).lfMessageFont;
     if (bold) lf.lfWeight = FW_BOLD;
@@ -252,9 +295,60 @@ HFONT ui_font(UINT dpi, bool bold, bool mono, float scale)
     return f;
 }
 
+bool renew_ui_fonts()
+{
+    const font_basis now = basis_now();
+    font_basis& was = made_from();
+    if (now.text_scale == was.text_scale && !std::memcmp(&now.message, &was.message, sizeof now.message))
+        return false;
+    was = now;
+    for (const auto& [key, font] : font_cache()) retired_fonts()[font] = key;
+    font_cache().clear();
+    metrics_cache().clear();
+    ++g_fonts_generation;
+    return true;
+}
+
+HFONT renewed_ui_font(HFONT retired)
+{
+    auto it = retired_fonts().find(retired);
+    if (it == retired_fonts().end()) return nullptr;
+    const auto& [dpi, bold, mono, percent] = it->second;
+    return ui_font(dpi, bold, mono, float(percent) / 100.f);
+}
+
+void free_retired_ui_fonts(const std::set<HFONT>& in_use)
+{
+    auto& retired = retired_fonts();
+    for (auto it = retired.begin(); it != retired.end();)
+        if (in_use.count(it->first))
+            ++it;
+        else
+        {
+            DeleteObject(it->first);
+            it = retired.erase(it);
+        }
+}
+
+size_t retired_ui_font_count()
+{
+    return retired_fonts().size();
+}
+
+unsigned ui_fonts_generation()
+{
+    return g_fonts_generation;
+}
+
+void set_message_font_size_for_tests(float dip)
+{
+    g_message_font_for_tests = dip;
+}
+
 SIZE font_metrics(UINT dpi)
 {
-    static std::map<UINT, SIZE> cache;
+    made_from();
+    auto& cache = metrics_cache();
     if (auto it = cache.find(dpi); it != cache.end()) return it->second;
     HDC dc = GetDC(nullptr);
     HGDIOBJ old = SelectObject(dc, ui_font(dpi));
@@ -751,6 +845,12 @@ com<IDWriteTextLayout> d2d_painter::layout(const std::string& s, const text_styl
     // only, like all painting.
     const float size = style.size > 0 ? style.size * 96.f / 72.f : ui_font_size_dip();
     static std::map<std::tuple<float, bool, bool, bool>, com<IDWriteTextFormat>> formats;
+    static unsigned generation = ui_fonts_generation();
+    if (generation != ui_fonts_generation())  // the message font changed: its family may have too
+    {
+        formats.clear();
+        generation = ui_fonts_generation();
+    }
     com<IDWriteTextFormat>& format = formats[{size, style.bold, style.italic, style.monospace}];
     if (!format)
         dwrite_factory()->CreateTextFormat(style.monospace ? L"Consolas" : ui_font_family().c_str(), nullptr,
