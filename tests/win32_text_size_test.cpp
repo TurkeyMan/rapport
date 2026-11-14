@@ -194,9 +194,10 @@ text_seen look_text(HWND rich)
         SendMessageW(rich, EM_GETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
         const DWORD effects = cf.dwEffects & (CFE_BOLD | CFE_ITALIC | CFE_AUTOCOLOR);
         t.runs.push_back({cf.yHeight, cf.szFaceName, effects, cf.crTextColor});
-        std::printf("     run at %ld: %ld twips, %ls%s%s, colour %06lx\n", at, cf.yHeight, cf.szFaceName,
+        std::printf("     run at %ld: %ld twips, %ls%s%s, colour %02x%02x%02x%s\n", at, cf.yHeight, cf.szFaceName,
                     cf.dwEffects & CFE_BOLD ? ", bold" : "", cf.dwEffects & CFE_ITALIC ? ", italic" : "",
-                    cf.crTextColor & 0xffffff);
+                    GetRValue(cf.crTextColor), GetGValue(cf.crTextColor), GetBValue(cf.crTextColor),
+                    cf.dwEffects & CFE_AUTOCOLOR ? " (automatic)" : "");
     }
     std::printf("     selection %ld..%ld, line %ld at the top\n", t.selection.cpMin, t.selection.cpMax,
                 t.first_line);
@@ -204,16 +205,32 @@ text_seen look_text(HWND rich)
     return t;
 }
 
+// A COLORREF as RRGGBB.
+std::string rgb_hex(COLORREF c)
+{
+    char b[16];
+    std::snprintf(b, sizeof b, "%02x%02x%02x", GetRValue(c), GetGValue(c), GetBValue(c));
+    return b;
+}
+
 void check_text(const text_seen& was, const text_seen& now, float ratio, const std::string& at)
 {
-    bool sizes = was.runs.size() == now.runs.size(), kept = sizes;
-    for (size_t i = 0; sizes && i < was.runs.size(); ++i)
+    const bool same_count = was.runs.size() == now.runs.size();
+    bool sizes = same_count, kept = same_count, colours = same_count;
+    for (size_t i = 0; same_count && i < was.runs.size(); ++i)
     {
         sizes = sizes && std::abs(now.runs[i].size - std::lround(was.runs[i].size * ratio)) <= 1;
         kept = kept && now.runs[i].face == was.runs[i].face && now.runs[i].effects == was.runs[i].effects;
+        // Every run's colour (the red span's, and the others' automatic
+        // or theme text colour) the same value, CFE_AUTOCOLOR with it.
+        colours = colours && now.runs[i].colour == was.runs[i].colour;
     }
     expect(sizes, "the text view's runs " + str(std::lround(ratio * 100)) + "% of their size" + at);
-    expect(kept, "their faces, bold, italic and colours kept" + at);
+    expect(kept, "their faces, bold and italic kept" + at);
+    expect(colours, "their colours kept" + at);
+    // The bold span's red (a diff's colour, applied only as it's loaded).
+    const COLORREF red = same_count && now.runs.size() > 1 ? now.runs[1].colour : CLR_INVALID;
+    expect(red == RGB(200, 0, 0), "the red span's colour c80000" + at + ": " + rgb_hex(red));
     expect(now.selection.cpMin == was.selection.cpMin && now.selection.cpMax == was.selection.cpMax,
            "its selection kept" + at + ": " + str(now.selection.cpMin) + ".." + str(now.selection.cpMax));
     expect(now.first_line == was.first_line,
@@ -340,6 +357,9 @@ int main(int argc, char** argv)
     std::printf("at 100%%:\n");
     const seen before = look(top, other_top);
     const text_seen text_before = look_text(rich);
+    expect(text_before.runs.size() > 1 && text_before.runs[1].colour == RGB(200, 0, 0),
+           "the red span's colour c80000 before the change: " +
+               rgb_hex(text_before.runs.size() > 1 ? text_before.runs[1].colour : CLR_INVALID));
     expect(text_before.first_line == 20, "the text view scrolled to line 20: " + str(text_before.first_line));
     expect(before.label_text == px(12, dpi), "the label's text " + str(px(12, dpi)) + " px: " + str(before.label_text));
     if (band)
