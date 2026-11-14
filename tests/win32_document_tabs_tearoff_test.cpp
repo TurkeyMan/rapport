@@ -695,6 +695,62 @@ void run(const char* stage)
 
     expect(loop_seen == 0 && same(a.window_rect(), a_was), "never the move loop, no window moved by a drag" + at);
 
+    // Let go somewhere the last move wasn't (no move there first): where it's
+    // let go decides, not where it last moved. In a group (R) and in none (E).
+    fixture& r = *make("R" + tag, {"r1", "r2", "r3"}, "g");
+    fixture& e = *make("E" + tag, {"e1", "e2", "e3"}, "");
+    place(r, 900, 100);
+    place(e, 1700, 100);
+    stack({a.top, b.top, c.top, r.top, e.top});
+    for (fixture* g : {&r, &e})
+    {
+        fixture& w = *g;
+        const std::string in = std::string(g == &r ? " in a group" : " in no group") + at;
+        RECT ws;
+        GetClientRect(w.strip, &ws);
+        w.refuse_detach = true;
+        // Out, then let go over its own row: no detach; it lands there.
+        POINT q = w.start(0);
+        w.move(POINT{q.x, ws.bottom + 200});
+        const bool was_out = image() != nullptr;
+        w.up(w.centre(2));
+        expect(was_out && w.detached.empty() && !image() && w.tabs->ids() == (g == &r ? ids{"r2", "r3", "r1"} : ids{"e2", "e3", "e1"}),
+               "out, then let go over its own row: not torn off, put where it was let go" + in + ": " +
+                   join(w.tabs->ids()));
+        expect(w.reordered.size() == 1 && w.reordered[0].second == 2, "and on_reorder once" + in);
+        w.reordered.clear();
+        const ids before = w.tabs->ids();
+        // Along the row, then let go outside: torn off (asked; refused here).
+        q = w.start(0);
+        w.move(w.centre(1));
+        expect(!image(), "along the row: no image" + in);
+        w.up(POINT{q.x, ws.bottom + 200});
+        expect(w.detached.size() == 1 && w.detached[0].first == before[0] && w.tabs->ids() == before && !image(),
+               "along the row, then let go outside: on_detach asked, the tab back where it was" + in + ": " +
+                   join(w.tabs->ids()));
+        expect(w.reordered.empty(), "and no on_reorder" + in);
+        w.detached.clear();
+        // Along the row, then let go over another window's row: in the group,
+        // dropped there; in none, outside every row (on_detach).
+        b.received.clear();
+        b.accept = false;
+        q = w.start(0);
+        w.move(w.centre(1));
+        w.up(w.client(over_b));
+        if (g == &r)
+            expect(b.received.size() == 1 && b.received[0].id == before[0] && w.detached.empty() &&
+                       w.tabs->ids() == before,
+                   "along the row, then let go over B's row: B's on_receive" + in);
+        else
+            expect(b.received.empty() && w.detached.size() == 1 && w.tabs->ids() == before,
+                   "along the row, then let go over B's row, in no group: on_detach, B asked nothing" + in);
+        expect(w.reordered.empty() && !image(), "and no on_reorder" + in);
+        b.accept = true;
+        b.received.clear();
+        w.detached.clear();
+        w.refuse_detach = false;
+    }
+
     // The right-click menu: the fixed items, then the app's.
     tab_menu_capture cap{};
     cap.choose = -1;

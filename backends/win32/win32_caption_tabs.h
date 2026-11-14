@@ -82,12 +82,14 @@ public:
     // there, where it may leave the strip (out to be torn off, or over
     // another window's strip, the owner's drag image following the pointer).
     // The strip goes on as it says.
+    // `letting_go`: the button's let go there (the strip asks once more, at
+    // that point, before it drops or reorders): where it is, and no image.
     enum class drag_there
     {
         along,  // along the strip, as ever
         away,   // out of it: put back where it was, its place left empty
     };
-    virtual drag_there caption_drag_at(int index, POINT screen) = 0;
+    virtual drag_there caption_drag_at(int index, POINT screen, bool letting_go) = 0;
     // Let go while away, at `screen`: the owner drops it or tears it off
     // there (the strip's drag is over, and it does nothing more; it may be
     // destroyed).

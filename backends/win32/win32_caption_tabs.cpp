@@ -402,7 +402,7 @@ struct caption_tabs::impl
         drag = drag_state{self.tabs_[size_t(i)].key, i, p, p.x - r.left, p.x};
         SetCapture(self.hwnd_);
     }
-    void drag_to(POINT p)
+    void drag_to(POINT p, bool letting_go = false)
     {
         if (!drag->active)
         {
@@ -419,7 +419,7 @@ struct caption_tabs::impl
         POINT screen = p;
         ClientToScreen(self.hwnd_, &screen);
         const unsigned key = drag->key;
-        const caption_tabs_owner::drag_there there = owner.caption_drag_at(at, screen);
+        const caption_tabs_owner::drag_there there = owner.caption_drag_at(at, screen, letting_go);
         if (!drag || drag->key != key) return;
         at = index_of_key(key);
         if (at < 0) return;
@@ -447,6 +447,9 @@ struct caption_tabs::impl
     // torn off there if it's away; nothing's done after.
     void let_go(POINT p)
     {
+        // Where it's let go decides, not where the last move was: along the
+        // strip (to the place there), or away.
+        if (drag && drag->active) drag_to(p, true);
         const std::optional<drag_state> d = std::exchange(drag, std::nullopt);
         if (GetCapture() == self.hwnd_) ReleaseCapture();  // the drag's gone: its WM_CAPTURECHANGED is nothing
         if (!d || !d->active) return;
