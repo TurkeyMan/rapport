@@ -457,6 +457,47 @@ bool confirm_replace(GtkWindow* parent, const std::string& path)
     return replace;
 }
 
+// GDK fits a menu into its monitor's work area, shrinking it if need be. A
+// monitor with no area (Broadway's, until a browser tells it the screen's
+// size) would shrink a menu to nothing, and GtkMenu would then lay its items
+// out at a negative width (a Gtk-CRITICAL, width >= 0, from
+// gtk_widget_get_preferred_height_for_width). With nothing to fit into, a
+// menu is placed as it is, unfitted.
+bool menu_monitor_has_area(GtkWidget* menu)
+{
+    GtkWidget* attach = gtk_menu_get_attach_widget(GTK_MENU(menu));
+    GdkDisplay* display = gtk_widget_get_display(attach ? attach : menu);
+    GdkWindow* window = attach ? gtk_widget_get_window(attach) : nullptr;
+    GdkMonitor* monitor = window ? gdk_display_get_monitor_at_window(display, window)
+                                 : gdk_display_get_primary_monitor(display);
+    if (!monitor && gdk_display_get_n_monitors(display) > 0)
+        monitor = gdk_display_get_monitor(display, 0);
+    if (!monitor) return false;
+    GdkRectangle area;
+    gdk_monitor_get_workarea(monitor, &area);
+    return area.width > 0 && area.height > 0;
+}
+
+void unfit_menu_without_monitor(GtkWidget* menu)
+{
+    GdkAnchorHints hints;
+    g_object_get(menu, "anchor-hints", &hints, nullptr);
+    if (hints != 0 && !menu_monitor_has_area(menu))
+        g_object_set(menu, "anchor-hints", GdkAnchorHints(0), nullptr);
+}
+
+// A menu kept unfitted on a monitor with no area: a submenu's item sets its
+// anchor hints each time it opens it, so they're checked as they're set.
+GtkWidget* new_menu()
+{
+    GtkWidget* menu = gtk_menu_new();
+    g_signal_connect(menu, "notify::anchor-hints",
+                     G_CALLBACK(+[](GObject* m, GParamSpec*, gpointer)
+                                { unfit_menu_without_monitor(GTK_WIDGET(m)); }),
+                     nullptr);
+    return menu;
+}
+
 GtkWidget* build_menu(const menu& items);
 
 // Appends `items` to `menu`; the GTK items point into `items`, which must
@@ -512,7 +553,7 @@ void fill_menu(GtkWidget* menu, const rap::menu& items)
 
 GtkWidget* build_menu(const menu& items)
 {
-    GtkWidget* menu = gtk_menu_new();
+    GtkWidget* menu = new_menu();
     fill_menu(menu, items);
     return menu;
 }
@@ -541,6 +582,7 @@ public:
                                         { (*static_cast<std::function<void()>*>(p))(); }),
                              &on_hide_);
         gtk_widget_show_all(menu_);
+        unfit_menu_without_monitor(menu_);
         if (below)
             gtk_menu_popup_at_widget(GTK_MENU(menu_), attach, GDK_GRAVITY_SOUTH_WEST,
                                      GDK_GRAVITY_NORTH_WEST, event);
@@ -5171,7 +5213,7 @@ private:
         {
             auto bar = std::make_unique<bar_menu>(bar_menu{m, nullptr, {}});
             GtkWidget* top = gtk_menu_item_new_with_mnemonic(m.title.c_str());
-            bar->menu = gtk_menu_new();
+            bar->menu = new_menu();
             gtk_menu_item_set_submenu(GTK_MENU_ITEM(top), bar->menu);
             gtk_menu_shell_append(GTK_MENU_SHELL(menu_bar_), top);
             connect(
