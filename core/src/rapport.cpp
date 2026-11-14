@@ -136,6 +136,7 @@ private:
         if (s.on_changed) t.on_changed(s.on_changed);
         bind(s.bind, w);
     }
+    static void apply(const spec::stack& s, widget& w) { bind(s.bind, w); }
     static void apply(const spec::label& s, widget& w) { bind(s.bind, w); }
     static void apply(const spec::button& s, widget& w)
     {
