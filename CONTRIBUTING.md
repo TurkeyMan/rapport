@@ -51,9 +51,12 @@ which makes checking a layout on each backend quick.
   monitor's rendering parameters (its ClearType level, gamma and pixel
   order, RGB or BGR) and the system's font smoothing setting, and make them
   again when the settings, the monitor or the DPI change.
-- Changing a public header (`widgets.h`, `layout.h`, `backend.h`,
-  `rapport.h`) bumps `abi_version` in `backend.h`, so mismatched plugins
-  refuse to load.
+- Changing what a public header (`widgets.h`, `layout.h`, `backend.h`,
+  `rapport.h`) compiles to, meaning a type, member, virtual, signature,
+  default argument, constant or inline function body, bumps `abi_version`
+  in `backend.h`, so mismatched plugins refuse to load. Comment-only
+  changes to those headers, and changes inside a backend, don't bump it.
+  Number it master + 1 when the PR lands.
 
 ## Code style
 
