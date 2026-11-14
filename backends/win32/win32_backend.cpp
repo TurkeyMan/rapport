@@ -5011,8 +5011,8 @@ public:
     void set_enabled(bool e) override;
     void set_visible(bool v) override;
     void set_tooltip(const std::string& t) override;
-    void focus() override {}
-    bool has_focus() const override { return false; }
+    void focus() override;
+    bool has_focus() const override;
     void set_icon(const icon& icon) override;
     bool checked() const override { return checked_; }
     void set_checked(bool c) override;
@@ -5041,6 +5041,23 @@ private:
     std::function<void(bool)> toggled_;
 };
 
+// The keyboard: a toolbar's buttons are one Tab stop, as Explorer's command
+// bar's are (a row of controls, an hbox, gives each its own). A toolbar's
+// buttons can be in several strips (its spacers and other controls part
+// them): the strips are a group, only one of them a Tab stop (the one the
+// focus was last in, else the first with a button to reach). Focused, one
+// of its buttons is the current one (the hot item, ringed while focus cues
+// show): the arrow keys, Home and End move it over the shown, enabled
+// buttons of the whole group, from strip to strip, wrapping; Space and
+// Enter press it. It's remembered while the focus is elsewhere, and focus()
+// on a button makes it the current one. A toolbar's other controls (an
+// entry, a slider) keep their own Tab stops.
+struct strip_group
+{
+    std::vector<tool_strip*> strips;  // in the toolbar's order
+    tool_strip* last = nullptr;       // the focus was last in it
+};
+
 class tool_strip : public leaf<widget>
 {
 public:
@@ -5053,20 +5070,66 @@ public:
                                  CCS_NODIVIDER));
         SendMessageW(h_, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
         SendMessageW(h_, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DOUBLEBUFFER);
-        // A DPI change refonts every control: the icons follow.
-        SetWindowSubclass(
-            h_,
-            [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
-            {
-                if (msg == WM_SETFONT) reinterpret_cast<tool_strip*>(data)->rescale();
-                return DefSubclassProc(h, msg, wp, lp);
-            },
-            1, reinterpret_cast<DWORD_PTR>(this));
+        SetWindowSubclass(h_, strip_subclass, 1, reinterpret_cast<DWORD_PTR>(this));
+    }
+
+    // The current button's index while the strip has the focus and focus
+    // cues show (to ring it), else -1.
+    int keyboard_item() const
+    {
+        if (GetFocus() != h_ || current_ < 0) return -1;
+        if (SendMessageW(h_, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS) return -1;
+        return current_;
+    }
+    // A button made the current one, and the strip focused (when its window
+    // shows, if it hasn't).
+    void focus_button(int id)
+    {
+        if (usable(id - 1)) current_ = id - 1;
+        HWND root = GetAncestor(h_, GA_ROOT);
+        if (!IsWindowVisible(root))
+            SetPropW(root, L"rapport-focus", h_);
+        else if (GetFocus() == h_)
+            show_current();
+        else
+            SetFocus(h_);
+    }
+    bool button_has_focus(int id) const { return GetFocus() == h_ && current_ == id - 1; }
+    // The keys it moves and presses with, while it has the focus: its own,
+    // before the window's on_key (as the focused document tabs' are).
+    static bool owns_key(const MSG& m)
+    {
+        if (m.message != WM_KEYDOWN && m.message != WM_KEYUP && m.message != WM_CHAR) return false;
+        if (m.message == WM_CHAR) return m.wParam == L' ' || m.wParam == L'\r';
+        if (GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0) return false;
+        switch (m.wParam)
+        {
+        case VK_LEFT:
+        case VK_RIGHT:
+        case VK_UP:
+        case VK_DOWN:
+        case VK_HOME:
+        case VK_END:
+        case VK_SPACE:
+        case VK_RETURN: return true;
+        default: return false;
+        }
     }
     ~tool_strip() override
     {
         for (HIMAGELIST l : images_)
             if (l) g_comctl.destroy(l);
+        if (group_)
+        {
+            std::erase(group_->strips, this);
+            if (group_->last == this) group_->last = nullptr;
+        }
+    }
+    // One of a toolbar's strips (before finish()).
+    void join(std::shared_ptr<strip_group> group)
+    {
+        group_ = std::move(group);
+        group_->strips.push_back(this);
     }
 
     void add_separator(strip_entry* e) { entries_.push_back({e, nullptr, L""}); }
@@ -5100,9 +5163,15 @@ public:
         SendMessageW(h_, TB_ADDBUTTONSW, WPARAM(buttons.size()), reinterpret_cast<LPARAM>(buttons.data()));
         size_buttons();
         shown_.assign(entries_.size(), true);
+        update_tab_stop();
     }
 
-    void set_enabled(int id, bool e) { SendMessageW(h_, TB_ENABLEBUTTON, WPARAM(id), MAKELPARAM(e, 0)); }
+    void set_enabled(int id, bool e)
+    {
+        SendMessageW(h_, TB_ENABLEBUTTON, WPARAM(id), MAKELPARAM(e, 0));
+        update_tab_stop();
+        repair_focus();
+    }
     void set_checked(int id, bool c) { SendMessageW(h_, TB_CHECKBUTTON, WPARAM(id), MAKELPARAM(c, 0)); }
     void set_text(int id, const std::string& text) { entries_[size_t(id) - 1].text = wide(text); }
     void set_icon(int id)
@@ -5124,23 +5193,55 @@ public:
 
     LRESULT notify(NMHDR* n, bool& handled) override
     {
-        if (n->code == NM_CUSTOMDRAW && dark_mode())
+        if (n->code == NM_CUSTOMDRAW)
         {
-            handled = true;
-            return dark_draw(reinterpret_cast<NMTBCUSTOMDRAW*>(n));
-        }
-        // Light, it draws its background in the style's (the window colour)
-        // whatever is behind it, double buffered or printed: on a base
-        // surface that's filled in the surface's colour first (the toolbar
-        // band's, in one), the buttons' looks (hot, pressed, checked,
-        // disabled) left to it.
-        if (n->code == NM_CUSTOMDRAW && surface_of(h_) == theme_color::base)
-        {
-            handled = true;
             auto* cd = reinterpret_cast<NMTBCUSTOMDRAW*>(n);
-            if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)
-                FillRect(cd->nmcd.hdc, &cd->nmcd.rc, surface_brush_of(h_));
-            return CDRF_DODEFAULT;
+            const int ring = keyboard_item();
+            // The current button ringed, over whatever drew it.
+            if (cd->nmcd.dwDrawStage == CDDS_ITEMPOSTPAINT)
+            {
+                handled = true;
+                if (int(cd->nmcd.dwItemSpec) - 1 == ring) draw_ring(cd->nmcd.hdc, cd->nmcd.rc);
+                return CDRF_DODEFAULT;
+            }
+            LRESULT r = CDRF_DODEFAULT;
+            bool mine = false;
+            if (dark_mode())
+            {
+                r = dark_draw(cd);
+                mine = true;
+            }
+            // Light, it draws its background in the style's (the window
+            // colour) whatever is behind it, double buffered or printed: on
+            // a base surface that's filled in the surface's colour first
+            // (the toolbar band's, in one), the buttons' looks (hot,
+            // pressed, checked, disabled) left to it.
+            else if (surface_of(h_) == theme_color::base)
+            {
+                if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) FillRect(cd->nmcd.hdc, &cd->nmcd.rc, surface_brush_of(h_));
+                mine = true;
+            }
+            if (ring >= 0)
+            {
+                if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) r |= CDRF_NOTIFYITEMDRAW;
+                if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT && int(cd->nmcd.dwItemSpec) - 1 == ring)
+                    r |= CDRF_NOTIFYPOSTPAINT;
+                mine = true;
+            }
+            handled = mine;
+            return mine ? r : 0;
+        }
+        // The mouse moves the hot item; while the strip has the focus that's
+        // the current button, and the pointer leaving doesn't take it away
+        // (the strip's own clearing, TB_SETHOTITEM -1, does).
+        if (n->code == TBN_HOTITEMCHANGE && GetFocus() == h_)
+        {
+            auto* hot = reinterpret_cast<NMTBHOTITEM*>(n);
+            handled = true;
+            if (!(hot->dwFlags & HICF_MOUSE)) return FALSE;
+            if (hot->dwFlags & HICF_LEAVING) return TRUE;
+            if (usable(hot->idNew - 1)) current_ = hot->idNew - 1;
+            return FALSE;
         }
         handled = n->code == TBN_GETINFOTIPW;
         if (!handled) return 0;
@@ -5237,16 +5338,242 @@ private:
     // Hides the entries whose items are hidden.
     void sync()
     {
+        bool changed = false;
         for (size_t i = 0; i < entries_.size(); ++i)
             if (shown_[i] != entries_[i].item->visible)
             {
                 shown_[i] = entries_[i].item->visible;
+                changed = true;
                 // A separator's id is 0, so it goes by index.
                 TBBUTTONINFOW info{sizeof info, TBIF_BYINDEX | TBIF_STATE};
                 SendMessageW(h_, TB_GETBUTTONINFOW, i, reinterpret_cast<LPARAM>(&info));
                 info.fsState = shown_[i] ? info.fsState & ~TBSTATE_HIDDEN : info.fsState | TBSTATE_HIDDEN;
                 SendMessageW(h_, TB_SETBUTTONINFOW, i, reinterpret_cast<LPARAM>(&info));
             }
+        if (!changed) return;
+        update_tab_stop();
+        repair_focus();
+    }
+    // Whichever of the group's strips has the focus, its current button
+    // gone (disabled, hidden), or none while one's now reachable (enabled or
+    // shown again, maybe in another strip): a current button found again.
+    void repair_focus()
+    {
+        const HWND f = GetFocus();
+        if (!group_)
+        {
+            if (f == h_ && !usable(current_)) rehome();
+            return;
+        }
+        for (tool_strip* s : group_->strips)
+            if (s->h_ == f && !s->usable(s->current_))
+            {
+                s->rehome();
+                return;
+            }
+    }
+    // The focused current button gone (disabled, hidden): the next one the
+    // keyboard can reach, in this strip, else in the group's next strip
+    // that has one (the focus going there), else none.
+    void rehome()
+    {
+        if (any_usable())
+        {
+            move_current(current_ < 0 ? 0 : current_, +1);
+            return;
+        }
+        current_ = -1;
+        show_current();
+        if (!group_) return;
+        const auto& v = group_->strips;
+        const auto at = std::find(v.begin(), v.end(), this);
+        if (at == v.end()) return;
+        const size_t from = size_t(at - v.begin()), n = v.size();
+        for (size_t k = 1; k < n; ++k)
+        {
+            tool_strip* s = v[(from + k) % n];
+            if (!s->any_usable()) continue;
+            if (!s->usable(s->current_))
+                for (int i = 0; i < int(s->entries_.size()); ++i)
+                    if (s->usable(i))
+                    {
+                        s->current_ = i;
+                        break;
+                    }
+            SetFocus(s->h_);
+            return;
+        }
+    }
+
+    // A button the keyboard can reach: shown and enabled.
+    bool usable(int i) const
+    {
+        if (i < 0 || size_t(i) >= entries_.size() || !entries_[size_t(i)].button) return false;
+        if (!entries_[size_t(i)].item->visible) return false;  // (hidden, or about to be)
+        return SendMessageW(h_, TB_ISBUTTONENABLED, WPARAM(i + 1), 0) != 0;
+    }
+    bool any_usable() const
+    {
+        for (int i = 0; i < int(entries_.size()); ++i)
+            if (usable(i)) return true;
+        return false;
+    }
+    void set_tab_stop(bool on)
+    {
+        const LONG_PTR style = GetWindowLongPtrW(h_, GWL_STYLE);
+        const LONG_PTR want = on ? style | WS_TABSTOP : style & ~LONG_PTR(WS_TABSTOP);
+        if (want != style) SetWindowLongPtrW(h_, GWL_STYLE, want);
+    }
+    // The group's one Tab stop: the strip the focus was last in, if it has
+    // a button to reach, else the first that has; none if none has.
+    void update_tab_stop()
+    {
+        if (!group_)
+        {
+            set_tab_stop(any_usable());
+            return;
+        }
+        tool_strip* stop = group_->last && group_->last->any_usable() ? group_->last : nullptr;
+        for (tool_strip* s : group_->strips)
+            if (!stop && s->any_usable()) stop = s;
+        for (tool_strip* s : group_->strips) s->set_tab_stop(s == stop);
+    }
+    // The current button stepped `dir` (+1, -1) over the group's buttons the
+    // keyboard can reach, from strip to strip, wrapping; `edge`: to the
+    // group's first (dir +1) or last (dir -1) instead.
+    void step(int dir, bool edge = false)
+    {
+        std::vector<tool_strip*> strips = group_ ? group_->strips : std::vector<tool_strip*>{this};
+        std::vector<std::pair<tool_strip*, int>> all;
+        int at = -1;
+        for (tool_strip* s : strips)
+            for (int i = 0; i < int(s->entries_.size()); ++i)
+                if (s->usable(i))
+                {
+                    if (s == this && i == current_) at = int(all.size());
+                    all.emplace_back(s, i);
+                }
+        if (all.empty()) return;
+        const int n = int(all.size());
+        const int to = edge ? (dir > 0 ? 0 : n - 1) : at < 0 ? (dir > 0 ? 0 : n - 1) : ((at + dir) % n + n) % n;
+        auto [s, i] = all[size_t(to)];
+        s->current_ = i;
+        if (s == this)
+            show_current();
+        else
+            SetFocus(s->h_);  // its WM_SETFOCUS shows it
+    }
+    // The current button moved to the first one the keyboard can reach from
+    // `from` (itself included) in direction `step`, wrapping; none, -1.
+    void move_current(int from, int step)
+    {
+        const int n = int(entries_.size());
+        current_ = -1;
+        for (int k = 0; k < n; ++k)
+        {
+            const int i = ((from + step * k) % n + n) % n;
+            if (usable(i))
+            {
+                current_ = i;
+                break;
+            }
+        }
+        show_current();
+    }
+    // The current button as the hot item, and redrawn for its ring.
+    void show_current()
+    {
+        SendMessageW(h_, TB_SETHOTITEM, WPARAM(current_), 0);
+        InvalidateRect(h_, nullptr, FALSE);
+    }
+    // The current button pressed from the keyboard, as a click is: a
+    // toggle's state flipped first.
+    void press_current()
+    {
+        if (!usable(current_)) return;
+        const int id = current_ + 1;
+        strip_button* b = entries_[size_t(current_)].button;
+        bool checked = false;
+        if (b->toggle())
+        {
+            checked = SendMessageW(h_, TB_ISBUTTONCHECKED, WPARAM(id), 0) == 0;
+            SendMessageW(h_, TB_CHECKBUTTON, WPARAM(id), MAKELPARAM(checked, 0));
+        }
+        b->clicked(checked);
+    }
+    // The focus ring: inside the button, as a native button's.
+    void draw_ring(HDC dc, RECT r) const
+    {
+        InflateRect(&r, -px(2), -px(2));
+        SetTextColor(dc, RGB(0, 0, 0));
+        SetBkColor(dc, RGB(255, 255, 255));
+        DrawFocusRect(dc, &r);
+    }
+
+    static LRESULT CALLBACK strip_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
+    {
+        auto* self = reinterpret_cast<tool_strip*>(data);
+        switch (msg)
+        {
+        // A DPI change refonts every control: the icons follow.
+        case WM_SETFONT: self->rescale(); break;
+        // The keys it moves and presses with are its own, not the dialog's
+        // (the default button's Enter, the arrows' moving between controls).
+        case WM_GETDLGCODE:
+            if (auto* m = reinterpret_cast<const MSG*>(lp); m && m->message == WM_KEYDOWN)
+                switch (m->wParam)
+                {
+                case VK_LEFT:
+                case VK_RIGHT:
+                case VK_UP:
+                case VK_DOWN:
+                case VK_HOME:
+                case VK_END:
+                case VK_SPACE:
+                case VK_RETURN: return DefSubclassProc(h, msg, wp, lp) | DLGC_WANTMESSAGE;
+                default: break;
+                }
+            return DefSubclassProc(h, msg, wp, lp) | DLGC_WANTARROWS;
+        case WM_KEYDOWN:
+            switch (wp)
+            {
+            case VK_LEFT:
+            case VK_UP: self->step(-1); return 0;
+            case VK_RIGHT:
+            case VK_DOWN: self->step(+1); return 0;
+            case VK_HOME: self->step(+1, true); return 0;
+            case VK_END: self->step(-1, true); return 0;
+            case VK_SPACE:
+            case VK_RETURN: self->press_current(); return 0;
+            default: break;
+            }
+            break;
+        case WM_CHAR:
+            if (wp == L' ' || wp == L'\r') return 0;  // pressed on the key's down
+            break;
+        case WM_SETFOCUS:
+        {
+            // What the control makes hot as it takes the focus isn't the
+            // current button: the remembered one is.
+            const int keep = self->current_;
+            const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+            self->current_ = keep;
+            if (self->group_) self->group_->last = self;
+            self->update_tab_stop();
+            self->move_current(self->usable(self->current_) ? self->current_ : 0, +1);
+            return r;
+        }
+        case WM_KILLFOCUS:
+        {
+            const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+            SendMessageW(h, TB_SETHOTITEM, WPARAM(-1), 0);
+            InvalidateRect(h, nullptr, FALSE);
+            return r;
+        }
+        case WM_UPDATEUISTATE: InvalidateRect(h, nullptr, FALSE); break;
+        default: break;
+        }
+        return DefSubclassProc(h, msg, wp, lp);
     }
 
     // Enabled, then disabled: the toolbar doesn't grey an icon with alpha.
@@ -5312,6 +5639,8 @@ private:
     }
 
     bool band_ = false;
+    int current_ = -1;                   // the keyboard's button (an entry's index), kept unfocused
+    std::shared_ptr<strip_group> group_;  // the toolbar's strips
     std::optional<SIZE> usual_spacing_;  // the control's own, out of the band
     std::vector<entry> entries_;
     std::vector<bool> shown_;
@@ -5328,6 +5657,8 @@ void strip_button::set_visible(bool v)
     strip_.relayout();
 }
 void strip_button::set_tooltip(const std::string& t) { strip_.set_text(id_, t); }
+void strip_button::focus() { strip_.focus_button(id_); }
+bool strip_button::has_focus() const { return strip_.button_has_focus(id_); }
 void strip_button::set_icon(const icon& icon)
 {
     icon_ = icon;
@@ -11854,6 +12185,8 @@ public:
         }
         // The arrows, Enter and Delete on the focused tabs are theirs.
         if (doc_tabs && doc_tabs->owns_key(m)) return false;
+        // A focused toolbar's arrows, Home, End, Space and Enter are its own.
+        if (dynamic_cast<tool_strip*>(handler_of(m.hwnd)) && tool_strip::owns_key(m)) return false;
         if (!on_key_) return false;
         // The control the key is going to (the focus, as it was typed).
         const bool typing = editable_field(m.hwnd);
@@ -12606,14 +12939,20 @@ private:
     item* make(const node& n, const spec::toolbar& s, HWND parent, orientation)
     {
         auto* box = own<toolbar_item>(win_);
-        // Each run of buttons and separators is one native toolbar.
+        // Each run of buttons and separators is one native toolbar; the
+        // runs are one group for the keyboard.
         tool_strip* strip = nullptr;
+        auto group = std::make_shared<strip_group>();
         for (const node& c : s.items)
         {
             const auto* b = std::get_if<spec::tool_button>(&c.spec);
             if (b || std::holds_alternative<spec::separator>(c.spec))
             {
-                if (!strip) box->children.push_back(strip = own<tool_strip>(win_, parent));
+                if (!strip)
+                {
+                    box->children.push_back(strip = own<tool_strip>(win_, parent));
+                    strip->join(group);
+                }
                 if (b)
                 {
                     strip_button* button = strip->add_button(*b);
