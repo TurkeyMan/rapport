@@ -1731,7 +1731,7 @@ public:
             {
                 auto* self = static_cast<entry_impl*>(p);
                 self->update_clear();
-                if (self->changed_) self->changed_(gtk_entry_get_text(GTK_ENTRY(e)));
+                if (!self->quiet_ && self->changed_) self->changed_(gtk_entry_get_text(GTK_ENTRY(e)));
             },
             this);
         if (clearable_ || leading_ || trailing_)
@@ -1761,7 +1761,13 @@ public:
     }
 
     std::string text() const override { return gtk_entry_get_text(GTK_ENTRY(w_)); }
-    void set_text(const std::string& t) override { gtk_entry_set_text(GTK_ENTRY(w_), t.c_str()); }
+    // The app's change, not the user's: on_changed isn't fired.
+    void set_text(const std::string& t) override
+    {
+        quiet_ = true;
+        gtk_entry_set_text(GTK_ENTRY(w_), t.c_str());
+        quiet_ = false;
+    }
     void set_read_only(bool v) override { gtk_editable_set_editable(GTK_EDITABLE(w_), !v); }
     // Frameless keeps the frame, made invisible, rather than
     // gtk_entry_set_has_frame(false): that entry is shorter, so giving it
@@ -1821,7 +1827,7 @@ private:
             gtk_entry_set_icon_sensitive(GTK_ENTRY(w_), GTK_ENTRY_ICON_SECONDARY, true);
         }
     }
-    bool clearable_ = false;
+    bool clearable_ = false, quiet_ = false;
     std::unique_ptr<entry_icon_action> leading_, trailing_;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
@@ -1840,23 +1846,33 @@ public:
             +[](GtkComboBox* c, gpointer p)
             {
                 auto* self = static_cast<drop_down_impl*>(p);
-                if (self->changed_) self->changed_(gtk_combo_box_get_active(c));
+                if (!self->quiet_ && self->changed_) self->changed_(gtk_combo_box_get_active(c));
             },
             this);
     }
 
+    // The app's changes, not the user's: on_changed isn't fired (GTK's
+    // "changed" comes for both, and for the items cleared).
     void set_items(std::vector<std::string> items) override
     {
+        quiet_ = true;
         auto* combo = GTK_COMBO_BOX_TEXT(w_);
         gtk_combo_box_text_remove_all(combo);
         for (auto& i : items) gtk_combo_box_text_append_text(combo, i.c_str());
+        quiet_ = false;
     }
     int current() const override { return gtk_combo_box_get_active(GTK_COMBO_BOX(w_)); }
-    void set_current(int i) override { gtk_combo_box_set_active(GTK_COMBO_BOX(w_), i); }
+    void set_current(int i) override
+    {
+        quiet_ = true;
+        gtk_combo_box_set_active(GTK_COMBO_BOX(w_), i);
+        quiet_ = false;
+    }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
 private:
     std::function<void(int)> changed_;
+    bool quiet_ = false;
 };
 
 class combo_impl : public widget_base<rap::combo>
@@ -1873,7 +1889,7 @@ public:
             +[](GtkEditable* e, gpointer p)
             {
                 auto* self = static_cast<combo_impl*>(p);
-                if (self->changed_) self->changed_(gtk_entry_get_text(GTK_ENTRY(e)));
+                if (!self->quiet_ && self->changed_) self->changed_(gtk_entry_get_text(GTK_ENTRY(e)));
             },
             this);
         connect(
@@ -1886,16 +1902,21 @@ public:
             this);
     }
 
+    // The app's changes, not the user's: on_changed isn't fired.
     void set_items(std::vector<std::string> items) override
     {
+        quiet_ = true;
         auto* combo = GTK_COMBO_BOX_TEXT(w_);
         gtk_combo_box_text_remove_all(combo);
         for (auto& i : items) gtk_combo_box_text_append_text(combo, i.c_str());
+        quiet_ = false;
     }
     std::string text() const override { return gtk_entry_get_text(GTK_ENTRY(entry_)); }
     void set_text(const std::string& t) override
     {
+        quiet_ = true;
         gtk_entry_set_text(GTK_ENTRY(entry_), t.c_str());
+        quiet_ = false;
     }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
@@ -1904,6 +1925,7 @@ private:
     GtkWidget* entry_;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
+    bool quiet_ = false;
 };
 
 class text_view_impl : public text_view_common
