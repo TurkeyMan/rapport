@@ -2,8 +2,10 @@
 //
 // Apps don't use this directly; see rapport.h. Backends and the core are
 // built by the same compiler against the same headers - this is a C++
-// interface, not a stable C ABI. Bump abi_version on any change here or
-// in widgets.h / layout.h.
+// interface, not a stable C ABI. Bump abi_version when what this header or
+// widgets.h / layout.h compiles to changes: a type, member, virtual, signature,
+// default argument, constant or inline function body. Comment-only
+// changes don't bump it.
 #pragma once
 
 #include "layout.h"
