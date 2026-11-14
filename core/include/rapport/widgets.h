@@ -1446,6 +1446,15 @@ public:
     virtual ~window() = default;  // destroys all widgets in the window
     virtual void set_title(const std::string&) = 0;
     virtual void show() = 0;
+    // Brings the window to the user: shown if it isn't, restored if
+    // minimised (to maximised, if it was), raised, and activated where the
+    // platform lets an app take the focus. Windows: SetForegroundWindow,
+    // which a process given AllowSetForegroundWindow may; refused, the
+    // taskbar button flashes. Wayland: the compositor decides, and may only
+    // mark the window as wanting attention. With RAPPORT_NO_ACTIVATE (test
+    // runs) shown, restored and raised, the focus left where it is (GTK 4
+    // can't raise without activating: restored only).
+    virtual void present() = 0;
     virtual void close() = 0;
 
     // Size of the window's content in logical px, and resizing it.

@@ -519,6 +519,7 @@ public:
     }
     void set_title(const std::string&) override {}
     void show() override {}
+    void present() override {}
     void close() override {}
     void on_finished(std::function<void(dialog_role)>) override {}
     void on_close_request(std::function<bool()>) override {}

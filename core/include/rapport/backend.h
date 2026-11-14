@@ -21,7 +21,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 85;
+inline constexpr int abi_version = 86;
 
 // Light or dark: as the desktop has it (system), or the app's own choice
 // (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for

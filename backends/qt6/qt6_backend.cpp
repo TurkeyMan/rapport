@@ -4524,6 +4524,21 @@ public:
         }
         snapshot_if_asked();
     }
+    void present() override
+    {
+        if (!frame_->isVisible()) show();
+        const bool quiet = std::getenv("RAPPORT_NO_ACTIVATE") != nullptr;
+        // Minimised: back as it was, maximised if it was (showNormal would
+        // unmaximise it).
+        if (frame_->windowState() & Qt::WindowMinimized)
+        {
+            Qt::WindowStates state = frame_->windowState() & ~Qt::WindowMinimized;
+            if (!quiet) state |= Qt::WindowActive;
+            frame_->setWindowState(state);
+        }
+        frame_->raise();
+        if (!quiet) frame_->activateWindow();
+    }
     void close() override { frame_->hide(); }
     void on_finished(std::function<void(dialog_role)> f) override { on_finished_ = std::move(f); }
     void on_close_request(std::function<bool()> f) override { on_close_request_ = std::move(f); }
