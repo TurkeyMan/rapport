@@ -11,6 +11,10 @@
 //   - The tab's folder is shown under the tabs: the app swaps the content,
 //     the tabs only say which one is current. "Rename" retitles the current
 //     tab; the path field's Enter takes it to that folder.
+//   - The row above the content holds one of each kind of control: on
+//     Windows 11 it's the toolbar band under the tabs (Explorer's address
+//     row), each control there the height of a WinUI text box, in WinUI's
+//     look. RAPPORT_DENSITY=compact shows it in WinUI's compact density.
 //   rapport-document-tabs --many    opens with fourteen tabs
 #include <rapport/rapport.h>
 
@@ -73,7 +77,16 @@ int main(int argc, char** argv)
     using namespace rap::layout;
     win = (*ui)->create(window{"Document tabs",
                                {vbox{
-                                   hbox{entry{}
+                                   hbox{tool_button{rap::icon::named("go-previous"), "Back"},
+                                        tool_button{rap::icon::named("go-up"), "Up"},
+                                        menu_button{"View"}.on_menu(
+                                            []
+                                            {
+                                                return rap::menu{{.label = "Details"},
+                                                                 {.label = "List"}};
+                                            }),
+                                        separator{},
+                                        entry{}
                                             .placeholder("Folder")
                                             .on_activate(
                                                 [&]
@@ -89,6 +102,13 @@ int main(int argc, char** argv)
                                                 })
                                             .bind(path_field)
                                             .stretch(),
+                                        drop_down{{"Name", "Date", "Size"}, 0},
+                                        combo{{"*", "*.txt", "*.png"}, "*"},
+                                        label{"Hidden"},
+                                        check{"Show"},
+                                        tool_button{rap::icon::named("view-list"), "Preview"}
+                                            .toggle(true),
+                                        button{"Refresh"}.icon(rap::icon::named("view-refresh")),
                                         button{"_Rename"}.on_click(
                                             [&]
                                             {

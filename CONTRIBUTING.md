@@ -30,6 +30,9 @@ cmake -S . -B build-static -G Ninja -DRAPPORT_STATIC=ON && cmake --build build-s
 
 `RAPPORT_SNAPSHOT=out.png` saves the first window a program shows and quits,
 which makes checking a layout on each backend quick.
+`RAPPORT_THEME=light|dark` forces a colour scheme, and `RAPPORT_DENSITY=compact`
+WinUI's compact density (for now only Windows 11's toolbar band takes it):
+development aids, for snapshots and tests of each, not an app's API.
 
 ## Design
 

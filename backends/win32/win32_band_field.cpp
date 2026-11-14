@@ -64,6 +64,7 @@ LRESULT CALLBACK field_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
 
 struct field_state
 {
+    const band_density* density = &standard_band;
     bool hot = false;      // the pointer's over it, or over a button in it
     bool focused = false;  // it has the keyboard focus (WM_SETFOCUS, WM_KILLFOCUS)
     HBRUSH brush = nullptr;
@@ -81,13 +82,10 @@ field_state* state_of(HWND h)
                                                                          : nullptr;
 }
 
-// WinUI's text size in the UI face, enlarged by the desktop's text size
-// (Settings > Accessibility > Text size) as the message font is: 14 at 100%,
-// 21 at 150%. The message font has the text size in it already, so it's
-// scaled to WinUI's size at that text size, not to 14 (which would undo it).
-HFONT field_font(UINT dpi)
+HFONT field_font(HWND h)
 {
-    return ui_font(dpi, false, false, band_metrics::font * text_scale() / std::max(1.f, ui_font_size_dip()));
+    field_state* st = state_of(h);
+    return band_font(dpi_of(h), st ? *st->density : standard_band);
 }
 
 // What the text's line takes: its height, ascent and capitals' height.
@@ -95,11 +93,10 @@ struct font_box
 {
     int height = 0, ascent = 0, cap = 0;
 };
-font_box box_of(HWND h)
+font_box box_of(HDC dc, HFONT font)
 {
     font_box b;
-    HDC dc = GetDC(h);
-    HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)));
+    HGDIOBJ old = SelectObject(dc, font);
     TEXTMETRICW tm{};
     GetTextMetricsW(dc, &tm);
     b.height = int(tm.tmHeight);
@@ -112,6 +109,12 @@ font_box box_of(HWND h)
     if (GetGlyphOutlineW(dc, L'H', GGO_METRICS, &gm, 0, nullptr, &identity) != GDI_ERROR && gm.gmptGlyphOrigin.y > 0)
         b.cap = int(gm.gmptGlyphOrigin.y);
     SelectObject(dc, old);
+    return b;
+}
+font_box box_of(HWND h)
+{
+    HDC dc = GetDC(h);
+    const font_box b = box_of(dc, reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)));
     ReleaseDC(h, dc);
     return b;
 }
@@ -138,15 +141,14 @@ struct look
     color text, placeholder;
     const field_colors* colors = nullptr;
 };
-look look_of(HWND h, const field_state& st)
+look look_at(color behind, bool enabled, bool focused, bool hot)
 {
     look l;
     const field_colors& p = dark_mode() ? dark_fields : light_fields;
     l.colors = &p;
-    const bool enabled = IsWindowEnabled(h) != FALSE;
-    l.focused = enabled && st.focused;
-    const bool hot = enabled && st.hot;
-    l.behind = surface_color_of(h);
+    l.focused = enabled && focused;
+    hot = enabled && hot;
+    l.behind = behind;
     l.behind.a = 255;
     l.face = over(!enabled ? p.disabled : l.focused ? p.focus : hot ? p.hover : p.rest, l.behind);
     l.stroke = over(p.stroke, l.behind);
@@ -156,6 +158,10 @@ look look_of(HWND h, const field_state& st)
     l.text = over(enabled ? p.text : p.text_disabled, l.face);
     l.placeholder = over(!enabled ? p.text_disabled : l.focused ? p.placeholder_focused : p.placeholder, l.face);
     return l;
+}
+look look_of(HWND h, const field_state& st)
+{
+    return look_at(surface_color_of(h), IsWindowEnabled(h) != FALSE, st.focused, st.hot);
 }
 
 HBRUSH face_brush(field_state& st, color face)
@@ -513,7 +519,7 @@ LRESULT CALLBACK field_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
     // at its DPI; the text centred again in it.
     case WM_SETFONT:
     {
-        const LRESULT r = DefSubclassProc(h, msg, reinterpret_cast<WPARAM>(field_font(dpi_of(h))), lp);
+        const LRESULT r = DefSubclassProc(h, msg, reinterpret_cast<WPARAM>(field_font(h)), lp);
         frame_changed(h);
         return r;
     }
@@ -538,10 +544,44 @@ UINT band_field_query_message()
     return m;
 }
 
-void set_band_field(HWND edit, bool on)
+namespace
+{
+int g_density_for_tests = -1;
+}
+
+const band_density& band_density_now()
+{
+    static const bool from_env = []
+    {
+        char v[16]{};
+        const DWORD n = GetEnvironmentVariableA("RAPPORT_DENSITY", v, sizeof v);
+        return n > 0 && n < sizeof v && !_stricmp(v, "compact");
+    }();
+    const bool compact = g_density_for_tests >= 0 ? g_density_for_tests == 1 : from_env;
+    return compact ? compact_band : standard_band;
+}
+
+void set_band_density_for_tests(int compact)
+{
+    g_density_for_tests = compact;
+}
+
+HFONT band_font(UINT dpi, const band_density& density)
+{
+    // WinUI's size in the UI face, enlarged by the desktop's text size
+    // (Settings > Accessibility > Text size) as the message font is: 14 at
+    // 100%, 21 at 150%. The message font has the text size in it already,
+    // so it's scaled to WinUI's size at that text size, not to 14 (which
+    // would undo it).
+    if (density.font <= 0) return ui_font(dpi);
+    return ui_font(dpi, false, false,
+                   density.font * text_scale() / std::max(1.f, ui_font_size_dip()));
+}
+
+void set_band_field(HWND edit, const band_density* density)
 {
     field_state* st = state_of(edit);
-    if (on)
+    if (density)
     {
         if (!st)
         {
@@ -549,8 +589,10 @@ void set_band_field(HWND edit, bool on)
             st->focused = GetFocus() == edit;
             SetWindowSubclass(edit, field_subclass, subclass_id, reinterpret_cast<DWORD_PTR>(st));
         }
+        st->density = density;
         apply_style(edit);
-        SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(field_font(dpi_of(edit))), FALSE);  // and its frame
+        SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(field_font(edit)),
+                     FALSE);  // and its frame
     }
     else if (st)
     {
@@ -579,17 +621,28 @@ void refresh_band_field(HWND edit)
 {
     if (!state_of(edit)) return;
     apply_style(edit);
-    SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(field_font(dpi_of(edit))), FALSE);
+    SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(field_font(edit)), FALSE);
     redraw(edit);
 }
 
 int band_field_height(HWND edit)
 {
+    field_state* st = state_of(edit);
+    const band_density& d = st ? *st->density : standard_band;
     const UINT dpi = dpi_of(edit);
     // WinUI's padding above and below the text (TextControlThemePadding's
-    // 5 and 6) and the border's: what a larger text takes.
-    const int around = band_px(5 + 6 + 2 * band_metrics::border, dpi);
-    return std::max(band_px(band_metrics::field, dpi), box_of(edit).height + around);
+    // top and bottom) and the border's: what a larger text takes.
+    const int around = band_px(d.text_top + d.text_bottom + 2 * band_metrics::border, dpi);
+    return std::max(band_px(d.field, dpi), box_of(edit).height + around);
+}
+
+int band_control_height(HFONT font, UINT dpi, const band_density& d)
+{
+    HDC dc = GetDC(nullptr);
+    const font_box box = box_of(dc, font);
+    ReleaseDC(nullptr, dc);
+    const int around = band_px(d.text_top + d.text_bottom + 2 * band_metrics::border, dpi);
+    return std::max(band_px(d.field, dpi), box.height + around);
 }
 
 bool band_field_ctlcolor(HWND control, HDC dc, LRESULT& result)
@@ -611,6 +664,23 @@ bool band_field_button_colors(HWND edit, bool pressed, bool hot, color& fill, co
     fill = pressed ? over(l.colors->button_pressed, l.face) : hot ? over(l.colors->button_hover, l.face) : l.face;
     ink = l.text;
     return true;
+}
+
+band_field_look band_field_look_at(color behind, bool enabled, bool focused, bool hot,
+                                   bool pressed_button, bool hot_button)
+{
+    const look l = look_at(behind, enabled, focused, hot);
+    band_field_look out;
+    out.face = l.face;
+    out.stroke = l.stroke;
+    out.accent = l.accent;
+    out.text = l.text;
+    out.ringed = l.ringed;
+    out.focused = l.focused;
+    out.button = pressed_button ? over(l.colors->button_pressed, l.face)
+                 : hot_button   ? over(l.colors->button_hover, l.face)
+                                : l.face;
+    return out;
 }
 
 }  // namespace rap::win32

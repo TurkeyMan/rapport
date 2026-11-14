@@ -442,9 +442,12 @@ struct window_spec
     // rather than the window colour, as Windows 11 Explorer's panes and
     // toolbar are white: its labels, check boxes, sliders, group boxes, tab
     // pages and toolbars on it. Windows 11 only; elsewhere the window colour.
-    // With the document tabs in the title bar there, a toolbar that's the
-    // content's first item, across it, is Explorer's address row: a band in
-    // WinUI's layer colour with a line under it, the current tab one with it.
+    // With the document tabs in the title bar there, a toolbar or a row of
+    // controls (an hbox) that's the content's first item, across it, is
+    // Explorer's address row: a band in WinUI's layer colour with a line
+    // under it, the current tab one with it, its controls all the height of
+    // a WinUI text box in WinUI's looks (its labels and check boxes native,
+    // centred in it).
     bool base_surface = false;
 };
 

@@ -7,8 +7,10 @@
 #include "lazy_tree.h"
 #include "menu_dismiss.h"
 #include "stack_pages.h"
+#include "win32_band_face.h"
 #include "win32_band_field.h"
 #include "win32_caption_tabs.h"
+#include "win32_chrome_palette.h"
 #include "win32_common.h"
 #include "win32_shell_icons.h"
 #include "window_chords.h"
@@ -313,6 +315,7 @@ struct comctl6
     decltype(&ImageList_Replace) replace = ImageList_Replace;
     decltype(&ImageList_GetImageCount) image_count = ImageList_GetImageCount;
     decltype(&ImageList_GetIconSize) icon_size = ImageList_GetIconSize;
+    decltype(&ImageList_Draw) draw = ImageList_Draw;
     // The classes' registration too: activating a context doesn't redirect
     // the imported one, v5's in an app without common controls 6.
     decltype(&InitCommonControlsEx) init = InitCommonControlsEx;
@@ -330,6 +333,7 @@ struct comctl6
         take(m, "ImageList_Replace", replace);
         take(m, "ImageList_GetImageCount", image_count);
         take(m, "ImageList_GetIconSize", icon_size);
+        take(m, "ImageList_Draw", draw);
         take(m, "InitCommonControlsEx", init);
     }
 
@@ -1734,6 +1738,36 @@ public:
 
     SIZE measure() override
     {
+        const SIZE s = measure_items();
+        if (!band_) return s;
+        const long around = band_px(band_->row, band_dpi()) - band_px(band_->field, band_dpi());
+        return {s.cx + band_px(band_metrics::start, band_dpi()) +
+                    band_px(band_metrics::end, band_dpi()),
+                std::max<long>(band_px(band_->row, band_dpi()), s.cy + around)};
+    }
+
+    // The toolbar band's row (win32_band_field.h), a toolbar or a row of
+    // controls, at `density`, or not (null): the row's height, its items
+    // centred in it at the field's height, from `start` in to `end` before
+    // the other end, `gap` apart; its items the band's (set_in_band).
+    // `win`: the window, whose DPI the metrics are at.
+    void set_band(const band_density* density, win_context& win)
+    {
+        band_win_ = &win;
+        if (band_ == density) return;
+        band_ = density;
+        for (item* c : children) c->set_in_band(density);
+    }
+    const band_density* band() const { return band_; }
+    // A box inside the band's row: its items in the band too.
+    void set_in_band(const band_density* density) override
+    {
+        for (item* c : children) c->set_in_band(density);
+    }
+    RECT rect{};  // where it was placed
+
+    SIZE measure_items()
+    {
         long main = 0, cross = 0;
         int n = 0;
         for (item* c : children)
@@ -1744,9 +1778,9 @@ public:
             cross = std::max(cross, across(s));
             ++n;
         }
-        if (n > 1) main += spacing_ * (n - 1);
-        main += 2 * margin_;
-        cross += 2 * (margin_ / 2);
+        if (n > 1) main += spacing() * (n - 1);
+        main += 2 * margin();
+        cross += 2 * (margin() / 2);
         return dir_ == orientation::horizontal ? SIZE{main, cross} : SIZE{cross, main};
     }
 
@@ -1754,18 +1788,19 @@ public:
     // that wraps is; in a row, each child's share of the width does.
     long measure_height(long width) override
     {
+        if (band_) return natural().cy;
         const std::vector<item*> shown = shown_children();
         if (shown.empty()) return natural().cy;
         if (dir_ == orientation::horizontal)
         {
-            const std::vector<long> sizes = shares(shown, width - 2 * margin_, 0);
+            const std::vector<long> sizes = shares(shown, width - 2 * margin(), 0);
             long h = 0;
             for (size_t i = 0; i < shown.size(); ++i)
                 h = std::max(h, height_of(shown[i], sizes[i]));
-            return h + 2 * (margin_ / 2);
+            return h + 2 * (margin() / 2);
         }
-        const long inner = width - 2 * (margin_ / 2);
-        long h = spacing_ * long(shown.size() - 1) + 2 * margin_;
+        const long inner = width - 2 * (margin() / 2);
+        long h = spacing() * long(shown.size() - 1) + 2 * margin();
         for (item* c : shown) h += height_of(c, cross_of(c, inner));
         return h;
     }
@@ -1773,10 +1808,22 @@ public:
     void place(RECT r) override
     {
         placed(r);
+        rect = r;
+        if (band_)
+        {
+            // The items in the field's height, (row - field) / 2 above them.
+            const long field = band_px(band_->field, band_dpi());
+            const long inner =
+                std::max(field, natural().cy - (band_px(band_->row, band_dpi()) - field));
+            const long top = std::max<long>(0, (r.bottom - r.top - inner) / 2);
+            r = RECT{r.left + band_px(band_metrics::start, band_dpi()), r.top + top,
+                     std::max(r.left, r.right - band_px(band_metrics::end, band_dpi())),
+                     r.top + top + inner};
+        }
         if (dir_ == orientation::horizontal)
-            InflateRect(&r, -margin_, -(margin_ / 2));
+            InflateRect(&r, -margin(), -(margin() / 2));
         else
-            InflateRect(&r, -(margin_ / 2), -margin_);
+            InflateRect(&r, -(margin() / 2), -margin());
         const std::vector<item*> shown = shown_children();
         if (shown.empty()) return;
         const long total = dir_ == orientation::horizontal ? r.right - r.left : r.bottom - r.top;
@@ -1804,7 +1851,7 @@ public:
                           ? RECT{pos, cross_pos, pos + sizes[i], cross_pos + cross_size}
                           : RECT{cross_pos, pos, cross_pos + cross_size, pos + sizes[i]};
             c->place(cr);
-            pos += sizes[i] + spacing_;
+            pos += sizes[i] + spacing();
         }
     }
 
@@ -1818,6 +1865,11 @@ protected:
     void set_spacing(int spacing) { spacing_ = spacing; }
 
 private:
+    // In the band, `gap` apart and no margins of its own: the row's ends
+    // are the band's.
+    int spacing() const { return band_ ? band_px(band_metrics::gap, band_dpi()) : spacing_; }
+    int margin() const { return band_ ? 0 : margin_; }
+
     SIZE size_of(item* c)
     {
         SIZE s = c->natural();
@@ -1851,7 +1903,7 @@ private:
     std::vector<long> shares(const std::vector<item*>& shown, long total, long cross_total)
     {
         std::vector<long> sizes;
-        long used = spacing_ * long(shown.size() - 1);
+        long used = spacing() * long(shown.size() - 1);
         int stretch_sum = 0;
         for (item* c : shown)
         {
@@ -1918,13 +1970,13 @@ private:
     orientation dir_;
     int spacing_;
     int margin_;
+    const band_density* band_ = nullptr;
+    win_context* band_win_ = nullptr;
+    UINT band_dpi() const { return band_win_ ? band_win_->dpi() : 96; }
 };
 
-// A toolbar's row: a box that knows it's one, and where it was placed (the
-// toolbar band's, win32_caption_tabs.h). The band's toolbar takes its
-// metrics (win32_band_field.h): the row band_metrics::row tall, its items
-// centred in it, from `start` in to `end` before the other end, `gap`
-// apart; its items theirs (set_in_band).
+// A toolbar's row: a box that knows it's one. As the toolbar band's row
+// (box_item::set_band), the band's metrics, as a row of controls there has.
 class toolbar_item final : public box_item
 {
 public:
@@ -1933,48 +1985,14 @@ public:
         , win_(win)
     {
     }
-    RECT rect{};
-    bool banded() const { return banded_; }
-    void set_banded(bool on)
-    {
-        if (banded_ == on) return;
-        banded_ = on;
-        for (item* c : children) c->set_in_band(on);
-    }
     SIZE measure() override
     {
-        const UINT dpi = win_.dpi();
-        set_spacing(banded_ ? band_px(band_metrics::gap, dpi) : win_.px(2));
-        SIZE s = box_item::measure();
-        if (!banded_) return s;
-        const long around = band_px(band_metrics::row, dpi) - band_px(band_metrics::field, dpi);
-        return {s.cx + band_px(band_metrics::start, dpi) + band_px(band_metrics::end, dpi),
-                std::max<long>(band_px(band_metrics::row, dpi), s.cy + around)};
-    }
-    long measure_height(long width) override
-    {
-        if (!banded_) return box_item::measure_height(width);
-        return natural().cy;
-    }
-    void place(RECT r) override
-    {
-        rect = r;
-        if (banded_)
-        {
-            // The items in the field's height, (row - field) / 2 above them.
-            const UINT dpi = win_.dpi();
-            const long field = band_px(band_metrics::field, dpi);
-            const long inner = std::max(field, natural().cy - (band_px(band_metrics::row, dpi) - field));
-            const long top = std::max<long>(0, (r.bottom - r.top - inner) / 2);
-            r = RECT{r.left + band_px(band_metrics::start, dpi), r.top + top,
-                     std::max(r.left, r.right - band_px(band_metrics::end, dpi)), r.top + top + inner};
-        }
-        box_item::place(r);
+        set_spacing(win_.px(2));
+        return box_item::measure();
     }
 
 private:
     win_context& win_;
-    bool banded_ = false;
 };
 
 // Labels right-aligned in the first column, fields in the second; an empty
@@ -2339,11 +2357,118 @@ void set_button_image(HWND h, win_context& win, const icon& icon, HIMAGELIST& im
     rebuild.arm([h, &win, &icon, &images, &rebuild] { set_button_image(h, win, icon, images, rebuild); });
 }
 
+// -- the band's buttons (win32_band_face.h) -------------------------------------
+
+// A line of `font`'s text: its width (mnemonic marks not counted).
+long band_text_width(HFONT font, const std::wstring& text)
+{
+    if (text.empty()) return 0;
+    HDC dc = GetDC(nullptr);
+    HGDIOBJ old = SelectObject(dc, font);
+    RECT r{};
+    DrawTextW(dc, text.c_str(), int(text.size()), &r, DT_SINGLELINE | DT_CALCRECT);
+    SelectObject(dc, old);
+    ReleaseDC(nullptr, dc);
+    return r.right - r.left;
+}
+
+// What a push button in the band shows: its icon (if any), its text (if
+// any) and, a drop-down button's, a chevron.
+struct band_content
+{
+    const icon* image = nullptr;  // null or empty: none
+    std::wstring text;            // with its mnemonic's &
+    bool chevron = false;
+};
+
+// Its content's width at `dpi` in `font`: the icon, 8, the text, 8 and the
+// chevron's box, each where there's one.
+long band_content_width(const band_content& c, HFONT font, UINT dpi)
+{
+    long w = 0;
+    auto add = [&](long part)
+    {
+        if (w) w += band_px(band_metrics::icon_gap, dpi);
+        w += part;
+    };
+    if (c.image && *c.image) add(band_px(16, dpi));
+    if (!c.text.empty()) add(band_text_width(font, c.text));
+    if (c.chevron)
+    {
+        if (w) w += band_px(band_metrics::menu_glyph_gap, dpi);
+        w += band_px(band_metrics::menu_glyph_box, dpi);
+    }
+    return w;
+}
+
+// A push button's size in the band: its content within ButtonPadding's
+// sides and its border, the field's height (more for a larger text).
+SIZE band_button_size(const band_content& c, HFONT font, UINT dpi, const band_density& d)
+{
+    const long sides =
+        2 * (band_px(band_metrics::border, dpi) + band_px(band_metrics::button_padding, dpi));
+    return {band_content_width(c, font, dpi) + sides, band_control_height(font, dpi, d)};
+}
+
+// A push button's face in the band (its NM_CUSTOMDRAW, CDDS_PREPAINT, the
+// whole of it drawn here: CDRF_SKIPDEFAULT): WinUI's Button (or, flat, its
+// subtle face) in its state, the content centred on it.
+LRESULT draw_band_button(NMCUSTOMDRAW* cd, const band_density& d, face_kind kind,
+                         const band_content& c, bool pushed)
+{
+    const HWND h = cd->hdr.hwndFrom;
+    if (cd->dwDrawStage != CDDS_PREPAINT) return CDRF_DODEFAULT;
+    const UINT item = cd->uItemState;
+    face_state st;
+    st.disabled = item & CDIS_DISABLED;
+    st.pressed = !st.disabled && ((item & CDIS_SELECTED) || pushed);
+    st.hot = !st.disabled && (item & CDIS_HOT);
+    st.focus_ring = (item & CDIS_FOCUS) && band_focus_cues(h);
+    HDC dc = cd->hdc;
+    const RECT r = cd->rc;
+    paint_band_face(h, dc, r, kind, st);
+    const color ink = band_face_ink(h, kind, st);
+    const UINT dpi = dpi_of(h);
+    HFONT font = band_text_font(h, d);
+    long x = r.left + (r.right - r.left - band_content_width(c, font, dpi)) / 2;
+    const int saved = SaveDC(dc);
+    if (c.image && *c.image)
+    {
+        const int size = band_px(16, dpi);
+        const int top = r.top + (r.bottom - r.top - size) / 2;
+        draw_icon_on_dc(dc, RECT{x, top, x + size, top + size}, *c.image, float(dpi) / 96.f, ink);
+        x += size + band_px(band_metrics::icon_gap, dpi);
+    }
+    if (!c.text.empty())
+    {
+        SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, color_ref(ink));
+        const long w = band_text_width(font, c.text);
+        const int top = band_text_top(dc, font, r.top, r.bottom - r.top);
+        RECT t{x, top, x + w, r.bottom};
+        const bool cues = !(SendMessageW(h, WM_QUERYUISTATE, 0, 0) & UISF_HIDEACCEL);
+        DrawTextW(dc, c.text.c_str(), int(c.text.size()), &t,
+                  DT_SINGLELINE | DT_NOCLIP | (cues ? 0 : DT_HIDEPREFIX));
+        x += w + band_px(band_metrics::menu_glyph_gap, dpi);
+    }
+    if (c.chevron)
+    {
+        const int box = band_px(band_metrics::menu_glyph_box, dpi);
+        const int top = r.top + (r.bottom - r.top - box) / 2;
+        draw_band_glyph(dc, RECT{x, top, x + box, top + box}, chevron_down_small,
+                        band_px(band_metrics::menu_glyph, dpi), ink);
+    }
+    RestoreDC(dc, saved);
+    return CDRF_SKIPDEFAULT;
+}
+
 class button_impl : public leaf<rap::button>
 {
 public:
     button_impl(win_context& win, HWND parent, const std::string& text, DWORD extra = 0)
         : leaf(win)
+        , flat_(extra & BS_FLAT)
     {
         adopt(create_control(win, parent, L"BUTTON", mnemonic(text), BS_PUSHBUTTON | WS_TABSTOP | extra));
     }
@@ -2369,17 +2494,45 @@ public:
     }
     SIZE measure() override
     {
+        if (band_drawn())
+            return band_button_size(content(), band_text_font(h_, *band_), win_.dpi(), *band_);
         const SIZE t = text_extent(h_, window_text(h_));
         const bool has_text = GetWindowTextLengthW(h_) > 0;
         long w = (has_text ? t.cx : 0) + px(has_text ? 24 : 10) + (images_ ? px(has_text ? 20 : 16) : 0);
         if (has_text) w = std::max<long>(w, px(75));
+        if (band_) return {w, std::max<long>(band_px(band_->field, win_.dpi()), t.cy + px(8))};
         return {w, std::max<long>(px(23), t.cy + px(8))};
+    }
+    // In the band: WinUI's Button (a flat one its subtle face), the field's
+    // height, its text WinUI's size (win32_band_face.h). Under high
+    // contrast, the native button at the field's height.
+    void set_in_band(const band_density* density) override
+    {
+        band_ = density;
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+    void theme_changed() override
+    {
+        if (band_) win_.relayout();
+    }
+    void fonts_changed() override { theme_changed(); }
+    LRESULT notify(NMHDR* hdr, bool& handled) override
+    {
+        handled = hdr->code == NM_CUSTOMDRAW && band_drawn();
+        if (!handled) return 0;
+        return draw_band_button(reinterpret_cast<NMCUSTOMDRAW*>(hdr), *band_,
+                                flat_ ? face_kind::subtle : face_kind::button, content(), false);
     }
 
     bool is_default = false;
     dialog_role role = dialog_role::none;
 
 private:
+    bool band_drawn() const { return band_ && !high_contrast(); }
+    band_content content() const { return {&icon_, window_text(h_), false}; }
+
+    bool flat_;
+    const band_density* band_ = nullptr;
     std::function<void()> click_;
     icon icon_;
     HIMAGELIST images_ = nullptr;
@@ -2769,9 +2922,9 @@ public:
         RedrawWindow(h_, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE | RDW_ERASE);
     }
     // In the toolbar band, a framed entry is a band field (win32_band_field.h).
-    void set_in_band(bool on) override
+    void set_in_band(const band_density* density) override
     {
-        in_band_ = on;
+        in_band_ = density;
         apply_band();
     }
     // High contrast on or off: a band field's frame drawn or native; its
@@ -2808,8 +2961,9 @@ public:
 private:
     void apply_band()
     {
-        const bool want = in_band_ && frame_;
-        if (want == is_band_field(h_)) return;
+        const band_density* want = frame_ ? in_band_ : nullptr;
+        if (want == band_of_ && (want != nullptr) == is_band_field(h_)) return;
+        band_of_ = want;
         set_band_field(h_, want);
         if (want && !buttons_hooked_)
         {
@@ -2905,13 +3059,34 @@ private:
     std::unique_ptr<edit_button> clear_;
     std::vector<std::unique_ptr<edit_button>> leading_, actions_;
     bool quiet_ = false;
-    bool frame_ = true, in_band_ = false;
+    bool frame_ = true;
+    const band_density* in_band_ = nullptr;  // the band's row it's in, at its density
+    const band_density* band_of_ = nullptr;  // the band field it is (set_band_field)
     bool buttons_hooked_ = false;  // edit_buttons_subclass installed
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
 
-class drop_down_impl : public leaf<rap::drop_down>
+// A combo box's height (its selection field's: a dropdown combo box keeps
+// its own whatever it's moved to) made `height`, through its item height.
+void fit_combo_height(HWND h, int height)
+{
+    for (int i = 0; i < 3; ++i)
+    {
+        RECT r{};
+        GetWindowRect(h, &r);
+        const int now = r.bottom - r.top;
+        if (now == height) return;
+        const LRESULT item = SendMessageW(h, CB_GETITEMHEIGHT, WPARAM(-1), 0);
+        if (item == CB_ERR) return;
+        SendMessageW(h, CB_SETITEMHEIGHT, WPARAM(-1), std::max<LPARAM>(1, item + height - now));
+    }
+}
+
+// In the band: ComboBox's closed face (win32_band_face.h), the field's
+// height: Button's fill and border, its text ComboBoxPadding's 12 in, its
+// chevron 14 from the right. The list and keyboard are the control's own.
+class drop_down_impl : public leaf<rap::drop_down>, public band_painted
 {
 public:
     drop_down_impl(win_context& win, HWND parent, const spec::drop_down& s)
@@ -2944,6 +3119,9 @@ public:
     void command(WORD code) override
     {
         if (code == CBN_DROPDOWN || code == CBN_SETFOCUS) fill();  // the keys choose from all of them too
+        // Pressed while its list is open.
+        if (band_ && (code == CBN_DROPDOWN || code == CBN_CLOSEUP))
+            InvalidateRect(h_, nullptr, FALSE);
         if (code == CBN_SELCHANGE)
         {
             current_ = current();
@@ -2952,12 +3130,89 @@ public:
     }
     SIZE measure() override
     {
+        if (band_drawn())
+        {
+            const UINT dpi = win_.dpi();
+            HFONT font = band_text_font(h_, *band_);
+            long w = band_px(60, dpi);
+            for (const std::string& i : items_) w = std::max(w, band_text_width(font, wide(i)));
+            return {
+                w + band_px(band_metrics::combo_text_start + band_metrics::combo_glyph_column, dpi),
+                band_control_height(font, dpi, *band_)};
+        }
         long w = px(60);
         for (const std::string& i : items_) w = std::max(w, text_extent(h_, wide(i)).cx);
         return {w + px(32), font_metrics(win_.dpi()).cy + px(10)};
     }
+    void place(RECT r) override
+    {
+        leaf::place(r);
+        if (band_) fit_combo_height(h_, r.bottom - r.top);
+    }
+    void set_in_band(const band_density* density) override
+    {
+        if (band_ == density) return;
+        band_ = density;
+        set_band_painted(h_, density ? this : nullptr);
+        // Out of it, its own height again: its font's.
+        if (!density) SendMessageW(h_, WM_SETFONT, SendMessageW(h_, WM_GETFONT, 0, 0), TRUE);
+        win_.relayout();
+    }
+    void theme_changed() override
+    {
+        if (band_) win_.relayout();
+    }
+    void fonts_changed() override { theme_changed(); }
+    void band_paint(HWND h, HDC dc, const RECT& c) override
+    {
+        face_state st;
+        st.disabled = !IsWindowEnabled(h);
+        st.hot = !st.disabled && band_painted_hot(h);
+        st.pressed = !st.disabled && SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0);
+        st.focus_ring = band_painted_focused(h) && band_focus_cues(h);
+        paint_band_face(h, dc, c, face_kind::button, st);
+        const color ink = band_face_ink(h, face_kind::button, st);
+        const UINT dpi = dpi_of(h);
+        const int glyph = band_px(band_metrics::combo_glyph, dpi);
+        const int glyph_right = c.right - band_px(band_metrics::combo_glyph_end, dpi);
+        const int top = c.top + (c.bottom - c.top - glyph) / 2;
+        draw_band_glyph(dc, RECT{glyph_right - glyph, top, glyph_right, top + glyph}, chevron_down,
+                        glyph, ink);
+        const std::wstring text = window_text(h);
+        if (text.empty()) return;
+        const int saved = SaveDC(dc);
+        HFONT font = band_text_font(h, *band_);
+        SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, color_ref(ink));
+        RECT t{c.left + band_px(band_metrics::combo_text_start, dpi),
+               band_text_top(dc, font, c.top, c.bottom - c.top),
+               c.right - band_px(band_metrics::combo_glyph_column, dpi), c.bottom};
+        DrawTextW(dc, text.c_str(), int(text.size()), &t,
+                  DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        RestoreDC(dc, saved);
+    }
+    bool band_message(HWND h, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result) override
+    {
+        // A new font (a new DPI) sets its height anew: the band's again.
+        if (msg != WM_SETFONT) return false;
+        result = DefSubclassProc(h, msg, wp, lp);
+        RECT r{};
+        if (const auto at = g_parked.find(h); at != g_parked.end())
+            r = at->second;
+        else
+        {
+            GetWindowRect(h, &r);
+            r.bottom = r.top + band_control_height(band_text_font(h, *band_), dpi_of(h), *band_);
+        }
+        fit_combo_height(h, r.bottom - r.top);
+        return true;
+    }
 
 private:
+    bool band_drawn() const { return band_ && !high_contrast(); }
+    const band_density* band_ = nullptr;
+
     void show_current_only()
     {
         SendMessageW(h_, CB_RESETCONTENT, 0, 0);
@@ -2982,7 +3237,11 @@ private:
     std::function<void(int)> changed_;
 };
 
-class combo_impl : public leaf<rap::combo>
+// In the band: a band field (win32_band_field.h) with a chevron button as
+// its trailing action (win32_band_face.h): its face drawn round its edit,
+// which takes the field's font and colours and is placed as a band field's
+// text is; the chevron's button opens the list.
+class combo_impl : public leaf<rap::combo>, public band_painted
 {
 public:
     combo_impl(win_context& win, HWND parent, const spec::combo& s)
@@ -3014,6 +3273,9 @@ public:
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
     void command(WORD code) override
     {
+        if (band_ && (code == CBN_DROPDOWN || code == CBN_CLOSEUP || code == CBN_SETFOCUS ||
+                      code == CBN_KILLFOCUS))
+            InvalidateRect(h_, nullptr, FALSE);
         if (quiet_ || !changed_) return;
         if (code == CBN_EDITCHANGE)
             changed_(text());
@@ -3031,10 +3293,229 @@ public:
     SIZE measure() override
     {
         const SIZE m = font_metrics(win_.dpi());
+        if (band_drawn())
+            return {m.cx * 20 + px(32),
+                    band_control_height(band_font(win_.dpi(), *band_), win_.dpi(), *band_)};
         return {m.cx * 20 + px(32), m.cy + px(10)};
+    }
+    void place(RECT r) override
+    {
+        leaf::place(r);
+        if (band_drawn()) fit_combo_height(h_, r.bottom - r.top);
+    }
+    ~combo_impl() override
+    {
+        if (brush_) DeleteObject(brush_);
+    }
+    void set_in_band(const band_density* density) override
+    {
+        if (band_ == density) return;
+        band_ = density;
+        set_band_painted(h_, density ? this : nullptr);
+        const LONG_PTR style = GetWindowLongPtrW(h_, GWL_STYLE);
+        SetWindowLongPtrW(h_, GWL_STYLE,
+                          density ? style | WS_CLIPCHILDREN : style & ~WS_CLIPCHILDREN);
+        if (const HWND e = edit(h_))
+        {
+            if (density)
+                SetWindowSubclass(e, edit_place_proc, 5, reinterpret_cast<DWORD_PTR>(this));
+            else
+            {
+                RemoveWindowSubclass(e, edit_place_proc, 5);
+                SendMessageW(e, EM_SETMARGINS, EC_USEFONTINFO, 0);
+            }
+        }
+        // Its font (the field's, or the message font again) and its height
+        // with it; its edit placed for it.
+        SendMessageW(h_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font(win_.dpi())), TRUE);
+        win_.relayout();
+    }
+    void theme_changed() override
+    {
+        if (!band_) return;
+        SendMessageW(h_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font(win_.dpi())), TRUE);
+        win_.relayout();
+    }
+    void fonts_changed() override { theme_changed(); }
+    void band_paint(HWND h, HDC dc, const RECT& c) override
+    {
+        const band_field_look l = look(h);
+        const RECT b = button_rect(h);
+        paint_band_field_face(h, dc, c, l, &b);
+        const int glyph = band_px(band_metrics::combo_glyph, dpi_of(h));
+        const int top = b.top + (b.bottom - b.top - glyph) / 2,
+                  left = b.left + (b.right - b.left - glyph) / 2;
+        draw_band_glyph(dc, RECT{left, top, left + glyph, top + glyph}, chevron_down, glyph,
+                        l.text);
+    }
+    bool band_message(HWND h, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result) override
+    {
+        switch (msg)
+        {
+        case WM_SETFONT:
+            // The field's font, whatever it's given (rapport's at a new DPI).
+            result =
+                DefSubclassProc(h, msg, reinterpret_cast<WPARAM>(band_font(dpi_of(h), *band_)), lp);
+            {
+                RECT r{};
+                GetWindowRect(h, &r);
+                const auto at = g_parked.find(h);
+                fit_combo_height(
+                    h, at != g_parked.end()
+                           ? int(at->second.bottom - at->second.top)
+                           : band_control_height(band_font(dpi_of(h), *band_), dpi_of(h), *band_));
+            }
+            place_edit(h);
+            return true;
+        case WM_SIZE:
+        case WM_WINDOWPOSCHANGED:
+        case CB_SETITEMHEIGHT:
+            result = DefSubclassProc(h, msg, wp, lp);
+            place_edit(h);
+            return true;
+        // The edit's focus, its hover: the face's.
+        case WM_COMMAND:
+            result = DefSubclassProc(h, msg, wp, lp);
+            if (HIWORD(wp) == EN_SETFOCUS || HIWORD(wp) == EN_KILLFOCUS)
+                InvalidateRect(h, nullptr, FALSE);
+            return true;
+        case WM_MOUSEMOVE:
+            InvalidateRect(h, nullptr, FALSE);  // the chevron's button hovered or not
+            return false;
+        // The chevron's button opens and closes the list; the rest of the
+        // face (round the edit) is the edit's.
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONDBLCLK:
+        {
+            const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            const RECT b = button_rect(h);
+            if (HWND e = edit(h)) SetFocus(e);
+            if (PtInRect(&b, pt))
+                SendMessageW(h, CB_SHOWDROPDOWN, !SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0), 0);
+            result = 0;
+            return true;
+        }
+        case WM_CTLCOLOREDIT:
+        {
+            const band_field_look l = look(h);
+            auto* dc = reinterpret_cast<HDC>(wp);
+            SetTextColor(dc, color_ref(l.text));
+            SetBkColor(dc, color_ref(l.face));
+            const COLORREF c = color_ref(l.face);
+            if (!brush_ || brush_color_ != c)
+            {
+                if (brush_) DeleteObject(brush_);
+                brush_ = CreateSolidBrush(c);
+                brush_color_ = c;
+            }
+            result = reinterpret_cast<LRESULT>(brush_);
+            return true;
+        }
+        default: return false;
+        }
     }
 
 private:
+    bool band_drawn() const { return band_ && !high_contrast(); }
+    static HWND edit(HWND h)
+    {
+        COMBOBOXINFO info{};
+        info.cbSize = sizeof info;
+        return GetComboBoxInfo(h, &info) ? info.hwndItem : nullptr;
+    }
+    // The chevron's button: an entry action's, at its right end
+    // (band_metrics::button wide, button_inset in from the border).
+    static RECT button_rect(HWND h)
+    {
+        RECT c{};
+        GetClientRect(h, &c);
+        const UINT dpi = dpi_of(h);
+        const int border = band_px(band_metrics::border, dpi),
+                  inset = band_px(band_metrics::button_inset, dpi);
+        const int right = c.right - border - inset;
+        return RECT{right - band_px(band_metrics::button, dpi), c.top + border, right,
+                    c.bottom - border};
+    }
+    band_field_look look(HWND h) const
+    {
+        const bool enabled = IsWindowEnabled(h) != FALSE;
+        const bool dropped = SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0) != 0;
+        const HWND e = edit(h);
+        const bool focused = dropped || (e && GetFocus() == e);
+        const bool hot = band_painted_hot(h);
+        bool over_button = false;
+        if (hot)
+        {
+            POINT pt{};
+            GetCursorPos(&pt);
+            ScreenToClient(h, &pt);
+            const RECT b = button_rect(h);
+            over_button = PtInRect(&b, pt) != FALSE;
+        }
+        return band_field_look_at(band_face_ground(h), enabled, focused, hot, dropped, over_button);
+    }
+    // Its edit where a band field's text is: TextControlThemePadding's left
+    // in from the border, up to the chevron's button, its line centred.
+    // Where its edit goes: where a band field's text is, TextControlThemePadding's
+    // left in from the border, up to the chevron's button, its line centred.
+    static bool edit_rect(HWND h, HWND e, RECT& out)
+    {
+        RECT c{};
+        GetClientRect(h, &c);
+        const UINT dpi = dpi_of(h);
+        const int left = band_px(band_metrics::border + band_metrics::text_start, dpi);
+        const int right = button_rect(h).left;
+        HDC dc = GetDC(e);
+        HFONT font = reinterpret_cast<HFONT>(SendMessageW(e, WM_GETFONT, 0, 0));
+        TEXTMETRICW tm{};
+        HGDIOBJ old = SelectObject(dc, font);
+        GetTextMetricsW(dc, &tm);
+        SelectObject(dc, old);
+        const int top = band_text_top(dc, font, c.top, c.bottom - c.top);
+        ReleaseDC(e, dc);
+        out = RECT{left, top, std::max(left, right), top + int(tm.tmHeight)};
+        return true;
+    }
+    // The combo box places its edit as it lays itself out (its size, its
+    // font, its item height): wherever it puts it, it goes where a band
+    // field's text is, and without margins of its own.
+    static LRESULT CALLBACK edit_place_proc(HWND e, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                            DWORD_PTR data)
+    {
+        if (msg == WM_WINDOWPOSCHANGING && !high_contrast())
+        {
+            auto* self = reinterpret_cast<combo_impl*>(data);
+            auto* pos = reinterpret_cast<WINDOWPOS*>(lp);
+            RECT r{};
+            if (self->band_ && edit_rect(self->h_, e, r))
+            {
+                pos->x = r.left;
+                pos->y = r.top;
+                pos->cx = r.right - r.left;
+                pos->cy = r.bottom - r.top;
+                pos->flags &= ~UINT(SWP_NOMOVE | SWP_NOSIZE);
+            }
+        }
+        if (msg == WM_SETFONT)
+        {
+            const LRESULT r = DefSubclassProc(e, msg, wp, lp);
+            SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+            return r;
+        }
+        return DefSubclassProc(e, msg, wp, lp);
+    }
+    void place_edit(HWND h)
+    {
+        const HWND e = edit(h);
+        if (!e || high_contrast()) return;
+        SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        // (edit_place_proc puts it where it goes)
+        SetWindowPos(e, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    const band_density* band_ = nullptr;
+    HBRUSH brush_ = nullptr;
+    COLORREF brush_color_ = CLR_INVALID;
     bool quiet_ = false;
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
@@ -3465,7 +3946,9 @@ private:
     std::vector<std::pair<std::string, text_style>> appended_;
 };
 
-class separator_item : public item
+// In the band's row a line the field's height (AppBarSeparator), in
+// DividerStrokeColorDefault (win32_band_face.h).
+class separator_item : public item, public band_painted
 {
 public:
     separator_item(win_context& win, HWND parent, orientation line_dir)
@@ -3478,12 +3961,37 @@ public:
     ~separator_item() override { DestroyWindow(h_); }
     SIZE measure() override
     {
+        if (band_drawn())
+            return {std::max(1, band_px(1, win_.dpi())), band_px(band_->field, win_.dpi())};
         const int t = std::max(2, win_.px(2)), pad = win_.px(4);
         return dir_ == orientation::horizontal ? SIZE{pad, t + 2 * pad} : SIZE{t + 2 * pad, pad};
     }
     bool fills() const override { return true; }
+    void set_in_band(const band_density* density) override
+    {
+        if (dir_ != orientation::vertical || band_ == density) return;
+        band_ = density;
+        set_band_painted(h_, density ? this : nullptr);
+    }
+    void band_paint(HWND h, HDC dc, const RECT& c) override
+    {
+        FillRect(dc, &c, surface_brush_of(h));
+        color ground = surface_color_of(h);
+        ground.a = 255;
+        const color line =
+            winui::over(dark_mode() ? winui::dark.divider : winui::light.divider, ground);
+        RECT l{c.left, c.top, c.left + std::max(1, band_px(1, dpi_of(h))), c.bottom};
+        HBRUSH b = CreateSolidBrush(color_ref(line));
+        FillRect(dc, &l, b);
+        DeleteObject(b);
+    }
     void place(RECT r) override
     {
+        if (band_drawn())
+        {
+            move_control(h_, r.left, r.top, r.right - r.left, r.bottom - r.top);
+            return;
+        }
         const int pad = win_.px(4);
         if (dir_ == orientation::horizontal)
             move_control(h_, r.left, (r.top + r.bottom) / 2, r.right - r.left, 2);
@@ -3493,9 +4001,11 @@ public:
     void show_all(bool shown) override { show_control(h_, shown && visible); }
 
 private:
+    bool band_drawn() const { return band_ && !high_contrast(); }
     win_context& win_;
     orientation dir_;
     HWND h_;
+    const band_density* band_ = nullptr;
 };
 
 // A titled frame around one item.
@@ -4863,16 +5373,46 @@ public:
         RECT r;
         GetWindowRect(h_, &r);
         SendMessageW(h_, BM_SETSTATE, TRUE, 0);
+        open_ = true;
         show_popup_menu(GetAncestor(h_, GA_ROOT), menu_(), POINT{r.left, r.bottom}, h_);
+        open_ = false;
         SendMessageW(h_, BM_SETSTATE, pushed_, 0);
     }
     SIZE measure() override
     {
+        if (band_drawn())
+            return band_button_size(content(), band_text_font(h_, *band_), win_.dpi(), *band_);
         const SIZE t = text_extent(h_, window_text(h_));
-        return {t.cx + px(24) + (images_ ? px(20) : 0), std::max<long>(px(23), t.cy + px(8))};
+        const long w = t.cx + px(24) + (images_ ? px(20) : 0);
+        if (band_) return {w, std::max<long>(band_px(band_->field, win_.dpi()), t.cy + px(8))};
+        return {w, std::max<long>(px(23), t.cy + px(8))};
+    }
+    // In the band: WinUI's DropDownButton (its chevron drawn, not the
+    // text's), the field's height (win32_band_face.h).
+    void set_in_band(const band_density* density) override
+    {
+        band_ = density;
+        InvalidateRect(h_, nullptr, TRUE);
+    }
+    void theme_changed() override
+    {
+        if (band_) win_.relayout();
+    }
+    void fonts_changed() override { theme_changed(); }
+    LRESULT notify(NMHDR* hdr, bool& handled) override
+    {
+        handled = hdr->code == NM_CUSTOMDRAW && band_drawn();
+        if (!handled) return 0;
+        return draw_band_button(reinterpret_cast<NMCUSTOMDRAW*>(hdr), *band_, face_kind::button,
+                                content(), pushed_ || open_);
     }
 
 private:
+    bool band_drawn() const { return band_ && !high_contrast(); }
+    band_content content() const { return {&icon_, mnemonic(text_), true}; }
+
+    const band_density* band_ = nullptr;
+    bool open_ = false;  // its menu showing
     std::string text_;
     bool pushed_ = false;
     std::function<menu()> menu_;
@@ -4925,6 +5465,24 @@ public:
     }
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
+        if (band_ && !high_contrast())
+        {
+            // AppBarButton (a checked toggle AppBarToggleButton's accent).
+            face_state st;
+            st.disabled = d->itemState & ODS_DISABLED;
+            st.pressed = !st.disabled && (d->itemState & ODS_SELECTED);
+            st.hot = !st.disabled && hot_;
+            st.focus_ring = (d->itemState & ODS_FOCUS) && band_focus_cues(h_);
+            const face_kind kind = checked_ && toggle_ ? face_kind::accent : face_kind::subtle;
+            paint_band_face(h_, d->hDC, d->rcItem, kind, st);
+            const RECT& r = d->rcItem;
+            const int icon = px(16);
+            const int left = r.left + (r.right - r.left - icon) / 2,
+                      top = r.top + (r.bottom - r.top - icon) / 2;
+            draw_icon_on_dc(d->hDC, RECT{left, top, left + icon, top + icon}, icon_, win_.scale(),
+                            band_face_ink(h_, kind, st));
+            return true;
+        }
         RECT r = d->rcItem;
         FillRect(d->hDC, &r, surface_brush_of(h_));
         const bool pressed = d->itemState & ODS_SELECTED;
@@ -4949,9 +5507,27 @@ public:
                      disabled ? theme_color_of(theme_color::placeholder_text) : theme_color_of(surface_text_of(h_)));
         return true;
     }
-    SIZE measure() override { return {px(28), px(28)}; }
+    SIZE measure() override
+    {
+        if (band_)
+        {
+            const UINT dpi = win_.dpi();
+            return {band_px(band_->nav_width, dpi), band_px(band_->field, dpi)};
+        }
+        return {px(28), px(28)};
+    }
+    // In a row of controls in the band: an AppBarButton, the field's height,
+    // and a Tab stop, as the row's other controls are.
+    void set_in_band(const band_density* density) override
+    {
+        band_ = density;
+        const LONG_PTR style = GetWindowLongPtrW(h_, GWL_STYLE);
+        SetWindowLongPtrW(h_, GWL_STYLE, density ? style | WS_TABSTOP : style & ~WS_TABSTOP);
+        InvalidateRect(h_, nullptr, TRUE);
+    }
 
 private:
+    const band_density* band_ = nullptr;
     static LRESULT CALLBACK hover_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
     {
         auto* self = reinterpret_cast<tool_button_impl*>(data);
@@ -5190,6 +5766,12 @@ public:
 
     LRESULT notify(NMHDR* n, bool& handled) override
     {
+        // In the band its own look, the keyboard's ring included.
+        if (n->code == NM_CUSTOMDRAW && band_ && !high_contrast())
+        {
+            handled = true;
+            return band_draw(reinterpret_cast<NMTBCUSTOMDRAW*>(n));
+        }
         if (n->code == NM_CUSTOMDRAW)
         {
             auto* cd = reinterpret_cast<NMTBCUSTOMDRAW*>(n);
@@ -5276,6 +5858,80 @@ public:
         }
         return CDRF_DODEFAULT;
     }
+    // In the band (win32_band_face.h): each button an AppBarButton (a checked
+    // toggle an AppBarToggleButton's accent), the field's height, its
+    // separators lines the field's height; the strip's own background the
+    // band's.
+    LRESULT band_draw(NMTBCUSTOMDRAW* cd)
+    {
+        HDC dc = cd->nmcd.hdc;
+        switch (cd->nmcd.dwDrawStage)
+        {
+        case CDDS_PREPAINT:
+            FillRect(dc, &cd->nmcd.rc, surface_brush_of(h_));
+            return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+        case CDDS_ITEMPREPAINT:
+        {
+            const UINT item = cd->nmcd.uItemState;
+            const int index = int(SendMessageW(h_, TB_COMMANDTOINDEX, cd->nmcd.dwItemSpec, 0));
+            face_state st;
+            st.disabled = item & (CDIS_DISABLED | CDIS_GRAYED);
+            st.pressed = !st.disabled && (item & CDIS_SELECTED);
+            st.hot = !st.disabled && (item & CDIS_HOT);
+            st.focus_ring = index >= 0 && index == keyboard_item();
+            const bool checked = item & CDIS_CHECKED;
+            const face_kind kind = checked ? face_kind::accent : face_kind::subtle;
+            RECT r = cd->nmcd.rc;
+            FillRect(dc, &r, surface_brush_of(h_));
+            paint_band_face(h_, dc, r, kind, st);
+            const int icon = px(16);
+            const int left = r.left + (r.right - r.left - icon) / 2,
+                      top = r.top + (r.bottom - r.top - icon) / 2;
+            const size_t id = size_t(cd->nmcd.dwItemSpec);
+            const strip_button* b =
+                id >= 1 && id <= entries_.size() ? entries_[id - 1].button : nullptr;
+            if (b && checked)
+                // On the accent: TextOnAccentFillColorPrimary.
+                draw_icon_on_dc(dc, RECT{left, top, left + icon, top + icon}, b->image(),
+                                win_.scale(), band_face_ink(h_, kind, st));
+            else if (b)
+            {
+                int image = 0;
+                for (size_t i = 0; i + 1 < id; ++i) image += entries_[i].button != nullptr;
+                if (images_[st.disabled ? 1 : 0])
+                    g_comctl.draw(images_[st.disabled ? 1 : 0], image, dc, left, top,
+                                  ILD_TRANSPARENT);
+            }
+            return CDRF_SKIPDEFAULT;
+        }
+        case CDDS_POSTPAINT:
+        {
+            // The separators the control drew, as AppBarSeparator's line.
+            color ground = surface_color_of(h_);
+            ground.a = 255;
+            const color line =
+                winui::over(dark_mode() ? winui::dark.divider : winui::light.divider, ground);
+            HBRUSH brush = CreateSolidBrush(color_ref(line));
+            for (size_t i = 0; i < entries_.size(); ++i)
+            {
+                if (entries_[i].button || !shown_[i]) continue;
+                RECT r{};
+                if (!SendMessageW(h_, TB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&r))) continue;
+                RECT c{};
+                GetClientRect(h_, &c);
+                r.top = c.top;
+                r.bottom = c.bottom;
+                FillRect(dc, &r, surface_brush_of(h_));
+                const int x = (r.left + r.right) / 2;
+                RECT l{x, r.top, x + std::max(1, band_px(1, win_.dpi())), r.bottom};
+                FillRect(dc, &l, brush);
+            }
+            DeleteObject(brush);
+            return CDRF_DODEFAULT;
+        }
+        default: return CDRF_DODEFAULT;
+        }
+    }
     // New colours: the icons again in the new text colour.
     void theme_changed() override
     {
@@ -5297,12 +5953,14 @@ public:
         SendMessageW(h_, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&s));
         return {s.cx, std::max<long>(s.cy, button_size().cy)};
     }
-    // In the toolbar band: Explorer's navigation buttons' size and spacing.
-    void set_in_band(bool on) override
+    // In the toolbar band: Explorer's navigation buttons' size and spacing,
+    // the field's height, at the band's density.
+    void set_in_band(const band_density* density) override
     {
-        if (band_ == on) return;
-        band_ = on;
+        if (band_ == density) return;
+        band_ = density;
         size_buttons();
+        InvalidateRect(h_, nullptr, TRUE);
     }
     void place(RECT r) override
     {
@@ -5324,12 +5982,12 @@ private:
         std::wstring text;
     };
 
-    // Square, or in the band band_metrics' navigation buttons.
+    // Square, or in the band its density's tool buttons, the field's height.
     SIZE button_size() const
     {
         if (!band_) return {px(28), px(28)};
         const UINT dpi = win_.dpi();
-        return {band_px(band_metrics::nav_width, dpi), band_px(band_metrics::nav_height, dpi)};
+        return {band_px(band_->nav_width, dpi), band_px(band_->field, dpi)};
     }
 
     // Hides the entries whose items are hidden.
@@ -5635,7 +6293,7 @@ private:
         SendMessageW(h_, TB_SETMETRICS, 0, reinterpret_cast<LPARAM>(&m));
     }
 
-    bool band_ = false;
+    const band_density* band_ = nullptr;
     int current_ = -1;                   // the keyboard's button (an entry's index), kept unfocused
     std::shared_ptr<strip_group> group_;  // the toolbar's strips
     std::optional<SIZE> usual_spacing_;  // the control's own, out of the band
@@ -11607,9 +12265,9 @@ public:
     void place_band(LONG top, const RECT& content)
     {
         RECT band{};
-        if (const toolbar_item* bar = band_toolbar(); bar && bar->rect.left == content.left &&
-                                                       bar->rect.right == content.right &&
-                                                       bar->rect.bottom > bar->rect.top)
+        if (const box_item* bar = band_row(); bar && bar->rect.left == content.left &&
+                                              bar->rect.right == content.right &&
+                                              bar->rect.bottom > bar->rect.top)
         {
             RECT c;
             GetClientRect(hwnd_, &c);
@@ -11626,40 +12284,47 @@ public:
         // what was band and isn't.
         RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
-    // The toolbar that's the band's, where there is one, whatever its size
+    // The row that's the band's, where there is one, whatever its size
     // (place_band then checks it spans the content): on a base surface
     // window with the tabs in the caption, its first content item (the
-    // content itself, or a column's first shown item).
-    toolbar_item* band_toolbar() const
+    // content itself, or a column's first shown item), a toolbar or a row
+    // of controls (an hbox).
+    box_item* band_row() const
     {
         if (!caption_ || surface_of(hwnd_) != theme_color::base) return nullptr;
         item* first = root;
-        if (auto* box = dynamic_cast<box_item*>(root); box && !dynamic_cast<toolbar_item*>(root))
+        if (auto* box = dynamic_cast<box_item*>(root);
+            box && box->direction() == orientation::vertical)
         {
             first = nullptr;
-            if (box->direction() == orientation::vertical)
-                for (item* c : box->children)
-                    if (c->visible)
-                    {
-                        first = c;
-                        break;
-                    }
+            for (item* c : box->children)
+                if (c->visible)
+                {
+                    first = c;
+                    break;
+                }
         }
-        auto* bar = dynamic_cast<toolbar_item*>(first);
-        return bar && bar->visible ? bar : nullptr;
+        auto* row = dynamic_cast<box_item*>(first);
+        return row && row->visible && row->direction() == orientation::horizontal ? row : nullptr;
     }
-    // The band's toolbar takes the band's metrics (win32_band_field.h), and
-    // one that no longer is gives them up, before either is measured.
+    // The band's row takes the band's metrics (win32_band_field.h), at the
+    // window's density, and one that no longer is gives them up, before
+    // either is measured.
     void sync_band_toolbar()
     {
-        toolbar_item* bar = band_toolbar();
-        if (bar == banded_) return;
-        if (banded_) banded_->set_banded(false);
-        if (bar) bar->set_banded(true);
-        banded_ = bar;
+        box_item* row = band_row();
+        const band_density* density = &band_density_now();
+        if (row == banded_)
+        {
+            if (row) row->set_band(density, *this);  // (the density changed)
+            return;
+        }
+        if (banded_) banded_->set_band(nullptr, *this);
+        if (row) row->set_band(density, *this);
+        banded_ = row;
         ++g_layout_pass;  // new sizes
     }
-    toolbar_item* banded_ = nullptr;  // the toolbar with the band's metrics
+    box_item* banded_ = nullptr;  // the row with the band's metrics
 
     // Owned parts of the window.
     std::vector<std::unique_ptr<container_state>> container_states;
