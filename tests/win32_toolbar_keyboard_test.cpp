@@ -296,15 +296,45 @@ int main(int argc, char** argv)
             expect(window_keys == 1, "elsewhere the window's on_key still gets its keys (" +
                                          std::to_string(window_keys) + ")");
             c->set_visible(false);
+        });
+    steps.push_back(
+        [&]
+        {
             c->focus();
             expect(!c->has_focus(), "focus() on a hidden button: not the current one");
             a->focus();
             expect(a->has_focus() && focused() == s[0], "focus() on a button: it, its strip focused");
+            // The focused button disabled, its strip left with none to
+            // reach: the next strip's, the focus there.
+            a->set_enabled(false);
+            expect(d->has_focus() && focused() == s[1],
+                   "the focused button disabled, none left in its strip: the next strip's");
+            type_key(VK_SPACE);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(d_toggles == 3, "and Space presses it");
+            a->set_enabled(true);
+            a->focus();
+            // Hidden: its strip's laid out (and finds it gone) on the loop.
+            a->set_visible(false);
+        });
+    steps.push_back(
+        [&]
+        {
+            expect(d->has_focus() && focused() == s[1],
+                   "the focused button hidden, none left in its strip: the next strip's");
+            a->set_visible(true);
+        });
+    steps.push_back(
+        [&]
+        {
             a->set_enabled(false);
             d->set_enabled(false);
             expect(!tab_stop(s[0]) && !tab_stop(s[1]), "no button reachable: no Tab stop");
             a->set_enabled(true);
-            expect(tab_stop(s[0]) && !tab_stop(s[1]), "one enabled again: its strip the Tab stop");
+            expect(tab_stop(s[0]) != tab_stop(s[1]) && tab_stop(s[0]), "one enabled again: its strip the Tab stop");
             expect(c_clicks == 0, "nothing pressed that wasn't asked for");
         });
 

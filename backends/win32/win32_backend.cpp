@@ -5167,7 +5167,7 @@ public:
     {
         SendMessageW(h_, TB_ENABLEBUTTON, WPARAM(id), MAKELPARAM(e, 0));
         update_tab_stop();
-        if (GetFocus() == h_ && !usable(current_)) move_current(current_, +1);
+        if (GetFocus() == h_ && !usable(current_)) rehome();
     }
     void set_checked(int id, bool c) { SendMessageW(h_, TB_CHECKBUTTON, WPARAM(id), MAKELPARAM(c, 0)); }
     void set_text(int id, const std::string& text) { entries_[size_t(id) - 1].text = wide(text); }
@@ -5349,7 +5349,39 @@ private:
             }
         if (!changed) return;
         update_tab_stop();
-        if (GetFocus() == h_ && !usable(current_)) move_current(current_, +1);
+        if (GetFocus() == h_ && !usable(current_)) rehome();
+    }
+    // The focused current button gone (disabled, hidden): the next one the
+    // keyboard can reach, in this strip, else in the group's next strip
+    // that has one (the focus going there), else none.
+    void rehome()
+    {
+        if (any_usable())
+        {
+            move_current(current_ < 0 ? 0 : current_, +1);
+            return;
+        }
+        current_ = -1;
+        show_current();
+        if (!group_) return;
+        const auto& v = group_->strips;
+        const auto at = std::find(v.begin(), v.end(), this);
+        if (at == v.end()) return;
+        const size_t from = size_t(at - v.begin()), n = v.size();
+        for (size_t k = 1; k < n; ++k)
+        {
+            tool_strip* s = v[(from + k) % n];
+            if (!s->any_usable()) continue;
+            if (!s->usable(s->current_))
+                for (int i = 0; i < int(s->entries_.size()); ++i)
+                    if (s->usable(i))
+                    {
+                        s->current_ = i;
+                        break;
+                    }
+            SetFocus(s->h_);
+            return;
+        }
     }
 
     // A button the keyboard can reach: shown and enabled.
