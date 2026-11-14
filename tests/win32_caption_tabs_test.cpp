@@ -16,7 +16,7 @@
 // title grey; on screen, that over the backdrop); the line
 // between strip and band elsewhere, under the caption buttons too; WinUI's
 // separator (TabViewItemSeparator) between two tabs neither current nor
-// hovered, and only there. Its
+// hovered, and after the last tab when it's neither, and only there. Its
 // text: the titles in the UI font (Segoe UI Variable Text, else Segoe UI),
 // as heavy as that face is, the current one in WinUI's TextFillColorPrimary,
 // the others TextFillColorSecondary; ClearType on the current tab when the
@@ -590,8 +590,10 @@ void check_pixels(HWND strip, const palette& pal, const std::string& when)
 // (TabViewItemSeparatorMargin, 0,8,0,8), in DividerStrokeColorDefault
 // (translucent, premultiplied over the clear strip; high contrast's
 // SystemColorWindowTextColor); none beside the current tab, nor beside a
-// hovered one (the mouse's move sent as a message, no input). Alpha is
-// current: Beta|Gamma has one, Alpha|Beta none.
+// hovered one (the mouse's move sent as a message, no input). And after
+// the last tab, at its right edge (before "+"), as WinUI's: the last tab's
+// own, none when it's current or hovered. Alpha is current: Beta|Gamma has
+// one, and Gamma's right edge, Alpha|Beta none.
 void check_separators(HWND strip, const palette& pal, const std::string& when)
 {
     const UINT dpi = GetDpiForWindow(strip);
@@ -616,23 +618,41 @@ void check_separators(HWND strip, const palette& pal, const std::string& when)
     {
         return rows.empty() ? std::string("none") : str(rows.front()) + ".." + str(rows.back());
     };
+    // A separator in the last column(s) of the tab ending at `end`.
+    auto present = [&](const printed& p, int end, const std::string& what)
     {
-        const printed p = print(strip);
-        // Beta|Gamma: in Beta's last column(s), Gamma's first untouched.
-        for (int x = beta.right - line; x < beta.right; ++x)
+        for (int x = end - line; x < end; ++x)
         {
-            const std::vector<int> rows = marked(p, x, beta.right - px(4, dpi));
+            const std::vector<int> rows = marked(p, x, end - px(4, dpi));
             const bool contiguous = !rows.empty() && rows.back() - rows.front() + 1 == int(rows.size());
             expect(contiguous && rows.front() == top && rows.back() == bottom - 1,
-                   "a separator between Beta and Gamma at x " + str(x) + ", rows " + str(top) + ".." +
-                       str(bottom - 1) + " (8 px in from the tab's top and bottom, scaled)" + at + ": " +
-                       span(rows));
+                   "a separator " + what + " at x " + str(x) + ", rows " + str(top) + ".." + str(bottom - 1) +
+                       " (8 px in from the tab's top and bottom, scaled)" + at + ": " + span(rows));
             for (int y : {top, (top + bottom) / 2, bottom - 1})
                 expect(near_px(p.at(x, y), pal.separator_px),
                        "in DividerStrokeColorDefault, " + argb_hex(pal.separator_px) +
                            (pal.clear ? " (premultiplied, translucent)" : "") + ", at " + str(x) + "," + str(y) +
                            at + ": " + argb_hex(p.at(x, y)));
         }
+    };
+    // None about `end`: its columns either side as they are at row `ref`.
+    auto absent = [&](const printed& p, int end, int ref, const std::string& what)
+    {
+        for (int x = end - line; x < end + line; ++x)
+        {
+            int unlike = 0;
+            for (int y = top; y < bottom; ++y)
+                if (!near_px(p.at(x, y), p.at(x, ref), 2)) ++unlike;
+            expect(unlike == 0, "no separator " + what + ", at x " + str(x) + at + ": " + str(unlike) +
+                                    " rows marked");
+        }
+    };
+    {
+        const printed p = print(strip);
+        // Beta|Gamma: in Beta's last column(s), Gamma's first untouched.
+        present(p, beta.right, "between Beta and Gamma");
+        // After the last tab, Gamma: at its right edge, before "+".
+        present(p, gamma.right, "after the last tab, Gamma, before \"+\"");
         {
             const std::vector<int> rows = marked(p, gamma.left, gamma.left + px(4, dpi));
             expect(rows.empty(), "Gamma's first column past the separator untouched" + at + ": " + span(rows));
@@ -640,16 +660,9 @@ void check_separators(HWND strip, const palette& pal, const std::string& when)
         // Alpha|Beta: none beside the current tab; the columns there as they
         // are below the separator's rows (the current tab's side, or its
         // fill), give or take the corner's antialiasing (a level).
-        for (int x = alpha.right - line; x < alpha.right + line; ++x)
-        {
-            int unlike = 0;
-            for (int y = top; y < bottom; ++y)
-                if (!near_px(p.at(x, y), p.at(x, bottom + px(2, dpi)), 2)) ++unlike;
-            expect(unlike == 0, "no separator beside the current tab, between Alpha and Beta, at x " + str(x) + at +
-                                    ": " + str(unlike) + " rows marked");
-        }
+        absent(p, alpha.right, bottom + px(2, dpi), "beside the current tab, between Alpha and Beta");
     }
-    // Hovered, Beta or Gamma: none between them.
+    // Hovered, Beta or Gamma: none between them; Gamma, none after it.
     for (const bool first : {true, false})
     {
         const RECT& r = first ? beta : gamma;
@@ -659,14 +672,8 @@ void check_separators(HWND strip, const palette& pal, const std::string& when)
         const printed p = print(strip);  // before the leave TrackMouseEvent may post
         SendMessageW(strip, WM_MOUSELEAVE, 0, 0);
         pump(2);
-        for (int x = beta.right - line; x < beta.right + line; ++x)
-        {
-            int unlike = 0;
-            for (int y = top; y < bottom; ++y)
-                if (!near_px(p.at(x, y), p.at(x, beta.top + px(2, dpi)), 2)) ++unlike;
-            expect(unlike == 0, std::string("no separator between Beta and Gamma, ") + name + " hovered, at x " +
-                                    str(x) + at + ": " + str(unlike) + " rows marked");
-        }
+        absent(p, beta.right, beta.top + px(2, dpi), std::string("between Beta and Gamma, ") + name + " hovered");
+        if (!first) absent(p, gamma.right, beta.top + px(2, dpi), "after the last tab, Gamma, hovered");
     }
 }
 
