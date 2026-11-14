@@ -21,6 +21,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QLineEdit>
+#include <QToolButton>
 #include <QWidget>
 #endif
 
@@ -231,15 +232,18 @@ bool type_into(const char* text)
 }
 bool press_clear(const char* text)
 {
-    // Qt's own clear button is this action of the line edit's.
+    // Qt's own clear button: the tool button showing the line edit's clear
+    // action (its click, not the action's trigger, is what clears).
     QLineEdit* e = find_edit(text);
     if (!e) return false;
     for (QAction* a : e->findChildren<QAction*>())
         if (a->objectName() == QLatin1String("_q_qlineeditclearaction"))
-        {
-            a->trigger();
-            return true;
-        }
+            for (QToolButton* b : e->findChildren<QToolButton*>())
+                if (b->defaultAction() == a)
+                {
+                    b->click();
+                    return true;
+                }
     return false;
 }
 bool choose(int i)
