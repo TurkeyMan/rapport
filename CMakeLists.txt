@@ -29,6 +29,34 @@ option(RAPPORT_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 # backends as dlopened plugins.
 option(RAPPORT_STATIC "Build static libraries instead of a shared core and plugins" OFF)
 option(RAPPORT_TESTS "Build the core's tests" ${PROJECT_IS_TOP_LEVEL})
+# AddressSanitizer through everything built here (CI's asan jobs): a read or
+# write of freed memory fails the program that did it. GCC and Clang
+# -fsanitize=address; MSVC /fsanitize=address, whose runtime DLL (beside
+# cl.exe) is copied beside the programs so they run without it on PATH.
+option(RAPPORT_ASAN "Build with AddressSanitizer" OFF)
+if(RAPPORT_ASAN)
+    if(MSVC)
+        add_compile_options(/fsanitize=address /Zi)
+        add_link_options(/DEBUG /INCREMENTAL:NO)
+        get_filename_component(rapport_cl_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        set(rapport_asan_dll "${rapport_cl_dir}/clang_rt.asan_dynamic-x86_64.dll")
+        if(NOT EXISTS "${rapport_asan_dll}")
+            message(FATAL_ERROR "RAPPORT_ASAN: no ASan runtime at ${rapport_asan_dll}")
+        endif()
+        if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+            if(CMAKE_CONFIGURATION_TYPES)
+                foreach(config ${CMAKE_CONFIGURATION_TYPES})
+                    file(COPY "${rapport_asan_dll}" DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${config}")
+                endforeach()
+            else()
+                file(COPY "${rapport_asan_dll}" DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+            endif()
+        endif()
+    else()
+        add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=address)
+    endif()
+endif()
 
 add_subdirectory(core)
 

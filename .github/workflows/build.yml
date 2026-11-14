@@ -8,7 +8,10 @@ on:
 
 jobs:
   # Every backend, as plugins and statically linked (one GTK at a time: a
-  # program can only hold one), with the examples and the shell probe.
+  # program can only hold one), with the examples and the shell probe. The
+  # asan job is the plugin build with AddressSanitizer (RAPPORT_ASAN), the
+  # same tests: a use after free fails the test it's in. Leaks aren't
+  # checked (GTK, fontconfig and Qt keep theirs till exit).
   linux:
     name: debian ${{ matrix.link }}
     runs-on: ubuntu-24.04
@@ -19,6 +22,10 @@ jobs:
         include:
           - { link: plugins, flags: '' }
           - { link: static,  flags: '-DRAPPORT_STATIC=ON -DRAPPORT_BACKEND_GTK4=OFF' }
+          - { link: asan,    flags: '-DCMAKE_BUILD_TYPE=RelWithDebInfo -DRAPPORT_ASAN=ON',
+              asan_options: 'detect_leaks=0:abort_on_error=0:halt_on_error=1' }
+    env:
+      ASAN_OPTIONS: ${{ matrix.asan_options }}
     steps:
       - name: Install build dependencies
         run: |
@@ -45,10 +52,10 @@ jobs:
       # Synthesized input through the real backends, off any desktop: GTK 3
       # on a Broadway server, Qt on its offscreen platform; GTK 4's entry
       # buttons through focus and activate, on its own Broadway server.
-      # (Plugins only: the tests load the backends.) A GTK critical fails
+      # (Plugins and asan: the tests load the backends.) A GTK critical fails
       # the test it's in; GTK 4's document tabs fail on any GTK warning.
       - name: List input
-        if: matrix.link == 'plugins'
+        if: matrix.link != 'static'
         run: |
           apt-get install -y --no-install-recommends libgtk-3-bin libgtk-4-bin
           export XDG_RUNTIME_DIR=$(mktemp -d)
@@ -78,7 +85,9 @@ jobs:
   # linked. The examples must run, and the shell extension must load into
   # Explorer's way of calling it and need nothing but Windows. Server 2022 is
   # build 20348, below Windows 11's 22000, so what's gated on Windows 11 runs
-  # only on Server 2025 (build 26100).
+  # only on Server 2025 (build 26100). The asan job is Server 2025's plugin
+  # build with AddressSanitizer (RAPPORT_ASAN): the same tests, run there so
+  # what's Windows 11's (the band, its glass) is in them too.
   windows:
     name: windows msvc ${{ matrix.link }}${{ matrix.tag }}
     runs-on: ${{ matrix.os }}
@@ -89,6 +98,7 @@ jobs:
           - { link: plugins, flags: '',                    os: windows-2022, tag: '' }
           - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2022, tag: '' }
           - { link: plugins, flags: '',                    os: windows-2025, tag: ' (build 26100)' }
+          - { link: asan,    flags: '-DRAPPORT_ASAN=ON',   os: windows-2025, tag: ' (build 26100)' }
     steps:
       - uses: actions/checkout@v4
 
@@ -134,7 +144,7 @@ jobs:
       # and the caption tabs and band fields with the display's scale (and
       # the tabs' high contrast) changed while they're open
       # (win32-caption-tabs-transitions, win32-band-fields-transitions):
-      # system settings, so only on a throwaway runner, and only this job.
+      # system settings, so only on a throwaway runner, and only its jobs.
       # Every Windows job drives the document tabs' dragging out and
       # dropping with real input (SendInput: shown windows, the desktop's
       # z-order), win32-document-tabs-tearoff-input, as it moves the pointer
@@ -155,6 +165,7 @@ jobs:
       # Our own DLLs beside them (the plugin build's core and backends) are
       # fine; any runtime isn't. The shell extension may need nothing at all.
       - name: Imports
+        if: matrix.link != 'asan'
         run: |
           python ci/check-imports.py --allow-beside (Get-ChildItem build/bin/Release/*.exe, build/bin/Release/*.dll)
           if ($LASTEXITCODE) { throw 'a runtime DLL is imported' }
