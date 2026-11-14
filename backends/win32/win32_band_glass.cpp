@@ -525,15 +525,24 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
     // above), the border ours.
     // A band field's frame is its own (win32_band_field.h), drawn with its
     // alpha: printed whole, as any window is, the client area past the frame
-    // (WM_PRINTCLIENT, above) and its buttons where they are. (Printed
-    // without PRF_NONCLIENT, DefWindowProc would put the client area at the
-    // DC's origin, under the frame.)
+    // (WM_PRINTCLIENT, above) and its buttons where they are.
     if (msg == WM_PRINT && (lp & PRF_NONCLIENT) && band_field_drawn(h)) return DefSubclassProc(h, msg, wp, lp);
     if (msg == WM_PRINT && (lp & PRF_NONCLIENT))
     {
         const bool hot = g->hot;
+        // Printed without PRF_NONCLIENT, DefWindowProc puts the client area
+        // (and its children) at the DC's origin: moved to where the client
+        // area is in the window, inside the frame, for that, and back after.
+        RECT w;
+        GetWindowRect(h, &w);
+        POINT origin{0, 0};
+        ClientToScreen(h, &origin);
+        HDC dc = reinterpret_cast<HDC>(wp);
+        POINT was{};
+        OffsetViewportOrgEx(dc, origin.x - w.left, origin.y - w.top, &was);
         const LRESULT r = DefSubclassProc(h, msg, wp, lp & ~LPARAM(PRF_NONCLIENT));
-        if (g->alive && !paint_border(h, reinterpret_cast<HDC>(wp), hot))
+        SetViewportOrgEx(dc, was.x, was.y, nullptr);  // (the caller's DC: there, gone or not)
+        if (g->alive && !paint_border(h, dc, hot))
         {
             ++t_printing;
             SendMessageW(h, WM_PRINT, wp, PRF_NONCLIENT | (lp & PRF_CHECKVISIBLE));
