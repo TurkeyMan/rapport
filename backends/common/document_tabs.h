@@ -180,6 +180,10 @@ public:
     rap::document_tabs::receive_fn on_receive;
     std::string group;
     std::function<rap::menu(const std::string&)> on_context_menu;
+    // The menu's Move to new window: the app's window, which it placed and
+    // didn't show, shown. Unset, its show(); the Win32 tests' never-shown
+    // windows put a stand-in here.
+    std::function<void(rap::window*)> show_moved;
 
     int count() const { return int(tabs.size()); }
     int index_of(const std::string& id) const
@@ -301,8 +305,19 @@ public:
                          rap::i18n::shortcut_label("Ctrl+W")});
         if (on_detach)
         {
+            // Shown as a torn-off tab's is: the handler returns it unshown.
+            // Copied first: the handler may change these tabs, or end them.
             menu_item move{rap::i18n::tr("rapport", "_Move to new window"),
-                           [this, id] { detach_asked(index_of(id), std::nullopt); }};
+                           [this, id]
+                           {
+                               auto show = show_moved;
+                               rap::window* made = detach_asked(index_of(id), std::nullopt);
+                               if (!made) return;
+                               if (show)
+                                   show(made);
+                               else
+                                   made->show();
+                           }};
             move.enabled = count() > 1;
             items.push_back(std::move(move));
         }

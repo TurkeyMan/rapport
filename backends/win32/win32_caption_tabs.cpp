@@ -370,27 +370,30 @@ struct caption_tabs::impl
         drag = drag_state{self.tabs_[size_t(i)].key, i, p, p.x - r.left, p.x};
         SetCapture(self.hwnd_);
     }
-    void drag_to(POINT p)
+    // False once the owner's taken the drag on (gone): the strip may have
+    // gone with its window, and nothing of it's touched after.
+    bool drag_to(POINT p)
     {
         if (!drag->active)
         {
             if (std::abs(p.x - drag->press.x) <= GetSystemMetricsForDpi(SM_CXDRAG, dpi()) &&
                 std::abs(p.y - drag->press.y) <= GetSystemMetricsForDpi(SM_CYDRAG, dpi()))
-                return;
+                return true;
             drag->active = true;
             hot = {};
         }
         drag->x = p.x;
         int at = index_of_key(drag->key);
-        if (at < 0) return;
+        if (at < 0) return true;
         // Out of the strip: the owner's to say (tearing off, dropping).
         POINT screen = p;
         ClientToScreen(self.hwnd_, &screen);
         const unsigned key = drag->key;
         const caption_tabs_owner::drag_there there = owner.caption_drag_at(at, screen);
-        if (there == caption_tabs_owner::drag_there::gone || !drag || drag->key != key) return;
+        if (there == caption_tabs_owner::drag_there::gone) return false;
+        if (!drag || drag->key != key) return true;
         at = index_of_key(key);
-        if (at < 0) return;
+        if (at < 0) return true;
         const bool away = there == caption_tabs_owner::drag_there::away;
         if (away != drag->away)
         {
@@ -400,16 +403,17 @@ struct caption_tabs::impl
                 const bool back = at != drag->from && drag->from < self.count();
                 if (back) move_tab(at, drag->from);
                 moved(back);
-                return;
+                return true;
             }
         }
-        if (away || slot_last < slot_first) return;
+        if (away || slot_last < slot_first) return true;
         // The place whose left is nearest the dragged tab's.
         const int to = std::clamp(slot_first + (dragged_left() - slot_left + slot_width / 2) / slot_width, slot_first,
                                   slot_last);
         const bool reordered = to != at;
         if (reordered) move_tab(at, to);
         moved(reordered);
+        return true;
     }
     // Let go: the owner's told, if the tab moved; nothing's done after.
     void let_go()
@@ -1163,8 +1167,8 @@ struct caption_tabs::impl
                     d.let_go();
                     return 0;
                 }
-                d.drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
-                if (!d.drag || d.drag->active) return 0;  // gone: torn off, or the window's moving
+                if (!d.drag_to(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) return 0;  // gone: torn off, or the window's moving
+                if (!d.drag || d.drag->active) return 0;
             }
             d.set_hot(s->hit_test(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}));
             return 0;

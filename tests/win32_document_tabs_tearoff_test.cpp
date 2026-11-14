@@ -173,6 +173,7 @@ struct fixture
     std::vector<told_receive> received;
     // How it answers.
     bool refuse_detach = false, accept = true;
+    bool close_emptied = false;  // on_receive closes the source it empties, there and then
     fixture* made = nullptr;  // the window on_detach made last
 
     RECT tab(int i) const
@@ -240,10 +241,17 @@ rap::layout::document_tabs tabs_spec(fixture& f, const std::vector<std::string>&
                 self->received.push_back({t.id, t.index, t.source});
                 if (!self->accept) return false;
                 for (auto& o : fixtures)
-                    if (o->win.get() == t.source)
+                    if (o->win && o->win.get() == t.source)
                     {
                         o->tabs->remove(t.id);
                         self->tabs->insert(t.index, {t.id, t.title, t.icon, t.tooltip});
+                        // As an app may: the emptied window closed at once,
+                        // in the middle of the drag's end.
+                        if (self->close_emptied && o->tabs->ids().empty())
+                        {
+                            o->tabs = nullptr;
+                            o->win.reset();
+                        }
                         return true;
                     }
                 return false;
@@ -525,6 +533,44 @@ void run(const char* stage)
            "let go: B takes solo from D, D left empty (the app's to close)" + at);
     expect(IsWindow(d.top), "rapport doesn't close it" + at);
 
+    // The app closing the emptied window in its on_receive, there and then,
+    // as the drag's end asks it: nothing of that window touched after (its
+    // window proc carries on with nothing).
+    b.received.clear();
+    b.close_emptied = true;
+    a.made = nullptr;
+    p = a.centre(1);  // k
+    a.down(p);
+    a.move(POINT{p.x + th + 1, p.y});
+    a.move(POINT{p.x, below.y});
+    if (!a.made) return expect(false, "torn off to be closed" + at);
+    fixture& tc = *a.made;
+    const HWND tc_top = tc.top;
+    GetWindowRect(tc_top, &tr);
+    move_window(tc_top, a.screen(POINT{p.x, below.y}), b_first, POINT{tr.left, tr.top});
+    set_keys({});
+    SendMessageW(tc_top, WM_EXITSIZEMOVE, 0, 0);
+    expect(b.received.size() == 1 && b.received[0].id == "k" && !tc.win && !IsWindow(tc_top) && !ask(a.top, 3),
+           "let go over B, whose on_receive closes the emptied window: closed, nothing moving" + at);
+    expect(a.tabs->ids() == ids{"a", "n"} && b.tabs->ids().front() == "k", "and B has k first" + at);
+    b.close_emptied = false;
+    // Escape: sent home, and A's on_receive closing it likewise.
+    a.close_emptied = true;
+    a.received.clear();
+    a.made = nullptr;
+    p = a.centre(0);  // a
+    a.down(p);
+    a.move(POINT{p.x + th + 1, p.y});
+    a.move(POINT{p.x, below.y});
+    if (!a.made) return expect(false, "torn off to be sent home and closed" + at);
+    fixture& th2 = *a.made;
+    const HWND th2_top = th2.top;
+    SendMessageW(th2_top, WM_EXITSIZEMOVE, 1, 0);  // the move loop ended by Escape
+    expect(a.received.size() == 1 && a.received[0].id == "a" && !th2.win && !IsWindow(th2_top) && !ask(a.top, 3),
+           "Escape, A's on_receive taking it home and closing the emptied window: closed" + at);
+    expect(a.tabs->ids() == ids{"a", "n"}, "and A has it back where it was" + at + ": " + join(a.tabs->ids()));
+    a.close_emptied = false;
+
     // The right-click menu: the fixed items, then the app's.
     tab_menu_capture cap{};
     cap.choose = -1;
@@ -541,12 +587,17 @@ void run(const char* stage)
     expect(cap.count > 3 && cap.enabled[3], "Move to new window enabled, with tabs to spare" + at);
     // Move to new window: on_detach with no point.
     a.detached.clear();
+    a.made = nullptr;
+    ask(a.top, 5);
     cap = tab_menu_capture{};
     cap.choose = 3;
     SendMessageW(a.strip, WM_CONTEXTMENU, WPARAM(a.strip), MAKELPARAM(o_at.x, o_at.y));
     expect(a.detached.size() == 1 && a.detached[0].first == "a" && !a.detached[0].second,
            "Move to new window: on_detach(a) with no point" + at);
     expect(!ask(a.top, 3), "and nothing's moving: the app places the window" + at);
+    // Shown, as the handler returns it unshown (here, never shown: noted).
+    expect(a.made && HWND(ask(a.top, 5)) == a.made->top && !IsWindowVisible(a.made->top),
+           "and the app's window shown (the tests' noted, not shown)" + at);
     // A window's only tab: the item disabled.
     cap = tab_menu_capture{};
     cap.choose = -1;

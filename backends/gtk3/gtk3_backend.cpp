@@ -530,6 +530,11 @@ public:
         items_ = std::move(items);
         menu_ = build_menu(items_);
         gtk_menu_attach_to_widget(GTK_MENU(menu_), attach, nullptr);
+        // Destroyed with the widget it's attached to (a tab's label, gone
+        // with its tab, as its own item may take it): forgotten then.
+        g_signal_connect(menu_, "destroy",
+                         G_CALLBACK(+[](GtkWidget*, gpointer p) { *static_cast<GtkWidget**>(p) = nullptr; }),
+                         &menu_);
         if (on_hide_)
             g_signal_connect(menu_, "deactivate",
                              G_CALLBACK(+[](GtkMenuShell*, gpointer p)
@@ -2150,7 +2155,13 @@ public:
     {
         live().erase(this);
         for (GtkWidget* w : going_) g_object_unref(w);
-        for (arrival& a : arrivals_) g_object_unref(a.page);
+        // Gone before its drops were settled: their sources' pages back.
+        for (arrival& a : std::exchange(arrivals_, {}))
+        {
+            const std::string id = id_of(a.page) ? id_of(a.page) : "";
+            g_object_unref(a.page);
+            put_back(a.source(), id);
+        }
     }
 
     void insert(int index, const document_tab& t) override
@@ -2309,8 +2320,11 @@ private:
         if (!id) return;
         const std::string tab = id;
         dragging_ = true;
+        // The handler may close this window (its tabs and all): the app's
+        // window is shown all the same, and nothing here touched after.
+        const std::weak_ptr<int> alive = alive_;
         rap::window* made = state.detach_asked(state.index_of(tab), at);
-        dragging_ = false;
+        if (!alive.expired()) dragging_ = false;
         if (!made) return;
         if (at) made->move(point_f{std::max(0.f, at->x - 60), std::max(0.f, at->y - 16)});
         made->show();
@@ -2331,7 +2345,8 @@ private:
             if (state.move(was, at)) state.reordered(at);
             return;
         }
-        arrivals_.push_back({GTK_WIDGET(g_object_ref(page)), at, from});
+        if (!live().contains(from)) from = nullptr;
+        arrivals_.push_back({GTK_WIDGET(g_object_ref(page)), at, from, from ? from->alive_ : std::weak_ptr<int>()});
         settle_later();
     }
     struct arrival
@@ -2339,7 +2354,17 @@ private:
         GtkWidget* page;
         int index;
         document_tabs_impl* from;
+        std::weak_ptr<int> from_alive;  // expired: `from` has gone
+        document_tabs_impl* source() const { return from && !from_alive.expired() ? from : nullptr; }
     };
+    // A page dropped in from `from`, gone from here: its own back there (a
+    // fresh one), as its bookkeeping still has it.
+    static void put_back(document_tabs_impl* from, const std::string& id)
+    {
+        const int i = from ? from->state.index_of(id) : -1;
+        if (i >= 0 && !from->page_of(id)) from->add_page(i, from->state.tabs[size_t(i)]);
+        if (from) from->show_current();
+    }
     void settle_later()
     {
         if (settle_source_) return;
@@ -2369,6 +2394,18 @@ private:
             }
             g_object_unref(page);
         }
+        // Every page undone first, its ref let go and its source's back,
+        // then the app asked: its on_receive may close this window or the
+        // source (emptied), so each ask finds both again, and nothing here's
+        // touched once this has gone.
+        struct ask
+        {
+            document_tabs_impl* from;
+            std::weak_ptr<int> from_alive;
+            std::string id;
+            int index;
+        };
+        std::vector<ask> asks;
         std::vector<arrival> arrivals = std::exchange(arrivals_, {});
         for (arrival& a : arrivals)
         {
@@ -2380,13 +2417,18 @@ private:
                 gtk_notebook_remove_page(nb, n);
             }
             g_object_unref(a.page);
-            document_tabs_impl* from = live().contains(a.from) ? a.from : nullptr;
-            const int i = from ? from->state.index_of(id) : -1;
-            if (i >= 0 && !from->page_of(id)) from->add_page(i, from->state.tabs[size_t(i)]);
-            if (from) from->show_current();
-            show_current();
+            put_back(a.source(), id);
+            if (a.source()) asks.push_back({a.from, a.from_alive, id, a.index});
+        }
+        show_current();
+        const std::weak_ptr<int> alive = alive_;
+        for (const ask& k : asks)
+        {
+            document_tabs_impl* from = k.from_alive.expired() ? nullptr : k.from;
+            const int i = from ? from->state.index_of(k.id) : -1;
             if (i >= 0 && from->state.same_group(state))
-                state.received(from->state.transfer_of(i, std::clamp(a.index, 0, state.count()), from->window));
+                state.received(from->state.transfer_of(i, std::clamp(k.index, 0, state.count()), from->window));
+            if (alive.expired()) return;
         }
         show_current();
         fit_later();
@@ -2551,6 +2593,8 @@ private:
     std::vector<arrival> arrivals_;      // dropped in from elsewhere (refs)
     guint settle_source_ = 0;
     popup_menu menu_;
+    // Gone with these tabs: the app's handlers may close their window.
+    std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };
 
 // -- list ---------------------------------------------------------------------

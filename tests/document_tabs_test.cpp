@@ -296,8 +296,16 @@ void tear_off_and_drop()
                m[3].label == rap::i18n::tr("rapport", "_Move to new window") && m[3].enabled && m[4].is_separator() &&
                m[5].label == "_Rename b",
            "a tab's: New tab, Close tab, Move to new window, then the app's after a separator");
+    std::vector<rap::window*> shown;
+    src.show_moved = [&](rap::window* w) { shown.push_back(w); };
     m[3].action();
     expect(asked.size() == 3 && asked.back() == "b" && !where, "Move to new window: on_detach(b) with no point");
+    expect(shown.empty(), "refused (null): nothing shown");
+    answer = reinterpret_cast<rap::window*>(&dst);  // an address to compare, never used
+    m[3].action();
+    expect(asked.size() == 4 && shown == std::vector<rap::window*>{answer},
+           "made: the app's window shown, as a torn-off tab's is");
+    answer = nullptr;
     src.on_context_menu = [](const std::string&) { return rap::menu{}; };
     expect(src.context_menu(0).size() == 4, "the app's items empty: no separator for them");
     src.on_detach = {};

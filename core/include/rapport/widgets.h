@@ -1097,9 +1097,10 @@ public:
     // another window's row in the group, that window's on_receive is asked
     // to take the tab (see there); anywhere else, the window stays where it
     // was let go. From the menu (no point), the app places the window itself
-    // before showing it, with window::move (e.g. a little down and right of
+    // before returning it, with window::move (e.g. a little down and right of
     // the source's window::position(); nothing on Wayland, where the
-    // compositor places windows). Returning nullptr refuses: nothing changes,
+    // compositor places windows), and rapport shows it there, as it shows a
+    // dragged one. Returning nullptr refuses: nothing changes,
     // and the drag goes on along the row. Asked at most once a drag.
     using detach_fn = std::function<rap::window*(const std::string& id, std::optional<point_f> screen)>;
     // A tab let go over this window's row, from another window in the same

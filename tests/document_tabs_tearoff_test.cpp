@@ -92,6 +92,9 @@ struct fixture
     std::vector<told_receive> received;
     std::vector<std::pair<std::string, int>> reordered;
     bool refuse_detach = false, accept = true;
+    // As an app may, there and then: on_detach closing this window once the
+    // tab's out of it; on_receive closing it once it's taken one.
+    bool close_on_detach = false, close_on_receive = false;
     fixture* made = nullptr;
 };
 
@@ -114,7 +117,13 @@ rap::layout::document_tabs tabs_spec(fixture& f, const std::vector<std::string>&
                 fixture* made = make(self->name + "+" + id, {id}, group);
                 self->tabs->remove(id);
                 self->made = made;
-                return made->win.get();
+                rap::window* w = made->win.get();
+                if (self->close_on_detach)
+                {
+                    self->tabs = nullptr;
+                    self->win.reset();
+                }
+                return w;
             })
         .on_receive(
             [self](const rap::document_tabs::transfer& t)
@@ -122,10 +131,15 @@ rap::layout::document_tabs tabs_spec(fixture& f, const std::vector<std::string>&
                 self->received.push_back({t.id, t.index, t.source});
                 if (!self->accept) return false;
                 for (auto& o : fixtures)
-                    if (o->win.get() == t.source)
+                    if (o->win && o->win.get() == t.source)
                     {
                         o->tabs->remove(t.id);
                         self->tabs->insert(t.index, {t.id, t.title, t.icon, t.tooltip});
+                        if (self->close_on_receive)
+                        {
+                            self->tabs = nullptr;
+                            self->win.reset();
+                        }
                         return true;
                     }
                 return false;
@@ -350,6 +364,7 @@ void run()
         if (GtkWidget* label = gtk_notebook_get_tab_label(na, gtk_notebook_get_nth_page(na, i)))
             menus = gtk_menu_get_for_attach_widget(label);
     std::vector<std::string> items;
+    GtkWidget* move = nullptr;
     if (menus)
     {
         GList* children = gtk_container_get_children(GTK_CONTAINER(menus->data));
@@ -357,16 +372,60 @@ void run()
         {
             const char* l = GTK_IS_SEPARATOR_MENU_ITEM(i->data) ? "" : gtk_menu_item_get_label(GTK_MENU_ITEM(i->data));
             items.push_back(l ? l : "");
+            if (items.size() == 4) move = GTK_WIDGET(i->data);
         }
         g_list_free(children);
         gtk_menu_popdown(GTK_MENU(menus->data));
     }
+    const std::string current = a.tabs->current();
     expect(handled && items.size() == 6 && items[0] == rap::i18n::tr("rapport", "_New tab") && items[1].empty() &&
                items[2] == rap::i18n::tr("rapport", "_Close tab") &&
                items[3] == rap::i18n::tr("rapport", "_Move to new window") && items[4].empty() &&
-               items[5] == "_Rename " + a.tabs->current(),
+               items[5] == "_Rename " + current,
            "popup-menu: New tab, Close tab, Move to new window, then the app's (" + join(items) + ")");
+    // Move to new window: on_detach with no point, and the app's window,
+    // returned unshown, shown.
+    a.detached.clear();
+    a.made = nullptr;
+    if (move) gtk_menu_item_activate(GTK_MENU_ITEM(move));
+    pump();
+    expect(a.detached.size() == 1 && a.detached[0].first == current && !a.detached[0].second && a.made,
+           "Move to new window: on_detach(" + current + ") with no point");
+    GtkWidget* mw = a.made ? window_titled(a.made->name) : nullptr;
+    expect(mw && gtk_widget_get_visible(mw) && a.made->tabs->ids() == ids{current},
+           "and the app's window shown, with " + current);
 #endif
+
+    // The app closing a window from its handler, there and then: nothing of
+    // it touched after. on_detach closing the source once the tab's out
+    // (GTK's drag holds the notebook, as here).
+    fixture& f = *make("Tear F", {"f1", "f2"}, "g");
+    f.close_on_detach = true;
+    f.win->show();
+    pump();
+    GtkNotebook* nf = notebook_of(f);
+    if (!nf) return expect(false, "F's notebook");
+    g_object_ref(nf);
+    create_window(nf, "f1", 200, 200);
+    g_object_unref(nf);
+    pump();
+    expect(!f.win && f.made && f.made->tabs->ids() == ids{"f1"} && window_titled(f.made->name) &&
+               gtk_widget_get_visible(window_titled(f.made->name)),
+           "on_detach closing its own window: closed, the app's window shown all the same");
+    // on_receive closing the target once it's taken the tab.
+    fixture& g = *make("Tear G", {"g1"}, "g");
+    g.close_on_receive = true;
+    g.win->show();
+    pump();
+    GtkNotebook* ng = notebook_of(g);
+    if (!ng) return expect(false, "G's notebook");
+    const std::vector<std::string> b_before = b.tabs->ids();
+    gtk_drop(nb, ng, b_before.front(), 0);
+    pump();
+    expect(g.received.size() == 1 && g.received[0].id == b_before.front() && !g.win &&
+               b.tabs->ids() == std::vector<std::string>(b_before.begin() + 1, b_before.end()) &&
+               pages(nb) == b.tabs->ids(),
+           "on_receive taking it and closing its own window: closed, B without it: " + join(pages(nb)));
 }
 
 #elif defined(RAPPORT_TEST_QT6)
@@ -403,6 +462,10 @@ void run()
            "Move to new window: on_detach(b) with no point");
     expect(a.tabs->ids() == std::vector<std::string>{"a"} && a.made && a.made->tabs->ids() == std::vector<std::string>{"b"},
            "and the app moved it to its window");
+    bool made_shown = false;
+    for (QWidget* w : QApplication::topLevelWidgets())
+        if (a.made && w->windowTitle() == QString::fromStdString(a.made->name)) made_shown = w->isVisible();
+    expect(made_shown, "and its window shown, as the handler returned it unshown");
 }
 
 #endif

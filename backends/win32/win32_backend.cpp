@@ -7455,6 +7455,9 @@ struct tab_drags
     bool test_no_loop = false;
     bool test_stack_set = false;
     std::vector<HWND> test_stack;
+    // With no move loop, the window the menu's Move to new window would
+    // have shown last (it isn't: the tests' windows are never shown).
+    HWND test_shown = nullptr;
 };
 tab_drags& tab_drag()
 {
@@ -7470,7 +7473,8 @@ tab_drags& tab_drag()
 // (lParam a null-terminated HWND array; 0 the desktop's again); 2 the drop
 // mark the window's strip shows (-1 none); 3 the window a tab drag is moving
 // (0 none); 4 the tabs' right-click menus captured, not shown (lParam a
-// tab_menu_capture; 0 shown again).
+// tab_menu_capture; 0 shown again); 5 with no move loop, the window the
+// menu's Move to new window would have shown last (0 none), forgotten.
 UINT tab_drag_message()
 {
     static const UINT m = RegisterWindowMessageW(L"rapport-document-tabs-drag");
@@ -7500,6 +7504,7 @@ void begin_window_drag(window_impl* w, const std::string& id, POINT screen, POIN
                        int from);
 void moving_at(POINT screen);
 void end_window_drag(bool cancelled);
+void show_moved_window(rap::window* w);
 
 // A window's document tabs, as the window lays them out and gives them its
 // keys: stage 1's strip in the client area (document_tabs_impl), or Windows
@@ -7519,6 +7524,7 @@ public:
                 for (const document_tab& t : state.tabs)
                     if (!t.icon.path.empty() && path_icon_key(t.icon.path) == key) return path_icon_found();
             });
+        state.show_moved = show_moved_window;
     }
     ~window_tabs() override
     {
@@ -11089,10 +11095,17 @@ private:
 
     // A tab drag moving this window (see tab_drags): where the pointer is as
     // it moves, the move loop's start and end; and the tests' message.
+    //
+    // A drag's end asks the app (on_receive), which may take this window's
+    // last tab and close it there and then: past end_window_drag (and the
+    // move loop, which ends in it) nothing of this is touched unless it's
+    // still here. True when the message is done with, as it is then.
     bool tab_drag_seen(UINT msg, WPARAM wp, LPARAM lp, LRESULT& result)
     {
         tab_drags& d = tab_drag();
-        const bool mine = d.moving && d.moving->hwnd == hwnd_;
+        const HWND h = hwnd_;
+        const bool mine = d.moving && d.moving->hwnd == h;
+        const std::weak_ptr<int> alive = alive_;
         switch (msg)
         {
         case wm_rapport_tab_move:
@@ -11109,9 +11122,9 @@ private:
             }
             d.moving->in_loop = true;
             ReleaseCapture();
-            SendMessageW(hwnd_, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, MAKELPARAM(c.x, c.y));
+            SendMessageW(h, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, MAKELPARAM(c.x, c.y));
             // No loop after all (no WM_EXITSIZEMOVE): ended here.
-            if (d.moving && d.moving->hwnd == hwnd_) end_window_drag(GetKeyState(VK_ESCAPE) < 0);
+            if (!alive.expired() && d.moving && d.moving->hwnd == h) end_window_drag(GetKeyState(VK_ESCAPE) < 0);
             return true;
         }
         case WM_MOVING:
@@ -11136,6 +11149,15 @@ private:
                 end_window_drag(wp == 1);
             else if (mine && d.moving->in_loop)
                 end_window_drag(GetKeyState(VK_ESCAPE) < 0 || GetKeyState(VK_LBUTTON) < 0);
+            else
+                return false;
+            // Closed by the app's on_receive: done, the window proc's
+            // caption and children gone with it.
+            if (alive.expired())
+            {
+                result = 0;
+                return true;
+            }
             return false;
         default: break;
         }
@@ -11158,6 +11180,7 @@ private:
             g_tab_menu_capture = reinterpret_cast<tab_menu_capture*>(lp);
             result = 1;
             break;
+        case 5: result = reinterpret_cast<LRESULT>(std::exchange(d.test_shown, nullptr)); break;
         default: result = 0; break;
         }
         return true;
@@ -11446,6 +11469,8 @@ private:
     static constexpr UINT_PTR deferred_timer = 0xDEF;
     std::optional<SIZE> requested_;  // client size from resize() before the first show
     bool placed_ = false;            // move()d by the app: left where it put it
+    // Gone with the window: a tab drag's end asks the app, which may close it.
+    std::shared_ptr<int> alive_ = std::make_shared<int>(0);
     struct bar_menu
     {
         menu_bar_item item;
@@ -11938,6 +11963,16 @@ void end_window_drag(bool cancelled)
     window_tabs* target = tabs_of(over);
     if (target && target != mine && target->state.same_group(mine->state))
         target->state.received(mine->state.transfer_of(i, index, mw));
+}
+
+// The menu's Move to new window: the app's window, placed and unshown,
+// shown (doc_tabs::state::show_moved); the tests' (no move loop) noted
+// instead, as their windows are never shown.
+void show_moved_window(rap::window* w)
+{
+    tab_drags& d = tab_drag();
+    if (!d.test_no_loop) return w->show();
+    if (auto* i = dynamic_cast<window_impl*>(w)) d.test_shown = i->hwnd();
 }
 
 window_tabs::there window_tabs::drag_at(std::string id, POINT screen)
