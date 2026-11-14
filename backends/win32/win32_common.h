@@ -102,6 +102,12 @@ SIZE font_metrics(UINT dpi);
 // The UI font family name and size in DIPs (for DirectWrite text).
 std::wstring ui_font_family();
 float ui_font_size_dip();
+// The desktop's text size (Settings > Accessibility > Text size): 1 at 100%,
+// up to 2.25; what the message font is enlarged by from its 9 pt.
+float text_scale();
+// For tests: the text size taken to be `scale` (0: the desktop's again),
+// without changing the setting; the message font itself stays as it is.
+void set_text_scale_for_tests(float scale);
 
 // Extent -> device pixels for a window.
 int extent_px(HWND h, extent e, bool vertical);

@@ -19,7 +19,10 @@
 // the glyph where Explorer's sits, the clear button there while there's
 // text, both doing what they do. At 125% and 150% through the DPI test hook
 // (rap::win32::set_dpi_for_tests and a WM_DPICHANGED, static builds), the
-// same metrics scaled. Under high contrast (rapport-win32-high-contrast-run,
+// same metrics scaled. At a larger text size (Settings > Accessibility >
+// Text size: 150% and 225%, through rap::win32::set_text_scale_for_tests,
+// the setting untouched), the fields' text enlarged by it from WinUI's 14
+// and the fields and the row taller to hold it. Under high contrast (rapport-win32-high-contrast-run,
 // CI only): nothing drawn, the native bordered EDIT at the band's metrics,
 // its text centred. Shown only (UI Automation leaves hidden windows out):
 // the field still an Edit to UIA, with its name and value.
@@ -59,6 +62,7 @@ RAPPORT_BUILTIN_BACKEND(win32);
 namespace rap::win32
 {
 void set_dpi_for_tests(UINT dpi);  // win32_common.h (which wants the backend's include paths)
+void set_text_scale_for_tests(float scale);
 }
 #endif
 
@@ -674,6 +678,58 @@ void check_at_dpi(HWND top, const std::vector<HWND>& fields, UINT dpi, const std
     expect(p.at(0, 0) == band_fill() && p.at(p.w * 3 / 4, p.h / 2) == rest, "its corners rounded and its fill" + at);
 }
 
+// At a text size (Settings > Accessibility > Text size) of `scale`: the
+// fields' text WinUI's 14 enlarged by it, as the message font is (21 at
+// 150%), not put back to 14; each field tall enough for its line (32 at
+// 100%, WinUI's padding and border around the text beyond), the text's ink
+// centred in it, and the row the field's height and 7 above and below.
+void check_text_size(HWND top, const std::vector<HWND>& fields, UINT dpi, float scale)
+{
+    const std::string at = " (text size " + str(std::lround(scale * 100)) + "%, " + str(long(dpi)) + " dpi)";
+    HWND strip = strip_of(top);
+    const int from = strip ? int(rect_in(top, strip).bottom) : 0;
+    const int em = int(std::lround(14.f * scale * float(dpi) / 96.f));
+    int tallest = 0;
+    for (HWND f : fields)
+    {
+        LOGFONTW lf{};
+        GetObjectW(reinterpret_cast<HFONT>(SendMessageW(f, WM_GETFONT, 0, 0)), sizeof lf, &lf);
+        expect(std::abs(std::abs(lf.lfHeight) - em) <= 1,
+               "its text " + str(em) + " px" + at + ": " + str(std::abs(lf.lfHeight)));
+        HDC dc = GetDC(f);
+        HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(f, WM_GETFONT, 0, 0)));
+        TEXTMETRICW tm{};
+        GetTextMetricsW(dc, &tm);
+        SelectObject(dc, old);
+        ReleaseDC(f, dc);
+        const RECT r = rect_in(top, f);
+        const int want = std::max(px(32, dpi), int(tm.tmHeight) + px(5 + 6 + 2, dpi));
+        expect(r.bottom - r.top == want, "the field " + str(want) + " px tall for its " + str(tm.tmHeight) +
+                                             " px line" + at + ": " + str(r.bottom - r.top));
+        const RECT t = text_area(f);
+        expect(t.bottom - t.top >= tm.tmHeight,
+               "its line not clipped" + at + ": " + str(t.bottom - t.top) + " px for " + str(tm.tmHeight));
+        tallest = std::max(tallest, int(r.bottom - r.top));
+        const RECT n = rect_in(top, fields[0]);
+        expect(r.top - from == (px(46, dpi) - px(32, dpi)) / 2 && r.top == n.top,
+               "under the strip by " + str((px(46, dpi) - px(32, dpi)) / 2) + at + ": " + str(r.top - from));
+    }
+    if (scale > 1.f)
+        expect(tallest > px(32, dpi),
+               "the fields taller than " + str(px(32, dpi)) + " px" + at + ": " + str(tallest));
+    const int row = tallest + px(46, dpi) - px(32, dpi);
+    const printed bg = print_erase(top);
+    const DWORD fill = band_fill();
+    int y = from;
+    while (y < bg.h && bg.at(bg.w - 2, y) == fill) ++y;
+    expect(y - from == row, "the band " + str(row) + " px from the strip to its line" + at + ": " + str(y - from));
+    if (!high_contrast())
+    {
+        const DWORD rest = over(colours().rest, band_fill());
+        check_centred(fields[0], rest, at);
+    }
+}
+
 // -- the display's scale, for real (CI only) ----------------------------------
 //
 // As win32-caption-tabs-transitions changes it: the primary display's scale
@@ -929,6 +985,11 @@ int main(int argc, char** argv)
         note("skipped the scale changes: no band before Windows 11 (build 22000)");
         return 77;
     }
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+    // The text size taken to be 100% (through its test hook: the setting
+    // itself untouched), whatever the desktop's: the metrics are 100%'s.
+    rap::win32::set_text_scale_for_tests(1.f);
+#endif
     rap::load_options options{.backend = "win32"};
     options.look.color_scheme = rap::color_scheme::dark;
     auto ui = rap::ui::load(argc, argv, options);
@@ -1044,8 +1105,31 @@ int main(int argc, char** argv)
         pump();
         check_at_dpi(top, fields, to, "the DPI hook");
     }
+
+    // A larger text size, through its test hook (the setting untouched):
+    // the fields' font made again, larger, and the fields and row taller
+    // for it. Each step at a DPI other than the last's (the window's own
+    // and 125%, or 150% where that's its own), so WM_DPICHANGED sets the
+    // font and resizes the window, which lays it out: as a text size the
+    // window takes as it's made, or with a move to another display.
+    const UINT other = dpi == 120 ? 144u : 120u;
+    for (const float scale : {1.5f, 2.25f, 1.f})
+        for (const UINT to : {other, dpi})
+        {
+            rap::win32::set_text_scale_for_tests(scale);
+            rap::win32::set_dpi_for_tests(to == dpi ? 0 : to);
+            RECT wr{};
+            GetWindowRect(top, &wr);
+            RECT suggested{wr.left, wr.top, wr.left + MulDiv(wr.right - wr.left, int(to), int(was)),
+                           wr.top + MulDiv(wr.bottom - wr.top, int(to), int(was))};
+            was = to;
+            SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&suggested));
+            pump();
+            check_text_size(top, fields, to, scale);
+        }
+    check_metrics(top, fields, dpi, "text size 100% again");
 #else
-    note("skipped 125% and 150%: the DPI test hook is the static backend's");
+    note("skipped 125% and 150%, and larger text sizes: the DPI and text size test hooks are the static backend's");
 #endif
 
     // UI Automation: only shown (it leaves hidden windows' content out).

@@ -80,11 +80,13 @@ field_state* state_of(HWND h)
                                                                          : nullptr;
 }
 
-// WinUI's text size in the UI face, scaled with the desktop's text size as
-// the message font is.
+// WinUI's text size in the UI face, enlarged by the desktop's text size
+// (Settings > Accessibility > Text size) as the message font is: 14 at 100%,
+// 21 at 150%. The message font has the text size in it already, so it's
+// scaled to WinUI's size at that text size, not to 14 (which would undo it).
 HFONT field_font(UINT dpi)
 {
-    return ui_font(dpi, false, false, band_metrics::font / std::max(1.f, ui_font_size_dip()));
+    return ui_font(dpi, false, false, band_metrics::font * text_scale() / std::max(1.f, ui_font_size_dip()));
 }
 
 // What the text's line takes: its height, ascent and capitals' height.
