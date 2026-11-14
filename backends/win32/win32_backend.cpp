@@ -2996,12 +2996,15 @@ public:
         if (GetComboBoxInfo(h_, &info) && info.hwndItem)
             SetWindowSubclass(info.hwndItem, enter_subclass, 1, reinterpret_cast<DWORD_PTR>(&activate_));
     }
+    // Quiet, as set_text: the text put back is the app's, not the user's.
     void set_items(std::vector<std::string> items) override
     {
+        quiet_ = true;
         const std::wstring keep = window_text(h_);
         SendMessageW(h_, CB_RESETCONTENT, 0, 0);
         for (const std::string& i : items) SendMessageW(h_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(i).c_str()));
         SetWindowTextW(h_, keep.c_str());
+        quiet_ = false;
     }
     std::string text() const override { return narrow(window_text(h_)); }
     void set_text(const std::string& t) override
