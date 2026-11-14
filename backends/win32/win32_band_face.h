@@ -18,8 +18,14 @@
 // opaque over the band's colour, as a band field's is (Explorer's boxes
 // measure opaque); a subtle face (a tool button's) is translucent, at its
 // own alpha over the layer. Under high contrast nothing here is drawn: the native controls, at
-// the band's metrics. Outside the band, before Windows 11 and in stage 1's
-// tabs, nothing here applies.
+// the band's metrics.
+//
+// Out of the band the same faces are on rapport's controls in every window
+// where they're fluent (look_options::controls: automatic is Windows 11),
+// at the app's density (face_density), over the window's own surface; the
+// band's own metrics (its row, its gap) and its glass are the band's alone.
+// Native (asked for, or before Windows 11) nothing here is drawn, and out
+// of the band the controls keep their native metrics.
 #pragma once
 
 #include "win32_band_field.h"

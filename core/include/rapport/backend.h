@@ -21,7 +21,7 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 86;
+inline constexpr int abi_version = 87;
 
 // Light or dark: as the desktop has it (system), or the app's own choice
 // (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for
@@ -31,6 +31,30 @@ enum class color_scheme
     system,
     light,
     dark,
+};
+
+// Windows: rapport's own controls (entries, buttons, menu buttons,
+// drop-downs, combo boxes, tool buttons) in WinUI's look, as Windows 11's
+// apps have them (fluent), or Win32's own (native). automatic is fluent on
+// Windows 11 (build 22000 and later, checked as it runs) and native before
+// it; fluent before Windows 11 is native too (its controls never had
+// WinUI's look). High contrast is always native. GTK and Qt ignore it.
+enum class control_style
+{
+    automatic,
+    native,
+    fluent,
+};
+
+// WinUI's densities, where controls are drawn in its look: standard (a text
+// box 32 px tall, Windows 11 Explorer's address row 46) or compact (24, a
+// row 36, the text the message font's size, for a dense window).
+// RAPPORT_DENSITY=compact overrides it, a development aid as RAPPORT_THEME
+// is. GTK and Qt ignore it.
+enum class density
+{
+    standard,
+    compact,
 };
 
 // For list::set_column_order: whether `order` names each of `n` columns once.
@@ -213,6 +237,10 @@ struct look_options
     bool header_bars = false;
     bool boxed_lists = false;
     bool alert_dialogs = false;
+    // Windows: its controls in WinUI's look or Win32's (control_style), and
+    // at which of WinUI's densities.
+    control_style controls = control_style::automatic;
+    rap::density density = rap::density::standard;
 };
 
 // Backend entry point. Returns nullptr if the ABI doesn't match or the

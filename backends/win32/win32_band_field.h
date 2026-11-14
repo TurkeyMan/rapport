@@ -17,8 +17,9 @@
 // edge antialiased into it. Under high contrast nothing is drawn: the native bordered EDIT at
 // the band's metrics, in the system colours.
 //
-// Everywhere else (other entries, Windows 10, stage 1's tabs, a window
-// without a base surface) nothing here applies.
+// Out of the band an entry is a field of this kind too where the app's
+// controls are fluent (look_options::controls: win32_band_face.h), on its
+// window's own surface; native, or before Windows 11, it's the plain EDIT.
 #pragma once
 
 #include "win32_common.h"
@@ -105,11 +106,22 @@ inline constexpr band_density standard_band{46, 32, 40, 14, 5, 6, false};
 // centred vertically.
 inline constexpr band_density compact_band{36, 24, 32, 0, 2, 3, true};
 
-// The density the band's controls take. No public switch names it yet (it
-// may become the app's, not the band's): standard, or compact where the
-// environment says RAPPORT_DENSITY=compact (for the examples' snapshots)
-// or a test has asked (set_band_density_for_tests).
+// The app's control style and density (look_options::controls, density),
+// as the backend's made.
+void set_control_style(control_style style, rap::density density);
+// rapport's controls in WinUI's look: fluent or automatic, on Windows 11
+// (build 22000 and later); native before it, or asked for.
+bool fluent_controls();
+// Their faces drawn now: fluent, and not under high contrast (native then,
+// at the density's heights).
+bool faces_on();
+// The density controls take: the app's (look_options::density), compact
+// where the environment says RAPPORT_DENSITY=compact (a development aid, as
+// RAPPORT_THEME is), or a test's (set_band_density_for_tests).
 const band_density& band_density_now();
+// The density a control out of the band takes: band_density_now() where
+// the controls are fluent, else none (native, at native metrics).
+const band_density* face_density();
 // For tests: compact or not (0, 1), or the environment's again (-1). Windows
 // laid out after it take it.
 void set_band_density_for_tests(int compact);

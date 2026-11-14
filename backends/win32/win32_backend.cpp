@@ -1756,13 +1756,15 @@ public:
         band_win_ = &win;
         if (band_ == density) return;
         band_ = density;
-        for (item* c : children) c->set_in_band(density);
+        // Out of the band, the app's density where its controls are fluent.
+        for (item* c : children)
+            c->set_in_band(density ? density : face_density(), density != nullptr);
     }
     const band_density* band() const { return band_; }
     // A box inside the band's row: its items in the band too.
-    void set_in_band(const band_density* density) override
+    void set_in_band(const band_density* density, bool row) override
     {
-        for (item* c : children) c->set_in_band(density);
+        for (item* c : children) c->set_in_band(density, row);
     }
     RECT rect{};  // where it was placed
 
@@ -2506,7 +2508,7 @@ public:
     // In the band: WinUI's Button (a flat one its subtle face), the field's
     // height, its text WinUI's size (win32_band_face.h). Under high
     // contrast, the native button at the field's height.
-    void set_in_band(const band_density* density) override
+    void set_in_band(const band_density* density, bool) override
     {
         band_ = density;
         InvalidateRect(h_, nullptr, TRUE);
@@ -2528,7 +2530,7 @@ public:
     dialog_role role = dialog_role::none;
 
 private:
-    bool band_drawn() const { return band_ && !high_contrast(); }
+    bool band_drawn() const { return band_ && faces_on(); }
     band_content content() const { return {&icon_, window_text(h_), false}; }
 
     bool flat_;
@@ -2922,7 +2924,7 @@ public:
         RedrawWindow(h_, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE | RDW_ERASE);
     }
     // In the toolbar band, a framed entry is a band field (win32_band_field.h).
-    void set_in_band(const band_density* density) override
+    void set_in_band(const band_density* density, bool) override
     {
         in_band_ = density;
         apply_band();
@@ -3162,7 +3164,7 @@ public:
     {
         if (band_ && height_ > 0) fit_combo_height(h, height_);
     }
-    void set_in_band(const band_density* density) override
+    void set_in_band(const band_density* density, bool) override
     {
         if (band_ == density) return;
         band_ = density;
@@ -3217,7 +3219,7 @@ public:
 
 private:
     int height_ = 0;  // in the band: its height, as placed
-    bool band_drawn() const { return band_ && !high_contrast(); }
+    bool band_drawn() const { return band_ && faces_on(); }
     const band_density* band_ = nullptr;
 
     void show_current_only()
@@ -3333,7 +3335,7 @@ public:
     {
         if (brush_) DeleteObject(brush_);
     }
-    void set_in_band(const band_density* density) override
+    void set_in_band(const band_density* density, bool) override
     {
         if (band_ == density) return;
         band_ = density;
@@ -3444,7 +3446,7 @@ public:
     }
 
 private:
-    bool band_drawn() const { return band_ && !high_contrast(); }
+    bool band_drawn() const { return band_ && faces_on(); }
     static HWND edit(HWND h)
     {
         COMBOBOXINFO info{};
@@ -3510,7 +3512,7 @@ private:
     static LRESULT CALLBACK edit_place_proc(HWND e, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
                                             DWORD_PTR data)
     {
-        if (msg == WM_WINDOWPOSCHANGING && !high_contrast())
+        if (msg == WM_WINDOWPOSCHANGING && faces_on())
         {
             auto* self = reinterpret_cast<combo_impl*>(data);
             auto* pos = reinterpret_cast<WINDOWPOS*>(lp);
@@ -3529,7 +3531,7 @@ private:
         if (msg == WM_SETFONT)
         {
             auto* self = reinterpret_cast<combo_impl*>(data);
-            if (self->band_ && !high_contrast())
+            if (self->band_ && faces_on())
                 wp = reinterpret_cast<WPARAM>(band_font(dpi_of(e), *self->band_));
             const LRESULT r = DefSubclassProc(e, msg, wp, lp);
             SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
@@ -3540,7 +3542,7 @@ private:
     void place_edit(HWND h)
     {
         const HWND e = edit(h);
-        if (!e || high_contrast()) return;
+        if (!e || !faces_on()) return;
         SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
         // (edit_place_proc puts it where it goes)
         SetWindowPos(e, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -4003,8 +4005,9 @@ public:
         return dir_ == orientation::horizontal ? SIZE{pad, t + 2 * pad} : SIZE{t + 2 * pad, pad};
     }
     bool fills() const override { return true; }
-    void set_in_band(const band_density* density) override
+    void set_in_band(const band_density* density, bool row) override
     {
+        if (!row) density = nullptr;  // out of the band's row, as ever
         if (dir_ != orientation::vertical || band_ == density) return;
         band_ = density;
         set_band_painted(h_, density ? this : nullptr);
@@ -4038,7 +4041,7 @@ public:
     void show_all(bool shown) override { show_control(h_, shown && visible); }
 
 private:
-    bool band_drawn() const { return band_ && !high_contrast(); }
+    bool band_drawn() const { return band_ && faces_on(); }
     win_context& win_;
     orientation dir_;
     HWND h_;
@@ -5426,7 +5429,7 @@ public:
     }
     // In the band: WinUI's DropDownButton (its chevron drawn, not the
     // text's), the field's height (win32_band_face.h).
-    void set_in_band(const band_density* density) override
+    void set_in_band(const band_density* density, bool) override
     {
         band_ = density;
         InvalidateRect(h_, nullptr, TRUE);
@@ -5445,7 +5448,7 @@ public:
     }
 
 private:
-    bool band_drawn() const { return band_ && !high_contrast(); }
+    bool band_drawn() const { return band_ && faces_on(); }
     band_content content() const { return {&icon_, mnemonic(text_), true}; }
 
     const band_density* band_ = nullptr;
@@ -5502,7 +5505,7 @@ public:
     }
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
-        if (band_ && !high_contrast())
+        if (band_ && faces_on())
         {
             // AppBarButton (a checked toggle AppBarToggleButton's accent).
             face_state st;
@@ -5553,13 +5556,13 @@ public:
         }
         return {px(28), px(28)};
     }
-    // In a row of controls in the band: an AppBarButton, the field's height,
-    // and a Tab stop, as the row's other controls are.
-    void set_in_band(const band_density* density) override
+    // Faced (win32_band_face.h): an AppBarButton, the field's height; in a row of
+    // controls in the band a Tab stop too, as the row's other controls are.
+    void set_in_band(const band_density* density, bool row) override
     {
         band_ = density;
         const LONG_PTR style = GetWindowLongPtrW(h_, GWL_STYLE);
-        SetWindowLongPtrW(h_, GWL_STYLE, density ? style | WS_TABSTOP : style & ~WS_TABSTOP);
+        SetWindowLongPtrW(h_, GWL_STYLE, density && row ? style | WS_TABSTOP : style & ~WS_TABSTOP);
         InvalidateRect(h_, nullptr, TRUE);
     }
 
@@ -5804,7 +5807,7 @@ public:
     LRESULT notify(NMHDR* n, bool& handled) override
     {
         // In the band its own look, the keyboard's ring included.
-        if (n->code == NM_CUSTOMDRAW && band_ && !high_contrast())
+        if (n->code == NM_CUSTOMDRAW && band_ && faces_on())
         {
             handled = true;
             return band_draw(reinterpret_cast<NMTBCUSTOMDRAW*>(n));
@@ -5992,7 +5995,7 @@ public:
     }
     // In the toolbar band: Explorer's navigation buttons' size and spacing,
     // the field's height, at the band's density.
-    void set_in_band(const band_density* density) override
+    void set_in_band(const band_density* density, bool) override
     {
         if (band_ == density) return;
         band_ = density;
@@ -13454,6 +13457,9 @@ public:
         item->stretch = n.common.stretch;
         item->fixed_w = extent_px(win_.hwnd(), n.common.width, false);
         item->fixed_h = extent_px(win_.hwnd(), n.common.height, true);
+        // Its face (win32_band_face.h) where the app's controls are fluent;
+        // the band's row gives the band's once it's laid out.
+        if (const band_density* d = face_density()) item->set_in_band(d, false);
         return item;
     }
 
@@ -13962,6 +13968,7 @@ public:
         trace::initialize();
         trace::install_message_hooks();
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
+        set_control_style(look.controls, look.density);
         // Per-monitor DPI awareness (v2) where the system has it.
         using fn_t = BOOL(WINAPI*)(HANDLE);
         if (auto fn = reinterpret_cast<fn_t>(reinterpret_cast<void*>(

@@ -592,6 +592,29 @@ if(TARGET rapport_win32)
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 RUN_SERIAL
         TRUE TIMEOUT 180)
 
+    # rapport's controls in WinUI's look in any window (look_options::controls):
+    # automatic (fluent on Windows 11, native before it), native, compact, and
+    # under high contrast (CI only, as above); never shown.
+    add_executable(rapport-win32-fluent-controls-test win32_fluent_controls_test.cpp)
+    target_link_libraries(rapport-win32-fluent-controls-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-fluent-controls-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-fluent-controls-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-fluent-controls-test rapport_win32)
+    add_test(NAME win32-fluent-controls COMMAND rapport-win32-fluent-controls-test)
+    add_test(NAME win32-fluent-controls-light COMMAND rapport-win32-fluent-controls-test)
+    add_test(NAME win32-fluent-controls-compact COMMAND rapport-win32-fluent-controls-test --compact)
+    add_test(NAME win32-fluent-controls-native COMMAND rapport-win32-fluent-controls-test --native)
+    set_tests_properties(win32-fluent-controls win32-fluent-controls-compact win32-fluent-controls-native PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 120)
+    set_tests_properties(win32-fluent-controls-light PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" TIMEOUT 120)
+    add_test(NAME win32-fluent-controls-high-contrast
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-fluent-controls-test>)
+    set_tests_properties(win32-fluent-controls-high-contrast PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build
     # skips): never-shown windows.

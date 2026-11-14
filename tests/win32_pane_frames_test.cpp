@@ -161,6 +161,9 @@ int main(int argc, char** argv)
 {
     rap::load_options options{.backend = "win32"};
     options.look.color_scheme = rap::color_scheme::dark;
+    // Native controls: their frames are the native ones this is about (a
+    // fluent entry's frame is its own, win32_band_field.h).
+    options.look.controls = rap::control_style::native;
     auto ui = rap::ui::load(argc, argv, options);
     if (!ui) return 1;
     using namespace rap::layout;

@@ -451,7 +451,8 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
     // A control whose band face is drawn (win32_band_face.h) is a layer
     // control, whatever its class: an editable combo box's face over the
     // band, its edit opaque on it.
-    if (g->k == kind::layer || (is_band_painted(h) && GetParent(h) == GetAncestor(h, GA_ROOT)))
+    if (g->k == kind::layer ||
+        (is_band_painted(h) && faces_on() && GetParent(h) == GetAncestor(h, GA_ROOT)))
     {
         switch (msg)
         {
