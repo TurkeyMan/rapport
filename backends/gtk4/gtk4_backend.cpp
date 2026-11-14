@@ -6,6 +6,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "../common/window_chords.h"
 #include <gtk/gtk.h>
 
 #include "builtin_icons.h"
@@ -4711,6 +4712,10 @@ public:
         connect(keys, "key-released", +[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer p)
                 { static_cast<window_impl*>(p)->window_key(false, keyval, state); }, this);
         gtk_widget_add_controller(win_, keys);
+        // A field's composition is watched from when it has the focus, as
+        // well as from its first key (im_composing).
+        connect(win_, "notify::focus-widget", +[](GObject* w, GParamSpec*, gpointer)
+                { if (GtkWidget* f = gtk_window_get_focus(GTK_WINDOW(w))) im_composing(f); }, this);
         // The mouse's side buttons are back and forward, pressed anywhere in
         // the window: taken on the way down (capture), before a list or a
         // tree selects with them. A canvas has them first; those it doesn't
@@ -4741,11 +4746,24 @@ public:
         if (dialog_)
         {
             gtk_window_set_modal(win, parent != nullptr && spec.modal);
+            // Escape closes it, but not while an input method composes:
+            // Escape cancels that (the shortcut not taken, the key goes on).
+            // The action can outlive this window (a ref kept on it, or on
+            // the GtkWindow): it holds the owner token, not `this`, and does
+            // nothing once the window has disconnected.
             GtkEventController* keys = gtk_shortcut_controller_new();
             gtk_shortcut_controller_add_shortcut(
                 GTK_SHORTCUT_CONTROLLER(keys),
                 gtk_shortcut_new(gtk_keyval_trigger_new(GDK_KEY_Escape, GdkModifierType(0)),
-                                 gtk_named_action_new("window.close")));
+                                 gtk_callback_action_new(
+                                     +[](GtkWidget* w, GVariant*, gpointer p) -> gboolean
+                                     {
+                                         window_impl* self = *static_cast<owner_token*>(p)->get();
+                                         if (!self || self->field_composing()) return false;
+                                         gtk_widget_activate_action(w, "window.close", nullptr);
+                                         return true;
+                                     },
+                                     new owner_token(owner_), +[](gpointer p) { delete static_cast<owner_token*>(p); })));
             gtk_widget_add_controller(win_, keys);
         }
         connect(
@@ -5019,20 +5037,42 @@ public:
         ev.key = key_for(keyval);
         if (ev.key == key::character) ev.codepoint = gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval));
         ev.modifiers = modifiers(state);
+        // Asked of every key, so the field's composition is watched from
+        // before it starts (im_composing).
+        const bool composing = field_composing();
         // The document tabs' keys first, whatever has the focus (none of
         // them is typing), and while the strip is hidden too.
         if (doc_tabs && document_tabs_key(ev)) return true;
         if (!on_key_) return false;
-        GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
-        const bool typing =
-            focus && (GTK_IS_EDITABLE(focus) || (GTK_IS_TEXT_VIEW(focus) &&
-                                                 gtk_text_view_get_editable(GTK_TEXT_VIEW(focus))));
+        const bool typing = editable_field(gtk_window_get_focus(GTK_WINDOW(win_)));
+        // While an input method composes in the field every key is its
+        // (Escape cancels, the function keys convert): none is the window's.
+        if (composing) return false;
         const bool navigation = navigation_key(ev.key);
         if (navigation && !press) return false;  // presses only
         const bool not_text = navigation || keyval == GDK_KEY_Escape || (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12);
-        if (typing && !not_text) return false;
+        // A shortcut chord is the window's first, as an accelerator (this is
+        // the capture phase).
+        if (typing && !not_text) return window_chords::to_window(ev) && on_key_(ev);
         return on_key_(ev);
     }
+    // An editable text field (an entry's text, an editable text view).
+    static bool editable_field(GtkWidget* w)
+    {
+        return w && (GTK_IS_EDITABLE(w) || (GTK_IS_TEXT_VIEW(w) && gtk_text_view_get_editable(GTK_TEXT_VIEW(w))));
+    }
+    // An input method composing in the window's focused field: every key and
+    // navigation is its then, none the window's.
+    bool field_composing()
+    {
+        GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(win_));
+        return editable_field(focus) && im_composing(focus);
+    }
+    // This window for callbacks that can outlive it (GTK objects others may
+    // keep a ref on): null once it has disconnected.
+    using owner_token = std::shared_ptr<window_impl*>;
+    owner_token owner_ = std::make_shared<window_impl*>(this);
+    void on_disconnect() override { *owner_ = nullptr; }
     document_tabs_impl* doc_tabs = nullptr;  // window_spec::tabs, among the parts
     // The document tabs' keys, but Ctrl+Tab where the focus has a use for
     // it: in a page's tabs (layout::tabs) it goes round their pages, as
@@ -5082,7 +5122,8 @@ public:
             const bool held = (gdk_event_get_modifier_state(e) & held_mask) != 0;
             to_canvas_ = side_.press(int(button), held, [e] { return pressed_in_canvas(e); });
         }
-        if (!on_key_ || type != GDK_BUTTON_PRESS) return false;
+        // Not while an input method composes in the focused field.
+        if (!on_key_ || type != GDK_BUTTON_PRESS || field_composing()) return false;
         const auto k = side_button_key(button);
         if (!k || to_canvas_ != canvas_turn) return false;
         key_event ev;
