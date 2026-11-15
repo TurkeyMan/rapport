@@ -68,9 +68,12 @@ color band_face_ink(HWND h, face_kind kind, const face_state& state);
 // shows its focus visual only for the keyboard, so a focused control shows
 // its ring only then.
 bool band_focus_cues(HWND h);
-// The band's text font for `h` (band_font), its grayscale copy while it's
-// on the band's glass (CONTRIBUTING.md: no ClearType over the backdrop).
-HFONT band_text_font(HWND h, const band_density& density);
+// The band's text font for `h` (band_font) on a face of `kind`: ClearType
+// where the face under the text is opaque (a button's, a combo box's, the
+// accent's, opaque in the band too: band_face_ground), its grayscale copy
+// on the band's glass where it isn't (a subtle face, the backdrop through
+// it: CONTRIBUTING.md, no ClearType over the backdrop).
+HFONT band_text_font(HWND h, const band_density& density, face_kind kind);
 // Where a line of `font` goes in `height` from `top`: its capitals' ink
 // centred, as a band field centres its text.
 int band_text_top(HDC dc, HFONT font, int top, int height);

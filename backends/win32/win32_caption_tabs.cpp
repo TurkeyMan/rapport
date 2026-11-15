@@ -729,8 +729,7 @@ struct caption_tabs::impl
         {
             rt->BeginDraw();
             rt->SetTransform(D2D1::Matrix3x2F::Identity());
-            rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            if (params) rt->SetTextRenderingParams(params.get());
+            set_text_smoothing(rt.get(), params.get(), false);  // grayscale, or aliased
             for (const cleartype_run* t : grey)
             {
                 brush->SetColor(d2d_color(t->ink));
@@ -844,10 +843,9 @@ struct caption_tabs::impl
         runs.clear();
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        // Grayscale here (the target's premultiplied); ClearType's text is
-        // the second pass's.
-        rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        if (params) rt->SetTextRenderingParams(params.get());
+        // Grayscale here (the target's premultiplied; aliased, the user's
+        // smoothing off); ClearType's text is the second pass's.
+        set_text_smoothing(rt.get(), params.get(), false);
         rt->Clear(colors.clear ? D2D1::ColorF(0, 0, 0, 0) : d2d_color(colors.empty));
         // Where it's all opaque (in fullscreen, in high contrast): the strip.
         const RECT* everywhere = colors.clear ? nullptr : &c;

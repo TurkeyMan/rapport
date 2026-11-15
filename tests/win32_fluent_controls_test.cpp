@@ -432,6 +432,45 @@ int main(int argc, char** argv)
         static const UINT face = RegisterWindowMessageW(L"rapport-band-face");
         expect(SendMessageW(list, face, 0, 0) == 0, "a drop-down list not drawn here");
     }
+    // An editable combo box's selection made unfocused (EM_SETSEL(1, 3)):
+    // kept either way. Fluent, as WinUI's ComboBox (and any edit): not shown
+    // until it's focused, its edit without ES_NOHIDESEL. Native, Windows'
+    // own: its edit with ES_NOHIDESEL, the selection shown unfocused.
+    {
+        COMBOBOXINFO ci{};
+        ci.cbSize = sizeof ci;
+        GetComboBoxInfo(editable, &ci);
+        expect(ci.hwndItem != nullptr, "an editable combo box's edit");
+        if (ci.hwndItem)
+        {
+            const bool hides = !(GetWindowLongPtrW(ci.hwndItem, GWL_STYLE) & ES_NOHIDESEL);
+            expect(hides == fluent, std::string("an editable combo box's edit ") +
+                                        (fluent ? "without" : "with") + " ES_NOHIDESEL");
+            SendMessageW(ci.hwndItem, EM_SETSEL, 1, 3);
+            DWORD from = 0, to = 0;
+            SendMessageW(ci.hwndItem, EM_GETSEL, reinterpret_cast<WPARAM>(&from), reinterpret_cast<LPARAM>(&to));
+            expect(from == 1 && to == 3, "its unfocused selection kept: " + str(long(from)) + ".." + str(long(to)));
+            const DWORD c = GetSysColor(COLOR_HIGHLIGHT);
+            const DWORD hl = (GetRValue(c) << 16) | (GetGValue(c) << 8) | GetBValue(c);
+            const printed p = print(editable);
+            RECT e{};
+            GetWindowRect(ci.hwndItem, &e);
+            MapWindowPoints(nullptr, editable, reinterpret_cast<POINT*>(&e), 2);
+            int lit = 0;
+            for (int y = e.top; y < e.bottom; ++y)
+                for (int x = e.left; x < e.right; ++x)
+                {
+                    const DWORD v = p.at(x, y);
+                    int d = 0;
+                    for (int shift : {16, 8, 0}) d = std::max(d, std::abs(channel(v, shift) - channel(hl, shift)));
+                    lit += d <= 8;
+                }
+            expect(fluent ? lit == 0 : lit > 0, std::string("its unfocused selection ") +
+                                                    (fluent ? "not shown" : "shown, as Windows' own") + ": " +
+                                                    str(lit) + " highlight pixels");
+            SendMessageW(ci.hwndItem, EM_SETSEL, 0, 0);
+        }
+    }
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

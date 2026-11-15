@@ -19,7 +19,20 @@
 // button as an AppBarButton (the band's layer at rest, SubtleFillColor-
 // Secondary over it hovered), a checked toggle in the accent; a separator a
 // line the field's height in DividerStrokeColorDefault. Labels and check
-// boxes stay native, centred in the row. Under high contrast
+// boxes stay native, centred in the row. The text on a face that's opaque
+// under it (a button's, a menu button's, a drop-down list's, an editable
+// combo box's, an entry's) drawn as plain GDI text is in the same process
+// (the probe: DEFAULT_QUALITY, as rapport's UI fonts): ClearType, colour at
+// its edges (as Explorer's); standard, grey edges; off, aliased, ink and
+// ground alone. A drop-down list's own font (its list's) isn't the grayscale
+// copy; a flat button's text, on the band's translucent layer at rest, has no
+// colour (CONTRIBUTING.md). What the probe drew, and the runner's setting,
+// are printed on every run ("fringe check: ..."; CI prints the line from
+// ctest's log). The test never changes the setting: win32-band-controls-
+// smoothing-off runs it under rapport-win32-font-smoothing-run, which turns
+// smoothing off before the test's process starts and puts it back after (a
+// CI runner's only); there the probe must have drawn without it. Under high
+// contrast
 // (rapport-win32-high-contrast-run, CI only): none of it drawn, the native
 // controls at the band's heights.
 //
@@ -33,12 +46,16 @@
 #include <windows.h>
 // After windows.h, which they need.
 #include <commctrl.h>
+#include <d2d1.h>
+#include <dwrite.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -56,6 +73,9 @@ void set_text_scale_for_tests(
     float scale);  // win32_common.h (which wants the backend's include paths)
 void set_band_density_for_tests(int compact);  // win32_band_field.h
 void set_dpi_for_tests(UINT dpi);              // win32_common.h
+void set_font_smoothing_for_tests(int smoothing);
+std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence);
+std::vector<uint32_t> rows_text_drawn_for_tests(int w, int h);
 }  // namespace rap::win32
 #endif
 
@@ -152,6 +172,18 @@ int luma(DWORD v)
 // -- what's expected ------------------------------------------------------
 
 bool g_dark = false;
+
+// A list's rows (Direct2D's text, in the row window under its band).
+class rows_model : public rap::list_model
+{
+public:
+    size_t row_count() const override { return 3; }
+    std::string text(size_t row, size_t col) const override
+    {
+        return (col == 0 ? "Name " : "Note ") + std::to_string(row);
+    }
+};
+rows_model g_rows;
 
 // WinUI's colours (#AARRGGBB), as backends/win32/win32_band_face.cpp has
 // them, each over what's under it.
@@ -547,6 +579,503 @@ void check_separator(HWND top, HWND sep, const density& d, const std::string& at
                str(r.bottom - r.top));
 }
 
+// The runner's font smoothing: off, standard or ClearType.
+struct smoothing
+{
+    BOOL on = FALSE;
+    UINT type = 0;
+};
+smoothing font_smoothing()
+{
+    smoothing s;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &s.on, 0);
+    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &s.type, 0);
+    return s;
+}
+std::string smoothing_name(const smoothing& s)
+{
+    return !s.on ? "off" : s.type == FE_FONTSMOOTHINGCLEARTYPE ? "ClearType" : "standard";
+}
+bool runner_cleartype()
+{
+    const smoothing s = font_smoothing();
+    return s.on && s.type == FE_FONTSMOOTHINGCLEARTYPE;
+}
+// What text looks like printed: no colour (aliased, or any grey: edges or
+// not), grey edges (standard smoothing), or ClearType's fringes.
+enum class text_look
+{
+    no_colour,
+    grey_edges,
+    cleartype,
+    aliased,   // two colours: no colour, partial pixels at most max(2, 2% of its ink)
+    smoothed,  // edges (more than 10), ClearType's colour or grey: either
+};
+// What plain GDI text looks like in this process (probe_text, in main);
+// the controls' text on opaque faces is held to it.
+text_look g_text_look = text_look::no_colour;
+bool g_probed = false;  // probe_text could tell
+text_look runner_text()
+{
+    return g_text_look;
+}
+int apart(DWORD a, DWORD b)
+{
+    int d = 0;
+    for (int shift : {16, 8, 0}) d = std::max(d, std::abs(channel(a, shift) - channel(b, shift)));
+    return d;
+}
+
+// A printed control's text in `area`, on `ground` (its face's colour): its
+// ink the pixel furthest from the ground; its edge pixels, partly covered
+// (more than 24 levels from both the ground and the ink in some channel),
+// and those of them with colour (ClearType's fringes: channels more than 4
+// apart; the ground and the ink grey); the most any inked pixel's channels
+// part. Edges, not ink, so glyphs' solid stems (more of them at a larger
+// scale) don't count; the text's area only, no chevron.
+struct ink_colour
+{
+    int ink = 0;  // every pixel inked (more than 16 levels off the ground)
+    int edges = 0, fringed = 0, chroma = 0;
+};
+ink_colour ink_colour_of(const printed& p, const RECT& area, DWORD ground)
+{
+    ink_colour out;
+    DWORD ink = ground;
+    for (int y = area.top; y < area.bottom; ++y)
+        for (int x = area.left; x < area.right; ++x)
+            if (apart(p.at(x, y), ground) > apart(ink, ground)) ink = p.at(x, y);
+    for (int y = area.top; y < area.bottom; ++y)
+        for (int x = area.left; x < area.right; ++x)
+        {
+            const DWORD v = p.at(x, y);
+            if (apart(v, ground) <= 16) continue;
+            ++out.ink;
+            const int hi = std::max({channel(v, 16), channel(v, 8), channel(v, 0)});
+            const int lo = std::min({channel(v, 16), channel(v, 8), channel(v, 0)});
+            out.chroma = std::max(out.chroma, hi - lo);
+            if (apart(v, ground) <= 24 || apart(v, ink) <= 24) continue;
+            ++out.edges;
+            out.fringed += hi - lo > 4;
+        }
+    return out;
+}
+
+// Where a control's text is, in its printed copy at `dpi`.
+enum class text_at
+{
+    face,   // a button's, an entry's: inside its border
+    list,   // a drop-down list's: up to its chevron's column (38)
+    menu,   // a menu button's: left of its chevron (a 12 square 8 after the text, 11 in)
+    combo,  // an editable combo box's: its edit
+};
+RECT text_area(HWND h, text_at where, UINT dpi)
+{
+    RECT w{};
+    GetWindowRect(h, &w);
+    const int width = w.right - w.left, height = w.bottom - w.top, in = px(4, dpi);
+    switch (where)
+    {
+    case text_at::list: return {in, in, width - px(38, dpi), height - in};
+    case text_at::menu: return {in, in, width - px(11 + 8 + 12, dpi), height - in};
+    case text_at::combo:
+    {
+        COMBOBOXINFO info{};
+        info.cbSize = sizeof info;
+        GetComboBoxInfo(h, &info);
+        if (info.hwndItem) return rect_in(h, info.hwndItem);
+        break;
+    }
+    case text_at::face: break;
+    }
+    return {in, in, width - in, height - in};
+}
+
+// `h`'s text as printed at `dpi`: ClearType (a third of its edge pixels or
+// more fringed) when `cleartype`, else grey (no inked pixel's channels more
+// than 2 apart). Its ground is read 4 px (scaled) in from its left edge at
+// mid-height, inside its border (1 px scaled, or a focus ring's 3, never
+// drawn here) and before its text (10 px in or more): it must be `face`,
+// within 2 levels, or nothing's measured.
+// What's wrong with text measured as `c` and meant to look `look` ("" if
+// nothing): ink always (more than 20 pixels); no colour anywhere unless
+// ClearType; edges to look at (more than 10) with smoothing (grey ones, or a
+// third or more fringed with ClearType). Aliased text, smoothing off, is ink
+// and ground alone: no edges, and right.
+std::string text_fault(const ink_colour& c, text_look look)
+{
+    if (c.ink <= 20) return "no text printed";
+    if (look == text_look::smoothed) return c.edges <= 10 ? "no edges to look at" : "";
+    if (look != text_look::cleartype && (c.fringed != 0 || c.chroma > 2)) return "colour in it";
+    if (look == text_look::aliased) return c.edges > std::max(2, c.ink / 50) ? "smoothed, not aliased" : "";
+    if (look == text_look::no_colour) return "";
+    if (c.edges <= 10) return "no edges to look at";
+    if (look == text_look::cleartype && c.fringed * 3 < c.edges) return "too few edges fringed";
+    return "";
+}
+const char* look_name(text_look look)
+{
+    return look == text_look::cleartype    ? "ClearType"
+           : look == text_look::grey_edges ? "grey, smoothed"
+           : look == text_look::aliased    ? "aliased"
+           : look == text_look::smoothed   ? "smoothed, ClearType or grey"
+                                           : "without colour";
+}
+
+// Plain GDI text in this process, as the runner's font smoothing draws it:
+// Segoe UI at 14 px, DEFAULT_QUALITY (as rapport's UI fonts are), dark on
+// light into a 32-bit DIB, measured as a control's text is. Its look, or
+// false if it's none of them (no text, or colour with too few edges).
+bool probe_text(text_look& look, ink_colour& c, const wchar_t* face = L"Segoe UI")
+{
+    const int w = 320, h = 40;
+    const DWORD ground = 0xF0F0F0;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp || !bits)
+    {
+        if (bmp) DeleteObject(bmp);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+        return false;
+    }
+    HGDIOBJ old = SelectObject(mem, bmp);
+    std::fill_n(static_cast<DWORD*>(bits), size_t(w) * h, ground);
+    HFONT font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+                             DEFAULT_PITCH, face);
+    HGDIOBJ old_font = SelectObject(mem, font);
+    SetBkMode(mem, TRANSPARENT);
+    SetTextColor(mem, RGB(0x1A, 0x1A, 0x1A));
+    const wchar_t text[] = L"Author Email, Subject, master";
+    TextOutW(mem, 8, 10, text, int(std::size(text) - 1));
+    GdiFlush();
+    printed p;
+    p.w = w;
+    p.h = h;
+    p.px.assign(static_cast<DWORD*>(bits), static_cast<DWORD*>(bits) + size_t(w) * h);
+    for (DWORD& v : p.px) v &= 0xffffff;
+    SelectObject(mem, old_font);
+    DeleteObject(font);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    c = ink_colour_of(p, RECT{0, 0, w, h}, ground);
+    for (text_look l : {text_look::cleartype, text_look::grey_edges, text_look::no_colour})
+        if (text_fault(c, l).empty())
+        {
+            look = l;
+            return true;
+        }
+    return false;
+}
+
+// text_fault on made text, as each smoothing would draw it, whatever the
+// runner's (never changed for this): 2 px stems in ink on a grey ground,
+// each edge column the ground (off: aliased), grey (standard) or tinted
+// (ClearType).
+void check_text_fault()
+{
+    const DWORD ground = 0xF0F0F0, ink = 0x1A1A1A;
+    auto made = [&](DWORD edge)
+    {
+        printed p;
+        p.w = 40;
+        p.h = 20;
+        p.px.assign(size_t(p.w) * p.h, ground);
+        for (int y = 4; y < 16; ++y)
+            for (int x = 4; x + 3 < 36; x += 6)
+            {
+                p.px[size_t(y) * p.w + x] = edge;
+                p.px[size_t(y) * p.w + x + 1] = ink;
+                p.px[size_t(y) * p.w + x + 2] = ink;
+                p.px[size_t(y) * p.w + x + 3] = edge;
+            }
+        return ink_colour_of(p, RECT{0, 0, p.w, p.h}, ground);
+    };
+    const ink_colour aliased = made(ground), grey = made(0x858585), tinted = made(0xC0802A);
+    const struct
+    {
+        const char* what;
+        ink_colour c;
+        text_look look;
+        bool right;
+    } cases[] = {
+        {"aliased text, smoothing off", aliased, text_look::no_colour, true},
+        {"grey edges, smoothing off", grey, text_look::no_colour, true},
+        {"tinted edges, smoothing off", tinted, text_look::no_colour, false},
+        {"grey edges, standard", grey, text_look::grey_edges, true},
+        {"aliased text, standard", aliased, text_look::grey_edges, false},
+        {"tinted edges, standard", tinted, text_look::grey_edges, false},
+        {"tinted edges, ClearType", tinted, text_look::cleartype, true},
+        {"grey edges, ClearType", grey, text_look::cleartype, false},
+        {"aliased text, ClearType", aliased, text_look::cleartype, false},
+        {"no text", ink_colour{}, text_look::no_colour, false},
+    };
+    for (const auto& k : cases)
+        expect(text_fault(k.c, k.look).empty() == k.right,
+               std::string("made text: ") + k.what + (k.right ? " passes" : " fails") + ": \"" +
+                   text_fault(k.c, k.look) + "\"");
+}
+
+// Direct2D text at `px` (Segoe UI), dark on light, aliased or grayscale,
+// GDI-classic: measured as a control's text is. Empty if not drawn.
+std::optional<ink_colour> d2d_text(float size, bool aliased)
+{
+    ID2D1Factory* d2d = nullptr;
+    IDWriteFactory* dw = nullptr;
+    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d)) ||
+        FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(&dw))))
+    {
+        if (d2d) d2d->Release();
+        return std::nullopt;
+    }
+    const int w = 600, h = 80;
+    const DWORD ground = 0xF0F0F0;
+    std::optional<ink_colour> out;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = bmp ? SelectObject(mem, bmp) : nullptr;
+    ID2D1DCRenderTarget* rt = nullptr;
+    ID2D1SolidColorBrush* brush = nullptr;
+    IDWriteRenderingParams* def = nullptr;
+    IDWriteRenderingParams* params = nullptr;
+    IDWriteTextFormat* format = nullptr;
+    const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+        96, 96);
+    if (bits && SUCCEEDED(d2d->CreateDCRenderTarget(&props, &rt)) &&
+        SUCCEEDED(rt->CreateSolidColorBrush(D2D1::ColorF(0x1A / 255.f, 0x1A / 255.f, 0x1A / 255.f), &brush)) &&
+        SUCCEEDED(dw->CreateRenderingParams(&def)) &&
+        SUCCEEDED(dw->CreateCustomRenderingParams(def->GetGamma(), def->GetEnhancedContrast(),
+                                                  def->GetClearTypeLevel(), def->GetPixelGeometry(),
+                                                  aliased ? DWRITE_RENDERING_MODE_ALIASED
+                                                          : DWRITE_RENDERING_MODE_GDI_CLASSIC,
+                                                  &params)) &&
+        SUCCEEDED(dw->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                       DWRITE_FONT_STRETCH_NORMAL, size, L"", &format)))
+    {
+        std::fill_n(static_cast<DWORD*>(bits), size_t(w) * h, ground);
+        const RECT r{0, 0, w, h};
+        if (SUCCEEDED(rt->BindDC(mem, &r)))
+        {
+            rt->BeginDraw();
+            rt->SetTextRenderingParams(params);
+            rt->SetTextAntialiasMode(aliased ? D2D1_TEXT_ANTIALIAS_MODE_ALIASED : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            const wchar_t text[] = L"Name 0, Note 0, Author Email";
+            rt->DrawText(text, UINT32(std::size(text) - 1), format, D2D1::RectF(8, 8, float(w), float(h)), brush);
+            if (SUCCEEDED(rt->EndDraw()))
+            {
+                GdiFlush();
+                printed p;
+                p.w = w;
+                p.h = h;
+                p.px.assign(static_cast<DWORD*>(bits), static_cast<DWORD*>(bits) + size_t(w) * h);
+                for (DWORD& v : p.px) v &= 0xffffff;
+                out = ink_colour_of(p, RECT{0, 0, w, h}, ground);
+            }
+        }
+    }
+    for (IUnknown* u : std::initializer_list<IUnknown*>{format, params, def, brush, rt})
+        if (u) u->Release();
+    if (old) SelectObject(mem, old);
+    if (bmp) DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    dw->Release();
+    d2d->Release();
+    return out;
+}
+
+// The aliased look told from grayscale in Direct2D text at 12, 24 and 28 px
+// (12 px text at 100%, 200%, about 233%): aliased passes, grayscale fails
+// it (and passes as grey edges).
+void check_aliased_predicate()
+{
+    for (const float size : {12.f, 24.f, 28.f})
+    {
+        const std::optional<ink_colour> a = d2d_text(size, true), g = d2d_text(size, false);
+        const std::string at = " at " + str(long(size)) + " px";
+        expect(a && g, "Direct2D's text drawn, aliased and grayscale" + at);
+        if (!a || !g) continue;
+        expect(text_fault(*a, text_look::aliased).empty(),
+               "aliased Direct2D text passes as aliased" + at + ": " + str(a->edges) + " partial of " +
+                   str(a->ink) + " ink, \"" + text_fault(*a, text_look::aliased) + "\"");
+        expect(!text_fault(*g, text_look::aliased).empty() && text_fault(*g, text_look::grey_edges).empty(),
+               "grayscale Direct2D text fails as aliased, passes as grey edges" + at + ": " + str(g->edges) +
+                   " partial of " + str(g->ink) + " ink");
+    }
+}
+
+void check_text(HWND h, text_at where, text_look look, UINT dpi, DWORD face,
+                const std::string& what)
+{
+    const printed p = print(h);
+    const DWORD ground = p.at(px(4, dpi), p.h / 2);
+    expect(apart(ground, face) <= 2,
+           "its face " + hex(face) + " where its ground is read" + what + ": " + hex(ground));
+    if (apart(ground, face) > 2) return;
+    const ink_colour c = ink_colour_of(p, text_area(h, where, dpi), ground);
+    const std::string fault = text_fault(c, look);
+    expect(fault.empty(), "its text " + std::string(look_name(look)) + what + ": " +
+                              (fault.empty() ? "" : fault + ", ") + str(c.ink) + " ink pixels, " +
+                              str(c.fringed) + " of " + str(c.edges) +
+                              " edge pixels with colour, chroma " + str(c.chroma));
+}
+
+// The texts checked at each scale, on their faces (ControlFillColorDefault
+// over the band's colour): a button's (no icon), a menu button's, a
+// drop-down list's, an editable combo box's, an entry's (given text for
+// it); any null left out.
+struct texts
+{
+    HWND button = nullptr, menu = nullptr, list = nullptr, combo = nullptr, entry = nullptr;
+};
+void check_texts(const texts& t, UINT dpi, const std::string& here)
+{
+    const text_look look = runner_text();
+    const DWORD face = over(colours().fill, band_fill());
+    const std::pair<HWND, text_at> each[] = {{t.button, text_at::face},
+                                             {t.menu, text_at::menu},
+                                             {t.list, text_at::list},
+                                             {t.combo, text_at::combo},
+                                             {t.entry, text_at::face}};
+    const char* names[] = {"a button", "a menu button", "a drop-down list", "an editable combo box",
+                           "an entry"};
+    for (size_t i = 0; i < std::size(each); ++i)
+        if (each[i].first)
+            check_text(each[i].first, each[i].second, look, dpi, face,
+                       " (" + std::string(names[i]) + here + ")");
+}
+
+// The quality a UI font's made in for the runner's font smoothing: off,
+// aliased; standard, grayscale; ClearType.
+BYTE smoothing_quality()
+{
+    const smoothing now = font_smoothing();
+    return !now.on                                  ? NONANTIALIASED_QUALITY
+           : now.type == FE_FONTSMOOTHINGCLEARTYPE ? CLEARTYPE_QUALITY
+                                                    : ANTIALIASED_QUALITY;
+}
+
+// `h`'s font a UI font as made for the runner's smoothing (smoothing_
+// quality): for a drop-down list (its list's, a window of its own), not
+// glass's grayscale copy unless the smoothing's standard anyway.
+void check_font_quality(HWND h, const std::string& name, const std::string& what, int want = -1)
+{
+    if (want < 0) want = smoothing_quality();
+    LOGFONTW lf{};
+    GetObjectW(reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)), sizeof lf, &lf);
+    expect(lf.lfQuality == want, name + "'s font in the font smoothing, quality " + str(want) + what + ": " +
+                                     str(lf.lfQuality));
+}
+
+// Direct2D text drawn as a list's rows draw theirs, measured as a
+// control's text is: its look (ClearType, grey edges or aliased), or false
+// if it couldn't be drawn or told. Drawn, not predicted from DirectWrite's
+// numbers (GDI-classic draws ClearType's colour at level 0, for one), and
+// through the backend itself (rows_text_drawn_for_tests: row_rendering_
+// params and set_text_smoothing): static builds only. A copy of that here
+// for plugin builds could drift and prove nothing.
+bool classify(const printed& p, DWORD ground, text_look& look, ink_colour& c)
+{
+    c = ink_colour_of(p, RECT{0, 0, p.w, p.h}, ground);
+    for (text_look l : {text_look::cleartype, text_look::grey_edges, text_look::no_colour})
+        if (text_fault(c, l).empty())
+        {
+            look = l;
+            return true;
+        }
+    return false;
+}
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+bool probe_rows_text(text_look& look, ink_colour& c)
+{
+    const int w = 320, h = 40;
+    const std::vector<uint32_t> px = rap::win32::rows_text_drawn_for_tests(w, h);
+    if (px.empty()) return false;
+    printed p;
+    p.w = w;
+    p.h = h;
+    p.px.assign(px.begin(), px.end());
+    for (DWORD& v : p.px) v &= 0xffffff;
+    return classify(p, 0xF0F0F0, look, c);
+}
+#endif
+// What a list's rows look like now. Standard and off are held to their own
+// looks, grey edges and aliased, never to the probe: a probe sharing the
+// rows' way of setting the smoothing would share a mistake in it. Only
+// ClearType's look is the probe's (drawn as the rows draw: GDI-classic's
+// ClearType is what it draws, not what DirectWrite's numbers would say),
+// said in the message (`why`); in plugin builds, which have no probe,
+// smoothed, ClearType's colour or grey.
+text_look rows_look(text_look asked, std::string& why)
+{
+    if (asked == text_look::no_colour) return text_look::aliased;
+    if (asked != text_look::cleartype) return asked;
+#ifndef RAPPORT_TEST_BUILTIN_WIN32
+    why = " (the rows' Direct2D probe is static builds' only: smoothed, ClearType's colour or grey)";
+    return text_look::smoothed;
+#else
+    text_look look = asked;
+    ink_colour c{};
+    if (!probe_rows_text(look, c))
+    {
+        why = " (the rows' Direct2D probe couldn't be drawn or told: " + std::string(look_name(asked)) +
+              " expected)";
+        return asked;
+    }
+    why = " (the rows' Direct2D probe " + std::string(look_name(look)) + ": " + str(c.fringed) + " of " +
+          str(c.edges) + " edge pixels with colour)";
+    return look;
+#endif
+}
+
+// A list's first row's text as printed (WM_PRINT: its rows are Direct2D's,
+// drawn in the list's custom draw), looking `look`; what was measured.
+ink_colour check_list_rows(HWND list, text_look look, const std::string& what)
+{
+    const printed p = print(list);
+    RECT row{};
+    if (!ListView_GetItemRect(list, 0, &row, LVIR_BOUNDS))
+    {
+        expect(false, "a list's first row" + what);
+        return {};
+    }
+    // The row in the printed copy, which has the list's frame round its
+    // client area (the row's rectangle is the client area's): the first
+    // column's inside alone, no frame, no column divider. Its ground past
+    // the column's text, at its right.
+    RECT w{};
+    GetWindowRect(list, &w);
+    POINT o{0, 0};
+    ClientToScreen(list, &o);
+    const int dx = o.x - w.left, dy = o.y - w.top;
+    const int col = ListView_GetColumnWidth(list, 0);
+    const RECT area{row.left + dx + 2, row.top + dy, row.left + dx + col - 4, row.bottom + dy};
+    const DWORD ground = p.at(area.right - 2, (area.top + area.bottom) / 2);
+    const ink_colour c = ink_colour_of(p, area, ground);
+    const std::string fault = text_fault(c, look);
+    expect(fault.empty(), "a list's row text " + std::string(look_name(look)) + what + ": " +
+                              (fault.empty() ? "" : fault + ", ") + str(c.ink) + " ink pixels, " +
+                              str(c.fringed) + " of " + str(c.edges) + " edge pixels with colour");
+    return c;
+}
+void check_list_font(HWND list, const std::string& what)
+{
+    check_font_quality(list, "a drop-down list", what);
+}
+
 // A font's height in px (its LOGFONT's, unsigned).
 long font_height(HWND h)
 {
@@ -561,8 +1090,10 @@ long font_height(HWND h)
 // text is; and each combo box still the field's height once moved again (a
 // combo box finds its own height from its font as it's moved).
 void check_at_dpi(HWND top, const std::vector<HWND>& controls, const std::vector<HWND>& combos,
-                  HWND editable, HWND field, const density& d, UINT dpi, const std::string& here)
+                  HWND editable, HWND field, const texts& text, const density& d, UINT dpi,
+                  const std::string& here)
 {
+    check_texts(text, dpi, here);
     for (HWND c : controls)
     {
         const RECT r = rect_in(top, c);
@@ -610,11 +1141,11 @@ void check_at_dpi(HWND top, const std::vector<HWND>& controls, const std::vector
 // control the UI font at the new DPI). On CI the display's own scale is
 // changed instead (--transitions).
 void check_dpi(HWND top, const std::vector<HWND>& controls, const std::vector<HWND>& combos,
-               HWND editable, HWND field, const density& d, const std::string& at)
+               HWND editable, HWND field, const texts& text, const density& d, const std::string& at)
 {
     const UINT dpi = GetDpiForWindow(top);
     UINT was = dpi;
-    for (const UINT to : {120u, 144u, dpi})
+    for (const UINT to : {120u, 144u, 192u, dpi})
     {
         rap::win32::set_dpi_for_tests(to == dpi ? 0 : to);
         RECT wr{};
@@ -624,7 +1155,7 @@ void check_dpi(HWND top, const std::vector<HWND>& controls, const std::vector<HW
         was = to;
         SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&suggested));
         pump();
-        check_at_dpi(top, controls, combos, editable, field, d, to,
+        check_at_dpi(top, controls, combos, editable, field, text, d, to,
                      at + ", " + str(long(to)) + " dpi");
     }
 }
@@ -900,13 +1431,15 @@ int transitions(rap::ui& ui, const density& d)
     expect(fetch && field && list && editable, "its controls");
     if (!(fetch && field && list && editable)) return 1;
     const std::string at = std::string(", ") + d.name;
-    check_at_dpi(top, {fetch, field, list, editable}, {list, editable}, editable, field, d,
+    SetWindowTextW(field, L"Subject");
+    const texts text{fetch, nullptr, list, editable, field};
+    check_at_dpi(top, {fetch, field, list, editable}, {list, editable}, editable, field, text, d,
                  GetDpiForWindow(top), at + ", before");
     return scale_transitions(top,
                              [&](UINT dpi, const std::string& here)
                              {
                                  check_at_dpi(top, {fetch, field, list, editable}, {list, editable},
-                                              editable, field, d, dpi, at + here);
+                                              editable, field, text, d, dpi, at + here);
                              });
 }
 
@@ -935,7 +1468,7 @@ void run(rap::ui& ui, const density& d, bool hc)
                                     drop_down{{"Author Email", "Subject"}, 0},
                                     combo{{"one", "two"}, "one"}, label{"Find"}, check{"Wrap"},
                                     tool_button{rap::icon::named("go-up"), "Toggle"}.toggle(true)},
-                               label{"content"}.stretch()}}}
+                               list{{{"Name", 160_px}, {"Notes", 160_px}}, &g_rows}.stretch()}}}
                       .size(1100_px, 300_px)
                       .margins(false)
                       .base_surface()
@@ -945,7 +1478,8 @@ void run(rap::ui& ui, const density& d, bool hc)
         window{bar_title,
                {vbox{toolbar{tool_button{rap::icon::named("go-previous"), "Back"}, separator{},
                              tool_button{rap::icon::named("go-next"), "Forward"}, button{"Fetch"},
-                             drop_down{{"Author Email"}, 0}, entry{}.stretch()},
+                             drop_down{{"Author Email"}, 0}, button{"Walk"}.flat(),
+                             entry{}.stretch()},
                      label{"content"}.stretch()}}}
             .size(1000_px, 300_px)
             .margins(false)
@@ -979,8 +1513,8 @@ void run(rap::ui& ui, const density& d, bool hc)
 
     HWND strip = child(top2, TOOLBARCLASSNAMEW);
     HWND fetch2 = child(top2, L"Button", L"Fetch"), list2 = combo_of(top2, true),
-         entry2 = child(top2, L"Edit");
-    expect(strip && fetch2 && list2 && entry2, "the toolbar's controls" + at);
+         entry2 = child(top2, L"Edit"), flat2 = child(top2, L"Button", L"Walk");
+    expect(strip && fetch2 && list2 && entry2 && flat2, "the toolbar's controls" + at);
     if (strip && fetch2 && list2 && entry2)
     {
         check_heights(top2, {fetch2, list2, entry2}, {}, d, at + ", a toolbar");
@@ -1003,6 +1537,76 @@ void run(rap::ui& ui, const density& d, bool hc)
         check_tool_button(pull, false, at);
         check_tool_button(toggle, true, at);
         check_combo(editable, at);
+        // Text on an opaque face ClearType (the runner's), on the layer grey.
+        const UINT text_dpi = GetDpiForWindow(top);
+        SetWindowTextW(entry_h, L"Subject");
+        // An editable combo box's text, set while it's never been focused:
+        // its selection as the combo box made it (kept: an accessibility
+        // client's, or the app's, is the edit's own), but not shown while
+        // it's unfocused (no ES_NOHIDESEL), so never on the highlight.
+        {
+            COMBOBOXINFO ci{};
+            ci.cbSize = sizeof ci;
+            GetComboBoxInfo(editable, &ci);
+            const bool hides = ci.hwndItem && !(GetWindowLongPtrW(ci.hwndItem, GWL_STYLE) & ES_NOHIDESEL);
+            expect(hides, "an editable combo box's edit hides its selection unfocused" + at);
+            if (ci.hwndItem)
+            {
+                const DWORD highlight = GetSysColor(COLOR_HIGHLIGHT);
+                const DWORD hl = (GetRValue(highlight) << 16) | (GetGValue(highlight) << 8) | GetBValue(highlight);
+                auto lit = [&]
+                {
+                    const printed p = print(editable);
+                    const RECT e = rect_in(editable, ci.hwndItem);
+                    int n = 0;
+                    for (int y = e.top; y < e.bottom; ++y)
+                        for (int x = e.left; x < e.right; ++x) n += apart(p.at(x, y), hl) <= 8;
+                    return n;
+                };
+                // As set (the combo box selects it all) and after a resize
+                // (it selects it all again): not drawn.
+                expect(lit() == 0, "its text set unfocused, no highlight (" + hex(hl) + ")" + at);
+                const RECT r = rect_in(top, editable);
+                SetWindowPos(editable, nullptr, r.left, r.top, r.right - r.left + 1, r.bottom - r.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(editable, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+                pump(2);
+                expect(lit() == 0, "resized unfocused, no highlight" + at);
+                // A selection made unfocused (as UI Automation's or the
+                // app's would be): kept, and not drawn.
+                SendMessageW(ci.hwndItem, EM_SETSEL, 1, 3);
+                DWORD from = 0, to = 0;
+                SendMessageW(ci.hwndItem, EM_GETSEL, reinterpret_cast<WPARAM>(&from),
+                             reinterpret_cast<LPARAM>(&to));
+                expect(from == 1 && to == 3, "an unfocused EM_SETSEL(1, 3) kept" + at + ": " + str(long(from)) +
+                                                 ".." + str(long(to)));
+                expect(lit() == 0, "that selection not drawn unfocused" + at);
+                // Focused (its own state follows WM_SETFOCUS: a never-shown
+                // window can't take the focus): the selection there, and
+                // drawn.
+                SendMessageW(ci.hwndItem, WM_SETFOCUS, 0, 0);
+                SendMessageW(ci.hwndItem, EM_GETSEL, reinterpret_cast<WPARAM>(&from),
+                             reinterpret_cast<LPARAM>(&to));
+                const int shown = lit();
+                SendMessageW(ci.hwndItem, WM_KILLFOCUS, 0, 0);
+                expect(from == 1 && to == 3 && shown > 0,
+                       "focused, the selection still 1..3 and drawn" + at + ": " + str(long(from)) + ".." +
+                           str(long(to)) + ", " + str(shown) + " highlight pixels");
+                SendMessageW(ci.hwndItem, EM_SETSEL, 0, 0);
+            }
+        }
+        check_texts({nullptr, menu_b, list, editable, entry_h}, text_dpi, at);
+        check_texts({fetch2, nullptr, list2, nullptr, nullptr}, text_dpi, ", a toolbar's" + at);
+        if (flat2)
+            check_text(flat2, text_at::face, text_look::no_colour, text_dpi,
+                       band_layer_px() & 0xffffff,
+                       " (a flat button at rest, on the layer" + at + ")");
+        check_list_font(list, at);
+        // The entry's font (a UI font) made in the user's font smoothing:
+        // ClearType, standard's grayscale, or off's aliased, explicitly.
+        check_font_quality(entry_h, "an entry", at);
+        if (list2) check_list_font(list2, ", a toolbar's" + at);
         // An entry in the band at rest: TextControlElevationBorderBrush, as
         // the combo box's (the window never shown, so never active).
         {
@@ -1033,15 +1637,103 @@ void run(rap::ui& ui, const density& d, bool hc)
                            argb_hex(band_layer_px()) + at + ": " + argb_hex(p.raw(0, 0)));
             }
             check_button(fetch, false, "a button, out of the band and back", at);
+            check_list_font(list, ", out of the band and back" + at);
+            check_text(list, text_at::list, runner_text(), GetDpiForWindow(top),
+                       over(colours().fill, band_fill()),
+                       " (a drop-down list, out of the band and back" + at + ")");
             check_combo_fill(editable,
                              " (an editable combo box, out of the band and back" + at + ")");
         }
         else
             expect(false, "the row's tabs bound" + at);
+        // A list's rows (Direct2D's text) in the runner's smoothing, as plain
+        // text is: ClearType's colour under win32-band-controls-cleartype,
+        // grey edges at standard, aliased off.
+        if (HWND rows = child(top, WC_LISTVIEWW))
+        {
+            std::string why;
+            const text_look look = rows_look(runner_text(), why);
+            check_list_rows(rows, look, " (the runner's smoothing" + at + ")" + why);
+        }
+        else
+            expect(false, "the row window's list" + at);
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
         check_dpi(top, {pull, menu_b, fetch, entry_h, list, editable, toggle}, {list, editable},
-                  editable, entry_h, d, at);
+                  editable, entry_h, {nullptr, menu_b, list, editable, entry_h}, d, at);
+        // The font smoothing changed while the window's open (the smoothing
+        // test hook, the setting untouched; WM_SETTINGCHANGE as Windows sends
+        // it): the UI fonts renewed in it, the entry's and the drop-down
+        // list's (the band's) quality following, the list's rows (Direct2D)
+        // drawn in it. ClearType, standard, off, ClearType; then the
+        // runner's own again.
+        if (HWND rows = child(top, WC_LISTVIEWW))
+        {
+            const struct
+            {
+                int smoothing;
+                BYTE quality;
+                text_look look;
+                const char* name;
+            } steps[] = {{2, CLEARTYPE_QUALITY, text_look::cleartype, "ClearType"},
+                         {1, ANTIALIASED_QUALITY, text_look::grey_edges, "standard"},
+                         {0, NONANTIALIASED_QUALITY, text_look::no_colour, "off"},
+                         {2, CLEARTYPE_QUALITY, text_look::cleartype, "ClearType again"}};
+            // Each step's ink at least 40% of ClearType's: all the row's text
+            // drawn (aliased, about 57%), not what's left when Direct2D's
+            // drawing fails (D1136: about 15%).
+            int cleartype_ink = 0;
+            for (const auto& st : steps)
+            {
+                rap::win32::set_font_smoothing_for_tests(st.smoothing);
+                SendMessageW(top, WM_SETTINGCHANGE, SPI_SETFONTSMOOTHING, 0);
+                pump();
+                std::string here = std::string(", smoothing changed to ") + st.name + at;
+                // The rows draw in DirectWrite's defaults as the system has
+                // them (the user's ClearType level and pixel geometry kept):
+                // ClearType's colour only where those can give it (not on a
+                // runner at standard, the hook asking for ClearType), grey
+                // edges otherwise.
+                std::string why;
+                const text_look look = rows_look(st.look, why);
+                here += why;
+                check_font_quality(entry_h, "an entry", here, st.quality);
+                check_font_quality(list, "a drop-down list (the band's)", here, st.quality);
+                const ink_colour c = check_list_rows(rows, look, here);
+                if (st.smoothing == 2 && !cleartype_ink) cleartype_ink = c.ink;
+                expect(c.ink * 5 >= cleartype_ink * 2,
+                       "a list's row text all drawn, " + str(c.ink) + " ink pixels against ClearType's " +
+                           str(cleartype_ink) + here);
+            }
+            // Off at 192 dpi (the DPI hook, as Windows sends WM_DPICHANGED):
+            // the rows still aliased, larger glyphs and all; then back.
+            {
+                rap::win32::set_font_smoothing_for_tests(0);
+                SendMessageW(top, WM_SETTINGCHANGE, SPI_SETFONTSMOOTHING, 0);
+                pump();
+                const UINT was = GetDpiForWindow(top);
+                auto to_dpi = [&](UINT from, UINT to)
+                {
+                    rap::win32::set_dpi_for_tests(to == was ? 0 : to);
+                    RECT wr{};
+                    GetWindowRect(top, &wr);
+                    RECT suggested{wr.left, wr.top, wr.left + MulDiv(wr.right - wr.left, int(to), int(from)),
+                                   wr.top + MulDiv(wr.bottom - wr.top, int(to), int(from))};
+                    SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&suggested));
+                    pump();
+                };
+                to_dpi(was, 192);
+                check_list_rows(rows, text_look::aliased, ", smoothing off, 192 dpi" + at);
+                to_dpi(192, was);
+            }
+            rap::win32::set_font_smoothing_for_tests(-1);
+            SendMessageW(top, WM_SETTINGCHANGE, SPI_SETFONTSMOOTHING, 0);
+            pump();
+            check_font_quality(entry_h, "an entry", ", the runner's smoothing again" + at);
+        }
+        else
+            expect(false, "the row window's list" + at);
 #endif
+        SetWindowTextW(entry_h, L"");
     }
 }
 
@@ -1069,6 +1761,58 @@ int main(int argc, char** argv)
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
     rap::win32::set_text_scale_for_tests(1.f);
 #endif
+    check_text_fault();
+    check_aliased_predicate();
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+    // Direct2D's text in each smoothing on one target, the mode changed on
+    // it (off needs aliased rendering parameters: D1136), for a list's rows'
+    // parameters and the caption tabs'.
+    {
+        const std::string fault = rap::win32::text_smoothing_draws_for_tests({2, 0, 1, 0, 2});
+        expect(fault.empty(), "Direct2D's text drawn in each smoothing, changed on one target: " + fault);
+    }
+#endif
+    // What plain text looks like here: the controls' is held to it. Under
+    // rapport-win32-font-smoothing-run (RAPPORT_TEST_FONT_SMOOTHING_SET) the
+    // smoothing was set before this process started: the probe must show
+    // it, or GDI didn't take it and the controls' text proves nothing.
+    ink_colour probed{};
+    g_probed = probe_text(g_text_look, probed);
+    expect(g_probed, "plain GDI text probed: " + str(probed.ink) + " ink pixels, " +
+                         str(probed.fringed) + " of " + str(probed.edges) +
+                         " edge pixels with colour, chroma " + str(probed.chroma));
+    const std::string set_for_run = env("RAPPORT_TEST_FONT_SMOOTHING_SET");
+    if (set_for_run == "off")
+        expect(g_probed && g_text_look == text_look::no_colour,
+               "plain GDI text drawn without smoothing, turned off before this process started: " +
+                   std::string(look_name(g_text_look)) + ", " + str(probed.fringed) + " of " +
+                   str(probed.edges) + " edge pixels with colour, chroma " + str(probed.chroma));
+    if (set_for_run == "cleartype")
+    {
+        expect(g_probed && g_text_look == text_look::cleartype,
+               "plain GDI text drawn with ClearType, turned on before this process started: " +
+                   std::string(look_name(g_text_look)));
+        // Direct2D's ClearType, drawn as a list's rows are, with it: colour,
+        // or the run fails (positive coverage can't go quietly). The probe
+        // is static builds' (the build-26100 static job's).
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+        text_look d2d = text_look::no_colour;
+        ink_colour c{};
+        const bool told = probe_rows_text(d2d, c);
+        expect(told && d2d == text_look::cleartype,
+               "Direct2D's ClearType with colour, as a list's rows draw, ClearType turned on before this "
+               "process started: " +
+                   str(c.fringed) + " of " + str(c.edges) + " edge pixels with colour");
+#else
+        note("the rows' Direct2D probe, and its ClearType requirement, are static builds' only");
+#endif
+    }
+    if (set_for_run == "standard")
+        expect(g_probed && g_text_look == text_look::grey_edges,
+               "plain GDI text drawn with standard smoothing, grey edges, set before this process "
+               "started: " +
+                   std::string(look_name(g_text_look)) + ", " + str(probed.fringed) + " of " +
+                   str(probed.edges) + " edge pixels with colour, chroma " + str(probed.chroma));
     rap::load_options options{.backend = "win32"};
     options.look.color_scheme = rap::color_scheme::dark;
     auto ui = rap::ui::load(argc, argv, options);
@@ -1076,6 +1820,43 @@ int main(int argc, char** argv)
     const bool hc = high_contrast();
     g_dark = !hc && env("RAPPORT_THEME") != "light";
     std::printf("build %lu, %s\n", build, hc ? "high contrast" : g_dark ? "dark" : "light");
+    // Whether the text's fringe checks run: on every run, for CI's log.
+    {
+        const smoothing now = font_smoothing();
+        const std::string set_for_run = env("RAPPORT_TEST_FONT_SMOOTHING_SET");
+        // The same in rapport's UI face, for the log only: GDI's own look
+        // for it at DEFAULT_QUALITY, which rapport's fonts don't rely on.
+        text_look ui_look = text_look::no_colour;
+        ink_colour ui_ink{};
+        const bool ui_probed = probe_text(ui_look, ui_ink, L"Segoe UI Variable Text");
+        const std::string how =
+            "font smoothing " + smoothing_name(now) +
+            (set_for_run.empty() ? std::string() : ", set " + set_for_run + " for this run") +
+            ", plain text probed " + (g_probed ? look_name(g_text_look) : "as nothing known") +
+            ", Segoe UI Variable Text at DEFAULT_QUALITY " + (ui_probed ? look_name(ui_look) : "unknown") +
+            ", Direct2D's ClearType (a list's rows) " + [&]
+            {
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+                text_look l = text_look::no_colour;
+                ink_colour c{};
+                return std::string(probe_rows_text(l, c) ? look_name(l) : "unknown");
+#else
+                return std::string("not probed (static builds only)");
+#endif
+            }();
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+        const char* densities = "both densities";
+#else
+        const char* densities = env("RAPPORT_DENSITY") == "compact" ? "compact" : "standard";
+#endif
+        std::printf("fringe check: %s (build %lu, %s, %s, %s)\n",
+                    hc           ? "not run, high contrast"
+                    : !g_probed  ? "not run, plain text unprobed"
+                    : runner_text() == text_look::cleartype  ? "ran, ClearType's fringes looked for"
+                    : runner_text() == text_look::grey_edges ? "ran, grey edges looked for"
+                                                             : "ran, text without colour looked for",
+                    build, hc ? "high contrast" : g_dark ? "dark" : "light", densities, how.c_str());
+    }
     if (transitions_run)
     {
         const int r = transitions(**ui, env("RAPPORT_DENSITY") == "compact" ? compact : standard);

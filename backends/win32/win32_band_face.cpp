@@ -367,9 +367,10 @@ bool band_focus_cues(HWND h)
     return !(SendMessageW(h, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS);
 }
 
-HFONT band_text_font(HWND h, const band_density& density)
+HFONT band_text_font(HWND h, const band_density& density, face_kind kind)
 {
-    return glass_font(h, band_font(dpi_of(h), density));
+    const HFONT f = band_font(dpi_of(h), density);
+    return kind == face_kind::subtle ? glass_font(h, f) : f;
 }
 
 int band_text_top(HDC dc, HFONT font, int top, int height)

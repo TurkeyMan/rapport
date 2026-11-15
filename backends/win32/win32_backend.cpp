@@ -2431,7 +2431,7 @@ LRESULT draw_band_button(NMCUSTOMDRAW* cd, const band_density& d, face_kind kind
     paint_band_face(h, dc, r, kind, st);
     const color ink = band_face_ink(h, kind, st);
     const UINT dpi = dpi_of(h);
-    HFONT font = band_text_font(h, d);
+    HFONT font = band_text_font(h, d, kind);
     long x = r.left + (r.right - r.left - band_content_width(c, font, dpi)) / 2;
     const int saved = SaveDC(dc);
     if (c.image && *c.image)
@@ -2497,7 +2497,8 @@ public:
     SIZE measure() override
     {
         if (band_drawn())
-            return band_button_size(content(), band_text_font(h_, *band_), win_.dpi(), *band_);
+            return band_button_size(content(), band_text_font(h_, *band_, face()), win_.dpi(),
+                                    *band_);
         const SIZE t = text_extent(h_, window_text(h_));
         const bool has_text = GetWindowTextLengthW(h_) > 0;
         long w = (has_text ? t.cx : 0) + px(has_text ? 24 : 10) + (images_ ? px(has_text ? 20 : 16) : 0);
@@ -2522,15 +2523,8 @@ public:
     {
         handled = hdr->code == NM_CUSTOMDRAW && band_drawn();
         if (!handled) return 0;
-        // The dialog's default (BS_DEFPUSHBUTTON, which the dialog manager
-        // moves to a focused push button and back): AccentButtonStyle, as
-        // ContentDialog's DefaultButton.
-        const bool is_default = (GetWindowLongPtrW(h_, GWL_STYLE) & BS_TYPEMASK) == BS_DEFPUSHBUTTON;
-        return draw_band_button(reinterpret_cast<NMCUSTOMDRAW*>(hdr), *band_,
-                                is_default ? face_kind::default_button
-                                : flat_    ? face_kind::subtle
-                                           : face_kind::button,
-                                content(), false);
+        return draw_band_button(reinterpret_cast<NMCUSTOMDRAW*>(hdr), *band_, face(), content(),
+                                false);
     }
 
     bool is_default = false;
@@ -2539,6 +2533,15 @@ public:
 private:
     bool band_drawn() const { return band_ && faces_on(); }
     band_content content() const { return {&icon_, window_text(h_), false}; }
+    // Its face: the dialog's default (BS_DEFPUSHBUTTON, which the dialog
+    // manager moves to a focused push button and back) AccentButtonStyle, as
+    // ContentDialog's DefaultButton; a flat one subtle.
+    face_kind face() const
+    {
+        if ((GetWindowLongPtrW(h_, GWL_STYLE) & BS_TYPEMASK) == BS_DEFPUSHBUTTON)
+            return face_kind::default_button;
+        return flat_ ? face_kind::subtle : face_kind::button;
+    }
 
     bool flat_;
     const band_density* band_ = nullptr;
@@ -2653,6 +2656,26 @@ public:
 private:
     std::function<void(bool)> toggled_;
 };
+
+// While a combo box is made (on this thread alone): the edit it makes for
+// itself made without ES_NOHIDESEL (combo_impl).
+LRESULT CALLBACK combo_edit_hook(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HCBT_CREATEWND)
+    {
+        const HWND h = reinterpret_cast<HWND>(wp);
+        CREATESTRUCTW* cs = reinterpret_cast<CBT_CREATEWNDW*>(lp)->lpcs;
+        wchar_t cls[16]{}, parent[16]{};
+        GetClassNameW(h, cls, 16);
+        if (cs && cs->hwndParent) GetClassNameW(cs->hwndParent, parent, 16);
+        if (!_wcsicmp(cls, L"Edit") && !_wcsicmp(parent, L"ComboBox") && (cs->style & ES_NOHIDESEL))
+        {
+            cs->style &= ~LONG(ES_NOHIDESEL);
+            SetWindowLongPtrW(h, GWL_STYLE, GetWindowLongPtrW(h, GWL_STYLE) & ~LONG_PTR(ES_NOHIDESEL));
+        }
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
 
 // Edit controls report Enter only to a subclass.
 LRESULT CALLBACK enter_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
@@ -3142,7 +3165,7 @@ public:
         if (band_drawn())
         {
             const UINT dpi = win_.dpi();
-            HFONT font = band_text_font(h_, *band_);
+            HFONT font = band_text_font(h_, *band_, face_kind::button);
             long w = band_px(60, dpi);
             for (const std::string& i : items_) w = std::max(w, band_text_width(font, wide(i)));
             return {
@@ -3204,7 +3227,7 @@ public:
         const std::wstring text = window_text(h);
         if (text.empty()) return;
         const int saved = SaveDC(dc);
-        HFONT font = band_text_font(h, *band_);
+        HFONT font = band_text_font(h, *band_, face_kind::button);
         SelectObject(dc, font);
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, color_ref(ink));
@@ -3220,7 +3243,8 @@ public:
         // A new font (a new DPI) sets its height anew: the band's again.
         if (msg != WM_SETFONT) return false;
         result = DefSubclassProc(h, msg, wp, lp);
-        fit_combo_height(h, band_control_height(band_text_font(h, *band_), dpi_of(h), *band_));
+        fit_combo_height(h, band_control_height(band_text_font(h, *band_, face_kind::button),
+                                                dpi_of(h), *band_));
         return true;
     }
 
@@ -3263,13 +3287,25 @@ public:
     combo_impl(win_context& win, HWND parent, const spec::combo& s)
         : leaf(win)
     {
+        // Fluent (WinUI's ComboBox, in the band or out of it, high contrast
+        // too): its edit without ES_NOHIDESEL, which the combo box gives it
+        // as it makes it (and the edit reads only then): with it, the combo
+        // box selecting all its text whenever it's set or sized stood the
+        // text on the accent highlight while unfocused. Without it, as any
+        // edit: the selection kept, shown only while focused. Native keeps
+        // Windows' own: the selection shown unfocused.
+        HHOOK hook = fluent_controls() ? SetWindowsHookExW(WH_CBT, combo_edit_hook, nullptr, GetCurrentThreadId())
+                                       : nullptr;
         adopt(create_control(win, parent, L"COMBOBOX", L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP));
+        if (hook) UnhookWindowsHookEx(hook);
         set_items(s.items);
         set_text(s.text);
         COMBOBOXINFO info{};
         info.cbSize = sizeof info;
         if (GetComboBoxInfo(h_, &info) && info.hwndItem)
+        {
             SetWindowSubclass(info.hwndItem, enter_subclass, 1, reinterpret_cast<DWORD_PTR>(&activate_));
+        }
     }
     // Quiet, as set_text: the text put back is the app's, not the user's.
     void set_items(std::vector<std::string> items) override
@@ -5472,7 +5508,8 @@ public:
     SIZE measure() override
     {
         if (band_drawn())
-            return band_button_size(content(), band_text_font(h_, *band_), win_.dpi(), *band_);
+            return band_button_size(content(), band_text_font(h_, *band_, face_kind::button),
+                                    win_.dpi(), *band_);
         const SIZE t = text_extent(h_, window_text(h_));
         const long w = t.cx + px(24) + (images_ ? px(20) : 0);
         if (band_) return {w, std::max<long>(band_px(band_->field, win_.dpi()), t.cy + px(8))};
@@ -7504,16 +7541,22 @@ private:
                 D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
                 96, 96);
             if (FAILED(d2d_factory()->CreateDCRenderTarget(&props, row_target_.put()))) return;
-            // Crisp GDI-style glyphs, like the list_view's own text.
-            com<IDWriteRenderingParams> def, params;
-            dwrite_factory()->CreateRenderingParams(def.put());
-            if (def &&
-                SUCCEEDED(dwrite_factory()->CreateCustomRenderingParams(
-                    def->GetGamma(), def->GetEnhancedContrast(), def->GetClearTypeLevel(), def->GetPixelGeometry(),
-                    DWRITE_RENDERING_MODE_GDI_CLASSIC, params.put())))
-                row_target_->SetTextRenderingParams(params.get());
-            row_target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+            row_params_.reset();
         }
+        // Crisp GDI-style glyphs, like the list_view's own text
+        // (row_rendering_params): the system's rendering defaults as they are
+        // for the smoothing rapport reads, made again when that changes, so
+        // none kept from before a change are drawn with. The user's level
+        // and pixel geometry as they are.
+        const int smoothing = font_smoothing_cleartype() ? 2 : font_smoothing_on() ? 1 : 0;
+        if (!row_params_ || row_params_smoothing_ != smoothing)
+        {
+            row_params_ = row_rendering_params();
+            row_params_smoothing_ = smoothing;
+        }
+        // The user's font smoothing, as it is now: the mode and the
+        // parameters together (aliased ones for off).
+        set_text_smoothing(row_target_.get(), row_params_.get(), true);
         ID2D1DCRenderTarget* rt = row_target_.get();
         if (FAILED(rt->BindDC(dc, &clip))) return;
         const float s = win_.scale();
@@ -8390,6 +8433,8 @@ private:
     std::vector<bool> restored_;  // per column: given its width by set_column_widths
     bool sel_pending_ = false;  // a selection change is posted, not yet reported
     com<ID2D1DCRenderTarget> row_target_;
+    com<IDWriteRenderingParams> row_params_;  // GDI-classic, for row_target_'s smoothed text
+    int row_params_smoothing_ = -1;           // the smoothing row_params_ were made for (0 off, 1, 2 ClearType)
     std::map<std::string, com<ID2D1Bitmap>> file_icons_;  // per extension, for row_target_
     bool checks_ = false;                                 // a checkbox at the start of column 0
     bool file_view_ = false;                              // Windows 11 file_view: column 0's content inset

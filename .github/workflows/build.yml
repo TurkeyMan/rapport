@@ -171,8 +171,16 @@ jobs:
         env:
           RAPPORT_TEST_SET_HIGH_CONTRAST: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
           RAPPORT_TEST_SET_DPI: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
+          RAPPORT_TEST_SET_FONT_SMOOTHING: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
           RAPPORT_TEST_SEND_INPUT: '1'
         run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
+
+      # Whether win32-band-controls' text fringe checks ran, and the font
+      # smoothing they ran under: its own line, from ctest's log (which keeps
+      # passing tests' output too).
+      - name: Text fringe checks
+        if: always()
+        run: Get-ChildItem build/Testing/Temporary -Filter 'LastTest*.log' | Select-String -Pattern 'fringe check:' | ForEach-Object { $_.Line }
 
       - name: Shell extension
         working-directory: build/bin/Release

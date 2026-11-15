@@ -98,6 +98,39 @@ void set_dpi_for_tests(UINT dpi);
 // The system message font at `dpi` (cached; owned by the cache), in
 // Segoe UI Variable where it's Segoe UI and that's installed.
 HFONT ui_font(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f);
+// The user's font smoothing (SPI_GETFONTSMOOTHING, ...TYPE): on at all, and
+// ClearType. The UI fonts are made in it explicitly (ClearType, standard's
+// grayscale, or off's aliased: Segoe UI Variable, the UI face, was seen
+// drawn in ClearType with smoothing off at DEFAULT_QUALITY), and renewed
+// when it changes; Direct2D's text follows it.
+bool font_smoothing_on();
+bool font_smoothing_cleartype();
+// For tests: the font smoothing taken to be off (0), standard (1) or
+// ClearType (2), without changing the setting; -1, the user's again.
+void set_font_smoothing_for_tests(int smoothing);
+// `rt`'s text in the user's font smoothing: its antialias mode and its
+// rendering parameters set together, as Direct2D needs (D1136: aliased text
+// wants an aliased rendering mode, a ClearType one fails). ClearType (only
+// if `cleartype_ok`: the text's ground opaque) or grayscale with `smoothed`
+// (null: the target's default); aliased, smoothing off, with an aliased mode
+// made from the defaults.
+void set_text_smoothing(ID2D1RenderTarget* rt, IDWriteRenderingParams* smoothed, bool cleartype_ok);
+// For tests: text drawn on one Direct2D DC target into a bitmap through
+// set_text_smoothing, for each smoothing in `sequence` in turn (0 off, 1
+// standard, 2 ClearType; the target kept, so the mode changes on it), with
+// GDI-classic parameters (a list's rows) and then the primary monitor's (the
+// caption tabs'). "" if each drew (EndDraw succeeded, ink in the bitmap),
+// else what didn't.
+std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence);
+// A list's rows' text rendering parameters: DirectWrite's defaults as the
+// system has them now, made GDI-classic (crisp, as the list view's own
+// text). Null if DirectWrite can't make them.
+com<IDWriteRenderingParams> row_rendering_params();
+// For tests: text drawn exactly as a list's rows draw theirs now
+// (row_rendering_params, set_text_smoothing in the smoothing as rapport reads
+// it, Direct2D on a DC target), dark on 0xF0F0F0 into a w by h 32-bit
+// bitmap: its pixels, or none if it couldn't be drawn.
+std::vector<uint32_t> rows_text_drawn_for_tests(int w, int h);
 // Average character width and line height of the UI font at `dpi`, in device px.
 SIZE font_metrics(UINT dpi);
 // The UI font family name and size in DIPs (for DirectWrite text).
