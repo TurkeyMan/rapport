@@ -84,6 +84,7 @@ int main()
         // One hide and show of the new caret: shown after, so nothing was
         // owed to it (a show to the gone caret would have been).
         HideCaret(h);
+        expect(!caret_hider::caret_shown(), "attempt 3: the new caret hidden by one HideCaret");
         ShowCaret(h);
         expect(caret_hider::caret_shown(), "attempt 3: the new caret's count balanced");
     }
