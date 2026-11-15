@@ -340,15 +340,69 @@ void set_text_smoothing(ID2D1RenderTarget* rt, IDWriteRenderingParams* smoothed,
                                                                        : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 }
 
+com<IDWriteRenderingParams> row_rendering_params()
+{
+    com<IDWriteRenderingParams> def, params;
+    if (dwrite_factory() && SUCCEEDED(dwrite_factory()->CreateRenderingParams(def.put())) && def)
+        dwrite_factory()->CreateCustomRenderingParams(def->GetGamma(), def->GetEnhancedContrast(),
+                                                      def->GetClearTypeLevel(), def->GetPixelGeometry(),
+                                                      DWRITE_RENDERING_MODE_GDI_CLASSIC, params.put());
+    return params;
+}
+
+std::vector<uint32_t> rows_text_drawn_for_tests(int w, int h)
+{
+    std::vector<uint32_t> out;
+    if (!d2d_factory() || !dwrite_factory() || w <= 0 || h <= 0) return out;
+    com<IDWriteTextFormat> format;
+    if (FAILED(dwrite_factory()->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.f,
+                                                  L"", format.put())))
+        return out;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = bmp ? SelectObject(mem, bmp) : nullptr;
+    const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96,
+        96);
+    com<ID2D1DCRenderTarget> rt;
+    com<ID2D1SolidColorBrush> brush;
+    const com<IDWriteRenderingParams> params = row_rendering_params();
+    if (bits && SUCCEEDED(d2d_factory()->CreateDCRenderTarget(&props, rt.put())) &&
+        SUCCEEDED(rt->CreateSolidColorBrush(D2D1::ColorF(0x1A / 255.f, 0x1A / 255.f, 0x1A / 255.f), brush.put())))
+    {
+        std::fill_n(static_cast<uint32_t*>(bits), size_t(w) * h, 0x00F0F0F0u);
+        const RECT r{0, 0, w, h};
+        if (SUCCEEDED(rt->BindDC(mem, &r)))
+        {
+            rt->BeginDraw();
+            set_text_smoothing(rt.get(), params.get(), true);
+            const wchar_t text[] = L"Name 0, Note 0, Author Email";
+            rt->DrawText(text, UINT32(std::size(text) - 1), format.get(), D2D1::RectF(8, 8, float(w), float(h)),
+                         brush.get());
+            if (SUCCEEDED(rt->EndDraw()))
+            {
+                GdiFlush();
+                out.assign(static_cast<uint32_t*>(bits), static_cast<uint32_t*>(bits) + size_t(w) * h);
+            }
+        }
+    }
+    if (old) SelectObject(mem, old);
+    if (bmp) DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    return out;
+}
+
 std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence)
 {
     if (!d2d_factory() || !dwrite_factory()) return "no Direct2D or DirectWrite";
-    com<IDWriteRenderingParams> def, classic, monitor;
-    dwrite_factory()->CreateRenderingParams(def.put());
-    if (def)
-        dwrite_factory()->CreateCustomRenderingParams(def->GetGamma(), def->GetEnhancedContrast(),
-                                                      def->GetClearTypeLevel(), def->GetPixelGeometry(),
-                                                      DWRITE_RENDERING_MODE_GDI_CLASSIC, classic.put());
+    com<IDWriteRenderingParams> monitor;
+    const com<IDWriteRenderingParams> classic = row_rendering_params();
     dwrite_factory()->CreateMonitorRenderingParams(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY),
                                                    monitor.put());
     com<IDWriteTextFormat> format;

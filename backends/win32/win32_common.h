@@ -122,6 +122,15 @@ void set_text_smoothing(ID2D1RenderTarget* rt, IDWriteRenderingParams* smoothed,
 // caption tabs'). "" if each drew (EndDraw succeeded, ink in the bitmap),
 // else what didn't.
 std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence);
+// A list's rows' text rendering parameters: DirectWrite's defaults as the
+// system has them now, made GDI-classic (crisp, as the list view's own
+// text). Null if DirectWrite can't make them.
+com<IDWriteRenderingParams> row_rendering_params();
+// For tests: text drawn exactly as a list's rows draw theirs now
+// (row_rendering_params, set_text_smoothing in the smoothing as rapport reads
+// it, Direct2D on a DC target), dark on 0xF0F0F0 into a w by h 32-bit
+// bitmap: its pixels, or none if it couldn't be drawn.
+std::vector<uint32_t> rows_text_drawn_for_tests(int w, int h);
 // Average character width and line height of the UI font at `dpi`, in device px.
 SIZE font_metrics(UINT dpi);
 // The UI font family name and size in DIPs (for DirectWrite text).

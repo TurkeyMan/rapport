@@ -569,7 +569,7 @@ if(TARGET rapport_win32)
     target_link_libraries(rapport-win32-font-smoothing-run PRIVATE user32)
     add_executable(rapport-win32-band-controls-test win32_band_controls_test.cpp)
     target_link_libraries(rapport-win32-band-controls-test PRIVATE rapport::rapport user32 gdi32 comctl32 advapi32
-                                                                  dwrite)
+                                                                  dwrite d2d1)
     if(RAPPORT_STATIC)
         target_link_libraries(rapport-win32-band-controls-test PRIVATE rapport::backend_win32)
         target_compile_definitions(rapport-win32-band-controls-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)

@@ -46,6 +46,7 @@
 #include <windows.h>
 // After windows.h, which they need.
 #include <commctrl.h>
+#include <d2d1.h>
 #include <dwrite.h>
 
 #include <algorithm>
@@ -73,6 +74,7 @@ void set_band_density_for_tests(int compact);  // win32_band_field.h
 void set_dpi_for_tests(UINT dpi);              // win32_common.h
 void set_font_smoothing_for_tests(int smoothing);
 std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence);
+std::vector<uint32_t> rows_text_drawn_for_tests(int w, int h);
 }  // namespace rap::win32
 #endif
 
@@ -877,34 +879,130 @@ void check_font_quality(HWND h, const std::string& name, const std::string& what
                                      str(lf.lfQuality));
 }
 
-// DirectWrite's rendering defaults can draw ClearType's colour now: a
-// ClearType level above 0 and a pixel geometry not flat (0 and flat are
-// the user's to choose). A list's rows are DirectWrite's, drawn in those.
-bool dwrite_cleartype()
+// Direct2D text drawn as a list's rows draw theirs, measured as a
+// control's text is: its look (ClearType, grey edges or aliased), or false
+// if it couldn't be drawn or told. Drawn, not predicted from DirectWrite's
+// numbers (GDI-classic draws ClearType's colour at level 0, for one).
+// Static builds draw through the backend itself (rows_text_drawn_for_tests:
+// row_rendering_params and set_text_smoothing, in the smoothing rapport
+// reads, the hook's too); plugin builds, which can't reach it, through the
+// same construction made here (DirectWrite's defaults made GDI-classic),
+// with ClearType asked for: keep the two alike.
+bool classify(const printed& p, DWORD ground, text_look& look, ink_colour& c)
 {
-    IDWriteFactory* f = nullptr;
-    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                   reinterpret_cast<IUnknown**>(&f))) ||
-        !f)
-        return false;
-    IDWriteRenderingParams* p = nullptr;
-    bool colour = false;
-    if (SUCCEEDED(f->CreateRenderingParams(&p)) && p)
-    {
-        colour = p->GetClearTypeLevel() > 0.f && p->GetPixelGeometry() != DWRITE_PIXEL_GEOMETRY_FLAT;
-        p->Release();
-    }
-    f->Release();
-    return colour;
+    c = ink_colour_of(p, RECT{0, 0, p.w, p.h}, ground);
+    for (text_look l : {text_look::cleartype, text_look::grey_edges, text_look::no_colour})
+        if (text_fault(c, l).empty())
+        {
+            look = l;
+            return true;
+        }
+    return false;
 }
-// What a list's rows look like, given what's asked for: ClearType's colour
-// only where DirectWrite's defaults give it, grey edges otherwise; the
-// message says so (`why`).
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+bool probe_rows_text(text_look& look, ink_colour& c)
+{
+    const int w = 320, h = 40;
+    const std::vector<uint32_t> px = rap::win32::rows_text_drawn_for_tests(w, h);
+    if (px.empty()) return false;
+    printed p;
+    p.w = w;
+    p.h = h;
+    p.px.assign(px.begin(), px.end());
+    for (DWORD& v : p.px) v &= 0xffffff;
+    return classify(p, 0xF0F0F0, look, c);
+}
+#else
+bool probe_rows_text(text_look& look, ink_colour& c)
+{
+    ID2D1Factory* d2d = nullptr;
+    IDWriteFactory* dw = nullptr;
+    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d)) ||
+        FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(&dw))))
+    {
+        if (d2d) d2d->Release();
+        return false;
+    }
+    const int w = 320, h = 40;
+    const DWORD ground = 0xF0F0F0;
+    bool drawn = false;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = bmp ? SelectObject(mem, bmp) : nullptr;
+    ID2D1DCRenderTarget* rt = nullptr;
+    ID2D1SolidColorBrush* brush = nullptr;
+    IDWriteRenderingParams* def = nullptr;
+    IDWriteRenderingParams* classic = nullptr;
+    IDWriteTextFormat* format = nullptr;
+    const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+        96, 96);
+    if (bits && SUCCEEDED(d2d->CreateDCRenderTarget(&props, &rt)) &&
+        SUCCEEDED(rt->CreateSolidColorBrush(D2D1::ColorF(0x1A / 255.f, 0x1A / 255.f, 0x1A / 255.f), &brush)) &&
+        SUCCEEDED(dw->CreateRenderingParams(&def)) &&
+        SUCCEEDED(dw->CreateCustomRenderingParams(def->GetGamma(), def->GetEnhancedContrast(),
+                                                  def->GetClearTypeLevel(), def->GetPixelGeometry(),
+                                                  DWRITE_RENDERING_MODE_GDI_CLASSIC, &classic)) &&
+        SUCCEEDED(dw->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                       DWRITE_FONT_STRETCH_NORMAL, 14.f, L"", &format)))
+    {
+        std::fill_n(static_cast<DWORD*>(bits), size_t(w) * h, ground);
+        const RECT r{0, 0, w, h};
+        if (SUCCEEDED(rt->BindDC(mem, &r)))
+        {
+            rt->BeginDraw();
+            rt->SetTextRenderingParams(classic);
+            rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+            const wchar_t text[] = L"Name 0, Note 0, Author Email";
+            rt->DrawText(text, UINT32(std::size(text) - 1), format, D2D1::RectF(8, 8, float(w), float(h)), brush);
+            drawn = SUCCEEDED(rt->EndDraw());
+        }
+        GdiFlush();
+    }
+    if (drawn)
+    {
+        printed p;
+        p.w = w;
+        p.h = h;
+        p.px.assign(static_cast<DWORD*>(bits), static_cast<DWORD*>(bits) + size_t(w) * h);
+        for (DWORD& v : p.px) v &= 0xffffff;
+        drawn = classify(p, ground, look, c);
+    }
+    for (IUnknown* u : std::initializer_list<IUnknown*>{format, classic, def, brush, rt})
+        if (u) u->Release();
+    if (old) SelectObject(mem, old);
+    if (bmp) DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    dw->Release();
+    d2d->Release();
+    return drawn;
+}
+#endif
+// What a list's rows look like now: as the probe draws (the rows' own way),
+// said in the message (`why`). Plugin builds' probe draws ClearType only, so
+// there a look other than ClearType asked for stands as asked.
 text_look rows_look(text_look asked, std::string& why)
 {
-    if (asked != text_look::cleartype || dwrite_cleartype()) return asked;
-    why = " (DirectWrite's defaults without ClearType's colour: grey edges)";
-    return text_look::grey_edges;
+#ifndef RAPPORT_TEST_BUILTIN_WIN32
+    if (asked != text_look::cleartype) return asked;
+#endif
+    text_look look = asked;
+    ink_colour c{};
+    if (!probe_rows_text(look, c))
+    {
+        why = " (the rows' Direct2D probe couldn't be drawn or told: " + std::string(look_name(asked)) +
+              " expected)";
+        return asked;
+    }
+    why = " (the rows' Direct2D probe " + std::string(look_name(look)) + ": " + str(c.fringed) + " of " +
+          str(c.edges) + " edge pixels with colour)";
+    return look;
 }
 
 // A list's first row's text as printed (WM_PRINT: its rows are Direct2D's,
@@ -1627,10 +1725,15 @@ int main(int argc, char** argv)
         expect(g_probed && g_text_look == text_look::cleartype,
                "plain GDI text drawn with ClearType, turned on before this process started: " +
                    std::string(look_name(g_text_look)));
-        // The runner's DirectWrite defaults with it (its level, its
-        // geometry): a list's rows then must show ClearType's colour.
-        expect(dwrite_cleartype(), "DirectWrite's defaults with ClearType's colour, ClearType turned on "
-                                   "before this process started (a ClearType level above 0, not flat)");
+        // Direct2D's ClearType, drawn as a list's rows are, with it: colour,
+        // or the run fails (positive coverage can't go quietly).
+        text_look d2d = text_look::no_colour;
+        ink_colour c{};
+        const bool told = probe_rows_text(d2d, c);
+        expect(told && d2d == text_look::cleartype,
+               "Direct2D's ClearType with colour, as a list's rows draw, ClearType turned on before this "
+               "process started: " +
+                   str(c.fringed) + " of " + str(c.edges) + " edge pixels with colour");
     }
     if (set_for_run == "standard")
         expect(g_probed && g_text_look == text_look::grey_edges,
@@ -1659,8 +1762,12 @@ int main(int argc, char** argv)
             (set_for_run.empty() ? std::string() : ", set " + set_for_run + " for this run") +
             ", plain text probed " + (g_probed ? look_name(g_text_look) : "as nothing known") +
             ", Segoe UI Variable Text at DEFAULT_QUALITY " + (ui_probed ? look_name(ui_look) : "unknown") +
-            ", DirectWrite's defaults (a list's rows) " +
-            (!now.on ? "aliased" : dwrite_cleartype() ? "with ClearType's colour" : "grey");
+            ", Direct2D's ClearType (a list's rows) " + [&]
+            {
+                text_look l = text_look::no_colour;
+                ink_colour c{};
+                return std::string(probe_rows_text(l, c) ? look_name(l) : "unknown");
+            }();
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
         const char* densities = "both densities";
 #else

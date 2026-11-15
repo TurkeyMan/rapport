@@ -7543,23 +7543,16 @@ private:
             if (FAILED(d2d_factory()->CreateDCRenderTarget(&props, row_target_.put()))) return;
             row_params_.reset();
         }
-        // Crisp GDI-style glyphs, like the list_view's own text, from the
-        // system's rendering defaults as they are for the smoothing rapport
-        // reads, made again when that changes: the defaults are the
-        // smoothing's when they're read (no ClearType level at standard), so
-        // ones kept from before a change to ClearType drew it grey. The
-        // user's level and pixel geometry as they are (0, or flat, a choice).
+        // Crisp GDI-style glyphs, like the list_view's own text
+        // (row_rendering_params): the system's rendering defaults as they are
+        // for the smoothing rapport reads, made again when that changes, so
+        // none kept from before a change are drawn with. The user's level
+        // and pixel geometry as they are.
         const int smoothing = font_smoothing_cleartype() ? 2 : font_smoothing_on() ? 1 : 0;
         if (!row_params_ || row_params_smoothing_ != smoothing)
         {
-            row_params_.reset();
+            row_params_ = row_rendering_params();
             row_params_smoothing_ = smoothing;
-            com<IDWriteRenderingParams> def;
-            dwrite_factory()->CreateRenderingParams(def.put());
-            if (def)
-                dwrite_factory()->CreateCustomRenderingParams(
-                    def->GetGamma(), def->GetEnhancedContrast(), def->GetClearTypeLevel(), def->GetPixelGeometry(),
-                    DWRITE_RENDERING_MODE_GDI_CLASSIC, row_params_.put());
         }
         // The user's font smoothing, as it is now: the mode and the
         // parameters together (aliased ones for off).
