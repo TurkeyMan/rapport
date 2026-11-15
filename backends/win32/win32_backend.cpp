@@ -7543,12 +7543,12 @@ private:
             if (FAILED(d2d_factory()->CreateDCRenderTarget(&props, row_target_.put()))) return;
             row_params_.reset();
         }
-        // Crisp GDI-style glyphs, like the list_view's own text, made for the
-        // smoothing as rapport reads it, and again when that changes: the
-        // system's defaults are those of the smoothing when they're made (no
-        // ClearType level at standard), so ClearType made from them after a
-        // change from standard would come out grey. With ClearType, its level
-        // and a pixel geometry given, the system's where it has them.
+        // Crisp GDI-style glyphs, like the list_view's own text, from the
+        // system's rendering defaults as they are for the smoothing rapport
+        // reads, made again when that changes: the defaults are the
+        // smoothing's when they're read (no ClearType level at standard), so
+        // ones kept from before a change to ClearType drew it grey. The
+        // user's level and pixel geometry as they are (0, or flat, a choice).
         const int smoothing = font_smoothing_cleartype() ? 2 : font_smoothing_on() ? 1 : 0;
         if (!row_params_ || row_params_smoothing_ != smoothing)
         {
@@ -7557,18 +7557,9 @@ private:
             com<IDWriteRenderingParams> def;
             dwrite_factory()->CreateRenderingParams(def.put());
             if (def)
-            {
-                float level = def->GetClearTypeLevel();
-                DWRITE_PIXEL_GEOMETRY geometry = def->GetPixelGeometry();
-                if (smoothing == 2)
-                {
-                    if (level <= 0.f) level = 1.f;
-                    if (geometry == DWRITE_PIXEL_GEOMETRY_FLAT) geometry = DWRITE_PIXEL_GEOMETRY_RGB;
-                }
-                dwrite_factory()->CreateCustomRenderingParams(def->GetGamma(), def->GetEnhancedContrast(), level,
-                                                              geometry, DWRITE_RENDERING_MODE_GDI_CLASSIC,
-                                                              row_params_.put());
-            }
+                dwrite_factory()->CreateCustomRenderingParams(
+                    def->GetGamma(), def->GetEnhancedContrast(), def->GetClearTypeLevel(), def->GetPixelGeometry(),
+                    DWRITE_RENDERING_MODE_GDI_CLASSIC, row_params_.put());
         }
         // The user's font smoothing, as it is now: the mode and the
         // parameters together (aliased ones for off).

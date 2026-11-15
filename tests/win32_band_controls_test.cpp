@@ -72,6 +72,7 @@ void set_band_density_for_tests(int compact);  // win32_band_field.h
 void set_dpi_for_tests(UINT dpi);              // win32_common.h
 void set_font_smoothing_for_tests(int smoothing);
 std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence);
+bool cleartype_rendering_for_tests();
 }  // namespace rap::win32
 #endif
 
@@ -1472,6 +1473,13 @@ void run(rap::ui& ui, const density& d, bool hc)
         }
         else
             expect(false, "the row's tabs bound" + at);
+        // A list's rows (Direct2D's text) in the runner's smoothing, as plain
+        // text is: ClearType's colour under win32-band-controls-cleartype,
+        // grey edges at standard, aliased off.
+        if (HWND rows = child(top, WC_LISTVIEWW))
+            check_list_rows(rows, runner_text(), " (the runner's smoothing" + at + ")");
+        else
+            expect(false, "the row window's list" + at);
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
         check_dpi(top, {pull, menu_b, fetch, entry_h, list, editable, toggle}, {list, editable},
                   editable, entry_h, {nullptr, menu_b, list, editable, entry_h}, d, at);
@@ -1483,7 +1491,6 @@ void run(rap::ui& ui, const density& d, bool hc)
         // runner's own again.
         if (HWND rows = child(top, WC_LISTVIEWW))
         {
-            check_list_rows(rows, runner_text(), " (the runner's smoothing" + at + ")");
             const struct
             {
                 int smoothing;
@@ -1503,10 +1510,21 @@ void run(rap::ui& ui, const density& d, bool hc)
                 rap::win32::set_font_smoothing_for_tests(st.smoothing);
                 SendMessageW(top, WM_SETTINGCHANGE, SPI_SETFONTSMOOTHING, 0);
                 pump();
-                const std::string here = std::string(", smoothing changed to ") + st.name + at;
+                std::string here = std::string(", smoothing changed to ") + st.name + at;
+                // The rows draw in DirectWrite's defaults as the system has
+                // them (the user's ClearType level and pixel geometry kept):
+                // ClearType's colour only where those can give it (not on a
+                // runner at standard, the hook asking for ClearType), grey
+                // edges otherwise.
+                text_look rows_look = st.look;
+                if (st.look == text_look::cleartype && !rap::win32::cleartype_rendering_for_tests())
+                {
+                    rows_look = text_look::grey_edges;
+                    here += " (DirectWrite's defaults without ClearType's colour)";
+                }
                 check_font_quality(entry_h, "an entry", here, st.quality);
                 check_font_quality(list, "a drop-down list (the band's)", here, st.quality);
-                const ink_colour c = check_list_rows(rows, st.look, here);
+                const ink_colour c = check_list_rows(rows, rows_look, here);
                 if (st.smoothing == 2 && !cleartype_ink) cleartype_ink = c.ink;
                 expect(c.ink * 5 >= cleartype_ink * 2,
                        "a list's row text all drawn, " + str(c.ink) + " ink pixels against ClearType's " +
