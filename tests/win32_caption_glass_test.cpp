@@ -44,6 +44,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #pragma comment(                                                                                   \
@@ -335,13 +336,28 @@ int main(int argc, char** argv)
     BOOL was = FALSE;
     DwmGetWindowAttribute(top, 20, &was, sizeof was);
     frame f[2];
-    for (int i = 0; i < 2; ++i)
+    // The pair taken with nothing of the window's own changing between them
+    // but the frame's colour (a pixel that changed itself reads as a hole,
+    // #86): the text field's caret hidden (blinking, it was on in one frame
+    // and off in the other), shown again after; and taken again if the
+    // focus or the activation moved meanwhile (the caret, the field's
+    // focused look and its clear button come and go with them).
+    auto focus_state = [&] { return std::pair{GetForegroundWindow() == top, GetFocus()}; };
+    for (int attempt = 0; attempt < 3; ++attempt)
     {
-        const BOOL frame_dark = i;
-        DwmSetWindowAttribute(top, 20, &frame_dark, sizeof frame_dark);
-        pump(10);
-        DwmFlush();
-        f[i] = cap.grab(top);
+        const auto before = focus_state();
+        const bool hid = HideCaret(edit) != FALSE;  // (none to hide when it's not focused)
+        for (int i = 0; i < 2; ++i)
+        {
+            const BOOL frame_dark = i;
+            DwmSetWindowAttribute(top, 20, &frame_dark, sizeof frame_dark);
+            pump(10);
+            DwmFlush();
+            f[i] = cap.grab(top);
+        }
+        if (hid) ShowCaret(edit);
+        if (focus_state() == before) break;
+        note("the focus or the activation moved while the pair was taken: taken again");
     }
     DwmSetWindowAttribute(top, 20, &was, sizeof was);
     if (f[0].px.empty() || f[1].px.empty()) return skip("no frame arrived from Windows.Graphics.Capture");
