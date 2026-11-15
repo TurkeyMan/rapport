@@ -27,7 +27,10 @@
 // mouse coming and going) is painted again at once the same way, within the
 // message that drew it. Their text is grayscale (CONTRIBUTING.md): ClearType
 // can't be worked out from two passes, and it's over what the compositor
-// fills in. Their font is a grayscale copy of the one they're given.
+// fills in. Their font is a grayscale copy of the one they're given. But
+// text on a face of ours that's opaque under it (win32_band_face.h: a
+// button's, a drop-down list's, the accent's) is ClearType: both passes the
+// same there, it comes out as drawn, at alpha 255.
 //
 // Opaque controls, fields kept native and as they look (an edit, a combo
 // box with one, a list, anything inside one of those, and any class not
@@ -129,6 +132,14 @@ bool on_glass(HWND h)
 {
     color fill{};
     return !high_contrast() && in_toolbar_band(h, fill);
+}
+
+// Its text grayscale: on glass, and not a drop-down list whose face is ours
+// (win32_band_face.h), opaque under its text, which is ClearType then, as is
+// its list's (a window of its own, opaque), drawn in its font.
+bool grayscale_text(HWND h)
+{
+    return on_glass(h) && !(is_band_painted(h) && faces_on());
 }
 
 // A font's grayscale copy (ANTIALIASED_QUALITY), one per face, size and
@@ -440,12 +451,12 @@ LRESULT CALLBACK glass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
         RemoveWindowSubclass(h, glass_proc, glass_id);
         return DefSubclassProc(h, msg, wp, lp);
     }
-    // Its font: shown grayscale on glass (a layer control's text), as given
-    // otherwise.
+    // Its font: shown grayscale on glass (a layer control's text, but for
+    // grayscale_text's opaque faces), as given otherwise.
     if (msg == WM_SETFONT && g->fonts)
     {
         g->given = reinterpret_cast<HFONT>(wp);
-        if (on_glass(h)) wp = reinterpret_cast<WPARAM>(grayscale(g->given));
+        if (grayscale_text(h)) wp = reinterpret_cast<WPARAM>(grayscale(g->given));
     }
     if (t_printing > 0 || !on_glass(h)) return DefSubclassProc(h, msg, wp, lp);
     // A control whose band face is drawn (win32_band_face.h) is a layer
@@ -614,7 +625,7 @@ BOOL CALLBACK glass_child(HWND c, LPARAM lp)
     // Its font as it should be now, grayscale or not.
     if (g->fonts && g->given)
     {
-        const HFONT want = in && !high_contrast() ? grayscale(g->given) : g->given;
+        const HFONT want = grayscale_text(c) ? grayscale(g->given) : g->given;
         if (reinterpret_cast<HFONT>(SendMessageW(c, WM_GETFONT, 0, 0)) != want)
             SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(g->given), TRUE);
     }

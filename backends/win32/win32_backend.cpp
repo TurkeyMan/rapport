@@ -2431,7 +2431,7 @@ LRESULT draw_band_button(NMCUSTOMDRAW* cd, const band_density& d, face_kind kind
     paint_band_face(h, dc, r, kind, st);
     const color ink = band_face_ink(h, kind, st);
     const UINT dpi = dpi_of(h);
-    HFONT font = band_text_font(h, d);
+    HFONT font = band_text_font(h, d, kind);
     long x = r.left + (r.right - r.left - band_content_width(c, font, dpi)) / 2;
     const int saved = SaveDC(dc);
     if (c.image && *c.image)
@@ -2497,7 +2497,8 @@ public:
     SIZE measure() override
     {
         if (band_drawn())
-            return band_button_size(content(), band_text_font(h_, *band_), win_.dpi(), *band_);
+            return band_button_size(content(), band_text_font(h_, *band_, face()), win_.dpi(),
+                                    *band_);
         const SIZE t = text_extent(h_, window_text(h_));
         const bool has_text = GetWindowTextLengthW(h_) > 0;
         long w = (has_text ? t.cx : 0) + px(has_text ? 24 : 10) + (images_ ? px(has_text ? 20 : 16) : 0);
@@ -2522,15 +2523,8 @@ public:
     {
         handled = hdr->code == NM_CUSTOMDRAW && band_drawn();
         if (!handled) return 0;
-        // The dialog's default (BS_DEFPUSHBUTTON, which the dialog manager
-        // moves to a focused push button and back): AccentButtonStyle, as
-        // ContentDialog's DefaultButton.
-        const bool is_default = (GetWindowLongPtrW(h_, GWL_STYLE) & BS_TYPEMASK) == BS_DEFPUSHBUTTON;
-        return draw_band_button(reinterpret_cast<NMCUSTOMDRAW*>(hdr), *band_,
-                                is_default ? face_kind::default_button
-                                : flat_    ? face_kind::subtle
-                                           : face_kind::button,
-                                content(), false);
+        return draw_band_button(reinterpret_cast<NMCUSTOMDRAW*>(hdr), *band_, face(), content(),
+                                false);
     }
 
     bool is_default = false;
@@ -2539,6 +2533,15 @@ public:
 private:
     bool band_drawn() const { return band_ && faces_on(); }
     band_content content() const { return {&icon_, window_text(h_), false}; }
+    // Its face: the dialog's default (BS_DEFPUSHBUTTON, which the dialog
+    // manager moves to a focused push button and back) AccentButtonStyle, as
+    // ContentDialog's DefaultButton; a flat one subtle.
+    face_kind face() const
+    {
+        if ((GetWindowLongPtrW(h_, GWL_STYLE) & BS_TYPEMASK) == BS_DEFPUSHBUTTON)
+            return face_kind::default_button;
+        return flat_ ? face_kind::subtle : face_kind::button;
+    }
 
     bool flat_;
     const band_density* band_ = nullptr;
@@ -3142,7 +3145,7 @@ public:
         if (band_drawn())
         {
             const UINT dpi = win_.dpi();
-            HFONT font = band_text_font(h_, *band_);
+            HFONT font = band_text_font(h_, *band_, face_kind::button);
             long w = band_px(60, dpi);
             for (const std::string& i : items_) w = std::max(w, band_text_width(font, wide(i)));
             return {
@@ -3204,7 +3207,7 @@ public:
         const std::wstring text = window_text(h);
         if (text.empty()) return;
         const int saved = SaveDC(dc);
-        HFONT font = band_text_font(h, *band_);
+        HFONT font = band_text_font(h, *band_, face_kind::button);
         SelectObject(dc, font);
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, color_ref(ink));
@@ -3220,7 +3223,8 @@ public:
         // A new font (a new DPI) sets its height anew: the band's again.
         if (msg != WM_SETFONT) return false;
         result = DefSubclassProc(h, msg, wp, lp);
-        fit_combo_height(h, band_control_height(band_text_font(h, *band_), dpi_of(h), *band_));
+        fit_combo_height(h, band_control_height(band_text_font(h, *band_, face_kind::button),
+                                                dpi_of(h), *band_));
         return true;
     }
 
@@ -5472,7 +5476,8 @@ public:
     SIZE measure() override
     {
         if (band_drawn())
-            return band_button_size(content(), band_text_font(h_, *band_), win_.dpi(), *band_);
+            return band_button_size(content(), band_text_font(h_, *band_, face_kind::button),
+                                    win_.dpi(), *band_);
         const SIZE t = text_extent(h_, window_text(h_));
         const long w = t.cx + px(24) + (images_ ? px(20) : 0);
         if (band_) return {w, std::max<long>(band_px(band_->field, win_.dpi()), t.cy + px(8))};

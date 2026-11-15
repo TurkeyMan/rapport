@@ -19,7 +19,12 @@
 // button as an AppBarButton (the band's layer at rest, SubtleFillColor-
 // Secondary over it hovered), a checked toggle in the accent; a separator a
 // line the field's height in DividerStrokeColorDefault. Labels and check
-// boxes stay native, centred in the row. Under high contrast
+// boxes stay native, centred in the row. The text on a face that's opaque
+// under it (a button's, a menu button's, a drop-down list's, an editable
+// combo box's, an entry's) is ClearType when the runner's font smoothing is
+// (read, never changed): colour at its edges, as Explorer's; a drop-down
+// list's own font (its list's) ClearType too; a flat button's text, on the
+// band's translucent layer at rest, grey (CONTRIBUTING.md). Under high contrast
 // (rapport-win32-high-contrast-run, CI only): none of it drawn, the native
 // controls at the band's heights.
 //
@@ -910,6 +915,71 @@ int transitions(rap::ui& ui, const density& d)
                              });
 }
 
+// The runner's own font smoothing: ClearType, or not. Read, never changed.
+bool runner_cleartype()
+{
+    BOOL smoothing = FALSE;
+    UINT type = 0;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &smoothing, 0);
+    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &type, 0);
+    return smoothing && type == FE_FONTSMOOTHINGCLEARTYPE;
+}
+
+// A printed control's ink inside its edge (4 px in, past its border): its
+// pixels more than 16 levels off its ground (at its left, mid-height) in a
+// channel; those of them with colour (ClearType's fringes: channels more
+// than 4 apart, the ground and the ink grey); the most any part.
+struct ink_colour
+{
+    int ink = 0, fringed = 0, chroma = 0;
+};
+ink_colour ink_colour_of(const printed& p)
+{
+    ink_colour out;
+    const DWORD ground = p.at(3, p.h / 2);
+    const int in = px(4, GetDpiForSystem());
+    for (int y = in; y < p.h - in; ++y)
+        for (int x = in; x < p.w - in; ++x)
+        {
+            const DWORD v = p.at(x, y);
+            int off = 0;
+            for (int shift : {16, 8, 0})
+                off = std::max(off, std::abs(channel(v, shift) - channel(ground, shift)));
+            if (off <= 16) continue;
+            ++out.ink;
+            const int hi = std::max({channel(v, 16), channel(v, 8), channel(v, 0)});
+            const int lo = std::min({channel(v, 16), channel(v, 8), channel(v, 0)});
+            out.fringed += hi - lo > 4;
+            out.chroma = std::max(out.chroma, hi - lo);
+        }
+    return out;
+}
+
+// `h`'s text as printed: ClearType (a third of its ink or more fringed) when
+// `cleartype`, else grey (no pixel's channels more than 2 apart).
+void check_text(HWND h, bool cleartype, const std::string& what)
+{
+    const ink_colour c = ink_colour_of(print(h));
+    const std::string seen = ": " + str(c.fringed) + " of " + str(c.ink) +
+                             " ink pixels with colour, chroma " + str(c.chroma);
+    expect(c.ink > 20, "its text printed" + what + seen);
+    if (cleartype)
+        expect(c.fringed * 3 >= c.ink, "its text ClearType" + what + seen);
+    else
+        expect(c.fringed == 0 && c.chroma <= 2, "its text grey" + what + seen);
+}
+
+// A drop-down list's own font (its list's, a window of its own) not the
+// grayscale copy glass gives a layer control's text.
+void check_list_font(HWND list, const std::string& what)
+{
+    LOGFONTW lf{};
+    GetObjectW(reinterpret_cast<HFONT>(SendMessageW(list, WM_GETFONT, 0, 0)), sizeof lf, &lf);
+    expect(lf.lfQuality != ANTIALIASED_QUALITY,
+           "a drop-down list's font (its list's) not grayscale" + what + ": quality " +
+               str(lf.lfQuality));
+}
+
 // One density: a row of controls (an hbox) and a toolbar, each its window's
 // band.
 void run(rap::ui& ui, const density& d, bool hc)
@@ -945,7 +1015,8 @@ void run(rap::ui& ui, const density& d, bool hc)
         window{bar_title,
                {vbox{toolbar{tool_button{rap::icon::named("go-previous"), "Back"}, separator{},
                              tool_button{rap::icon::named("go-next"), "Forward"}, button{"Fetch"},
-                             drop_down{{"Author Email"}, 0}, entry{}.stretch()},
+                             drop_down{{"Author Email"}, 0}, button{"Walk"}.flat(),
+                             entry{}.stretch()},
                      label{"content"}.stretch()}}}
             .size(1000_px, 300_px)
             .margins(false)
@@ -979,8 +1050,8 @@ void run(rap::ui& ui, const density& d, bool hc)
 
     HWND strip = child(top2, TOOLBARCLASSNAMEW);
     HWND fetch2 = child(top2, L"Button", L"Fetch"), list2 = combo_of(top2, true),
-         entry2 = child(top2, L"Edit");
-    expect(strip && fetch2 && list2 && entry2, "the toolbar's controls" + at);
+         entry2 = child(top2, L"Edit"), flat2 = child(top2, L"Button", L"Walk");
+    expect(strip && fetch2 && list2 && entry2 && flat2, "the toolbar's controls" + at);
     if (strip && fetch2 && list2 && entry2)
     {
         check_heights(top2, {fetch2, list2, entry2}, {}, d, at + ", a toolbar");
@@ -1003,6 +1074,20 @@ void run(rap::ui& ui, const density& d, bool hc)
         check_tool_button(pull, false, at);
         check_tool_button(toggle, true, at);
         check_combo(editable, at);
+        // Text on an opaque face ClearType (the runner's), on the layer grey.
+        const bool cleartype = runner_cleartype();
+        note(std::string("the runner's font smoothing: ") +
+             (cleartype ? "ClearType" : "not ClearType"));
+        SetWindowTextW(entry_h, L"Subject");
+        for (const auto& [h, name] :
+             {std::pair{menu_b, "a menu button"}, std::pair{list, "a drop-down list"},
+              std::pair{editable, "an editable combo box"}, std::pair{entry_h, "an entry"},
+              std::pair{fetch2, "a button"}, std::pair{list2, "a toolbar's drop-down list"}})
+            if (h) check_text(h, cleartype, " (" + std::string(name) + at + ")");
+        SetWindowTextW(entry_h, L"");
+        if (flat2) check_text(flat2, false, " (a flat button at rest, on the layer" + at + ")");
+        check_list_font(list, at);
+        if (list2) check_list_font(list2, ", a toolbar's" + at);
         // An entry in the band at rest: TextControlElevationBorderBrush, as
         // the combo box's (the window never shown, so never active).
         {
@@ -1033,6 +1118,9 @@ void run(rap::ui& ui, const density& d, bool hc)
                            argb_hex(band_layer_px()) + at + ": " + argb_hex(p.raw(0, 0)));
             }
             check_button(fetch, false, "a button, out of the band and back", at);
+            check_list_font(list, ", out of the band and back" + at);
+            check_text(list, runner_cleartype(),
+                       " (a drop-down list, out of the band and back" + at + ")");
             check_combo_fill(editable,
                              " (an editable combo box, out of the band and back" + at + ")");
         }
