@@ -23,6 +23,7 @@
 // no frame arriving, or the two backdrops not differing enough to tell.
 //   rapport-win32-caption-glass-test (RAPPORT_THEME=light for light)
 #include <rapport/rapport.h>
+#include "win32_caret_hider.h"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -44,6 +45,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #pragma comment(                                                                                   \
@@ -335,13 +337,74 @@ int main(int argc, char** argv)
     BOOL was = FALSE;
     DwmGetWindowAttribute(top, 20, &was, sizeof was);
     frame f[2];
-    for (int i = 0; i < 2; ++i)
+    // The pair taken with nothing of the window's own changing between them
+    // but the frame's colour (a pixel that changed itself reads as a hole,
+    // #86): the caret hidden (blinking, it was on in one frame and off in
+    // the other), whichever control has it (the text field, the editable
+    // combo box's edit), and every hide balanced (win32_caret_hider.h);
+    // taken again if the focus or the activation moved at all meanwhile,
+    // even away and back (the caret's made anew then, and the field's
+    // focused look and its clear button come and go), or the caret couldn't
+    // be hidden.
+    expect(caret_hider::watch(), "the focus and activation watched while the pair's taken");
+    bool steady = false;
+    std::string moves_seen;  // each attempt's count, for the failure
+    for (int attempt = 0; attempt < 3 && !steady; ++attempt)
     {
-        const BOOL frame_dark = i;
-        DwmSetWindowAttribute(top, 20, &frame_dark, sizeof frame_dark);
-        pump(10);
-        DwmFlush();
-        f[i] = cap.grab(top);
+        // The caret as it is at the attempt's start (shown, or hidden: the
+        // hides are cumulative, and a new caret starts hidden): after it,
+        // if it's the same caret still, as it was.
+        const HWND caret_was = caret_hider::owner();
+        const bool shown_was = caret_hider::caret_shown();
+        bool hid = false;
+        const HWND owner = caret_hider::hide(hid);
+        if (owner)
+        {
+            wchar_t cls[32]{};
+            GetClassNameW(owner, cls, 32);
+            char name[64];
+            std::snprintf(name, sizeof name, "%ls", cls);
+            note(std::string("the caret's ") + name + (GetParent(owner) == top ? "" : " (in another control)") +
+                 (hid ? ", hidden for the pair" : ", NOT hidden (HideCaret failed)"));
+        }
+        for (int i = 0; i < 2; ++i)
+        {
+            const BOOL frame_dark = i;
+            DwmSetWindowAttribute(top, 20, &frame_dark, sizeof frame_dark);
+            pump(10);
+            DwmFlush();
+            f[i] = cap.grab(top);
+        }
+        const int moved = caret_hider::moved();
+        const bool caret_lost = caret_hider::lost();
+        caret_hider::show();
+        if (caret_was && !caret_lost && caret_hider::owner() == caret_was)
+            expect(caret_hider::caret_shown() == shown_was,
+                   std::string("the caret as it was before the attempt, ") + (shown_was ? "shown" : "hidden") +
+                       ": its hide balanced");
+        else if (caret_was)
+            note("the caret made anew during the attempt: not compared");  // balanced whatever moved, unless the caret's gone
+        steady = moved == 0 && (!owner || hid);
+        moves_seen += (moves_seen.empty() ? "" : ", ") + str(moved) + (owner && !hid ? " (caret not hidden)" : "");
+        if (!steady)
+            note(owner && !hid ? std::string("the caret couldn't be hidden: taken again")
+                               : "the focus or the activation moved while the pair was taken (" + str(moved) +
+                                     " messages): taken again");
+    }
+    caret_hider::unwatch();
+    // Every hide balanced: whatever caret there is now, it's shown
+    // (GUI_CARETBLINKING: the caret visible).
+    // Never measured from a pair the focus moved in (it would read false
+    // holes): a failure of its own instead, not a skip, so a runner that
+    // keeps taking the focus is seen.
+    if (!steady)
+    {
+        DwmSetWindowAttribute(top, 20, &was, sizeof was);
+        expect(false, "capture unstable: in every attempt the focus or the activation moved, or the caret "
+                      "couldn't be hidden (focus and activation messages per attempt: " +
+                          moves_seen + ")");
+        std::printf("%d failed\n", fails);
+        return 1;
     }
     DwmSetWindowAttribute(top, 20, &was, sizeof was);
     if (f[0].px.empty() || f[1].px.empty()) return skip("no frame arrived from Windows.Graphics.Capture");

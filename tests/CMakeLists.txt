@@ -498,6 +498,11 @@ if(TARGET rapport_win32)
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
     # The toolbar band's glass when a control's own message destroys it
     # (a slider's on_changed closing the window mid-move): never shown.
+    # win32_caret_hider.h's caret balance (win32-caption-glass's captures):
+    # a never-shown window, no focus or input.
+    add_executable(rapport-win32-caret-balance-test win32_caret_balance_test.cpp)
+    target_link_libraries(rapport-win32-caret-balance-test PRIVATE user32)
+    add_test(NAME win32-caret-balance COMMAND rapport-win32-caret-balance-test)
     add_executable(rapport-win32-caption-glass-reentrant-test win32_caption_glass_reentrant_test.cpp)
     target_link_libraries(rapport-win32-caption-glass-reentrant-test PRIVATE rapport::rapport user32 gdi32 comctl32)
     if(RAPPORT_STATIC)
