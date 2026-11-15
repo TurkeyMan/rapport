@@ -24,7 +24,12 @@
 // combo box's, an entry's) is ClearType when the runner's font smoothing is
 // (read, never changed): colour at its edges, as Explorer's; a drop-down
 // list's own font (its list's) ClearType too; a flat button's text, on the
-// band's translucent layer at rest, grey (CONTRIBUTING.md). Under high contrast
+// band's translucent layer at rest, grey (CONTRIBUTING.md). Whether those
+// fringe checks ran, and the font smoothing, is printed on every run
+// ("fringe check: ..."; CI prints the line from ctest's log). A CI runner
+// that opts in (GITHUB_ACTIONS=true, RAPPORT_TEST_SET_CLEARTYPE=1) has its
+// font smoothing set to ClearType for the run and put back after; never a
+// desktop's. Under high contrast
 // (rapport-win32-high-contrast-run, CI only): none of it drawn, the native
 // controls at the band's heights.
 //
@@ -915,15 +920,47 @@ int transitions(rap::ui& ui, const density& d)
                              });
 }
 
-// The runner's own font smoothing: ClearType, or not. Read, never changed.
+// The runner's font smoothing: off, standard or ClearType.
+struct smoothing
+{
+    BOOL on = FALSE;
+    UINT type = 0;
+};
+smoothing font_smoothing()
+{
+    smoothing s;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &s.on, 0);
+    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &s.type, 0);
+    return s;
+}
+std::string smoothing_name(const smoothing& s)
+{
+    return !s.on ? "off" : s.type == FE_FONTSMOOTHINGCLEARTYPE ? "ClearType" : "standard";
+}
 bool runner_cleartype()
 {
-    BOOL smoothing = FALSE;
-    UINT type = 0;
-    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &smoothing, 0);
-    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &type, 0);
-    return smoothing && type == FE_FONTSMOOTHINGCLEARTYPE;
+    const smoothing s = font_smoothing();
+    return s.on && s.type == FE_FONTSMOOTHINGCLEARTYPE;
 }
+void set_smoothing(const smoothing& s)
+{
+    SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, reinterpret_cast<PVOID>(UINT_PTR(s.type)),
+                          SPIF_SENDCHANGE);
+    SystemParametersInfoW(SPI_SETFONTSMOOTHING, s.on, nullptr, SPIF_SENDCHANGE);
+}
+// The runner's smoothing as it was, put back at exit once changed (a CI
+// runner's only: RAPPORT_TEST_SET_CLEARTYPE).
+struct smoothing_restore
+{
+    bool changed = false;
+    smoothing was;
+    void undo()
+    {
+        if (changed) set_smoothing(was);
+        changed = false;
+    }
+    ~smoothing_restore() { undo(); }
+} g_smoothing;
 
 // A printed control's ink inside its edge (4 px in, past its border): its
 // pixels more than 16 levels off its ground (at its left, mid-height) in a
@@ -1076,8 +1113,6 @@ void run(rap::ui& ui, const density& d, bool hc)
         check_combo(editable, at);
         // Text on an opaque face ClearType (the runner's), on the layer grey.
         const bool cleartype = runner_cleartype();
-        note(std::string("the runner's font smoothing: ") +
-             (cleartype ? "ClearType" : "not ClearType"));
         SetWindowTextW(entry_h, L"Subject");
         for (const auto& [h, name] :
              {std::pair{menu_b, "a menu button"}, std::pair{list, "a drop-down list"},
@@ -1157,6 +1192,19 @@ int main(int argc, char** argv)
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
     rap::win32::set_text_scale_for_tests(1.f);
 #endif
+    // ClearType for the fringe checks: set on a CI runner that opts in,
+    // never on a desktop; put back at exit.
+    g_smoothing.was = font_smoothing();
+    const bool set_cleartype =
+        env("GITHUB_ACTIONS") == "true" && env("RAPPORT_TEST_SET_CLEARTYPE") == "1";
+    if (set_cleartype && !transitions_run && !runner_cleartype())
+    {
+        g_smoothing.changed = true;  // marked before it's tried: half made is put back too
+        set_smoothing({TRUE, FE_FONTSMOOTHINGCLEARTYPE});
+        expect(runner_cleartype(),
+               "the runner's font smoothing set to ClearType (RAPPORT_TEST_SET_CLEARTYPE): " +
+                   smoothing_name(font_smoothing()));
+    }
     rap::load_options options{.backend = "win32"};
     options.look.color_scheme = rap::color_scheme::dark;
     auto ui = rap::ui::load(argc, argv, options);
@@ -1164,6 +1212,25 @@ int main(int argc, char** argv)
     const bool hc = high_contrast();
     g_dark = !hc && env("RAPPORT_THEME") != "light";
     std::printf("build %lu, %s\n", build, hc ? "high contrast" : g_dark ? "dark" : "light");
+    // Whether the text's fringe checks run: on every run, for CI's log.
+    {
+        const smoothing now = font_smoothing();
+        const std::string how =
+            "font smoothing " + smoothing_name(now) +
+            (g_smoothing.changed ? ", set for this run from " + smoothing_name(g_smoothing.was)
+                                 : std::string());
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+        const char* densities = "both densities";
+#else
+        const char* densities = env("RAPPORT_DENSITY") == "compact" ? "compact" : "standard";
+#endif
+        std::printf("fringe check: %s (build %lu, %s, %s, %s)\n",
+                    transitions_run      ? "not run, --transitions"
+                    : hc                 ? "not run, high contrast"
+                    : runner_cleartype() ? "ran, ClearType's fringes looked for"
+                                         : "ran, grey text looked for",
+                    build, hc ? "high contrast" : g_dark ? "dark" : "light", densities, how.c_str());
+    }
     if (transitions_run)
     {
         const int r = transitions(**ui, env("RAPPORT_DENSITY") == "compact" ? compact : standard);
