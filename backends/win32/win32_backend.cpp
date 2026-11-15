@@ -7541,14 +7541,34 @@ private:
                 D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
                 96, 96);
             if (FAILED(d2d_factory()->CreateDCRenderTarget(&props, row_target_.put()))) return;
-            // Crisp GDI-style glyphs, like the list_view's own text.
-            com<IDWriteRenderingParams> def;
             row_params_.reset();
+        }
+        // Crisp GDI-style glyphs, like the list_view's own text, made for the
+        // smoothing as rapport reads it, and again when that changes: the
+        // system's defaults are those of the smoothing when they're made (no
+        // ClearType level at standard), so ClearType made from them after a
+        // change from standard would come out grey. With ClearType, its level
+        // and a pixel geometry given, the system's where it has them.
+        const int smoothing = font_smoothing_cleartype() ? 2 : font_smoothing_on() ? 1 : 0;
+        if (!row_params_ || row_params_smoothing_ != smoothing)
+        {
+            row_params_.reset();
+            row_params_smoothing_ = smoothing;
+            com<IDWriteRenderingParams> def;
             dwrite_factory()->CreateRenderingParams(def.put());
             if (def)
-                dwrite_factory()->CreateCustomRenderingParams(
-                    def->GetGamma(), def->GetEnhancedContrast(), def->GetClearTypeLevel(), def->GetPixelGeometry(),
-                    DWRITE_RENDERING_MODE_GDI_CLASSIC, row_params_.put());
+            {
+                float level = def->GetClearTypeLevel();
+                DWRITE_PIXEL_GEOMETRY geometry = def->GetPixelGeometry();
+                if (smoothing == 2)
+                {
+                    if (level <= 0.f) level = 1.f;
+                    if (geometry == DWRITE_PIXEL_GEOMETRY_FLAT) geometry = DWRITE_PIXEL_GEOMETRY_RGB;
+                }
+                dwrite_factory()->CreateCustomRenderingParams(def->GetGamma(), def->GetEnhancedContrast(), level,
+                                                              geometry, DWRITE_RENDERING_MODE_GDI_CLASSIC,
+                                                              row_params_.put());
+            }
         }
         // The user's font smoothing, as it is now: the mode and the
         // parameters together (aliased ones for off).
@@ -8430,6 +8450,7 @@ private:
     bool sel_pending_ = false;  // a selection change is posted, not yet reported
     com<ID2D1DCRenderTarget> row_target_;
     com<IDWriteRenderingParams> row_params_;  // GDI-classic, for row_target_'s smoothed text
+    int row_params_smoothing_ = -1;           // the smoothing row_params_ were made for (0 off, 1, 2 ClearType)
     std::map<std::string, com<ID2D1Bitmap>> file_icons_;  // per extension, for row_target_
     bool checks_ = false;                                 // a checkbox at the start of column 0
     bool file_view_ = false;                              // Windows 11 file_view: column 0's content inset
