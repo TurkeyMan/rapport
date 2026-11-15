@@ -338,15 +338,49 @@ int main(int argc, char** argv)
     frame f[2];
     // The pair taken with nothing of the window's own changing between them
     // but the frame's colour (a pixel that changed itself reads as a hole,
-    // #86): the text field's caret hidden (blinking, it was on in one frame
-    // and off in the other), shown again after; and taken again if the
-    // focus or the activation moved meanwhile (the caret, the field's
-    // focused look and its clear button come and go with them).
-    auto focus_state = [&] { return std::pair{GetForegroundWindow() == top, GetFocus()}; };
-    for (int attempt = 0; attempt < 3; ++attempt)
+    // #86): the caret hidden (blinking, it was on in one frame and off in
+    // the other), whichever control has it (the text field, the editable
+    // combo box's edit: GetGUIThreadInfo's), shown again after on the same
+    // one; and taken again if the
+    // focus or the activation moved at all meanwhile, even away and back
+    // (the caret's made anew then, unhidden, and the field's focused look
+    // and its clear button come and go): every WM_SETFOCUS, WM_KILLFOCUS,
+    // WM_ACTIVATE and WM_NCACTIVATE to this thread's windows counted, by a
+    // hook on this thread for the pair's length.
+    static int moves = 0;
+    HHOOK watch = SetWindowsHookExW(
+        WH_CALLWNDPROC,
+        [](int code, WPARAM wp, LPARAM lp) -> LRESULT
+        {
+            if (code == HC_ACTION)
+            {
+                const UINT msg = reinterpret_cast<const CWPSTRUCT*>(lp)->message;
+                if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_ACTIVATE || msg == WM_NCACTIVATE)
+                    ++moves;
+            }
+            return CallNextHookEx(nullptr, code, wp, lp);
+        },
+        nullptr, GetCurrentThreadId());
+    expect(watch != nullptr, "the focus and activation watched while the pair's taken");
+    bool steady = false;
+    std::string moves_seen;  // each attempt's count, for the failure
+    for (int attempt = 0; attempt < 3 && !steady; ++attempt)
     {
-        const auto before = focus_state();
-        const bool hid = HideCaret(edit) != FALSE;  // (none to hide when it's not focused)
+        moves = 0;
+        // The caret's owner now, if there's one (none when nothing here has
+        // the focus): hidden, or the attempt's unsteady.
+        GUITHREADINFO gui{sizeof gui};
+        const HWND owner = GetGUIThreadInfo(GetCurrentThreadId(), &gui) ? gui.hwndCaret : nullptr;
+        const bool hid = owner && HideCaret(owner);
+        if (owner)
+        {
+            wchar_t cls[32]{};
+            GetClassNameW(owner, cls, 32);
+            char name[64];
+            std::snprintf(name, sizeof name, "%ls", cls);
+            note(std::string("the caret's ") + name + (GetParent(owner) == top ? "" : " (in another control)") +
+                 (hid ? ", hidden for the pair" : ", NOT hidden (HideCaret failed)"));
+        }
         for (int i = 0; i < 2; ++i)
         {
             const BOOL frame_dark = i;
@@ -355,9 +389,31 @@ int main(int argc, char** argv)
             DwmFlush();
             f[i] = cap.grab(top);
         }
-        if (hid) ShowCaret(edit);
-        if (focus_state() == before) break;
-        note("the focus or the activation moved while the pair was taken: taken again");
+        const int moved = moves;
+        // Shown again on the window it was hidden on, only if it's still the
+        // caret that was hidden: one made anew meanwhile (the focus gone and
+        // back) was never hidden.
+        if (hid && moved == 0) ShowCaret(owner);
+        // Unsteady too if there was a caret and it couldn't be hidden.
+        steady = moved == 0 && (!owner || hid);
+        moves_seen += (moves_seen.empty() ? "" : ", ") + str(moved) + (owner && !hid ? " (caret not hidden)" : "");
+        if (!steady)
+            note(owner && !hid ? std::string("the caret couldn't be hidden: taken again")
+                               : "the focus or the activation moved while the pair was taken (" + str(moved) +
+                                     " messages): taken again");
+    }
+    if (watch) UnhookWindowsHookEx(watch);
+    // Never measured from a pair the focus moved in (it would read false
+    // holes): a failure of its own instead, not a skip, so a runner that
+    // keeps taking the focus is seen.
+    if (!steady)
+    {
+        DwmSetWindowAttribute(top, 20, &was, sizeof was);
+        expect(false, "capture unstable: in every attempt the focus or the activation moved, or the caret "
+                      "couldn't be hidden (focus and activation messages per attempt: " +
+                          moves_seen + ")");
+        std::printf("%d failed\n", fails);
+        return 1;
     }
     DwmSetWindowAttribute(top, 20, &was, sizeof was);
     if (f[0].px.empty() || f[1].px.empty()) return skip("no frame arrived from Windows.Graphics.Capture");
