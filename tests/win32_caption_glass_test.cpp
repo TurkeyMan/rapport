@@ -23,6 +23,7 @@
 // no frame arriving, or the two backdrops not differing enough to tell.
 //   rapport-win32-caption-glass-test (RAPPORT_THEME=light for light)
 #include <rapport/rapport.h>
+#include "win32_caret_hider.h"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -340,38 +341,18 @@ int main(int argc, char** argv)
     // but the frame's colour (a pixel that changed itself reads as a hole,
     // #86): the caret hidden (blinking, it was on in one frame and off in
     // the other), whichever control has it (the text field, the editable
-    // combo box's edit: GetGUIThreadInfo's), shown again after on the same
-    // one; and taken again if the
-    // focus or the activation moved at all meanwhile, even away and back
-    // (the caret's made anew then, unhidden, and the field's focused look
-    // and its clear button come and go): every WM_SETFOCUS, WM_KILLFOCUS,
-    // WM_ACTIVATE and WM_NCACTIVATE to this thread's windows counted, by a
-    // hook on this thread for the pair's length.
-    static int moves = 0;
-    HHOOK watch = SetWindowsHookExW(
-        WH_CALLWNDPROC,
-        [](int code, WPARAM wp, LPARAM lp) -> LRESULT
-        {
-            if (code == HC_ACTION)
-            {
-                const UINT msg = reinterpret_cast<const CWPSTRUCT*>(lp)->message;
-                if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_ACTIVATE || msg == WM_NCACTIVATE)
-                    ++moves;
-            }
-            return CallNextHookEx(nullptr, code, wp, lp);
-        },
-        nullptr, GetCurrentThreadId());
-    expect(watch != nullptr, "the focus and activation watched while the pair's taken");
+    // combo box's edit), and every hide balanced (win32_caret_hider.h);
+    // taken again if the focus or the activation moved at all meanwhile,
+    // even away and back (the caret's made anew then, and the field's
+    // focused look and its clear button come and go), or the caret couldn't
+    // be hidden.
+    expect(caret_hider::watch(), "the focus and activation watched while the pair's taken");
     bool steady = false;
     std::string moves_seen;  // each attempt's count, for the failure
     for (int attempt = 0; attempt < 3 && !steady; ++attempt)
     {
-        moves = 0;
-        // The caret's owner now, if there's one (none when nothing here has
-        // the focus): hidden, or the attempt's unsteady.
-        GUITHREADINFO gui{sizeof gui};
-        const HWND owner = GetGUIThreadInfo(GetCurrentThreadId(), &gui) ? gui.hwndCaret : nullptr;
-        const bool hid = owner && HideCaret(owner);
+        bool hid = false;
+        const HWND owner = caret_hider::hide(hid);
         if (owner)
         {
             wchar_t cls[32]{};
@@ -389,12 +370,8 @@ int main(int argc, char** argv)
             DwmFlush();
             f[i] = cap.grab(top);
         }
-        const int moved = moves;
-        // Shown again on the window it was hidden on, only if it's still the
-        // caret that was hidden: one made anew meanwhile (the focus gone and
-        // back) was never hidden.
-        if (hid && moved == 0) ShowCaret(owner);
-        // Unsteady too if there was a caret and it couldn't be hidden.
+        const int moved = caret_hider::moved();
+        caret_hider::show();  // balanced whatever moved, unless the caret's gone
         steady = moved == 0 && (!owner || hid);
         moves_seen += (moves_seen.empty() ? "" : ", ") + str(moved) + (owner && !hid ? " (caret not hidden)" : "");
         if (!steady)
@@ -402,7 +379,11 @@ int main(int argc, char** argv)
                                : "the focus or the activation moved while the pair was taken (" + str(moved) +
                                      " messages): taken again");
     }
-    if (watch) UnhookWindowsHookEx(watch);
+    caret_hider::unwatch();
+    // Every hide balanced: whatever caret there is now, it's shown
+    // (GUI_CARETBLINKING: the caret visible).
+    if (caret_hider::owner())
+        expect(caret_hider::caret_shown(), "the caret shown again after the pairs, every hide balanced");
     // Never measured from a pair the focus moved in (it would read false
     // holes): a failure of its own instead, not a skip, so a runner that
     // keeps taking the focus is seen.
