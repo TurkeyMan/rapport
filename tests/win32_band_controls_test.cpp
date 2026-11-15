@@ -21,17 +21,18 @@
 // line the field's height in DividerStrokeColorDefault. Labels and check
 // boxes stay native, centred in the row. The text on a face that's opaque
 // under it (a button's, a menu button's, a drop-down list's, an editable
-// combo box's, an entry's) drawn as the runner's font smoothing draws text:
-// ClearType, colour at its edges (as Explorer's); standard, grey edges; off,
-// aliased, ink and ground alone. A drop-down list's own font (its list's)
-// isn't the grayscale copy; a flat button's text, on the band's translucent
-// layer at rest, has no colour (CONTRIBUTING.md). Whether those checks ran,
-// and the smoothing, is printed on every run ("fringe check: ..."; CI prints
-// the line from ctest's log). A CI runner that opts in (GITHUB_ACTIONS=true,
-// RAPPORT_TEST_SET_FONT_SMOOTHING=1) has its font smoothing set for the run,
-// to ClearType, or off where RAPPORT_TEST_FONT_SMOOTHING=off says
-// (win32-band-controls-smoothing-off), and put back after, checked; never a
-// desktop's (the off variant skipped without the opt-in). Under high contrast
+// combo box's, an entry's) drawn as plain GDI text is in the same process
+// (the probe: DEFAULT_QUALITY, as rapport's UI fonts): ClearType, colour at
+// its edges (as Explorer's); standard, grey edges; off, aliased, ink and
+// ground alone. A drop-down list's own font (its list's) isn't the grayscale
+// copy; a flat button's text, on the band's translucent layer at rest, has no
+// colour (CONTRIBUTING.md). What the probe drew, and the runner's setting,
+// are printed on every run ("fringe check: ..."; CI prints the line from
+// ctest's log). The test never changes the setting: win32-band-controls-
+// smoothing-off runs it under rapport-win32-font-smoothing-run, which turns
+// smoothing off before the test's process starts and puts it back after (a
+// CI runner's only); there the probe must have drawn without it. Under high
+// contrast
 // (rapport-win32-high-contrast-run, CI only): none of it drawn, the native
 // controls at the band's heights.
 //
@@ -590,50 +591,14 @@ enum class text_look
     grey_edges,
     cleartype,
 };
+// What plain GDI text looks like in this process (probe_text, in main);
+// the controls' text on opaque faces is held to it.
+text_look g_text_look = text_look::no_colour;
+bool g_probed = false;  // probe_text could tell
 text_look runner_text()
 {
-    const smoothing s = font_smoothing();
-    return !s.on                                  ? text_look::no_colour
-           : s.type == FE_FONTSMOOTHINGCLEARTYPE ? text_look::cleartype
-                                                  : text_look::grey_edges;
+    return g_text_look;
 }
-// `s` set, its type first: whether each SPI_SET call took and the setting
-// reads back as `s`.
-bool set_smoothing(const smoothing& s)
-{
-    bool ok = SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0,
-                                    reinterpret_cast<PVOID>(UINT_PTR(s.type)),
-                                    SPIF_SENDCHANGE) != FALSE;
-    ok = SystemParametersInfoW(SPI_SETFONTSMOOTHING, s.on, nullptr, SPIF_SENDCHANGE) != FALSE && ok;
-    const smoothing now = font_smoothing();
-    return ok && (now.on != FALSE) == (s.on != FALSE) && now.type == s.type;
-}
-// The runner's smoothing as it was, put back once changed (a CI runner's
-// only: RAPPORT_TEST_SET_FONT_SMOOTHING): by main before it returns, checked, a
-// failure loud and the run failed; at exit, if a return came first.
-struct smoothing_restore
-{
-    bool changed = false;
-    smoothing was;
-    bool undo()
-    {
-        if (!changed) return true;
-        changed = false;
-        const bool ok = set_smoothing(was);
-        const smoothing now = font_smoothing();
-        if (!ok)
-            std::fprintf(stderr,
-                         "FAIL the runner's font smoothing NOT put back: was %s (type %u), now %s "
-                         "(type %u)\n",
-                         smoothing_name(was).c_str(), was.type, smoothing_name(now).c_str(),
-                         now.type);
-        else
-            std::printf("the runner's font smoothing put back: %s\n", smoothing_name(now).c_str());
-        return ok;
-    }
-    ~smoothing_restore() { undo(); }
-} g_smoothing;
-
 int apart(DWORD a, DWORD b)
 {
     int d = 0;
@@ -731,6 +696,59 @@ const char* look_name(text_look look)
     return look == text_look::cleartype    ? "ClearType"
            : look == text_look::grey_edges ? "grey, smoothed"
                                            : "without colour";
+}
+
+// Plain GDI text in this process, as the runner's font smoothing draws it:
+// Segoe UI at 14 px, DEFAULT_QUALITY (as rapport's UI fonts are), dark on
+// light into a 32-bit DIB, measured as a control's text is. Its look, or
+// false if it's none of them (no text, or colour with too few edges).
+bool probe_text(text_look& look, ink_colour& c)
+{
+    const int w = 320, h = 40;
+    const DWORD ground = 0xF0F0F0;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp || !bits)
+    {
+        if (bmp) DeleteObject(bmp);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+        return false;
+    }
+    HGDIOBJ old = SelectObject(mem, bmp);
+    std::fill_n(static_cast<DWORD*>(bits), size_t(w) * h, ground);
+    HFONT font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+                             DEFAULT_PITCH, L"Segoe UI");
+    HGDIOBJ old_font = SelectObject(mem, font);
+    SetBkMode(mem, TRANSPARENT);
+    SetTextColor(mem, RGB(0x1A, 0x1A, 0x1A));
+    const wchar_t text[] = L"Author Email, Subject, master";
+    TextOutW(mem, 8, 10, text, int(std::size(text) - 1));
+    GdiFlush();
+    printed p;
+    p.w = w;
+    p.h = h;
+    p.px.assign(static_cast<DWORD*>(bits), static_cast<DWORD*>(bits) + size_t(w) * h);
+    for (DWORD& v : p.px) v &= 0xffffff;
+    SelectObject(mem, old_font);
+    DeleteObject(font);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    c = ink_colour_of(p, RECT{0, 0, w, h}, ground);
+    for (text_look l : {text_look::cleartype, text_look::grey_edges, text_look::no_colour})
+        if (text_fault(c, l).empty())
+        {
+            look = l;
+            return true;
+        }
+    return false;
 }
 
 // text_fault on made text, as each smoothing would draw it, whatever the
@@ -1377,31 +1395,25 @@ int main(int argc, char** argv)
     rap::win32::set_text_scale_for_tests(1.f);
 #endif
     check_text_fault();
-    // The font smoothing for the text checks: ClearType, or off
-    // (RAPPORT_TEST_FONT_SMOOTHING=off), set on a CI runner that opts in,
-    // never on a desktop; put back before returning, checked. Off is only
-    // ever run so: skipped without the opt-in.
-    g_smoothing.was = font_smoothing();
-    const bool may_set =
-        env("GITHUB_ACTIONS") == "true" && env("RAPPORT_TEST_SET_FONT_SMOOTHING") == "1";
-    const bool want_off = env("RAPPORT_TEST_FONT_SMOOTHING") == "off";
-    if (want_off && !may_set)
-    {
-        note("skipped: font smoothing off is set only on a CI runner (GITHUB_ACTIONS=true, "
-             "RAPPORT_TEST_SET_FONT_SMOOTHING=1)");
-        std::printf("fringe check: not run, smoothing off needs the CI opt-in\n");
-        return 77;
-    }
-    const smoothing want = want_off ? smoothing{FALSE, g_smoothing.was.type}
-                                    : smoothing{TRUE, FE_FONTSMOOTHINGCLEARTYPE};
-    const smoothing now = font_smoothing();
-    if (may_set && ((now.on != FALSE) != (want.on != FALSE) || (want.on && now.type != want.type)))
-    {
-        g_smoothing.changed = true;  // marked before it's tried: half made is put back too
-        expect(set_smoothing(want),
-               "the runner's font smoothing set to " + smoothing_name(want) +
-                   " (RAPPORT_TEST_SET_FONT_SMOOTHING): " + smoothing_name(font_smoothing()));
-    }
+    // What plain text looks like here: the controls' is held to it. Under
+    // rapport-win32-font-smoothing-run (RAPPORT_TEST_FONT_SMOOTHING_SET) the
+    // smoothing was set before this process started: the probe must show
+    // it, or GDI didn't take it and the controls' text proves nothing.
+    ink_colour probed{};
+    g_probed = probe_text(g_text_look, probed);
+    expect(g_probed, "plain GDI text probed: " + str(probed.ink) + " ink pixels, " +
+                         str(probed.fringed) + " of " + str(probed.edges) +
+                         " edge pixels with colour, chroma " + str(probed.chroma));
+    const std::string set_for_run = env("RAPPORT_TEST_FONT_SMOOTHING_SET");
+    if (set_for_run == "off")
+        expect(g_probed && g_text_look == text_look::no_colour,
+               "plain GDI text drawn without smoothing, turned off before this process started: " +
+                   std::string(look_name(g_text_look)) + ", " + str(probed.fringed) + " of " +
+                   str(probed.edges) + " edge pixels with colour, chroma " + str(probed.chroma));
+    if (set_for_run == "cleartype")
+        expect(g_probed && g_text_look == text_look::cleartype,
+               "plain GDI text drawn with ClearType, turned on before this process started: " +
+                   std::string(look_name(g_text_look)));
     rap::load_options options{.backend = "win32"};
     options.look.color_scheme = rap::color_scheme::dark;
     auto ui = rap::ui::load(argc, argv, options);
@@ -1412,17 +1424,19 @@ int main(int argc, char** argv)
     // Whether the text's fringe checks run: on every run, for CI's log.
     {
         const smoothing now = font_smoothing();
+        const std::string set_for_run = env("RAPPORT_TEST_FONT_SMOOTHING_SET");
         const std::string how =
             "font smoothing " + smoothing_name(now) +
-            (g_smoothing.changed ? ", set for this run from " + smoothing_name(g_smoothing.was)
-                                 : std::string());
+            (set_for_run.empty() ? std::string() : ", set " + set_for_run + " for this run") +
+            ", plain text probed " + (g_probed ? look_name(g_text_look) : "as nothing known");
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
         const char* densities = "both densities";
 #else
         const char* densities = env("RAPPORT_DENSITY") == "compact" ? "compact" : "standard";
 #endif
         std::printf("fringe check: %s (build %lu, %s, %s, %s)\n",
-                    hc                                       ? "not run, high contrast"
+                    hc           ? "not run, high contrast"
+                    : !g_probed  ? "not run, plain text unprobed"
                     : runner_text() == text_look::cleartype  ? "ran, ClearType's fringes looked for"
                     : runner_text() == text_look::grey_edges ? "ran, grey edges looked for"
                                                              : "ran, text without colour looked for",
@@ -1432,7 +1446,6 @@ int main(int argc, char** argv)
     {
         const int r = transitions(**ui, env("RAPPORT_DENSITY") == "compact" ? compact : standard);
         g_restore.undo();
-        if (!g_smoothing.undo()) ++fails;
         std::printf(fails ? "%d failed\n" : "all passed\n", fails);
         return fails ? 1 : r;
     }
@@ -1447,7 +1460,6 @@ int main(int argc, char** argv)
     // The environment's (RAPPORT_DENSITY: win32-band-controls-compact).
     run(**ui, env("RAPPORT_DENSITY") == "compact" ? compact : standard, hc);
 #endif
-    if (!g_smoothing.undo()) ++fails;
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
