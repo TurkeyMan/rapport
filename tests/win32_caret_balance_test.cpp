@@ -10,7 +10,9 @@
 //  - a steady attempt: nothing moved, the caret shown after;
 //  - a caret hidden before an attempt (the hides cumulative): with
 //    activation during it, still hidden after, balanced (one ShowCaret
-//    shows it).
+//    shows it);
+//  - a new caret, made and never shown (CreateCaret's start: hidden): an
+//    attempt with activation leaves it hidden, and one ShowCaret shows it.
 //   rapport-win32-caret-balance-test
 #include "win32_caret_hider.h"
 
@@ -100,6 +102,20 @@ int main()
         expect(hid && !caret_hider::caret_shown(), "attempt 4: still hidden after, as it was");
         ShowCaret(h);
         expect(caret_hider::caret_shown(), "attempt 4: one ShowCaret shows it: balanced");
+    }
+    // A new caret, never shown (hidden, as CreateCaret makes it): hidden
+    // after an attempt, and one ShowCaret shows it.
+    {
+        DestroyCaret();
+        CreateCaret(h, nullptr, 2, 20);
+        expect(caret_hider::owner() == h && !caret_hider::caret_shown(), "attempt 5: a new caret, hidden");
+        bool hid = false;
+        caret_hider::hide(hid);
+        SendMessageW(h, WM_NCACTIVATE, TRUE, 0);
+        caret_hider::show();
+        expect(!caret_hider::caret_shown(), "attempt 5: still hidden after, as it was");
+        ShowCaret(h);
+        expect(caret_hider::caret_shown(), "attempt 5: one ShowCaret shows it: balanced");
     }
     caret_hider::unwatch();
     DestroyCaret();
