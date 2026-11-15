@@ -105,6 +105,23 @@ HFONT ui_font(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f)
 // when it changes; Direct2D's text follows it.
 bool font_smoothing_on();
 bool font_smoothing_cleartype();
+// For tests: the font smoothing taken to be off (0), standard (1) or
+// ClearType (2), without changing the setting; -1, the user's again.
+void set_font_smoothing_for_tests(int smoothing);
+// `rt`'s text in the user's font smoothing: its antialias mode and its
+// rendering parameters set together, as Direct2D needs (D1136: aliased text
+// wants an aliased rendering mode, a ClearType one fails). ClearType (only
+// if `cleartype_ok`: the text's ground opaque) or grayscale with `smoothed`
+// (null: the target's default); aliased, smoothing off, with an aliased mode
+// made from the defaults.
+void set_text_smoothing(ID2D1RenderTarget* rt, IDWriteRenderingParams* smoothed, bool cleartype_ok);
+// For tests: text drawn on one Direct2D DC target into a bitmap through
+// set_text_smoothing, for each smoothing in `sequence` in turn (0 off, 1
+// standard, 2 ClearType; the target kept, so the mode changes on it), with
+// GDI-classic parameters (a list's rows) and then the primary monitor's (the
+// caption tabs'). "" if each drew (EndDraw succeeded, ink in the bitmap),
+// else what didn't.
+std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence);
 // Average character width and line height of the UI font at `dpi`, in device px.
 SIZE font_metrics(UINT dpi);
 // The UI font family name and size in DIPs (for DirectWrite text).

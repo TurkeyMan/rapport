@@ -2657,6 +2657,22 @@ private:
     std::function<void(bool)> toggled_;
 };
 
+// A combo box's edit shows its selection unfocused (ES_NOHIDESEL), and
+// the combo box selects all of its text whenever the text is set or the
+// box is sized: text set or laid out while it's not focused stood on the
+// accent highlight until it was focused and left. A selection made while
+// the edit isn't focused is dropped (EM_SETSEL from -1: none, the caret
+// kept); focused, it selects as Windows does.
+LRESULT CALLBACK unfocused_selection_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg == EM_SETSEL && GetFocus() != h && int(wp) != -1)
+    {
+        wp = WPARAM(-1);
+        lp = 0;
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
 // Edit controls report Enter only to a subclass.
 LRESULT CALLBACK enter_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data)
 {
@@ -3273,7 +3289,11 @@ public:
         COMBOBOXINFO info{};
         info.cbSize = sizeof info;
         if (GetComboBoxInfo(h_, &info) && info.hwndItem)
+        {
             SetWindowSubclass(info.hwndItem, enter_subclass, 1, reinterpret_cast<DWORD_PTR>(&activate_));
+            SetWindowSubclass(info.hwndItem, unfocused_selection_subclass, 6, 0);
+            SendMessageW(info.hwndItem, EM_SETSEL, WPARAM(-1), 0);  // what set_text selected
+        }
     }
     // Quiet, as set_text: the text put back is the app's, not the user's.
     void set_items(std::vector<std::string> items) override
@@ -7510,18 +7530,17 @@ private:
                 96, 96);
             if (FAILED(d2d_factory()->CreateDCRenderTarget(&props, row_target_.put()))) return;
             // Crisp GDI-style glyphs, like the list_view's own text.
-            com<IDWriteRenderingParams> def, params;
+            com<IDWriteRenderingParams> def;
+            row_params_.reset();
             dwrite_factory()->CreateRenderingParams(def.put());
-            if (def &&
-                SUCCEEDED(dwrite_factory()->CreateCustomRenderingParams(
+            if (def)
+                dwrite_factory()->CreateCustomRenderingParams(
                     def->GetGamma(), def->GetEnhancedContrast(), def->GetClearTypeLevel(), def->GetPixelGeometry(),
-                    DWRITE_RENDERING_MODE_GDI_CLASSIC, params.put())))
-                row_target_->SetTextRenderingParams(params.get());
+                    DWRITE_RENDERING_MODE_GDI_CLASSIC, row_params_.put());
         }
-        // The user's font smoothing, as it is now.
-        row_target_->SetTextAntialiasMode(font_smoothing_cleartype() ? D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE
-                                          : font_smoothing_on()      ? D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE
-                                                                     : D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+        // The user's font smoothing, as it is now: the mode and the
+        // parameters together (aliased ones for off).
+        set_text_smoothing(row_target_.get(), row_params_.get(), true);
         ID2D1DCRenderTarget* rt = row_target_.get();
         if (FAILED(rt->BindDC(dc, &clip))) return;
         const float s = win_.scale();
@@ -8398,6 +8417,7 @@ private:
     std::vector<bool> restored_;  // per column: given its width by set_column_widths
     bool sel_pending_ = false;  // a selection change is posted, not yet reported
     com<ID2D1DCRenderTarget> row_target_;
+    com<IDWriteRenderingParams> row_params_;  // GDI-classic, for row_target_'s smoothed text
     std::map<std::string, com<ID2D1Bitmap>> file_icons_;  // per extension, for row_target_
     bool checks_ = false;                                 // a checkbox at the start of column 0
     bool file_view_ = false;                              // Windows 11 file_view: column 0's content inset

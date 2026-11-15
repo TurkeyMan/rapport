@@ -591,6 +591,11 @@ if(TARGET rapport_win32)
              COMMAND rapport-win32-font-smoothing-run off $<TARGET_FILE:rapport-win32-band-controls-test>)
     set_tests_properties(win32-band-controls-smoothing-off PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    # And standard smoothing (grayscale): grey edges, no colour.
+    add_test(NAME win32-band-controls-smoothing-standard
+             COMMAND rapport-win32-font-smoothing-run standard $<TARGET_FILE:rapport-win32-band-controls-test>)
+    set_tests_properties(win32-band-controls-smoothing-standard PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
     # And with ClearType set on (if it isn't), the same way: the probe must
     # read ClearType there, so the fringes are looked for whatever the
     # runner's own setting. Dark and light; a plugin build's compact through

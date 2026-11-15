@@ -1,5 +1,5 @@
-// Runs a test (argv[2..]) with the font smoothing `argv[1]` ("off" or
-// "cleartype"), for CI: a runner is a throwaway VM, where changing it for a
+// Runs a test (argv[2..]) with the font smoothing `argv[1]` ("off",
+// "standard" or "cleartype"), for CI: a runner is a throwaway VM, where changing it for a
 // while is fine. It changes a system setting, so it refuses to unless both
 // GITHUB_ACTIONS=true and RAPPORT_TEST_SET_FONT_SMOOTHING=1 say it's such a
 // runner (skipped, 77, otherwise). It sets the smoothing before the test's
@@ -88,9 +88,10 @@ int main(int argc, char** argv)
     DWORD timeout_s = 120;
     if (const char* t = std::getenv("RAPPORT_TEST_RUN_TIMEOUT_S"); t && std::atoi(t) > 0)
         timeout_s = DWORD(std::atoi(t));
-    if (argc < 3 || (std::strcmp(argv[1], "off") && std::strcmp(argv[1], "cleartype")))
+    if (argc < 3 ||
+        (std::strcmp(argv[1], "off") && std::strcmp(argv[1], "standard") && std::strcmp(argv[1], "cleartype")))
     {
-        std::fprintf(stderr, "usage: %s off|cleartype test [args...]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s off|standard|cleartype test [args...]\n", argv[0]);
         return 2;
     }
     if (!env_is("GITHUB_ACTIONS", "true") || !env_is("RAPPORT_TEST_SET_FONT_SMOOTHING", "1"))
@@ -100,8 +101,9 @@ int main(int argc, char** argv)
         return 77;
     }
     const smoothing was = read();
-    const smoothing want = !std::strcmp(argv[1], "off") ? smoothing{FALSE, was.type}
-                                                        : smoothing{TRUE, FE_FONTSMOOTHINGCLEARTYPE};
+    const smoothing want = !std::strcmp(argv[1], "off")        ? smoothing{FALSE, was.type}
+                           : !std::strcmp(argv[1], "standard") ? smoothing{TRUE, FE_FONTSMOOTHINGSTANDARD}
+                                                               : smoothing{TRUE, FE_FONTSMOOTHINGCLEARTYPE};
     std::printf("font smoothing before: %s (type %u)\n", name(was), was.type);
     int code = 1;
     if (!set(want))

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <optional>
@@ -289,8 +290,19 @@ unsigned g_fonts_generation = 0;
 
 }  // namespace
 
+namespace
+{
+int g_smoothing_for_tests = -1;
+}
+
+void set_font_smoothing_for_tests(int smoothing)
+{
+    g_smoothing_for_tests = smoothing;
+}
+
 bool font_smoothing_on()
 {
+    if (g_smoothing_for_tests >= 0) return g_smoothing_for_tests > 0;
     BOOL on = FALSE;
     SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &on, 0);
     return on != FALSE;
@@ -298,9 +310,110 @@ bool font_smoothing_on()
 
 bool font_smoothing_cleartype()
 {
+    if (g_smoothing_for_tests >= 0) return g_smoothing_for_tests == 2;
     UINT type = 0;
     SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &type, 0);
     return font_smoothing_on() && type == FE_FONTSMOOTHINGCLEARTYPE;
+}
+
+void set_text_smoothing(ID2D1RenderTarget* rt, IDWriteRenderingParams* smoothed, bool cleartype_ok)
+{
+    if (!rt) return;
+    if (!font_smoothing_on())
+    {
+        // Made once from the defaults: aliased (DWRITE_RENDERING_MODE_ALIASED).
+        static com<IDWriteRenderingParams> aliased = []
+        {
+            com<IDWriteRenderingParams> def, made;
+            if (dwrite_factory() && SUCCEEDED(dwrite_factory()->CreateRenderingParams(def.put())))
+                dwrite_factory()->CreateCustomRenderingParams(def->GetGamma(), def->GetEnhancedContrast(),
+                                                              def->GetClearTypeLevel(), def->GetPixelGeometry(),
+                                                              DWRITE_RENDERING_MODE_ALIASED, made.put());
+            return made;
+        }();
+        rt->SetTextRenderingParams(aliased.get());
+        rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+        return;
+    }
+    rt->SetTextRenderingParams(smoothed);
+    rt->SetTextAntialiasMode(cleartype_ok && font_smoothing_cleartype() ? D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE
+                                                                       : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+}
+
+std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence)
+{
+    if (!d2d_factory() || !dwrite_factory()) return "no Direct2D or DirectWrite";
+    com<IDWriteRenderingParams> def, classic, monitor;
+    dwrite_factory()->CreateRenderingParams(def.put());
+    if (def)
+        dwrite_factory()->CreateCustomRenderingParams(def->GetGamma(), def->GetEnhancedContrast(),
+                                                      def->GetClearTypeLevel(), def->GetPixelGeometry(),
+                                                      DWRITE_RENDERING_MODE_GDI_CLASSIC, classic.put());
+    dwrite_factory()->CreateMonitorRenderingParams(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY),
+                                                   monitor.put());
+    com<IDWriteTextFormat> format;
+    if (FAILED(dwrite_factory()->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.f,
+                                                  L"", format.put())))
+        return "no text format";
+    const int w = 200, h = 30;
+    std::string fault;
+    const struct
+    {
+        const char* name;
+        IDWriteRenderingParams* params;
+    } bases[] = {{"GDI classic", classic.get()}, {"the monitor's", monitor.get()}};
+    for (const auto& base : bases)
+    {
+        HDC screen = GetDC(nullptr);
+        HDC mem = CreateCompatibleDC(screen);
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+        void* bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ old = bmp ? SelectObject(mem, bmp) : nullptr;
+        const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            96, 96);
+        com<ID2D1DCRenderTarget> rt;
+        com<ID2D1SolidColorBrush> brush;
+        if (!bits || FAILED(d2d_factory()->CreateDCRenderTarget(&props, rt.put())) ||
+            FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0.1f, 0.1f, 0.1f), brush.put())))
+            fault += std::string(fault.empty() ? "" : "; ") + base.name + ": no target";
+        else
+            for (const int s : sequence)
+            {
+                set_font_smoothing_for_tests(s);
+                const RECT r{0, 0, w, h};
+                std::fill_n(static_cast<uint32_t*>(bits), size_t(w) * h, 0x00F0F0F0u);
+                HRESULT hr = rt->BindDC(mem, &r);
+                if (SUCCEEDED(hr))
+                {
+                    rt->BeginDraw();
+                    set_text_smoothing(rt.get(), base.params, true);
+                    rt->DrawText(L"Name 0, Note 0", 14, format.get(), D2D1::RectF(4, 4, float(w), float(h)),
+                                 brush.get());
+                    hr = rt->EndDraw();
+                }
+                GdiFlush();
+                int ink = 0;
+                for (int i = 0; i < w * h; ++i)
+                    ink += (static_cast<uint32_t*>(bits)[i] & 0xffffff) != 0xF0F0F0u;
+                if (FAILED(hr) || ink < 20)
+                {
+                    char line[160];
+                    std::snprintf(line, sizeof line, "%s%s, smoothing %d: EndDraw %08lx, %d ink pixels",
+                                  fault.empty() ? "" : "; ", base.name, s, static_cast<unsigned long>(hr), ink);
+                    fault += line;
+                }
+            }
+        set_font_smoothing_for_tests(-1);
+        if (old) SelectObject(mem, old);
+        if (bmp) DeleteObject(bmp);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+    }
+    return fault;
 }
 
 HFONT ui_font(UINT dpi, bool bold, bool mono, float scale)
