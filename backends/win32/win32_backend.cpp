@@ -4310,21 +4310,18 @@ public:
         // have it (its dark one in dark mode).
         theme_control(h_);
         TreeView_SetExtendedStyle(h_, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
-        if (s.navigator && windows_build() >= 22000)
-        {
-            navigator_ = true;
-            // A new DPI comes with a new font: the spacing follows it.
-            SetWindowSubclass(
-                h_,
-                [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
-                {
-                    const LRESULT result = DefSubclassProc(h, msg, wp, lp);
-                    if (msg == WM_SETFONT) reinterpret_cast<tree_impl*>(data)->apply_navigator_spacing();
-                    return result;
-                },
-                1, reinterpret_cast<DWORD_PTR>(this));
-            apply_navigator_spacing();
-        }
+        navigator_ = s.navigator && windows_build() >= 22000;
+        // A new DPI comes with a new font: the spacing follows it.
+        SetWindowSubclass(
+            h_,
+            [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
+            {
+                const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+                if (msg == WM_SETFONT) reinterpret_cast<tree_impl*>(data)->apply_spacing();
+                return result;
+            },
+            1, reinterpret_cast<DWORD_PTR>(this));
+        apply_spacing();
         SetWindowSubclass(h_, key_proc, 2, reinterpret_cast<DWORD_PTR>(this));
         set_items(s.items);
     }
@@ -4337,20 +4334,36 @@ public:
 
     void theme_changed() override
     {
-        if (navigator_) apply_navigator_spacing();
+        apply_spacing();
         rebuild_icons();
     }
-    // Windows 11 Explorer's own, measured from its tree at 96 DPI.
-    void apply_navigator_spacing()
+    // Fluent controls: rows at the density's height.
+    void set_in_band(const band_density* density, bool) override
     {
+        density_ = density;
+        apply_spacing();
+    }
+    // A navigator's spacing: Windows 11 Explorer's own, measured from its
+    // tree at 96 DPI, its rows 32 (WinUI's TreeViewItemMinHeight and its
+    // presenter's margin), the compact density's where the controls are
+    // fluent and compact. A tree's rows the density's where the controls are
+    // fluent; else the font's, as the tree view has them.
+    void apply_spacing()
+    {
+        if (!navigator_)
+        {
+            if (density_) TreeView_SetItemHeight(h_, px(density_->item));
+            return;
+        }
         // Undocumented, and set on Explorer's own tree: the expander keeps its
         // full size when the indent is narrower than it.
         constexpr DWORD tvs_ex_full_size_expanders = 0x1000;
         TreeView_SetExtendedStyle(h_, tvs_ex_full_size_expanders, tvs_ex_full_size_expanders);
         TreeView_SetIndent(h_, px(8));
-        TreeView_SetItemHeight(h_, px(32));
+        TreeView_SetItemHeight(h_, px(density_ ? density_->item : standard_band.item));
     }
     bool navigator_ = false;
+    const band_density* density_ = nullptr;  // fluent controls': the rows' (set_in_band)
     std::unordered_set<std::string> lines_;  // ids with tree_item::separator_before
 
     void set_items(std::vector<tree_item> items) override
@@ -6598,6 +6611,7 @@ public:
         }
         set_model(s.model);
         soft_ = s.soft_selection;
+        compact_ = s.compact;
         checks_ = s.checkboxes;
         if (checks_) SetWindowSubclass(h_, check_proc, 9, reinterpret_cast<DWORD_PTR>(this));
         if (s.auto_scroll) SetWindowSubclass(h_, auto_scroll_proc, 7, reinterpret_cast<DWORD_PTR>(this));
@@ -6620,36 +6634,68 @@ public:
                 col.iImage = 0;
                 ListView_SetColumn(h_, 0, &col);
             }
-            // A new DPI comes with a new font: the row height and the inset
-            // follow it. A new theme can give the header its own margins back.
-            SetWindowSubclass(
-                h_,
-                [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
-                {
-                    const LRESULT result = DefSubclassProc(h, msg, wp, lp);
-                    auto* self = reinterpret_cast<list_impl*>(data);
-                    if (msg == WM_SETFONT)
-                        self->apply_file_view_rows();
-                    else if (msg == WM_THEMECHANGED || msg == WM_SETTINGCHANGE)
-                        self->apply_header_inset();
-                    return result;
-                },
-                11, reinterpret_cast<DWORD_PTR>(this));
-            apply_file_view_rows();
         }
+        // A new DPI comes with a new font: the row height and the inset
+        // follow it. A new theme can give the header its own margins back.
+        SetWindowSubclass(
+            h_,
+            [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
+            {
+                const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+                auto* self = reinterpret_cast<list_impl*>(data);
+                if (msg == WM_SETFONT)
+                    self->apply_rows();
+                else if (msg == WM_THEMECHANGED || msg == WM_SETTINGCHANGE)
+                    self->apply_header_inset();
+                return result;
+            },
+            11, reinterpret_cast<DWORD_PTR>(this));
+        apply_rows();
     }
-    // Windows 11 Explorer's row spacing at 96 DPI. A report view takes its row height
-    // from its image list, plus a pixel. Its width is the image slot at the
-    // start of column 0, which is the first column's inset: the rows paint
-    // their own, so the slot is otherwise empty, and the list_view's own
-    // measures of the column (its label rect, its auto-size) count it.
-    void apply_file_view_rows()
+    // Fluent controls: rows at the density's height (a compact list's the
+    // compact density's), a file_view's at Explorer's for the density.
+    void set_in_band(const band_density* density, bool) override
     {
-        HIMAGELIST rows = g_comctl.create(std::max(first_inset(), 1), px(28) - 1, ILC_COLOR32, 1, 0);
+        density_ = density;
+        apply_rows();
+    }
+    // The rows' height, logical px: a file_view's Explorer's (Windows 11 at
+    // 96 DPI, 28; in its compact view the compact density's), a list's the
+    // density's where the controls are fluent; 0: the font's, as the
+    // list_view has it.
+    float row_height() const
+    {
+        if (file_view_) return density_ ? density_->file_item : standard_band.file_item;
+        if (!density_) return 0;
+        return compact_ ? compact_band.item : density_->item;
+    }
+    // A report view takes its row height from its image list, plus a pixel.
+    // Its width is the image slot at the start of column 0, which is the
+    // first column's inset: the rows paint their own, so the slot is
+    // otherwise empty, and the list_view's own measures of the column (its
+    // label rect, its auto-size) count it.
+    void apply_rows()
+    {
+        const float row = row_height();
+        if (row <= 0)
+        {
+            if (rows_set_)
+            {
+                if (HIMAGELIST old = ListView_SetImageList(h_, nullptr, LVSIL_SMALL))
+                    g_comctl.destroy(old);
+                rows_set_ = false;
+                apply_header_inset();
+            }
+            return;
+        }
+        HIMAGELIST rows =
+            g_comctl.create(std::max(first_inset(), 1), px(row) - 1, ILC_COLOR32, 1, 0);
         if (!rows) return;  // the spacing it has is better than none
         if (HIMAGELIST old = ListView_SetImageList(h_, rows, LVSIL_SMALL)) g_comctl.destroy(old);
+        rows_set_ = true;
         // The list_view has just given the header that list too, as tall as a
-        // row: the header gets its own instead, one blank as wide as its inset.
+        // row: the header gets its own instead (a file_view's one blank as
+        // wide as its inset), or none.
         apply_header_inset();
     }
     // Explorer's details view starts its first column's content, and the
@@ -6666,9 +6712,13 @@ public:
     // the image's width alone, at any DPI and font.
     void apply_header_inset()
     {
-        if (!file_view_) return;
         HWND header = ListView_GetHeader(h_);
         if (!header) return;
+        if (!file_view_)
+        {
+            if (SendMessageW(header, HDM_GETIMAGELIST, 0, 0)) Header_SetImageList(header, nullptr);
+            return;
+        }
         const int w = std::max(title_inset(), 1);
         if (!header_images_ || header_images_w_ != w)
             if (HIMAGELIST fresh = blank_image_list(w))
@@ -8307,6 +8357,9 @@ private:
     std::map<std::string, com<ID2D1Bitmap>> file_icons_;  // per extension, for row_target_
     bool checks_ = false;                                 // a checkbox at the start of column 0
     bool file_view_ = false;                              // Windows 11 file_view: column 0's content inset
+    bool compact_ = false;                                // spec::list::compact
+    const band_density* density_ = nullptr;  // fluent controls': the rows' (set_in_band)
+    bool rows_set_ = false;                  // its rows' image list set (apply_rows)
     HIMAGELIST header_images_ = nullptr;                  // its one blank, for the header's first title
     int header_images_w_ = 0;
     std::array<com<ID2D1Bitmap>, 3> check_bitmaps_;       // per check_state, for row_target_
@@ -8530,6 +8583,27 @@ public:
             item.pszText = t.data();
             TabCtrl_InsertItem(h_, int(i), &item);
         }
+        // A new DPI comes with a new font: the tabs' height follows it.
+        SetWindowSubclass(
+            h_,
+            [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
+            {
+                const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+                if (msg == WM_SETFONT) reinterpret_cast<tabs_impl*>(data)->apply_rows();
+                return result;
+            },
+            2, reinterpret_cast<DWORD_PTR>(this));
+    }
+    // Fluent controls: its tabs at the density's height (TabViewItemMinHeight
+    // standard; the compact density's, as the controls'). Else the font's.
+    void set_in_band(const band_density* density, bool) override
+    {
+        density_ = density;
+        apply_rows();
+    }
+    void apply_rows()
+    {
+        if (density_) TabCtrl_SetItemSize(h_, 0, px(density_->item));
     }
     std::vector<item*> pages;
     // Lazy pages: their builders until built.
@@ -8603,6 +8677,7 @@ public:
 private:
     int pad() const { return px(6); }
     std::function<void(int)> changed_;
+    const band_density* density_ = nullptr;  // fluent controls': the tabs' (set_in_band)
 };
 
 // Tabs as a list of page names down the left, the page beside it.
@@ -8625,15 +8700,39 @@ public:
             titles_.push_back(title);
             SendMessageW(h_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(title.c_str()));
         }
-        SendMessageW(h_, LB_SETITEMHEIGHT, 0, font_metrics(win.dpi()).cy + px(12));
+        apply_rows();
         SendMessageW(h_, LB_SETCURSEL, 0, 0);
+        // A new DPI comes with a new font: the rows follow it.
+        SetWindowSubclass(
+            h_,
+            [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
+            {
+                const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+                if (msg == WM_SETFONT) reinterpret_cast<side_tabs_impl*>(data)->apply_rows();
+                return result;
+            },
+            1, reinterpret_cast<DWORD_PTR>(this));
     }
     // Its rows as tall as the new font's line, as they were made for the old.
     void fonts_changed() override
     {
-        SendMessageW(h_, LB_SETITEMHEIGHT, 0, font_metrics(win_.dpi()).cy + px(12));
+        apply_rows();
         InvalidateRect(h_, nullptr, TRUE);
     }
+    // Fluent controls: its rows at the density's height.
+    void set_in_band(const band_density* density, bool) override
+    {
+        density_ = density;
+        apply_rows();
+    }
+    // The density's rows where the controls are fluent; else the font's line
+    // and 12 px.
+    void apply_rows()
+    {
+        const int row = density_ ? px(density_->item) : font_metrics(win_.dpi()).cy + px(12);
+        SendMessageW(h_, LB_SETITEMHEIGHT, 0, row);
+    }
+    const band_density* density_ = nullptr;  // fluent controls': the rows' (set_in_band)
     std::vector<item*> pages;
     std::vector<std::function<node()>> lazy;
     std::function<item*(const node&)> buildPage;
