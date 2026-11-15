@@ -21,15 +21,17 @@
 // line the field's height in DividerStrokeColorDefault. Labels and check
 // boxes stay native, centred in the row. The text on a face that's opaque
 // under it (a button's, a menu button's, a drop-down list's, an editable
-// combo box's, an entry's) is ClearType when the runner's font smoothing is
-// (read, never changed): colour at its edges, as Explorer's; a drop-down
-// list's own font (its list's) ClearType too; a flat button's text, on the
-// band's translucent layer at rest, grey (CONTRIBUTING.md). Whether those
-// fringe checks ran, and the font smoothing, is printed on every run
-// ("fringe check: ..."; CI prints the line from ctest's log). A CI runner
-// that opts in (GITHUB_ACTIONS=true, RAPPORT_TEST_SET_CLEARTYPE=1) has its
-// font smoothing set to ClearType for the run and put back after; never a
-// desktop's. Under high contrast
+// combo box's, an entry's) drawn as the runner's font smoothing draws text:
+// ClearType, colour at its edges (as Explorer's); standard, grey edges; off,
+// aliased, ink and ground alone. A drop-down list's own font (its list's)
+// isn't the grayscale copy; a flat button's text, on the band's translucent
+// layer at rest, has no colour (CONTRIBUTING.md). Whether those checks ran,
+// and the smoothing, is printed on every run ("fringe check: ..."; CI prints
+// the line from ctest's log). A CI runner that opts in (GITHUB_ACTIONS=true,
+// RAPPORT_TEST_SET_FONT_SMOOTHING=1) has its font smoothing set for the run,
+// to ClearType, or off where RAPPORT_TEST_FONT_SMOOTHING=off says
+// (win32-band-controls-smoothing-off), and put back after, checked; never a
+// desktop's (the off variant skipped without the opt-in). Under high contrast
 // (rapport-win32-high-contrast-run, CI only): none of it drawn, the native
 // controls at the band's heights.
 //
@@ -580,6 +582,21 @@ bool runner_cleartype()
     const smoothing s = font_smoothing();
     return s.on && s.type == FE_FONTSMOOTHINGCLEARTYPE;
 }
+// What text looks like printed: no colour (aliased, or any grey: edges or
+// not), grey edges (standard smoothing), or ClearType's fringes.
+enum class text_look
+{
+    no_colour,
+    grey_edges,
+    cleartype,
+};
+text_look runner_text()
+{
+    const smoothing s = font_smoothing();
+    return !s.on                                  ? text_look::no_colour
+           : s.type == FE_FONTSMOOTHINGCLEARTYPE ? text_look::cleartype
+                                                  : text_look::grey_edges;
+}
 // `s` set, its type first: whether each SPI_SET call took and the setting
 // reads back as `s`.
 bool set_smoothing(const smoothing& s)
@@ -592,7 +609,7 @@ bool set_smoothing(const smoothing& s)
     return ok && (now.on != FALSE) == (s.on != FALSE) && now.type == s.type;
 }
 // The runner's smoothing as it was, put back once changed (a CI runner's
-// only: RAPPORT_TEST_SET_CLEARTYPE): by main before it returns, checked, a
+// only: RAPPORT_TEST_SET_FONT_SMOOTHING): by main before it returns, checked, a
 // failure loud and the run failed; at exit, if a return came first.
 struct smoothing_restore
 {
@@ -633,6 +650,7 @@ int apart(DWORD a, DWORD b)
 // scale) don't count; the text's area only, no chevron.
 struct ink_colour
 {
+    int ink = 0;  // every pixel inked (more than 16 levels off the ground)
     int edges = 0, fringed = 0, chroma = 0;
 };
 ink_colour ink_colour_of(const printed& p, const RECT& area, DWORD ground)
@@ -647,6 +665,7 @@ ink_colour ink_colour_of(const printed& p, const RECT& area, DWORD ground)
         {
             const DWORD v = p.at(x, y);
             if (apart(v, ground) <= 16) continue;
+            ++out.ink;
             const int hi = std::max({channel(v, 16), channel(v, 8), channel(v, 0)});
             const int lo = std::min({channel(v, 16), channel(v, 8), channel(v, 0)});
             out.chroma = std::max(out.chroma, hi - lo);
@@ -693,7 +712,77 @@ RECT text_area(HWND h, text_at where, UINT dpi)
 // mid-height, inside its border (1 px scaled, or a focus ring's 3, never
 // drawn here) and before its text (10 px in or more): it must be `face`,
 // within 2 levels, or nothing's measured.
-void check_text(HWND h, text_at where, bool cleartype, UINT dpi, DWORD face, const std::string& what)
+// What's wrong with text measured as `c` and meant to look `look` ("" if
+// nothing): ink always (more than 20 pixels); no colour anywhere unless
+// ClearType; edges to look at (more than 10) with smoothing (grey ones, or a
+// third or more fringed with ClearType). Aliased text, smoothing off, is ink
+// and ground alone: no edges, and right.
+std::string text_fault(const ink_colour& c, text_look look)
+{
+    if (c.ink <= 20) return "no text printed";
+    if (look != text_look::cleartype && (c.fringed != 0 || c.chroma > 2)) return "colour in it";
+    if (look == text_look::no_colour) return "";
+    if (c.edges <= 10) return "no edges to look at";
+    if (look == text_look::cleartype && c.fringed * 3 < c.edges) return "too few edges fringed";
+    return "";
+}
+const char* look_name(text_look look)
+{
+    return look == text_look::cleartype    ? "ClearType"
+           : look == text_look::grey_edges ? "grey, smoothed"
+                                           : "without colour";
+}
+
+// text_fault on made text, as each smoothing would draw it, whatever the
+// runner's (never changed for this): 2 px stems in ink on a grey ground,
+// each edge column the ground (off: aliased), grey (standard) or tinted
+// (ClearType).
+void check_text_fault()
+{
+    const DWORD ground = 0xF0F0F0, ink = 0x1A1A1A;
+    auto made = [&](DWORD edge)
+    {
+        printed p;
+        p.w = 40;
+        p.h = 20;
+        p.px.assign(size_t(p.w) * p.h, ground);
+        for (int y = 4; y < 16; ++y)
+            for (int x = 4; x + 3 < 36; x += 6)
+            {
+                p.px[size_t(y) * p.w + x] = edge;
+                p.px[size_t(y) * p.w + x + 1] = ink;
+                p.px[size_t(y) * p.w + x + 2] = ink;
+                p.px[size_t(y) * p.w + x + 3] = edge;
+            }
+        return ink_colour_of(p, RECT{0, 0, p.w, p.h}, ground);
+    };
+    const ink_colour aliased = made(ground), grey = made(0x858585), tinted = made(0xC0802A);
+    const struct
+    {
+        const char* what;
+        ink_colour c;
+        text_look look;
+        bool right;
+    } cases[] = {
+        {"aliased text, smoothing off", aliased, text_look::no_colour, true},
+        {"grey edges, smoothing off", grey, text_look::no_colour, true},
+        {"tinted edges, smoothing off", tinted, text_look::no_colour, false},
+        {"grey edges, standard", grey, text_look::grey_edges, true},
+        {"aliased text, standard", aliased, text_look::grey_edges, false},
+        {"tinted edges, standard", tinted, text_look::grey_edges, false},
+        {"tinted edges, ClearType", tinted, text_look::cleartype, true},
+        {"grey edges, ClearType", grey, text_look::cleartype, false},
+        {"aliased text, ClearType", aliased, text_look::cleartype, false},
+        {"no text", ink_colour{}, text_look::no_colour, false},
+    };
+    for (const auto& k : cases)
+        expect(text_fault(k.c, k.look).empty() == k.right,
+               std::string("made text: ") + k.what + (k.right ? " passes" : " fails") + ": \"" +
+                   text_fault(k.c, k.look) + "\"");
+}
+
+void check_text(HWND h, text_at where, text_look look, UINT dpi, DWORD face,
+                const std::string& what)
 {
     const printed p = print(h);
     const DWORD ground = p.at(px(4, dpi), p.h / 2);
@@ -701,13 +790,11 @@ void check_text(HWND h, text_at where, bool cleartype, UINT dpi, DWORD face, con
            "its face " + hex(face) + " where its ground is read" + what + ": " + hex(ground));
     if (apart(ground, face) > 2) return;
     const ink_colour c = ink_colour_of(p, text_area(h, where, dpi), ground);
-    const std::string seen = ": " + str(c.fringed) + " of " + str(c.edges) +
-                             " edge pixels with colour, chroma " + str(c.chroma);
-    expect(c.edges > 10, "its text printed" + what + seen);
-    if (cleartype)
-        expect(c.fringed * 3 >= c.edges, "its text ClearType" + what + seen);
-    else
-        expect(c.fringed == 0 && c.chroma <= 2, "its text grey" + what + seen);
+    const std::string fault = text_fault(c, look);
+    expect(fault.empty(), "its text " + std::string(look_name(look)) + what + ": " +
+                              (fault.empty() ? "" : fault + ", ") + str(c.ink) + " ink pixels, " +
+                              str(c.fringed) + " of " + str(c.edges) +
+                              " edge pixels with colour, chroma " + str(c.chroma));
 }
 
 // The texts checked at each scale, on their faces (ControlFillColorDefault
@@ -720,7 +807,7 @@ struct texts
 };
 void check_texts(const texts& t, UINT dpi, const std::string& here)
 {
-    const bool cleartype = runner_cleartype();
+    const text_look look = runner_text();
     const DWORD face = over(colours().fill, band_fill());
     const std::pair<HWND, text_at> each[] = {{t.button, text_at::face},
                                              {t.menu, text_at::menu},
@@ -731,7 +818,7 @@ void check_texts(const texts& t, UINT dpi, const std::string& here)
                            "an entry"};
     for (size_t i = 0; i < std::size(each); ++i)
         if (each[i].first)
-            check_text(each[i].first, each[i].second, cleartype, dpi, face,
+            check_text(each[i].first, each[i].second, look, dpi, face,
                        " (" + std::string(names[i]) + here + ")");
 }
 
@@ -1213,7 +1300,8 @@ void run(rap::ui& ui, const density& d, bool hc)
         check_texts({nullptr, menu_b, list, editable, entry_h}, text_dpi, at);
         check_texts({fetch2, nullptr, list2, nullptr, nullptr}, text_dpi, ", a toolbar's" + at);
         if (flat2)
-            check_text(flat2, text_at::face, false, text_dpi, band_layer_px() & 0xffffff,
+            check_text(flat2, text_at::face, text_look::no_colour, text_dpi,
+                       band_layer_px() & 0xffffff,
                        " (a flat button at rest, on the layer" + at + ")");
         check_list_font(list, at);
         if (list2) check_list_font(list2, ", a toolbar's" + at);
@@ -1248,7 +1336,7 @@ void run(rap::ui& ui, const density& d, bool hc)
             }
             check_button(fetch, false, "a button, out of the band and back", at);
             check_list_font(list, ", out of the band and back" + at);
-            check_text(list, text_at::list, runner_cleartype(), GetDpiForWindow(top),
+            check_text(list, text_at::list, runner_text(), GetDpiForWindow(top),
                        over(colours().fill, band_fill()),
                        " (a drop-down list, out of the band and back" + at + ")");
             check_combo_fill(editable,
@@ -1288,17 +1376,31 @@ int main(int argc, char** argv)
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
     rap::win32::set_text_scale_for_tests(1.f);
 #endif
-    // ClearType for the fringe checks: set on a CI runner that opts in,
-    // never on a desktop; put back at exit.
+    check_text_fault();
+    // The font smoothing for the text checks: ClearType, or off
+    // (RAPPORT_TEST_FONT_SMOOTHING=off), set on a CI runner that opts in,
+    // never on a desktop; put back before returning, checked. Off is only
+    // ever run so: skipped without the opt-in.
     g_smoothing.was = font_smoothing();
-    const bool set_cleartype =
-        env("GITHUB_ACTIONS") == "true" && env("RAPPORT_TEST_SET_CLEARTYPE") == "1";
-    if (set_cleartype && !runner_cleartype())
+    const bool may_set =
+        env("GITHUB_ACTIONS") == "true" && env("RAPPORT_TEST_SET_FONT_SMOOTHING") == "1";
+    const bool want_off = env("RAPPORT_TEST_FONT_SMOOTHING") == "off";
+    if (want_off && !may_set)
+    {
+        note("skipped: font smoothing off is set only on a CI runner (GITHUB_ACTIONS=true, "
+             "RAPPORT_TEST_SET_FONT_SMOOTHING=1)");
+        std::printf("fringe check: not run, smoothing off needs the CI opt-in\n");
+        return 77;
+    }
+    const smoothing want = want_off ? smoothing{FALSE, g_smoothing.was.type}
+                                    : smoothing{TRUE, FE_FONTSMOOTHINGCLEARTYPE};
+    const smoothing now = font_smoothing();
+    if (may_set && ((now.on != FALSE) != (want.on != FALSE) || (want.on && now.type != want.type)))
     {
         g_smoothing.changed = true;  // marked before it's tried: half made is put back too
-        expect(set_smoothing({TRUE, FE_FONTSMOOTHINGCLEARTYPE}) && runner_cleartype(),
-               "the runner's font smoothing set to ClearType (RAPPORT_TEST_SET_CLEARTYPE): " +
-                   smoothing_name(font_smoothing()));
+        expect(set_smoothing(want),
+               "the runner's font smoothing set to " + smoothing_name(want) +
+                   " (RAPPORT_TEST_SET_FONT_SMOOTHING): " + smoothing_name(font_smoothing()));
     }
     rap::load_options options{.backend = "win32"};
     options.look.color_scheme = rap::color_scheme::dark;
@@ -1320,9 +1422,10 @@ int main(int argc, char** argv)
         const char* densities = env("RAPPORT_DENSITY") == "compact" ? "compact" : "standard";
 #endif
         std::printf("fringe check: %s (build %lu, %s, %s, %s)\n",
-                    hc                   ? "not run, high contrast"
-                    : runner_cleartype() ? "ran, ClearType's fringes looked for"
-                                         : "ran, grey text looked for",
+                    hc                                       ? "not run, high contrast"
+                    : runner_text() == text_look::cleartype  ? "ran, ClearType's fringes looked for"
+                    : runner_text() == text_look::grey_edges ? "ran, grey edges looked for"
+                                                             : "ran, text without colour looked for",
                     build, hc ? "high contrast" : g_dark ? "dark" : "light", densities, how.c_str());
     }
     if (transitions_run)

@@ -171,7 +171,7 @@ jobs:
         env:
           RAPPORT_TEST_SET_HIGH_CONTRAST: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
           RAPPORT_TEST_SET_DPI: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
-          RAPPORT_TEST_SET_CLEARTYPE: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
+          RAPPORT_TEST_SET_FONT_SMOOTHING: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
           RAPPORT_TEST_SEND_INPUT: '1'
         run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
 

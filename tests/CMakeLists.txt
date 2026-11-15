@@ -553,8 +553,8 @@ if(TARGET rapport_win32)
     # builds), and their WinUI faces printed, never shown, light and dark,
     # and under high contrast (CI only, as above).
     # Every variant may set the runner's font smoothing to ClearType (CI's
-    # opt-in, RAPPORT_TEST_SET_CLEARTYPE) and put it back: RUN_SERIAL, so no
-    # test runs meanwhile.
+    # opt-in, RAPPORT_TEST_SET_FONT_SMOOTHING) and put it back: RUN_SERIAL, so
+    # no test runs meanwhile. -smoothing-off sets it off instead, CI only.
     add_executable(rapport-win32-band-controls-test win32_band_controls_test.cpp)
     target_link_libraries(rapport-win32-band-controls-test PRIVATE rapport::rapport user32 gdi32 comctl32 advapi32)
     if(RAPPORT_STATIC)
@@ -575,6 +575,10 @@ if(TARGET rapport_win32)
     add_test(NAME win32-band-controls-compact-light COMMAND rapport-win32-band-controls-test)
     set_tests_properties(win32-band-controls-compact-light PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+    add_test(NAME win32-band-controls-smoothing-off COMMAND rapport-win32-band-controls-test)
+    set_tests_properties(win32-band-controls-smoothing-off PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_TEST_FONT_SMOOTHING=off" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
+        TIMEOUT 120)
     add_test(NAME win32-band-controls-high-contrast
              COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-band-controls-test>)
     set_tests_properties(win32-band-controls-high-contrast PROPERTIES
