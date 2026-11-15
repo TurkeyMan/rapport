@@ -615,6 +615,35 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-fluent-controls-high-contrast PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
 
+    # Lists', trees' and tabs' rows where the controls are fluent: the
+    # density's (a file_view's Explorer's, a compact list's compact), native
+    # unchanged, under high contrast kept (CI only); never shown, the DPI
+    # through the test hook. The display's scale really changed and put
+    # back at each density: CI only, as win32-band-controls-transitions.
+    add_executable(rapport-win32-fluent-rows-test win32_fluent_rows_test.cpp)
+    target_link_libraries(rapport-win32-fluent-rows-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-fluent-rows-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-fluent-rows-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-fluent-rows-test rapport_win32)
+    add_test(NAME win32-fluent-rows COMMAND rapport-win32-fluent-rows-test)
+    add_test(NAME win32-fluent-rows-compact COMMAND rapport-win32-fluent-rows-test --compact)
+    add_test(NAME win32-fluent-rows-native COMMAND rapport-win32-fluent-rows-test --native)
+    set_tests_properties(win32-fluent-rows win32-fluent-rows-compact win32-fluent-rows-native PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+    add_test(NAME win32-fluent-rows-high-contrast
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-fluent-rows-test>)
+    set_tests_properties(win32-fluent-rows-high-contrast PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    add_test(NAME win32-fluent-rows-transitions COMMAND rapport-win32-fluent-rows-test --transitions)
+    set_tests_properties(win32-fluent-rows-transitions PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    add_test(NAME win32-fluent-rows-compact-transitions COMMAND rapport-win32-fluent-rows-test --transitions)
+    set_tests_properties(win32-fluent-rows-compact-transitions PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 RUN_SERIAL
+        TRUE TIMEOUT 180)
+
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build
     # skips): never-shown windows.

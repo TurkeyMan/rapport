@@ -90,6 +90,12 @@ struct band_density
     // `field` (a large text size) keeps round its text.
     float text_top, text_bottom;
     bool compact;
+    // A row of a list (a data grid's, as WinUI's DataGrid has it), a tree
+    // (TreeViewItemMinHeight and its presenter's margin) or a tab
+    // (TabViewItemMinHeight): out of the band, where the controls are fluent.
+    float item;
+    // A file_view list's row: Explorer's.
+    float file_item;
 };
 // Standard: Explorer's row measures 46 (WinUI names no command-bar height
 // that matches it: CommandBar's own is 48, its compact one 40), its boxes
@@ -97,14 +103,16 @@ struct band_density
 // navigation buttons 40 by 32. The text ControlContentThemeFontSize, 14
 // (Explorer's address and search text measure the same), where Win32's
 // message font is 9 pt (12).
-inline constexpr band_density standard_band{46, 32, 40, 14, 5, 6, false};
+// Its rows 32, Explorer's file rows 28.
+inline constexpr band_density standard_band{46, 32, 40, 14, 5, 6, false, 32, 28};
 // Compact: WinUI's compact TextControlThemeMinHeight, 24, 6 above and below
 // it; tool buttons 32 wide; the text the message font's size. WinUI 2's
 // repository has no compact density dictionary to read its paddings from:
 // the field keeps 2 above and 3 below its text (what 24 leaves the message
 // font's line, centred), the buttons ButtonPadding's sides, everything
-// centred vertically.
-inline constexpr band_density compact_band{36, 24, 32, 0, 2, 3, true};
+// centred vertically. Its rows 24 (Compact.xaml's TreeViewItemMinHeight,
+// with no margin), Explorer's file rows too (its compact view).
+inline constexpr band_density compact_band{36, 24, 32, 0, 2, 3, true, 24, 24};
 
 // The app's control style and density (look_options::controls, density),
 // as the backend's made.
