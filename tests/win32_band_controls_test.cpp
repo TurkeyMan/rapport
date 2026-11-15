@@ -1366,20 +1366,61 @@ void run(rap::ui& ui, const density& d, bool hc)
         // Text on an opaque face ClearType (the runner's), on the layer grey.
         const UINT text_dpi = GetDpiForWindow(top);
         SetWindowTextW(entry_h, L"Subject");
-        // An editable combo box's text, set while it's never been focused,
-        // not selected: its edit shows a selection unfocused (ES_NOHIDESEL),
-        // which stood its text on the accent highlight.
+        // An editable combo box's text, set while it's never been focused:
+        // its selection as the combo box made it (kept: an accessibility
+        // client's, or the app's, is the edit's own), but not shown while
+        // it's unfocused (no ES_NOHIDESEL), so never on the highlight.
         {
             COMBOBOXINFO ci{};
             ci.cbSize = sizeof ci;
             GetComboBoxInfo(editable, &ci);
-            DWORD from = 0, to = 0;
+            const bool hides = ci.hwndItem && !(GetWindowLongPtrW(ci.hwndItem, GWL_STYLE) & ES_NOHIDESEL);
+            expect(hides, "an editable combo box's edit hides its selection unfocused" + at);
             if (ci.hwndItem)
+            {
+                const DWORD highlight = GetSysColor(COLOR_HIGHLIGHT);
+                const DWORD hl = (GetRValue(highlight) << 16) | (GetGValue(highlight) << 8) | GetBValue(highlight);
+                auto lit = [&]
+                {
+                    const printed p = print(editable);
+                    const RECT e = rect_in(editable, ci.hwndItem);
+                    int n = 0;
+                    for (int y = e.top; y < e.bottom; ++y)
+                        for (int x = e.left; x < e.right; ++x) n += apart(p.at(x, y), hl) <= 8;
+                    return n;
+                };
+                // As set (the combo box selects it all) and after a resize
+                // (it selects it all again): not drawn.
+                expect(lit() == 0, "its text set unfocused, no highlight (" + hex(hl) + ")" + at);
+                const RECT r = rect_in(top, editable);
+                SetWindowPos(editable, nullptr, r.left, r.top, r.right - r.left + 1, r.bottom - r.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(editable, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+                pump(2);
+                expect(lit() == 0, "resized unfocused, no highlight" + at);
+                // A selection made unfocused (as UI Automation's or the
+                // app's would be): kept, and not drawn.
+                SendMessageW(ci.hwndItem, EM_SETSEL, 1, 3);
+                DWORD from = 0, to = 0;
                 SendMessageW(ci.hwndItem, EM_GETSEL, reinterpret_cast<WPARAM>(&from),
                              reinterpret_cast<LPARAM>(&to));
-            expect(ci.hwndItem && from == to,
-                   "an editable combo box's text not selected, unfocused" + at + ": " + str(long(from)) + ".." +
-                       str(long(to)));
+                expect(from == 1 && to == 3, "an unfocused EM_SETSEL(1, 3) kept" + at + ": " + str(long(from)) +
+                                                 ".." + str(long(to)));
+                expect(lit() == 0, "that selection not drawn unfocused" + at);
+                // Focused (its own state follows WM_SETFOCUS: a never-shown
+                // window can't take the focus): the selection there, and
+                // drawn.
+                SendMessageW(ci.hwndItem, WM_SETFOCUS, 0, 0);
+                SendMessageW(ci.hwndItem, EM_GETSEL, reinterpret_cast<WPARAM>(&from),
+                             reinterpret_cast<LPARAM>(&to));
+                const int shown = lit();
+                SendMessageW(ci.hwndItem, WM_KILLFOCUS, 0, 0);
+                expect(from == 1 && to == 3 && shown > 0,
+                       "focused, the selection still 1..3 and drawn" + at + ": " + str(long(from)) + ".." +
+                           str(long(to)) + ", " + str(shown) + " highlight pixels");
+                SendMessageW(ci.hwndItem, EM_SETSEL, 0, 0);
+            }
         }
         check_texts({nullptr, menu_b, list, editable, entry_h}, text_dpi, at);
         check_texts({fetch2, nullptr, list2, nullptr, nullptr}, text_dpi, ", a toolbar's" + at);

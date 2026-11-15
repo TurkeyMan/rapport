@@ -2657,20 +2657,24 @@ private:
     std::function<void(bool)> toggled_;
 };
 
-// A combo box's edit shows its selection unfocused (ES_NOHIDESEL), and
-// the combo box selects all of its text whenever the text is set or the
-// box is sized: text set or laid out while it's not focused stood on the
-// accent highlight until it was focused and left. A selection made while
-// the edit isn't focused is dropped (EM_SETSEL from -1: none, the caret
-// kept); focused, it selects as Windows does.
-LRESULT CALLBACK unfocused_selection_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+// While a combo box is made (on this thread alone): the edit it makes for
+// itself made without ES_NOHIDESEL (combo_impl).
+LRESULT CALLBACK combo_edit_hook(int code, WPARAM wp, LPARAM lp)
 {
-    if (msg == EM_SETSEL && GetFocus() != h && int(wp) != -1)
+    if (code == HCBT_CREATEWND)
     {
-        wp = WPARAM(-1);
-        lp = 0;
+        const HWND h = reinterpret_cast<HWND>(wp);
+        CREATESTRUCTW* cs = reinterpret_cast<CBT_CREATEWNDW*>(lp)->lpcs;
+        wchar_t cls[16]{}, parent[16]{};
+        GetClassNameW(h, cls, 16);
+        if (cs && cs->hwndParent) GetClassNameW(cs->hwndParent, parent, 16);
+        if (!_wcsicmp(cls, L"Edit") && !_wcsicmp(parent, L"ComboBox") && (cs->style & ES_NOHIDESEL))
+        {
+            cs->style &= ~LONG(ES_NOHIDESEL);
+            SetWindowLongPtrW(h, GWL_STYLE, GetWindowLongPtrW(h, GWL_STYLE) & ~LONG_PTR(ES_NOHIDESEL));
+        }
     }
-    return DefSubclassProc(h, msg, wp, lp);
+    return CallNextHookEx(nullptr, code, wp, lp);
 }
 
 // Edit controls report Enter only to a subclass.
@@ -3283,7 +3287,14 @@ public:
     combo_impl(win_context& win, HWND parent, const spec::combo& s)
         : leaf(win)
     {
+        // Its edit without ES_NOHIDESEL, which the combo box gives it as it
+        // makes it (and the edit reads only then): with it, the combo box
+        // selecting all its text whenever it's set or sized stood the text
+        // on the accent highlight while unfocused. Without it, as any edit:
+        // the selection kept, shown only while focused.
+        HHOOK hook = SetWindowsHookExW(WH_CBT, combo_edit_hook, nullptr, GetCurrentThreadId());
         adopt(create_control(win, parent, L"COMBOBOX", L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP));
+        if (hook) UnhookWindowsHookEx(hook);
         set_items(s.items);
         set_text(s.text);
         COMBOBOXINFO info{};
@@ -3291,8 +3302,6 @@ public:
         if (GetComboBoxInfo(h_, &info) && info.hwndItem)
         {
             SetWindowSubclass(info.hwndItem, enter_subclass, 1, reinterpret_cast<DWORD_PTR>(&activate_));
-            SetWindowSubclass(info.hwndItem, unfocused_selection_subclass, 6, 0);
-            SendMessageW(info.hwndItem, EM_SETSEL, WPARAM(-1), 0);  // what set_text selected
         }
     }
     // Quiet, as set_text: the text put back is the app's, not the user's.
