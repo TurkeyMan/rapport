@@ -46,6 +46,7 @@
 #include <windows.h>
 // After windows.h, which they need.
 #include <commctrl.h>
+#include <dwrite.h>
 
 #include <algorithm>
 #include <cmath>
@@ -72,7 +73,6 @@ void set_band_density_for_tests(int compact);  // win32_band_field.h
 void set_dpi_for_tests(UINT dpi);              // win32_common.h
 void set_font_smoothing_for_tests(int smoothing);
 std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence);
-bool cleartype_rendering_for_tests();
 }  // namespace rap::win32
 #endif
 
@@ -877,6 +877,36 @@ void check_font_quality(HWND h, const std::string& name, const std::string& what
                                      str(lf.lfQuality));
 }
 
+// DirectWrite's rendering defaults can draw ClearType's colour now: a
+// ClearType level above 0 and a pixel geometry not flat (0 and flat are
+// the user's to choose). A list's rows are DirectWrite's, drawn in those.
+bool dwrite_cleartype()
+{
+    IDWriteFactory* f = nullptr;
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(&f))) ||
+        !f)
+        return false;
+    IDWriteRenderingParams* p = nullptr;
+    bool colour = false;
+    if (SUCCEEDED(f->CreateRenderingParams(&p)) && p)
+    {
+        colour = p->GetClearTypeLevel() > 0.f && p->GetPixelGeometry() != DWRITE_PIXEL_GEOMETRY_FLAT;
+        p->Release();
+    }
+    f->Release();
+    return colour;
+}
+// What a list's rows look like, given what's asked for: ClearType's colour
+// only where DirectWrite's defaults give it, grey edges otherwise; the
+// message says so (`why`).
+text_look rows_look(text_look asked, std::string& why)
+{
+    if (asked != text_look::cleartype || dwrite_cleartype()) return asked;
+    why = " (DirectWrite's defaults without ClearType's colour: grey edges)";
+    return text_look::grey_edges;
+}
+
 // A list's first row's text as printed (WM_PRINT: its rows are Direct2D's,
 // drawn in the list's custom draw), looking `look`; what was measured.
 ink_colour check_list_rows(HWND list, text_look look, const std::string& what)
@@ -1477,7 +1507,11 @@ void run(rap::ui& ui, const density& d, bool hc)
         // text is: ClearType's colour under win32-band-controls-cleartype,
         // grey edges at standard, aliased off.
         if (HWND rows = child(top, WC_LISTVIEWW))
-            check_list_rows(rows, runner_text(), " (the runner's smoothing" + at + ")");
+        {
+            std::string why;
+            const text_look look = rows_look(runner_text(), why);
+            check_list_rows(rows, look, " (the runner's smoothing" + at + ")" + why);
+        }
         else
             expect(false, "the row window's list" + at);
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
@@ -1516,15 +1550,12 @@ void run(rap::ui& ui, const density& d, bool hc)
                 // ClearType's colour only where those can give it (not on a
                 // runner at standard, the hook asking for ClearType), grey
                 // edges otherwise.
-                text_look rows_look = st.look;
-                if (st.look == text_look::cleartype && !rap::win32::cleartype_rendering_for_tests())
-                {
-                    rows_look = text_look::grey_edges;
-                    here += " (DirectWrite's defaults without ClearType's colour)";
-                }
+                std::string why;
+                const text_look look = rows_look(st.look, why);
+                here += why;
                 check_font_quality(entry_h, "an entry", here, st.quality);
                 check_font_quality(list, "a drop-down list (the band's)", here, st.quality);
-                const ink_colour c = check_list_rows(rows, rows_look, here);
+                const ink_colour c = check_list_rows(rows, look, here);
                 if (st.smoothing == 2 && !cleartype_ink) cleartype_ink = c.ink;
                 expect(c.ink * 5 >= cleartype_ink * 2,
                        "a list's row text all drawn, " + str(c.ink) + " ink pixels against ClearType's " +
@@ -1592,9 +1623,15 @@ int main(int argc, char** argv)
                    std::string(look_name(g_text_look)) + ", " + str(probed.fringed) + " of " +
                    str(probed.edges) + " edge pixels with colour, chroma " + str(probed.chroma));
     if (set_for_run == "cleartype")
+    {
         expect(g_probed && g_text_look == text_look::cleartype,
                "plain GDI text drawn with ClearType, turned on before this process started: " +
                    std::string(look_name(g_text_look)));
+        // The runner's DirectWrite defaults with it (its level, its
+        // geometry): a list's rows then must show ClearType's colour.
+        expect(dwrite_cleartype(), "DirectWrite's defaults with ClearType's colour, ClearType turned on "
+                                   "before this process started (a ClearType level above 0, not flat)");
+    }
     if (set_for_run == "standard")
         expect(g_probed && g_text_look == text_look::grey_edges,
                "plain GDI text drawn with standard smoothing, grey edges, set before this process "
@@ -1621,7 +1658,9 @@ int main(int argc, char** argv)
             "font smoothing " + smoothing_name(now) +
             (set_for_run.empty() ? std::string() : ", set " + set_for_run + " for this run") +
             ", plain text probed " + (g_probed ? look_name(g_text_look) : "as nothing known") +
-            ", Segoe UI Variable Text at DEFAULT_QUALITY " + (ui_probed ? look_name(ui_look) : "unknown");
+            ", Segoe UI Variable Text at DEFAULT_QUALITY " + (ui_probed ? look_name(ui_look) : "unknown") +
+            ", DirectWrite's defaults (a list's rows) " +
+            (!now.on ? "aliased" : dwrite_cleartype() ? "with ClearType's colour" : "grey");
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
         const char* densities = "both densities";
 #else

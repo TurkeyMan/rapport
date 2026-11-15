@@ -122,10 +122,6 @@ void set_text_smoothing(ID2D1RenderTarget* rt, IDWriteRenderingParams* smoothed,
 // caption tabs'). "" if each drew (EndDraw succeeded, ink in the bitmap),
 // else what didn't.
 std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence);
-// For tests: DirectWrite's rendering defaults now can draw ClearType's
-// colour (a ClearType level above 0, a pixel geometry not flat): what a
-// list's rows draw in when ClearType's asked for.
-bool cleartype_rendering_for_tests();
 // Average character width and line height of the UI font at `dpi`, in device px.
 SIZE font_metrics(UINT dpi);
 // The UI font family name and size in DIPs (for DirectWrite text).

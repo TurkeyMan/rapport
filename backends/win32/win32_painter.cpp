@@ -340,13 +340,6 @@ void set_text_smoothing(ID2D1RenderTarget* rt, IDWriteRenderingParams* smoothed,
                                                                        : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 }
 
-bool cleartype_rendering_for_tests()
-{
-    com<IDWriteRenderingParams> def;
-    if (!dwrite_factory() || FAILED(dwrite_factory()->CreateRenderingParams(def.put())) || !def) return false;
-    return def->GetClearTypeLevel() > 0.f && def->GetPixelGeometry() != DWRITE_PIXEL_GEOMETRY_FLAT;
-}
-
 std::string text_smoothing_draws_for_tests(const std::vector<int>& sequence)
 {
     if (!d2d_factory() || !dwrite_factory()) return "no Direct2D or DirectWrite";
