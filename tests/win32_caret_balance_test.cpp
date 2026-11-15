@@ -7,7 +7,10 @@
 //  - the caret's window losing the focus during an attempt (WM_KILLFOCUS, its
 //    caret destroyed and a new one made and shown): no show for the gone
 //    caret, the new one shown;
-//  - a steady attempt: nothing moved, the caret shown after.
+//  - a steady attempt: nothing moved, the caret shown after;
+//  - a caret hidden before an attempt (the hides cumulative): with
+//    activation during it, still hidden after, balanced (one ShowCaret
+//    shows it).
 //   rapport-win32-caret-balance-test
 #include "win32_caret_hider.h"
 
@@ -83,6 +86,19 @@ int main()
         HideCaret(h);
         ShowCaret(h);
         expect(caret_hider::caret_shown(), "attempt 3: the new caret's count balanced");
+    }
+    // Hidden before the attempt: hidden after it too, activation and all,
+    // and one ShowCaret (the one owed for the hide before) shows it.
+    {
+        HideCaret(h);
+        expect(!caret_hider::caret_shown(), "attempt 4: the caret hidden beforehand");
+        bool hid = false;
+        caret_hider::hide(hid);
+        SendMessageW(h, WM_NCACTIVATE, FALSE, 0);
+        caret_hider::show();
+        expect(hid && !caret_hider::caret_shown(), "attempt 4: still hidden after, as it was");
+        ShowCaret(h);
+        expect(caret_hider::caret_shown(), "attempt 4: one ShowCaret shows it: balanced");
     }
     caret_hider::unwatch();
     DestroyCaret();

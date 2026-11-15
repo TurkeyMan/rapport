@@ -349,6 +349,12 @@ int main(int argc, char** argv)
     expect(caret_hider::watch(), "the focus and activation watched while the pair's taken");
     bool steady = false;
     std::string moves_seen;  // each attempt's count, for the failure
+    // The caret as it was: after the pairs, the same caret (not destroyed
+    // meanwhile) as shown or hidden as it was (the hides cumulative: one
+    // hidden before stays hidden, balanced).
+    const HWND caret_was = caret_hider::owner();
+    const bool shown_was = caret_hider::caret_shown();
+    bool caret_lost = false;
     for (int attempt = 0; attempt < 3 && !steady; ++attempt)
     {
         bool hid = false;
@@ -371,6 +377,7 @@ int main(int argc, char** argv)
             f[i] = cap.grab(top);
         }
         const int moved = caret_hider::moved();
+        caret_lost = caret_lost || caret_hider::lost();
         caret_hider::show();  // balanced whatever moved, unless the caret's gone
         steady = moved == 0 && (!owner || hid);
         moves_seen += (moves_seen.empty() ? "" : ", ") + str(moved) + (owner && !hid ? " (caret not hidden)" : "");
@@ -382,8 +389,22 @@ int main(int argc, char** argv)
     caret_hider::unwatch();
     // Every hide balanced: whatever caret there is now, it's shown
     // (GUI_CARETBLINKING: the caret visible).
-    if (caret_hider::owner())
-        expect(caret_hider::caret_shown(), "the caret shown again after the pairs, every hide balanced");
+    if (caret_was && !caret_lost && caret_hider::owner() == caret_was)
+    {
+        note("the same caret through the pairs: compared with how it was");
+        expect(caret_hider::caret_shown() == shown_was,
+               std::string("the caret as it was after the pairs, ") + (shown_was ? "shown" : "hidden") +
+                   ": every hide balanced");
+    }
+    else if (caret_hider::owner())
+    {
+        // Made anew meanwhile (its window lost the focus, or another has
+        // it now): a new caret starts shown, never hidden here.
+        note("the caret made anew during the pairs: a new one, shown");
+        expect(caret_hider::caret_shown(), "the new caret shown after the pairs");
+    }
+    else
+        note("no caret after the pairs");
     // Never measured from a pair the focus moved in (it would read false
     // holes): a failure of its own instead, not a skip, so a runner that
     // keeps taking the focus is seen.
