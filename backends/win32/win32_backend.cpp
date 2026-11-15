@@ -7517,8 +7517,11 @@ private:
                     def->GetGamma(), def->GetEnhancedContrast(), def->GetClearTypeLevel(), def->GetPixelGeometry(),
                     DWRITE_RENDERING_MODE_GDI_CLASSIC, params.put())))
                 row_target_->SetTextRenderingParams(params.get());
-            row_target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
         }
+        // The user's font smoothing, as it is now.
+        row_target_->SetTextAntialiasMode(font_smoothing_cleartype() ? D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE
+                                          : font_smoothing_on()      ? D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE
+                                                                     : D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
         ID2D1DCRenderTarget* rt = row_target_.get();
         if (FAILED(rt->BindDC(dc, &clip))) return;
         const float s = win_.scale();

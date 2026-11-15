@@ -273,6 +273,7 @@ struct caption_tabs::impl
     com<IDWriteRenderingParams> params;
     HMONITOR params_monitor = nullptr;
     bool cleartype = false;
+    bool smoothing = true;  // the user's font smoothing on (off: aliased text)
     unsigned params_made = 0;  // for the tests (query_message)
     // A run of text to draw with ClearType: where it's laid out, the opaque
     // rectangle it's drawn into, and its colour over what's there.
@@ -630,6 +631,7 @@ struct caption_tabs::impl
         params_monitor = monitor;
         ++params_made;
         cleartype = system_cleartype();
+        smoothing = font_smoothing_on();
         if (dwrite_factory()) dwrite_factory()->CreateMonitorRenderingParams(monitor, params.put());
     }
 
@@ -729,7 +731,8 @@ struct caption_tabs::impl
         {
             rt->BeginDraw();
             rt->SetTransform(D2D1::Matrix3x2F::Identity());
-            rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            rt->SetTextAntialiasMode(smoothing ? D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE
+                                               : D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
             if (params) rt->SetTextRenderingParams(params.get());
             for (const cleartype_run* t : grey)
             {
@@ -844,9 +847,10 @@ struct caption_tabs::impl
         runs.clear();
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        // Grayscale here (the target's premultiplied); ClearType's text is
-        // the second pass's.
-        rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        // Grayscale here (the target's premultiplied; aliased, the user's
+        // smoothing off); ClearType's text is the second pass's.
+        rt->SetTextAntialiasMode(smoothing ? D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE
+                                           : D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
         if (params) rt->SetTextRenderingParams(params.get());
         rt->Clear(colors.clear ? D2D1::ColorF(0, 0, 0, 0) : d2d_color(colors.empty));
         // Where it's all opaque (in fullscreen, in high contrast): the strip.

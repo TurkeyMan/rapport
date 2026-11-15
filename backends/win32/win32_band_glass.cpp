@@ -160,7 +160,10 @@ HFONT grayscale(HFONT f)
     using made = grayscale_font;
     std::vector<made>& fonts = grayscale_fonts();
     LOGFONTW lf{};
-    if (!f || !GetObjectW(f, sizeof lf, &lf) || lf.lfQuality == ANTIALIASED_QUALITY) return f;
+    // (Already grayscale, or aliased, smoothing off: no ClearType in it.)
+    if (!f || !GetObjectW(f, sizeof lf, &lf) || lf.lfQuality == ANTIALIASED_QUALITY ||
+        lf.lfQuality == NONANTIALIASED_QUALITY)
+        return f;
     for (const made& m : fonts)
         if (!std::memcmp(&m.from, &lf, sizeof lf)) return m.font;
     LOGFONTW grey = lf;

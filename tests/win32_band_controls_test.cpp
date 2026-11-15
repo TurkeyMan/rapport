@@ -702,7 +702,7 @@ const char* look_name(text_look look)
 // Segoe UI at 14 px, DEFAULT_QUALITY (as rapport's UI fonts are), dark on
 // light into a 32-bit DIB, measured as a control's text is. Its look, or
 // false if it's none of them (no text, or colour with too few edges).
-bool probe_text(text_look& look, ink_colour& c)
+bool probe_text(text_look& look, ink_colour& c, const wchar_t* face = L"Segoe UI")
 {
     const int w = 320, h = 40;
     const DWORD ground = 0xF0F0F0;
@@ -723,7 +723,7 @@ bool probe_text(text_look& look, ink_colour& c)
     std::fill_n(static_cast<DWORD*>(bits), size_t(w) * h, ground);
     HFONT font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-                             DEFAULT_PITCH, L"Segoe UI");
+                             DEFAULT_PITCH, face);
     HGDIOBJ old_font = SelectObject(mem, font);
     SetBkMode(mem, TRANSPARENT);
     SetTextColor(mem, RGB(0x1A, 0x1A, 0x1A));
@@ -1322,6 +1322,18 @@ void run(rap::ui& ui, const density& d, bool hc)
                        band_layer_px() & 0xffffff,
                        " (a flat button at rest, on the layer" + at + ")");
         check_list_font(list, at);
+        // The entry's font (a UI font) made in the user's font smoothing:
+        // ClearType, standard's grayscale, or off's aliased, explicitly.
+        {
+            const smoothing now = font_smoothing();
+            const BYTE want = !now.on                                  ? NONANTIALIASED_QUALITY
+                              : now.type == FE_FONTSMOOTHINGCLEARTYPE ? CLEARTYPE_QUALITY
+                                                                       : ANTIALIASED_QUALITY;
+            LOGFONTW lf{};
+            GetObjectW(reinterpret_cast<HFONT>(SendMessageW(entry_h, WM_GETFONT, 0, 0)), sizeof lf, &lf);
+            expect(lf.lfQuality == want, "an entry's font in the font smoothing (" + smoothing_name(now) +
+                                             "), quality " + str(want) + at + ": " + str(lf.lfQuality));
+        }
         if (list2) check_list_font(list2, ", a toolbar's" + at);
         // An entry in the band at rest: TextControlElevationBorderBrush, as
         // the combo box's (the window never shown, so never active).
@@ -1425,10 +1437,16 @@ int main(int argc, char** argv)
     {
         const smoothing now = font_smoothing();
         const std::string set_for_run = env("RAPPORT_TEST_FONT_SMOOTHING_SET");
+        // The same in rapport's UI face, for the log only: GDI's own look
+        // for it at DEFAULT_QUALITY, which rapport's fonts don't rely on.
+        text_look ui_look = text_look::no_colour;
+        ink_colour ui_ink{};
+        const bool ui_probed = probe_text(ui_look, ui_ink, L"Segoe UI Variable Text");
         const std::string how =
             "font smoothing " + smoothing_name(now) +
             (set_for_run.empty() ? std::string() : ", set " + set_for_run + " for this run") +
-            ", plain text probed " + (g_probed ? look_name(g_text_look) : "as nothing known");
+            ", plain text probed " + (g_probed ? look_name(g_text_look) : "as nothing known") +
+            ", Segoe UI Variable Text at DEFAULT_QUALITY " + (ui_probed ? look_name(ui_look) : "unknown");
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
         const char* densities = "both densities";
 #else

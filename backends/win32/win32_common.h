@@ -98,6 +98,13 @@ void set_dpi_for_tests(UINT dpi);
 // The system message font at `dpi` (cached; owned by the cache), in
 // Segoe UI Variable where it's Segoe UI and that's installed.
 HFONT ui_font(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f);
+// The user's font smoothing (SPI_GETFONTSMOOTHING, ...TYPE): on at all, and
+// ClearType. The UI fonts are made in it explicitly (ClearType, standard's
+// grayscale, or off's aliased: Segoe UI Variable, the UI face, was seen
+// drawn in ClearType with smoothing off at DEFAULT_QUALITY), and renewed
+// when it changes; Direct2D's text follows it.
+bool font_smoothing_on();
+bool font_smoothing_cleartype();
 // Average character width and line height of the UI font at `dpi`, in device px.
 SIZE font_metrics(UINT dpi);
 // The UI font family name and size in DIPs (for DirectWrite text).

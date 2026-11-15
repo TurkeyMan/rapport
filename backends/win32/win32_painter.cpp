@@ -248,10 +248,19 @@ struct font_basis
 {
     LOGFONTW message{};
     float text_scale = 1.f;
+    BYTE quality = DEFAULT_QUALITY;  // the user's font smoothing's (font_quality)
 };
+// The quality a UI font's made in for the user's font smoothing: off,
+// aliased; standard, grayscale; ClearType.
+BYTE font_quality()
+{
+    return !font_smoothing_on()        ? NONANTIALIASED_QUALITY
+           : font_smoothing_cleartype() ? CLEARTYPE_QUALITY
+                                        : ANTIALIASED_QUALITY;
+}
 font_basis basis_now()
 {
-    return {metrics_for(96).lfMessageFont, text_scale()};
+    return {metrics_for(96).lfMessageFont, text_scale(), font_quality()};
 }
 font_basis& made_from()
 {
@@ -280,6 +289,20 @@ unsigned g_fonts_generation = 0;
 
 }  // namespace
 
+bool font_smoothing_on()
+{
+    BOOL on = FALSE;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &on, 0);
+    return on != FALSE;
+}
+
+bool font_smoothing_cleartype()
+{
+    UINT type = 0;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &type, 0);
+    return font_smoothing_on() && type == FE_FONTSMOOTHINGCLEARTYPE;
+}
+
 HFONT ui_font(UINT dpi, bool bold, bool mono, float scale)
 {
     made_from();
@@ -290,6 +313,8 @@ HFONT ui_font(UINT dpi, bool bold, bool mono, float scale)
     if (bold) lf.lfWeight = FW_BOLD;
     if (mono) wcscpy(lf.lfFaceName, L"Consolas");
     if (scale != 1.f) lf.lfHeight = LONG(std::lround(lf.lfHeight * scale));
+    // In the user's font smoothing, whatever the message font's LOGFONT says.
+    lf.lfQuality = made_from().quality;
     HFONT f = CreateFontIndirectW(&lf);
     cache[key] = f;
     return f;
@@ -299,7 +324,8 @@ bool renew_ui_fonts()
 {
     const font_basis now = basis_now();
     font_basis& was = made_from();
-    if (now.text_scale == was.text_scale && !std::memcmp(&now.message, &was.message, sizeof now.message))
+    if (now.text_scale == was.text_scale && now.quality == was.quality &&
+        !std::memcmp(&now.message, &was.message, sizeof now.message))
         return false;
     was = now;
     for (const auto& [key, font] : font_cache()) retired_fonts()[font] = key;
