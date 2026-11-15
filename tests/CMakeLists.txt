@@ -552,6 +552,9 @@ if(TARGET rapport_win32)
     # height at both densities (compact through its test hook: static
     # builds), and their WinUI faces printed, never shown, light and dark,
     # and under high contrast (CI only, as above).
+    # Every variant may set the runner's font smoothing to ClearType (CI's
+    # opt-in, RAPPORT_TEST_SET_CLEARTYPE) and put it back: RUN_SERIAL, so no
+    # test runs meanwhile.
     add_executable(rapport-win32-band-controls-test win32_band_controls_test.cpp)
     target_link_libraries(rapport-win32-band-controls-test PRIVATE rapport::rapport user32 gdi32 comctl32 advapi32)
     if(RAPPORT_STATIC)
@@ -560,18 +563,18 @@ if(TARGET rapport_win32)
     endif()
     add_dependencies(rapport-win32-band-controls-test rapport_win32)
     add_test(NAME win32-band-controls COMMAND rapport-win32-band-controls-test)
-    set_tests_properties(win32-band-controls PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+    set_tests_properties(win32-band-controls PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
     add_test(NAME win32-band-controls-light COMMAND rapport-win32-band-controls-test)
     set_tests_properties(win32-band-controls-light PROPERTIES
-        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 TIMEOUT 120)
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
     # Compact through RAPPORT_DENSITY, for a plugin build (which has no test
     # hook): Windows 11 runners build plugins.
     add_test(NAME win32-band-controls-compact COMMAND rapport-win32-band-controls-test)
     set_tests_properties(win32-band-controls-compact PROPERTIES
-        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 TIMEOUT 120)
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
     add_test(NAME win32-band-controls-compact-light COMMAND rapport-win32-band-controls-test)
     set_tests_properties(win32-band-controls-compact-light PROPERTIES
-        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 TIMEOUT 120)
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
     add_test(NAME win32-band-controls-high-contrast
              COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-band-controls-test>)
     set_tests_properties(win32-band-controls-high-contrast PROPERTIES

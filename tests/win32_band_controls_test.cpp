@@ -49,6 +49,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -557,6 +558,194 @@ void check_separator(HWND top, HWND sep, const density& d, const std::string& at
                str(r.bottom - r.top));
 }
 
+// The runner's font smoothing: off, standard or ClearType.
+struct smoothing
+{
+    BOOL on = FALSE;
+    UINT type = 0;
+};
+smoothing font_smoothing()
+{
+    smoothing s;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &s.on, 0);
+    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &s.type, 0);
+    return s;
+}
+std::string smoothing_name(const smoothing& s)
+{
+    return !s.on ? "off" : s.type == FE_FONTSMOOTHINGCLEARTYPE ? "ClearType" : "standard";
+}
+bool runner_cleartype()
+{
+    const smoothing s = font_smoothing();
+    return s.on && s.type == FE_FONTSMOOTHINGCLEARTYPE;
+}
+// `s` set, its type first: whether each SPI_SET call took and the setting
+// reads back as `s`.
+bool set_smoothing(const smoothing& s)
+{
+    bool ok = SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0,
+                                    reinterpret_cast<PVOID>(UINT_PTR(s.type)),
+                                    SPIF_SENDCHANGE) != FALSE;
+    ok = SystemParametersInfoW(SPI_SETFONTSMOOTHING, s.on, nullptr, SPIF_SENDCHANGE) != FALSE && ok;
+    const smoothing now = font_smoothing();
+    return ok && (now.on != FALSE) == (s.on != FALSE) && now.type == s.type;
+}
+// The runner's smoothing as it was, put back once changed (a CI runner's
+// only: RAPPORT_TEST_SET_CLEARTYPE): by main before it returns, checked, a
+// failure loud and the run failed; at exit, if a return came first.
+struct smoothing_restore
+{
+    bool changed = false;
+    smoothing was;
+    bool undo()
+    {
+        if (!changed) return true;
+        changed = false;
+        const bool ok = set_smoothing(was);
+        const smoothing now = font_smoothing();
+        if (!ok)
+            std::fprintf(stderr,
+                         "FAIL the runner's font smoothing NOT put back: was %s (type %u), now %s "
+                         "(type %u)\n",
+                         smoothing_name(was).c_str(), was.type, smoothing_name(now).c_str(),
+                         now.type);
+        else
+            std::printf("the runner's font smoothing put back: %s\n", smoothing_name(now).c_str());
+        return ok;
+    }
+    ~smoothing_restore() { undo(); }
+} g_smoothing;
+
+int apart(DWORD a, DWORD b)
+{
+    int d = 0;
+    for (int shift : {16, 8, 0}) d = std::max(d, std::abs(channel(a, shift) - channel(b, shift)));
+    return d;
+}
+
+// A printed control's text in `area`, on `ground` (its face's colour): its
+// ink the pixel furthest from the ground; its edge pixels, partly covered
+// (more than 24 levels from both the ground and the ink in some channel),
+// and those of them with colour (ClearType's fringes: channels more than 4
+// apart; the ground and the ink grey); the most any inked pixel's channels
+// part. Edges, not ink, so glyphs' solid stems (more of them at a larger
+// scale) don't count; the text's area only, no chevron.
+struct ink_colour
+{
+    int edges = 0, fringed = 0, chroma = 0;
+};
+ink_colour ink_colour_of(const printed& p, const RECT& area, DWORD ground)
+{
+    ink_colour out;
+    DWORD ink = ground;
+    for (int y = area.top; y < area.bottom; ++y)
+        for (int x = area.left; x < area.right; ++x)
+            if (apart(p.at(x, y), ground) > apart(ink, ground)) ink = p.at(x, y);
+    for (int y = area.top; y < area.bottom; ++y)
+        for (int x = area.left; x < area.right; ++x)
+        {
+            const DWORD v = p.at(x, y);
+            if (apart(v, ground) <= 16) continue;
+            const int hi = std::max({channel(v, 16), channel(v, 8), channel(v, 0)});
+            const int lo = std::min({channel(v, 16), channel(v, 8), channel(v, 0)});
+            out.chroma = std::max(out.chroma, hi - lo);
+            if (apart(v, ground) <= 24 || apart(v, ink) <= 24) continue;
+            ++out.edges;
+            out.fringed += hi - lo > 4;
+        }
+    return out;
+}
+
+// Where a control's text is, in its printed copy at `dpi`.
+enum class text_at
+{
+    face,   // a button's, an entry's: inside its border
+    list,   // a drop-down list's: up to its chevron's column (38)
+    menu,   // a menu button's: left of its chevron (a 12 square 8 after the text, 11 in)
+    combo,  // an editable combo box's: its edit
+};
+RECT text_area(HWND h, text_at where, UINT dpi)
+{
+    RECT w{};
+    GetWindowRect(h, &w);
+    const int width = w.right - w.left, height = w.bottom - w.top, in = px(4, dpi);
+    switch (where)
+    {
+    case text_at::list: return {in, in, width - px(38, dpi), height - in};
+    case text_at::menu: return {in, in, width - px(11 + 8 + 12, dpi), height - in};
+    case text_at::combo:
+    {
+        COMBOBOXINFO info{};
+        info.cbSize = sizeof info;
+        GetComboBoxInfo(h, &info);
+        if (info.hwndItem) return rect_in(h, info.hwndItem);
+        break;
+    }
+    case text_at::face: break;
+    }
+    return {in, in, width - in, height - in};
+}
+
+// `h`'s text as printed at `dpi`: ClearType (a third of its edge pixels or
+// more fringed) when `cleartype`, else grey (no inked pixel's channels more
+// than 2 apart). Its ground is read 4 px (scaled) in from its left edge at
+// mid-height, inside its border (1 px scaled, or a focus ring's 3, never
+// drawn here) and before its text (10 px in or more): it must be `face`,
+// within 2 levels, or nothing's measured.
+void check_text(HWND h, text_at where, bool cleartype, UINT dpi, DWORD face, const std::string& what)
+{
+    const printed p = print(h);
+    const DWORD ground = p.at(px(4, dpi), p.h / 2);
+    expect(apart(ground, face) <= 2,
+           "its face " + hex(face) + " where its ground is read" + what + ": " + hex(ground));
+    if (apart(ground, face) > 2) return;
+    const ink_colour c = ink_colour_of(p, text_area(h, where, dpi), ground);
+    const std::string seen = ": " + str(c.fringed) + " of " + str(c.edges) +
+                             " edge pixels with colour, chroma " + str(c.chroma);
+    expect(c.edges > 10, "its text printed" + what + seen);
+    if (cleartype)
+        expect(c.fringed * 3 >= c.edges, "its text ClearType" + what + seen);
+    else
+        expect(c.fringed == 0 && c.chroma <= 2, "its text grey" + what + seen);
+}
+
+// The texts checked at each scale, on their faces (ControlFillColorDefault
+// over the band's colour): a button's (no icon), a menu button's, a
+// drop-down list's, an editable combo box's, an entry's (given text for
+// it); any null left out.
+struct texts
+{
+    HWND button = nullptr, menu = nullptr, list = nullptr, combo = nullptr, entry = nullptr;
+};
+void check_texts(const texts& t, UINT dpi, const std::string& here)
+{
+    const bool cleartype = runner_cleartype();
+    const DWORD face = over(colours().fill, band_fill());
+    const std::pair<HWND, text_at> each[] = {{t.button, text_at::face},
+                                             {t.menu, text_at::menu},
+                                             {t.list, text_at::list},
+                                             {t.combo, text_at::combo},
+                                             {t.entry, text_at::face}};
+    const char* names[] = {"a button", "a menu button", "a drop-down list", "an editable combo box",
+                           "an entry"};
+    for (size_t i = 0; i < std::size(each); ++i)
+        if (each[i].first)
+            check_text(each[i].first, each[i].second, cleartype, dpi, face,
+                       " (" + std::string(names[i]) + here + ")");
+}
+
+// A drop-down list's own font (its list's, a window of its own) not the
+// grayscale copy glass gives a layer control's text.
+void check_list_font(HWND list, const std::string& what)
+{
+    LOGFONTW lf{};
+    GetObjectW(reinterpret_cast<HFONT>(SendMessageW(list, WM_GETFONT, 0, 0)), sizeof lf, &lf);
+    expect(lf.lfQuality != ANTIALIASED_QUALITY,
+           "a drop-down list's font (its list's) not grayscale" + what + ": quality " +
+               str(lf.lfQuality));
+}
+
 // A font's height in px (its LOGFONT's, unsigned).
 long font_height(HWND h)
 {
@@ -571,8 +760,10 @@ long font_height(HWND h)
 // text is; and each combo box still the field's height once moved again (a
 // combo box finds its own height from its font as it's moved).
 void check_at_dpi(HWND top, const std::vector<HWND>& controls, const std::vector<HWND>& combos,
-                  HWND editable, HWND field, const density& d, UINT dpi, const std::string& here)
+                  HWND editable, HWND field, const texts& text, const density& d, UINT dpi,
+                  const std::string& here)
 {
+    check_texts(text, dpi, here);
     for (HWND c : controls)
     {
         const RECT r = rect_in(top, c);
@@ -620,11 +811,11 @@ void check_at_dpi(HWND top, const std::vector<HWND>& controls, const std::vector
 // control the UI font at the new DPI). On CI the display's own scale is
 // changed instead (--transitions).
 void check_dpi(HWND top, const std::vector<HWND>& controls, const std::vector<HWND>& combos,
-               HWND editable, HWND field, const density& d, const std::string& at)
+               HWND editable, HWND field, const texts& text, const density& d, const std::string& at)
 {
     const UINT dpi = GetDpiForWindow(top);
     UINT was = dpi;
-    for (const UINT to : {120u, 144u, dpi})
+    for (const UINT to : {120u, 144u, 192u, dpi})
     {
         rap::win32::set_dpi_for_tests(to == dpi ? 0 : to);
         RECT wr{};
@@ -634,7 +825,7 @@ void check_dpi(HWND top, const std::vector<HWND>& controls, const std::vector<HW
         was = to;
         SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&suggested));
         pump();
-        check_at_dpi(top, controls, combos, editable, field, d, to,
+        check_at_dpi(top, controls, combos, editable, field, text, d, to,
                      at + ", " + str(long(to)) + " dpi");
     }
 }
@@ -910,111 +1101,16 @@ int transitions(rap::ui& ui, const density& d)
     expect(fetch && field && list && editable, "its controls");
     if (!(fetch && field && list && editable)) return 1;
     const std::string at = std::string(", ") + d.name;
-    check_at_dpi(top, {fetch, field, list, editable}, {list, editable}, editable, field, d,
+    SetWindowTextW(field, L"Subject");
+    const texts text{fetch, nullptr, list, editable, field};
+    check_at_dpi(top, {fetch, field, list, editable}, {list, editable}, editable, field, text, d,
                  GetDpiForWindow(top), at + ", before");
     return scale_transitions(top,
                              [&](UINT dpi, const std::string& here)
                              {
                                  check_at_dpi(top, {fetch, field, list, editable}, {list, editable},
-                                              editable, field, d, dpi, at + here);
+                                              editable, field, text, d, dpi, at + here);
                              });
-}
-
-// The runner's font smoothing: off, standard or ClearType.
-struct smoothing
-{
-    BOOL on = FALSE;
-    UINT type = 0;
-};
-smoothing font_smoothing()
-{
-    smoothing s;
-    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &s.on, 0);
-    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &s.type, 0);
-    return s;
-}
-std::string smoothing_name(const smoothing& s)
-{
-    return !s.on ? "off" : s.type == FE_FONTSMOOTHINGCLEARTYPE ? "ClearType" : "standard";
-}
-bool runner_cleartype()
-{
-    const smoothing s = font_smoothing();
-    return s.on && s.type == FE_FONTSMOOTHINGCLEARTYPE;
-}
-void set_smoothing(const smoothing& s)
-{
-    SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, reinterpret_cast<PVOID>(UINT_PTR(s.type)),
-                          SPIF_SENDCHANGE);
-    SystemParametersInfoW(SPI_SETFONTSMOOTHING, s.on, nullptr, SPIF_SENDCHANGE);
-}
-// The runner's smoothing as it was, put back at exit once changed (a CI
-// runner's only: RAPPORT_TEST_SET_CLEARTYPE).
-struct smoothing_restore
-{
-    bool changed = false;
-    smoothing was;
-    void undo()
-    {
-        if (changed) set_smoothing(was);
-        changed = false;
-    }
-    ~smoothing_restore() { undo(); }
-} g_smoothing;
-
-// A printed control's ink inside its edge (4 px in, past its border): its
-// pixels more than 16 levels off its ground (at its left, mid-height) in a
-// channel; those of them with colour (ClearType's fringes: channels more
-// than 4 apart, the ground and the ink grey); the most any part.
-struct ink_colour
-{
-    int ink = 0, fringed = 0, chroma = 0;
-};
-ink_colour ink_colour_of(const printed& p)
-{
-    ink_colour out;
-    const DWORD ground = p.at(3, p.h / 2);
-    const int in = px(4, GetDpiForSystem());
-    for (int y = in; y < p.h - in; ++y)
-        for (int x = in; x < p.w - in; ++x)
-        {
-            const DWORD v = p.at(x, y);
-            int off = 0;
-            for (int shift : {16, 8, 0})
-                off = std::max(off, std::abs(channel(v, shift) - channel(ground, shift)));
-            if (off <= 16) continue;
-            ++out.ink;
-            const int hi = std::max({channel(v, 16), channel(v, 8), channel(v, 0)});
-            const int lo = std::min({channel(v, 16), channel(v, 8), channel(v, 0)});
-            out.fringed += hi - lo > 4;
-            out.chroma = std::max(out.chroma, hi - lo);
-        }
-    return out;
-}
-
-// `h`'s text as printed: ClearType (a third of its ink or more fringed) when
-// `cleartype`, else grey (no pixel's channels more than 2 apart).
-void check_text(HWND h, bool cleartype, const std::string& what)
-{
-    const ink_colour c = ink_colour_of(print(h));
-    const std::string seen = ": " + str(c.fringed) + " of " + str(c.ink) +
-                             " ink pixels with colour, chroma " + str(c.chroma);
-    expect(c.ink > 20, "its text printed" + what + seen);
-    if (cleartype)
-        expect(c.fringed * 3 >= c.ink, "its text ClearType" + what + seen);
-    else
-        expect(c.fringed == 0 && c.chroma <= 2, "its text grey" + what + seen);
-}
-
-// A drop-down list's own font (its list's, a window of its own) not the
-// grayscale copy glass gives a layer control's text.
-void check_list_font(HWND list, const std::string& what)
-{
-    LOGFONTW lf{};
-    GetObjectW(reinterpret_cast<HFONT>(SendMessageW(list, WM_GETFONT, 0, 0)), sizeof lf, &lf);
-    expect(lf.lfQuality != ANTIALIASED_QUALITY,
-           "a drop-down list's font (its list's) not grayscale" + what + ": quality " +
-               str(lf.lfQuality));
 }
 
 // One density: a row of controls (an hbox) and a toolbar, each its window's
@@ -1112,15 +1208,13 @@ void run(rap::ui& ui, const density& d, bool hc)
         check_tool_button(toggle, true, at);
         check_combo(editable, at);
         // Text on an opaque face ClearType (the runner's), on the layer grey.
-        const bool cleartype = runner_cleartype();
+        const UINT text_dpi = GetDpiForWindow(top);
         SetWindowTextW(entry_h, L"Subject");
-        for (const auto& [h, name] :
-             {std::pair{menu_b, "a menu button"}, std::pair{list, "a drop-down list"},
-              std::pair{editable, "an editable combo box"}, std::pair{entry_h, "an entry"},
-              std::pair{fetch2, "a button"}, std::pair{list2, "a toolbar's drop-down list"}})
-            if (h) check_text(h, cleartype, " (" + std::string(name) + at + ")");
-        SetWindowTextW(entry_h, L"");
-        if (flat2) check_text(flat2, false, " (a flat button at rest, on the layer" + at + ")");
+        check_texts({nullptr, menu_b, list, editable, entry_h}, text_dpi, at);
+        check_texts({fetch2, nullptr, list2, nullptr, nullptr}, text_dpi, ", a toolbar's" + at);
+        if (flat2)
+            check_text(flat2, text_at::face, false, text_dpi, band_layer_px() & 0xffffff,
+                       " (a flat button at rest, on the layer" + at + ")");
         check_list_font(list, at);
         if (list2) check_list_font(list2, ", a toolbar's" + at);
         // An entry in the band at rest: TextControlElevationBorderBrush, as
@@ -1154,7 +1248,8 @@ void run(rap::ui& ui, const density& d, bool hc)
             }
             check_button(fetch, false, "a button, out of the band and back", at);
             check_list_font(list, ", out of the band and back" + at);
-            check_text(list, runner_cleartype(),
+            check_text(list, text_at::list, runner_cleartype(), GetDpiForWindow(top),
+                       over(colours().fill, band_fill()),
                        " (a drop-down list, out of the band and back" + at + ")");
             check_combo_fill(editable,
                              " (an editable combo box, out of the band and back" + at + ")");
@@ -1163,8 +1258,9 @@ void run(rap::ui& ui, const density& d, bool hc)
             expect(false, "the row's tabs bound" + at);
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
         check_dpi(top, {pull, menu_b, fetch, entry_h, list, editable, toggle}, {list, editable},
-                  editable, entry_h, d, at);
+                  editable, entry_h, {nullptr, menu_b, list, editable, entry_h}, d, at);
 #endif
+        SetWindowTextW(entry_h, L"");
     }
 }
 
@@ -1197,11 +1293,10 @@ int main(int argc, char** argv)
     g_smoothing.was = font_smoothing();
     const bool set_cleartype =
         env("GITHUB_ACTIONS") == "true" && env("RAPPORT_TEST_SET_CLEARTYPE") == "1";
-    if (set_cleartype && !transitions_run && !runner_cleartype())
+    if (set_cleartype && !runner_cleartype())
     {
         g_smoothing.changed = true;  // marked before it's tried: half made is put back too
-        set_smoothing({TRUE, FE_FONTSMOOTHINGCLEARTYPE});
-        expect(runner_cleartype(),
+        expect(set_smoothing({TRUE, FE_FONTSMOOTHINGCLEARTYPE}) && runner_cleartype(),
                "the runner's font smoothing set to ClearType (RAPPORT_TEST_SET_CLEARTYPE): " +
                    smoothing_name(font_smoothing()));
     }
@@ -1225,8 +1320,7 @@ int main(int argc, char** argv)
         const char* densities = env("RAPPORT_DENSITY") == "compact" ? "compact" : "standard";
 #endif
         std::printf("fringe check: %s (build %lu, %s, %s, %s)\n",
-                    transitions_run      ? "not run, --transitions"
-                    : hc                 ? "not run, high contrast"
+                    hc                   ? "not run, high contrast"
                     : runner_cleartype() ? "ran, ClearType's fringes looked for"
                                          : "ran, grey text looked for",
                     build, hc ? "high contrast" : g_dark ? "dark" : "light", densities, how.c_str());
@@ -1235,6 +1329,7 @@ int main(int argc, char** argv)
     {
         const int r = transitions(**ui, env("RAPPORT_DENSITY") == "compact" ? compact : standard);
         g_restore.undo();
+        if (!g_smoothing.undo()) ++fails;
         std::printf(fails ? "%d failed\n" : "all passed\n", fails);
         return fails ? 1 : r;
     }
@@ -1249,6 +1344,7 @@ int main(int argc, char** argv)
     // The environment's (RAPPORT_DENSITY: win32-band-controls-compact).
     run(**ui, env("RAPPORT_DENSITY") == "compact" ? compact : standard, hc);
 #endif
+    if (!g_smoothing.undo()) ++fails;
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
