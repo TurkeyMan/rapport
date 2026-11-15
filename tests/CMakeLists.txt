@@ -620,13 +620,24 @@ if(TARGET rapport_win32)
     # unchanged, under high contrast kept (CI only); never shown, the DPI
     # through the test hook. The display's scale really changed and put
     # back at each density: CI only, as win32-band-controls-transitions.
-    add_executable(rapport-win32-fluent-rows-test win32_fluent_rows_test.cpp)
-    target_link_libraries(rapport-win32-fluent-rows-test PRIVATE rapport::rapport user32 gdi32 comctl32)
-    if(RAPPORT_STATIC)
-        target_link_libraries(rapport-win32-fluent-rows-test PRIVATE rapport::backend_win32)
-        target_compile_definitions(rapport-win32-fluent-rows-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
-    endif()
-    add_dependencies(rapport-win32-fluent-rows-test rapport_win32)
+    # Also without a Common Controls 6 manifest (-no-manifest): the
+    # controls whichever comctl32 the backend selects (rapport#41).
+    foreach(variant IN ITEMS "" "-no-manifest")
+        set(t rapport-win32-fluent-rows${variant}-test)
+        add_executable(${t} win32_fluent_rows_test.cpp)
+        target_link_libraries(${t} PRIVATE rapport::rapport user32 gdi32 comctl32)
+        if(RAPPORT_STATIC)
+            target_link_libraries(${t} PRIVATE rapport::backend_win32)
+            target_compile_definitions(${t} PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+        endif()
+        if(variant)
+            target_compile_definitions(${t} PRIVATE RAPPORT_TEST_NO_MANIFEST)
+        endif()
+        add_dependencies(${t} rapport_win32)
+    endforeach()
+    add_test(NAME win32-fluent-rows-no-manifest COMMAND rapport-win32-fluent-rows-no-manifest-test)
+    set_tests_properties(win32-fluent-rows-no-manifest PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
     add_test(NAME win32-fluent-rows COMMAND rapport-win32-fluent-rows-test)
     add_test(NAME win32-fluent-rows-compact COMMAND rapport-win32-fluent-rows-test --compact)
     add_test(NAME win32-fluent-rows-native COMMAND rapport-win32-fluent-rows-test --native)

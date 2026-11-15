@@ -13,6 +13,10 @@
 // test hook (--compact: the option's, compact). --transitions: the window
 // shown, the display's scale changed for real and put back (CI only).
 //   rapport-win32-fluent-rows-test [--native] [--compact] [--transitions]
+//
+// Built without a Common Controls 6 manifest too (RAPPORT_TEST_NO_MANIFEST,
+// win32-fluent-rows-no-manifest): the controls whichever comctl32 the
+// backend selects (rapport#41), their rows the same.
 #include <rapport/rapport.h>
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -29,7 +33,7 @@
 #include <string>
 #include <vector>
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(RAPPORT_TEST_NO_MANIFEST)
 #pragma comment(                                                                                   \
     linker,                                                                                        \
     "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -41,6 +45,8 @@ namespace rap::win32
 {
 void set_band_density_for_tests(int compact);  // win32_band_field.h
 void set_dpi_for_tests(UINT dpi);              // win32_common.h
+void set_text_scale_for_tests(float scale);    // win32_common.h
+void set_message_font_size_for_tests(float dip);
 }  // namespace rap::win32
 #endif
 
@@ -149,13 +155,15 @@ std::vector<HWND> all_of(HWND top, const wchar_t* cls)
 }
 
 // A density's rows, logical px (win32_band_field.h's band_density).
+// `pad`: the room round a taller font's line (TextControlThemePadding's top
+// and bottom).
 struct density
 {
     const char* name;
-    float item, file_item;
+    float item, file_item, pad;
 };
-constexpr density standard{"standard", 32, 28};
-constexpr density compact{"compact", 24, 24};
+constexpr density standard{"standard", 32, 28, 11};
+constexpr density compact{"compact", 24, 24, 5};
 
 class rows_model : public rap::list_model
 {
@@ -568,6 +576,200 @@ void run(rap::ui& ui, const density& d, bool fluent)
 #endif
 }
 
+// A tree view's own row height for its font: a fresh one's, given the font.
+int native_tree_height(HWND like)
+{
+    HWND t = CreateWindowExW(0, WC_TREEVIEWW, L"", WS_CHILD, 0, 0, 300, 200, GetParent(like),
+                             nullptr, nullptr, nullptr);
+    if (!t) return -2;
+    SendMessageW(t, WM_SETFONT, SendMessageW(like, WM_GETFONT, 0, 0), FALSE);
+    const int h = TreeView_GetItemHeight(t);
+    DestroyWindow(t);
+    return h;
+}
+
+// A list, a tree and tabs in the toolbar band's row (a window with a base
+// surface and document tabs: its first row), each the band's density's rows
+// (fluent or native: the band's row is the band's); out of the band (the
+// document tabs hidden: no band) the app's again: the density's where
+// fluent, native their own (the row height set while in the band undone);
+// and back in the band, the band's.
+void run_band(rap::ui& ui, const density& d, bool fluent)
+{
+    using namespace rap::layout;
+    using namespace rap::literals;
+    const std::string title = std::string("Fluent rows band ") + d.name;
+    const std::vector<rap::column> cols{{"Name", 160_px}, {"Notes", 160_px}};
+    const std::vector<rap::tree_item> items{{"Alpha", "a"}, {"Beta", "b"}};
+    rap::document_tabs* doc_tabs = nullptr;
+    auto win = ui.create(
+        window{title,
+               {vbox{hbox{list{cols, &g_model}.stretch(), tree{items}.stretch(),
+                          tabs{{"One", label{"one"}}, {"Two", label{"two"}}}.stretch()},
+                     label{"content"}.stretch()}}}
+            .size(1100_px, 400_px)
+            .margins(false)
+            .base_surface()
+            .tabs(document_tabs{{{"a", "Alpha", rap::icon::named("folder"), {}}}}.bind(doc_tabs)));
+    pump();
+    HWND top = top_of(title);
+    expect(top != nullptr && doc_tabs != nullptr, "the band's window, " + std::string(d.name));
+    if (!top || !doc_tabs) return;
+    const std::vector<HWND> lists = all_of(top, WC_LISTVIEWW), trees = all_of(top, WC_TREEVIEWW),
+                            tabs_h = all_of(top, WC_TABCONTROLW);
+    // The document tabs are a tab control too: the row's is the one with
+    // two tabs and a page.
+    HWND page_tabs = nullptr;
+    for (HWND t : tabs_h)
+        if (TabCtrl_GetItemCount(t) == 2) page_tabs = t;
+    expect(lists.size() == 1 && trees.size() == 1 && page_tabs, "the band's list, tree and tabs");
+    if (lists.size() != 1 || trees.size() != 1 || !page_tabs) return;
+    HWND l = lists[0], t = trees[0];
+    const UINT dpi = GetDpiForWindow(top);
+    const int want = px(d.item, dpi);
+    auto in_band = [&](const std::string& at)
+    {
+        expect(list_row(l) == want,
+               "a list in the band's row, its rows " + str(want) + at + ": " + str(list_row(l)));
+        expect(TreeView_GetItemHeight(t) == want, "a tree in the band's row, its rows " +
+                                                      str(want) + at + ": " +
+                                                      str(TreeView_GetItemHeight(t)));
+        expect(tab_height(page_tabs) == want,
+               "tabs in the band's row, " + str(want) + at + ": " + str(tab_height(page_tabs)));
+    };
+    const std::string at = std::string(", ") + d.name;
+    in_band(at);
+    doc_tabs->set_visible(false);
+    pump();
+    const std::string out = ", out of the band" + at;
+    if (fluent)
+        in_band(out);
+    else
+    {
+        expect(!ListView_GetImageList(l, LVSIL_SMALL),
+               "a native list out of the band, no rows' image list");
+        const int tree = TreeView_GetItemHeight(t), tree_own = native_tree_height(t);
+        expect(tree == tree_own,
+               "a native tree out of the band, its own rows, " + str(tree_own) + ": " + str(tree));
+        const int tabs = tab_height(page_tabs), own = native_tab_height(page_tabs);
+        expect(tabs == own,
+               "native tabs out of the band, their own, " + str(own) + ": " + str(tabs));
+    }
+    doc_tabs->set_visible(true);
+    pump();
+    in_band(", back in the band" + at);
+}
+
+// The line of the font control `h` has, px.
+int font_line(HWND h)
+{
+    HDC dc = GetDC(h);
+    HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)));
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, old);
+    ReleaseDC(h, dc);
+    return int(tm.tmHeight);
+}
+
+// A sidebar of four pages in a window of its own natural size (none asked
+// for): every row whole in the list, none clipped.
+void sidebar_fits(rap::ui& ui, const density& d, const std::string& at)
+{
+    using namespace rap::layout;
+    const std::string title = std::string("Fluent rows sidebar ") + d.name;
+    auto win = ui.create(window{title,
+                                {tabs{{"General", label{"one"}},
+                                      {"Appearance", label{"two"}},
+                                      {"Fonts", label{"three"}},
+                                      {"Advanced", label{"four"}}}
+                                     .sidebar()}});
+    pump();
+    HWND top = top_of(title);
+    const std::vector<HWND> boxes = top ? all_of(top, L"ListBox") : std::vector<HWND>{};
+    expect(boxes.size() == 1, "a sidebar in a window of its natural size" + at);
+    if (boxes.size() != 1) return;
+    RECT client{};
+    GetClientRect(boxes[0], &client);
+    for (int i = 0; i < 4; ++i)
+    {
+        RECT r{};
+        SendMessageW(boxes[0], LB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&r));
+        expect(r.top >= client.top && r.bottom <= client.bottom,
+               "its row " + str(i) + " whole, " + str(r.top) + ".." + str(r.bottom) + " in 0.." +
+                   str(client.bottom) + at);
+    }
+}
+
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+// A large text size (150%, the message font 18 DIPs: the text size test
+// hooks, the setting untouched, WM_SETTINGCHANGE as Windows sends it) while
+// the window's open: each row the density's or, taller, its font's line
+// with the density's room round it, no text clipped (a tree's, tabs' and a
+// list box's set height is kept however tall the font is); a sidebar made
+// at it whole at its natural size. Then 100% again, and the density's rows.
+void large_text(rap::ui& ui, const density& d)
+{
+    using namespace rap::layout;
+    using namespace rap::literals;
+    const std::string title = std::string("Fluent rows large text ") + d.name;
+    auto win = ui.create(window{title, {rows_layout()}}.size(1000_px, 700_px));
+    pump();
+    HWND top = top_of(title);
+    const controls c = top ? controls_of(top) : controls{};
+    expect(c.all(), "the large text window's controls, " + std::string(d.name));
+    if (!c.all()) return;
+    auto settings_changed = [&]
+    {
+        SendMessageW(top, WM_SETTINGCHANGE, SPI_SETNONCLIENTMETRICS,
+                     reinterpret_cast<LPARAM>(L"WindowMetrics"));
+        pump();
+    };
+    rap::win32::set_text_scale_for_tests(1.5f);
+    rap::win32::set_message_font_size_for_tests(18.f);
+    settings_changed();
+    const UINT dpi = GetDpiForWindow(top);
+    const std::string at = std::string(", text 150%, ") + d.name;
+    auto row_for = [&](HWND h, float item, float pad)
+    { return std::max(px(item, dpi), font_line(h) + px(pad, dpi)); };
+    // A tree view's rows even: an odd one rounded up.
+    auto even = [](int h) { return h + (h & 1); };
+    struct row
+    {
+        const char* what;
+        HWND h;
+        int now, want;
+    };
+    const int line = font_line(c.tree);
+    expect(line + px(d.pad, dpi) > px(d.item, dpi),
+           "the font's line with its room taller than the density's row, " + str(line) + " + " +
+               str(px(d.pad, dpi)) + at);
+    const row rows[] = {
+        {"a list's rows", c.list, list_row(c.list), row_for(c.list, d.item, d.pad)},
+        {"a compact list's rows", c.compact_list, list_row(c.compact_list),
+         row_for(c.compact_list, compact.item, compact.pad)},
+        {"a file_view's rows", c.file_list, list_row(c.file_list),
+         row_for(c.file_list, d.file_item, d.pad)},
+        {"a tree's rows", c.tree, TreeView_GetItemHeight(c.tree),
+         even(row_for(c.tree, d.item, d.pad))},
+        {"a navigator's rows", c.navigator, TreeView_GetItemHeight(c.navigator),
+         even(row_for(c.navigator, d.item, d.pad))},
+        {"a tab control's tabs", c.tabs, tab_height(c.tabs), row_for(c.tabs, d.item, d.pad)},
+        {"a sidebar's rows", c.sidebar, int(SendMessageW(c.sidebar, LB_GETITEMHEIGHT, 0, 0)),
+         row_for(c.sidebar, d.item, d.pad)},
+    };
+    for (const row& r : rows)
+        expect(r.now == r.want && r.now >= font_line(r.h),
+               std::string(r.what) + " " + str(r.want) + ", its font's line " +
+                   str(font_line(r.h)) + " whole" + at + ": " + str(r.now));
+    sidebar_fits(ui, d, at);
+    rap::win32::set_text_scale_for_tests(1.f);
+    rap::win32::set_message_font_size_for_tests(12.f);
+    settings_changed();
+    check_rows(c, true, d, dpi, ", text 100% again, " + std::string(d.name));
+}
+#endif
+
 // --transitions: the window shown, taking each scale the display allows.
 int transitions(rap::ui& ui, const density& d, bool fluent)
 {
@@ -637,14 +839,28 @@ int main(int argc, char** argv)
         // Both, through the density's test hook.
         rap::win32::set_band_density_for_tests(0);
         run(**ui, standard, fluent);
+        run_band(**ui, standard, fluent);
+        sidebar_fits(**ui, standard, ", standard");
+        large_text(**ui, standard);
         rap::win32::set_band_density_for_tests(1);
         run(**ui, compact, fluent);
+        run_band(**ui, compact, fluent);
+        sidebar_fits(**ui, compact, ", compact");
+        large_text(**ui, compact);
         rap::win32::set_band_density_for_tests(-1);
     }
     else
-        run(**ui, compact_run ? compact : standard, fluent);
+    {
+        const density& d = compact_run ? compact : standard;
+        run(**ui, d, fluent);
+        run_band(**ui, d, fluent);
+        sidebar_fits(**ui, d, std::string(", ") + d.name);
+        if (fluent) large_text(**ui, d);
+    }
 #else
     run(**ui, compact_run ? compact : standard, fluent);
+    run_band(**ui, compact_run ? compact : standard, fluent);
+    sidebar_fits(**ui, compact_run ? compact : standard, "");
 #endif
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;

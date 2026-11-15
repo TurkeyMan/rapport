@@ -4288,6 +4288,26 @@ private:
     bool marquee_ = false;
 };
 
+// A row of control `h` (a list, a tree, tabs) at `dpi`, device px:
+// `logical` (the density's row), or where the line of the font it has is
+// taller (a large text size) that line with the density's room round it, as
+// a band field keeps it (TextControlThemePadding's top and bottom): never
+// clipping its text. (A tree's, a tab control's and a list box's set height
+// is kept however tall the font is.)
+int fluent_row(HWND h, const band_density& d, float logical, UINT dpi)
+{
+    int line = int(font_metrics(dpi).cy);
+    if (HDC dc = GetDC(h))
+    {
+        HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)));
+        TEXTMETRICW tm{};
+        if (GetTextMetricsW(dc, &tm)) line = int(tm.tmHeight);
+        SelectObject(dc, old);
+        ReleaseDC(h, dc);
+    }
+    return std::max(band_px(logical, dpi), line + band_px(d.text_top + d.text_bottom, dpi));
+}
+
 // -- tree ---------------------------------------------------------------------
 
 // The common controls' tree view. Items are found by the app's ids; each
@@ -4337,7 +4357,8 @@ public:
         apply_spacing();
         rebuild_icons();
     }
-    // Fluent controls: rows at the density's height.
+    // Fluent controls: rows at the density's height. Null (native, out of
+    // a band's row it was in): the font's again.
     void set_in_band(const band_density* density, bool) override
     {
         density_ = density;
@@ -4352,7 +4373,12 @@ public:
     {
         if (!navigator_)
         {
-            if (density_) TreeView_SetItemHeight(h_, px(density_->item));
+            if (density_)
+                TreeView_SetItemHeight(
+                    h_, tree_row(fluent_row(h_, *density_, density_->item, win_.dpi())));
+            else if (rows_set_)
+                TreeView_SetItemHeight(h_, -1);  // the tree view's own again
+            rows_set_ = density_ != nullptr;
             return;
         }
         // Undocumented, and set on Explorer's own tree: the expander keeps its
@@ -4360,10 +4386,15 @@ public:
         constexpr DWORD tvs_ex_full_size_expanders = 0x1000;
         TreeView_SetExtendedStyle(h_, tvs_ex_full_size_expanders, tvs_ex_full_size_expanders);
         TreeView_SetIndent(h_, px(8));
-        TreeView_SetItemHeight(h_, px(density_ ? density_->item : standard_band.item));
+        const band_density& d = density_ ? *density_ : standard_band;
+        TreeView_SetItemHeight(h_, tree_row(fluent_row(h_, d, d.item, win_.dpi())));
     }
+    // A tree view keeps an even row height (no TVS_NONEVENHEIGHT): an odd
+    // one rounded up, not down into the text.
+    static int tree_row(int h) { return h + (h & 1); }
     bool navigator_ = false;
     const band_density* density_ = nullptr;  // fluent controls': the rows' (set_in_band)
+    bool rows_set_ = false;                  // a plain tree's rows set from density_
     std::unordered_set<std::string> lines_;  // ids with tree_item::separator_before
 
     void set_items(std::vector<tree_item> items) override
@@ -6659,15 +6690,21 @@ public:
         density_ = density;
         apply_rows();
     }
-    // The rows' height, logical px: a file_view's Explorer's (Windows 11 at
+    // The rows' height, device px: a file_view's Explorer's (Windows 11 at
     // 96 DPI, 28; in its compact view the compact density's), a list's the
-    // density's where the controls are fluent; 0: the font's, as the
-    // list_view has it.
-    float row_height() const
+    // density's where the controls are fluent, each taller where the text
+    // is (fluent_row); 0: the font's, as the list_view has it.
+    int row_height() const
     {
-        if (file_view_) return density_ ? density_->file_item : standard_band.file_item;
+        const UINT dpi = win_.dpi();
+        if (file_view_)
+        {
+            const band_density& d = density_ ? *density_ : standard_band;
+            return fluent_row(h_, d, d.file_item, dpi);
+        }
         if (!density_) return 0;
-        return compact_ ? compact_band.item : density_->item;
+        return compact_ ? fluent_row(h_, compact_band, compact_band.item, dpi)
+                        : fluent_row(h_, *density_, density_->item, dpi);
     }
     // A report view takes its row height from its image list, plus a pixel.
     // Its width is the image slot at the start of column 0, which is the
@@ -6676,7 +6713,7 @@ public:
     // label rect, its auto-size) count it.
     void apply_rows()
     {
-        const float row = row_height();
+        const int row = row_height();
         if (row <= 0)
         {
             if (rows_set_)
@@ -6688,8 +6725,7 @@ public:
             }
             return;
         }
-        HIMAGELIST rows =
-            g_comctl.create(std::max(first_inset(), 1), px(row) - 1, ILC_COLOR32, 1, 0);
+        HIMAGELIST rows = g_comctl.create(std::max(first_inset(), 1), row - 1, ILC_COLOR32, 1, 0);
         if (!rows) return;  // the spacing it has is better than none
         if (HIMAGELIST old = ListView_SetImageList(h_, rows, LVSIL_SMALL)) g_comctl.destroy(old);
         rows_set_ = true;
@@ -8595,7 +8631,8 @@ public:
             2, reinterpret_cast<DWORD_PTR>(this));
     }
     // Fluent controls: its tabs at the density's height (TabViewItemMinHeight
-    // standard; the compact density's, as the controls'). Else the font's.
+    // standard; the compact density's, as the controls'). Null (native, out
+    // of a band's row it was in): the font's again.
     void set_in_band(const band_density* density, bool) override
     {
         density_ = density;
@@ -8603,7 +8640,11 @@ public:
     }
     void apply_rows()
     {
-        if (density_) TabCtrl_SetItemSize(h_, 0, px(density_->item));
+        // A height of 0: the tab control's own, from its font, again.
+        if (density_ || rows_set_)
+            TabCtrl_SetItemSize(
+                h_, 0, density_ ? fluent_row(h_, *density_, density_->item, win_.dpi()) : 0);
+        rows_set_ = density_ != nullptr;
     }
     std::vector<item*> pages;
     // Lazy pages: their builders until built.
@@ -8678,6 +8719,7 @@ private:
     int pad() const { return px(6); }
     std::function<void(int)> changed_;
     const band_density* density_ = nullptr;  // fluent controls': the tabs' (set_in_band)
+    bool rows_set_ = false;                  // its tabs' height set from density_
 };
 
 // Tabs as a list of page names down the left, the page beside it.
@@ -8725,13 +8767,15 @@ public:
         density_ = density;
         apply_rows();
     }
-    // The density's rows where the controls are fluent; else the font's line
-    // and 12 px.
-    void apply_rows()
+    // A row's height: the density's where the controls are fluent (taller
+    // where the text is: fluent_row); else the font's line and 12 px. What
+    // the rows are given and what's measured.
+    int row_height() const
     {
-        const int row = density_ ? px(density_->item) : font_metrics(win_.dpi()).cy + px(12);
-        SendMessageW(h_, LB_SETITEMHEIGHT, 0, row);
+        return density_ ? fluent_row(h_, *density_, density_->item, win_.dpi())
+                        : font_metrics(win_.dpi()).cy + px(12);
     }
+    void apply_rows() { SendMessageW(h_, LB_SETITEMHEIGHT, 0, row_height()); }
     const band_density* density_ = nullptr;  // fluent controls': the rows' (set_in_band)
     std::vector<item*> pages;
     std::vector<std::function<node()>> lazy;
@@ -8795,7 +8839,11 @@ public:
             in.cx = std::max(in.cx, s.cx);
             in.cy = std::max(in.cy, s.cy);
         }
-        return {list_width() + gap() + in.cx, std::max<long>(in.cy, long(titles_.size()) * (font_metrics(win_.dpi()).cy + px(12)))};
+        // Every row whole: the rows and the list's frame (its client edge,
+        // above and below) round them.
+        const long frame = 2L * GetSystemMetricsForDpi(SM_CYEDGE, win_.dpi());
+        return {list_width() + gap() + in.cx,
+                std::max<long>(in.cy, long(titles_.size()) * row_height() + frame)};
     }
     void place(RECT r) override
     {
