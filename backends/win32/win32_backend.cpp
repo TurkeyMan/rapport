@@ -3287,12 +3287,15 @@ public:
     combo_impl(win_context& win, HWND parent, const spec::combo& s)
         : leaf(win)
     {
-        // Its edit without ES_NOHIDESEL, which the combo box gives it as it
-        // makes it (and the edit reads only then): with it, the combo box
-        // selecting all its text whenever it's set or sized stood the text
-        // on the accent highlight while unfocused. Without it, as any edit:
-        // the selection kept, shown only while focused.
-        HHOOK hook = SetWindowsHookExW(WH_CBT, combo_edit_hook, nullptr, GetCurrentThreadId());
+        // Fluent (WinUI's ComboBox, in the band or out of it, high contrast
+        // too): its edit without ES_NOHIDESEL, which the combo box gives it
+        // as it makes it (and the edit reads only then): with it, the combo
+        // box selecting all its text whenever it's set or sized stood the
+        // text on the accent highlight while unfocused. Without it, as any
+        // edit: the selection kept, shown only while focused. Native keeps
+        // Windows' own: the selection shown unfocused.
+        HHOOK hook = fluent_controls() ? SetWindowsHookExW(WH_CBT, combo_edit_hook, nullptr, GetCurrentThreadId())
+                                       : nullptr;
         adopt(create_control(win, parent, L"COMBOBOX", L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP));
         if (hook) UnhookWindowsHookEx(hook);
         set_items(s.items);
