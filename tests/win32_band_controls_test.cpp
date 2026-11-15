@@ -55,6 +55,7 @@
 #include <cstring>
 #include <functional>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -607,7 +608,7 @@ enum class text_look
     no_colour,
     grey_edges,
     cleartype,
-    aliased,   // no colour, and few partial edges (no more than half its ink)
+    aliased,   // two colours: no colour, partial pixels at most max(2, 2% of its ink)
     smoothed,  // edges (more than 10), ClearType's colour or grey: either
 };
 // What plain GDI text looks like in this process (probe_text, in main);
@@ -706,7 +707,7 @@ std::string text_fault(const ink_colour& c, text_look look)
     if (c.ink <= 20) return "no text printed";
     if (look == text_look::smoothed) return c.edges <= 10 ? "no edges to look at" : "";
     if (look != text_look::cleartype && (c.fringed != 0 || c.chroma > 2)) return "colour in it";
-    if (look == text_look::aliased) return c.edges * 2 > c.ink ? "smoothed, not aliased" : "";
+    if (look == text_look::aliased) return c.edges > std::max(2, c.ink / 50) ? "smoothed, not aliased" : "";
     if (look == text_look::no_colour) return "";
     if (c.edges <= 10) return "no edges to look at";
     if (look == text_look::cleartype && c.fringed * 3 < c.edges) return "too few edges fringed";
@@ -820,6 +821,100 @@ void check_text_fault()
         expect(text_fault(k.c, k.look).empty() == k.right,
                std::string("made text: ") + k.what + (k.right ? " passes" : " fails") + ": \"" +
                    text_fault(k.c, k.look) + "\"");
+}
+
+// Direct2D text at `px` (Segoe UI), dark on light, aliased or grayscale,
+// GDI-classic: measured as a control's text is. Empty if not drawn.
+std::optional<ink_colour> d2d_text(float size, bool aliased)
+{
+    ID2D1Factory* d2d = nullptr;
+    IDWriteFactory* dw = nullptr;
+    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d)) ||
+        FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(&dw))))
+    {
+        if (d2d) d2d->Release();
+        return std::nullopt;
+    }
+    const int w = 600, h = 80;
+    const DWORD ground = 0xF0F0F0;
+    std::optional<ink_colour> out;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = bmp ? SelectObject(mem, bmp) : nullptr;
+    ID2D1DCRenderTarget* rt = nullptr;
+    ID2D1SolidColorBrush* brush = nullptr;
+    IDWriteRenderingParams* def = nullptr;
+    IDWriteRenderingParams* params = nullptr;
+    IDWriteTextFormat* format = nullptr;
+    const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+        96, 96);
+    if (bits && SUCCEEDED(d2d->CreateDCRenderTarget(&props, &rt)) &&
+        SUCCEEDED(rt->CreateSolidColorBrush(D2D1::ColorF(0x1A / 255.f, 0x1A / 255.f, 0x1A / 255.f), &brush)) &&
+        SUCCEEDED(dw->CreateRenderingParams(&def)) &&
+        SUCCEEDED(dw->CreateCustomRenderingParams(def->GetGamma(), def->GetEnhancedContrast(),
+                                                  def->GetClearTypeLevel(), def->GetPixelGeometry(),
+                                                  aliased ? DWRITE_RENDERING_MODE_ALIASED
+                                                          : DWRITE_RENDERING_MODE_GDI_CLASSIC,
+                                                  &params)) &&
+        SUCCEEDED(dw->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                       DWRITE_FONT_STRETCH_NORMAL, size, L"", &format)))
+    {
+        std::fill_n(static_cast<DWORD*>(bits), size_t(w) * h, ground);
+        const RECT r{0, 0, w, h};
+        if (SUCCEEDED(rt->BindDC(mem, &r)))
+        {
+            rt->BeginDraw();
+            rt->SetTextRenderingParams(params);
+            rt->SetTextAntialiasMode(aliased ? D2D1_TEXT_ANTIALIAS_MODE_ALIASED : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            const wchar_t text[] = L"Name 0, Note 0, Author Email";
+            rt->DrawText(text, UINT32(std::size(text) - 1), format, D2D1::RectF(8, 8, float(w), float(h)), brush);
+            if (SUCCEEDED(rt->EndDraw()))
+            {
+                GdiFlush();
+                printed p;
+                p.w = w;
+                p.h = h;
+                p.px.assign(static_cast<DWORD*>(bits), static_cast<DWORD*>(bits) + size_t(w) * h);
+                for (DWORD& v : p.px) v &= 0xffffff;
+                out = ink_colour_of(p, RECT{0, 0, w, h}, ground);
+            }
+        }
+    }
+    for (IUnknown* u : std::initializer_list<IUnknown*>{format, params, def, brush, rt})
+        if (u) u->Release();
+    if (old) SelectObject(mem, old);
+    if (bmp) DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    dw->Release();
+    d2d->Release();
+    return out;
+}
+
+// The aliased look told from grayscale in Direct2D text at 12, 24 and 28 px
+// (12 px text at 100%, 200%, about 233%): aliased passes, grayscale fails
+// it (and passes as grey edges).
+void check_aliased_predicate()
+{
+    for (const float size : {12.f, 24.f, 28.f})
+    {
+        const std::optional<ink_colour> a = d2d_text(size, true), g = d2d_text(size, false);
+        const std::string at = " at " + str(long(size)) + " px";
+        expect(a && g, "Direct2D's text drawn, aliased and grayscale" + at);
+        if (!a || !g) continue;
+        expect(text_fault(*a, text_look::aliased).empty(),
+               "aliased Direct2D text passes as aliased" + at + ": " + str(a->edges) + " partial of " +
+                   str(a->ink) + " ink, \"" + text_fault(*a, text_look::aliased) + "\"");
+        expect(!text_fault(*g, text_look::aliased).empty() && text_fault(*g, text_look::grey_edges).empty(),
+               "grayscale Direct2D text fails as aliased, passes as grey edges" + at + ": " + str(g->edges) +
+                   " partial of " + str(g->ink) + " ink");
+    }
 }
 
 void check_text(HWND h, text_at where, text_look look, UINT dpi, DWORD face,
@@ -957,10 +1052,19 @@ ink_colour check_list_rows(HWND list, text_look look, const std::string& what)
         expect(false, "a list's first row" + what);
         return {};
     }
-    // Its ground at the row's right end, past its text.
-    const DWORD ground = p.at(row.right - 4, (row.top + row.bottom) / 2);
-    const ink_colour c = ink_colour_of(p, RECT{row.left, row.top, std::min<long>(row.right, 300), row.bottom},
-                                       ground);
+    // The row in the printed copy, which has the list's frame round its
+    // client area (the row's rectangle is the client area's): the first
+    // column's inside alone, no frame, no column divider. Its ground past
+    // the column's text, at its right.
+    RECT w{};
+    GetWindowRect(list, &w);
+    POINT o{0, 0};
+    ClientToScreen(list, &o);
+    const int dx = o.x - w.left, dy = o.y - w.top;
+    const int col = ListView_GetColumnWidth(list, 0);
+    const RECT area{row.left + dx + 2, row.top + dy, row.left + dx + col - 4, row.bottom + dy};
+    const DWORD ground = p.at(area.right - 2, (area.top + area.bottom) / 2);
+    const ink_colour c = ink_colour_of(p, area, ground);
     const std::string fault = text_fault(c, look);
     expect(fault.empty(), "a list's row text " + std::string(look_name(look)) + what + ": " +
                               (fault.empty() ? "" : fault + ", ") + str(c.ink) + " ink pixels, " +
@@ -1600,6 +1704,27 @@ void run(rap::ui& ui, const density& d, bool hc)
                        "a list's row text all drawn, " + str(c.ink) + " ink pixels against ClearType's " +
                            str(cleartype_ink) + here);
             }
+            // Off at 192 dpi (the DPI hook, as Windows sends WM_DPICHANGED):
+            // the rows still aliased, larger glyphs and all; then back.
+            {
+                rap::win32::set_font_smoothing_for_tests(0);
+                SendMessageW(top, WM_SETTINGCHANGE, SPI_SETFONTSMOOTHING, 0);
+                pump();
+                const UINT was = GetDpiForWindow(top);
+                auto to_dpi = [&](UINT from, UINT to)
+                {
+                    rap::win32::set_dpi_for_tests(to == was ? 0 : to);
+                    RECT wr{};
+                    GetWindowRect(top, &wr);
+                    RECT suggested{wr.left, wr.top, wr.left + MulDiv(wr.right - wr.left, int(to), int(from)),
+                                   wr.top + MulDiv(wr.bottom - wr.top, int(to), int(from))};
+                    SendMessageW(top, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&suggested));
+                    pump();
+                };
+                to_dpi(was, 192);
+                check_list_rows(rows, text_look::aliased, ", smoothing off, 192 dpi" + at);
+                to_dpi(192, was);
+            }
             rap::win32::set_font_smoothing_for_tests(-1);
             SendMessageW(top, WM_SETTINGCHANGE, SPI_SETFONTSMOOTHING, 0);
             pump();
@@ -1637,6 +1762,7 @@ int main(int argc, char** argv)
     rap::win32::set_text_scale_for_tests(1.f);
 #endif
     check_text_fault();
+    check_aliased_predicate();
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
     // Direct2D's text in each smoothing on one target, the mode changed on
     // it (off needs aliased rendering parameters: D1136), for a list's rows'
