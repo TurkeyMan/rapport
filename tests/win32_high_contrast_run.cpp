@@ -5,8 +5,10 @@
 // otherwise). It turns on "High Contrast Black", confirms high contrast is
 // reported on and the system colours have changed (Server 2025 gives a
 // Windows 11 contrast theme's, #202020 windows with white text, for it),
-// runs the test (ended, and failed, if it doesn't finish), and turns it off
-// again whatever the test did. It fails unless the flag is off and the window
+// runs the test (ended, and failed, if it doesn't finish in 120 s: inside
+// CTest's 180, with room for the 30 s the colours may take to come back),
+// and turns it off again whatever the test did. `--sleep S` only sleeps: a
+// hung test, for win32-high-contrast-run-hung. It fails unless the flag is off and the window
 // and text colours are back as they were within 30 seconds.
 #include <windows.h>
 #include <cstdio>
@@ -43,10 +45,35 @@ void print_colours(const char* when)
                 high_contrast_on() ? "on" : "off", GetSysColor(COLOR_WINDOW), GetSysColor(COLOR_WINDOWTEXT),
                 GetSysColor(COLOR_BTNFACE));
 }
+
+// An inheritable copy of one of this process's standard handles, for the
+// test's (null if it has none).
+HANDLE inheritable(DWORD which)
+{
+    const HANDLE h = GetStdHandle(which);
+    HANDLE copy = nullptr;
+    if (h && h != INVALID_HANDLE_VALUE)
+        DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &copy, 0, TRUE, DUPLICATE_SAME_ACCESS);
+    return copy;
+}
 }
 
 int main(int argc, char** argv)
 {
+    // Unbuffered, so stdout and stderr reach CTest in the order they happen.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // A test that hangs, for the -hung self-test: only sleeps.
+    if (argc == 3 && !std::strcmp(argv[1], "--sleep"))
+    {
+        Sleep(DWORD(std::atoi(argv[2])) * 1000);
+        return 0;
+    }
+    // The test's bound: 120 s (RAPPORT_TEST_RUN_TIMEOUT_S, if set), well
+    // inside CTest's 180 s, so the setting's put back here, never left to
+    // CTest's kill of this process.
+    DWORD timeout_s = 120;
+    if (const char* t = std::getenv("RAPPORT_TEST_RUN_TIMEOUT_S"); t && std::atoi(t) > 0)
+        timeout_s = DWORD(std::atoi(t));
     if (argc < 2)
     {
         std::fprintf(stderr, "usage: %s test [args...]\n", argv[0]);
@@ -90,19 +117,29 @@ int main(int argc, char** argv)
             command += argv[i];
             command += '"';
         }
+        // The test's output and failures this process's (CTest's log), passed
+        // to it explicitly.
         STARTUPINFOA si{sizeof si};
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = inheritable(STD_INPUT_HANDLE);
+        si.hStdOutput = inheritable(STD_OUTPUT_HANDLE);
+        si.hStdError = inheritable(STD_ERROR_HANDLE);
         PROCESS_INFORMATION pi{};
-        if (CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+        const BOOL started =
+            CreateProcessA(nullptr, command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
+        for (HANDLE h : {si.hStdInput, si.hStdOutput, si.hStdError})
+            if (h) CloseHandle(h);
+        if (started)
         {
-            const DWORD waited = WaitForSingleObject(pi.hProcess, 5 * 60 * 1000);
+            const DWORD waited = WaitForSingleObject(pi.hProcess, timeout_s * 1000);
             DWORD exit = 1;
             if (waited == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &exit))
                 code = int(exit);
             else
             {
                 // Timed out, or the wait failed: ended, and a failure.
-                std::fprintf(stderr, "%s didn't finish (wait %lu, error %lu): ended\n", argv[1], waited,
-                             GetLastError());
+                std::fprintf(stderr, "%s didn't finish in %lu s (wait %lu, error %lu): ended\n", argv[1],
+                             timeout_s, waited, GetLastError());
                 TerminateProcess(pi.hProcess, 1);
                 WaitForSingleObject(pi.hProcess, 10 * 1000);
                 code = 1;

@@ -7,8 +7,10 @@
 // profile and broadcast: a process's GDI was seen drawing ClearType still
 // when the process turned it off itself), confirms it reads back so, runs the
 // test with RAPPORT_TEST_FONT_SMOOTHING_SET naming what was set (ended, and
-// failed, if it doesn't finish), and puts the smoothing back as it was
-// whatever the test did, failing unless it reads back as it was.
+// failed, if it doesn't finish in 120 s: inside CTest's 180), and puts the
+// smoothing back as it was whatever the test did, failing unless it reads
+// back as it was. `--sleep S` only sleeps: a hung test, for
+// win32-font-smoothing-run-hung.
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
@@ -57,10 +59,35 @@ bool set(const smoothing& s)
     }
     return ok && same(read(), s);
 }
+
+// An inheritable copy of one of this process's standard handles, for the
+// test's (null if it has none).
+HANDLE inheritable(DWORD which)
+{
+    const HANDLE h = GetStdHandle(which);
+    HANDLE copy = nullptr;
+    if (h && h != INVALID_HANDLE_VALUE)
+        DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &copy, 0, TRUE, DUPLICATE_SAME_ACCESS);
+    return copy;
+}
 }  // namespace
 
 int main(int argc, char** argv)
 {
+    // Unbuffered, so stdout and stderr reach CTest in the order they happen.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // A test that hangs, for the -hung self-test: only sleeps.
+    if (argc == 3 && !std::strcmp(argv[1], "--sleep"))
+    {
+        Sleep(DWORD(std::atoi(argv[2])) * 1000);
+        return 0;
+    }
+    // The test's bound: 120 s (RAPPORT_TEST_RUN_TIMEOUT_S, if set), well
+    // inside CTest's 180 s, so the setting's put back here, never left to
+    // CTest's kill of this process.
+    DWORD timeout_s = 120;
+    if (const char* t = std::getenv("RAPPORT_TEST_RUN_TIMEOUT_S"); t && std::atoi(t) > 0)
+        timeout_s = DWORD(std::atoi(t));
     if (argc < 3 || (std::strcmp(argv[1], "off") && std::strcmp(argv[1], "cleartype")))
     {
         std::fprintf(stderr, "usage: %s off|cleartype test [args...]\n", argv[0]);
@@ -91,18 +118,28 @@ int main(int argc, char** argv)
             command += argv[i];
             command += '"';
         }
+        // The test's output and failures this process's (CTest's log), passed
+        // to it explicitly.
         STARTUPINFOA si{sizeof si};
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = inheritable(STD_INPUT_HANDLE);
+        si.hStdOutput = inheritable(STD_OUTPUT_HANDLE);
+        si.hStdError = inheritable(STD_ERROR_HANDLE);
         PROCESS_INFORMATION pi{};
-        if (CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+        const BOOL started =
+            CreateProcessA(nullptr, command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
+        for (HANDLE h : {si.hStdInput, si.hStdOutput, si.hStdError})
+            if (h) CloseHandle(h);
+        if (started)
         {
-            const DWORD waited = WaitForSingleObject(pi.hProcess, 5 * 60 * 1000);
+            const DWORD waited = WaitForSingleObject(pi.hProcess, timeout_s * 1000);
             DWORD exit = 1;
             if (waited == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &exit))
                 code = int(exit);
             else
             {
-                std::fprintf(stderr, "%s didn't finish (wait %lu, error %lu): ended\n", argv[2], waited,
-                             GetLastError());
+                std::fprintf(stderr, "%s didn't finish in %lu s (wait %lu, error %lu): ended\n", argv[2],
+                             timeout_s, waited, GetLastError());
                 TerminateProcess(pi.hProcess, 1);
                 WaitForSingleObject(pi.hProcess, 10 * 1000);
                 code = 1;

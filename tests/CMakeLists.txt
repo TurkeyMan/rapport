@@ -454,6 +454,14 @@ if(TARGET rapport_win32)
     # unless GITHUB_ACTIONS=true and RAPPORT_TEST_SET_HIGH_CONTRAST=1.
     add_executable(rapport-win32-high-contrast-run win32_high_contrast_run.cpp)
     target_link_libraries(rapport-win32-high-contrast-run PRIVATE user32)
+    # It over a test that hangs (itself, --sleep): ended after its own bound
+    # (3 s here), high contrast turned off all the same.
+    add_test(NAME win32-high-contrast-run-hung
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-high-contrast-run> --sleep 600)
+    set_tests_properties(win32-high-contrast-run-hung PROPERTIES
+        ENVIRONMENT "RAPPORT_TEST_RUN_TIMEOUT_S=3" SKIP_REGULAR_EXPRESSION "skipped: changes a system setting"
+        PASS_REGULAR_EXPRESSION "didn't finish in 3 s.*turned off: high contrast off"
+        FAIL_REGULAR_EXPRESSION "wasn't put back|failed \\(" RUN_SERIAL TRUE TIMEOUT 90)
     add_test(NAME win32-base-surface-high-contrast
              COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-base-surface-test>)
     set_tests_properties(win32-base-surface-high-contrast PROPERTIES
@@ -583,6 +591,32 @@ if(TARGET rapport_win32)
              COMMAND rapport-win32-font-smoothing-run off $<TARGET_FILE:rapport-win32-band-controls-test>)
     set_tests_properties(win32-band-controls-smoothing-off PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    # And with ClearType set on (if it isn't), the same way: the probe must
+    # read ClearType there, so the fringes are looked for whatever the
+    # runner's own setting. Dark and light; a plugin build's compact through
+    # RAPPORT_DENSITY (a static build does both densities in each).
+    foreach(variant IN ITEMS "" "-light" "-compact" "-compact-light")
+        set(variant_env "RAPPORT_NO_ACTIVATE=1")
+        if(variant MATCHES "light")
+            string(APPEND variant_env ";RAPPORT_THEME=light")
+        endif()
+        if(variant MATCHES "compact")
+            string(APPEND variant_env ";RAPPORT_DENSITY=compact")
+        endif()
+        add_test(NAME win32-band-controls-cleartype${variant}
+                 COMMAND rapport-win32-font-smoothing-run cleartype $<TARGET_FILE:rapport-win32-band-controls-test>)
+        set_tests_properties(win32-band-controls-cleartype${variant} PROPERTIES
+            ENVIRONMENT "${variant_env}" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 180)
+    endforeach()
+    # The wrapper over a test that hangs (itself, --sleep): ended after the
+    # wrapper's own bound (3 s here), the smoothing put back all the same.
+    add_test(NAME win32-font-smoothing-run-hung
+             COMMAND rapport-win32-font-smoothing-run off $<TARGET_FILE:rapport-win32-font-smoothing-run>
+                     --sleep 600)
+    set_tests_properties(win32-font-smoothing-run-hung PROPERTIES
+        ENVIRONMENT "RAPPORT_TEST_RUN_TIMEOUT_S=3" SKIP_REGULAR_EXPRESSION "skipped: changes a system setting"
+        PASS_REGULAR_EXPRESSION "didn't finish in 3 s.*font smoothing put back: "
+        FAIL_REGULAR_EXPRESSION "NOT put back" RUN_SERIAL TRUE TIMEOUT 60)
     add_test(NAME win32-band-controls-high-contrast
              COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-band-controls-test>)
     set_tests_properties(win32-band-controls-high-contrast PROPERTIES
