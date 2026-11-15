@@ -93,7 +93,9 @@ jobs:
   # build 20348, below Windows 11's 22000, so what's gated on Windows 11 runs
   # only on Server 2025 (build 26100). The asan job is Server 2025's plugin
   # build with AddressSanitizer (RAPPORT_ASAN): the same tests, run there so
-  # what's Windows 11's (the band, its glass) is in them too.
+  # what's Windows 11's (the band, its glass) is in them too. Server 2025's
+  # static build runs the tests whose hooks only a static build has (the
+  # text size, the message font) where Windows 11's faces and rows are on.
   windows:
     name: windows msvc ${{ matrix.link }}${{ matrix.tag }}
     runs-on: ${{ matrix.os }}
@@ -104,6 +106,7 @@ jobs:
           - { link: plugins, flags: '',                    os: windows-2022, tag: '' }
           - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2022, tag: '' }
           - { link: plugins, flags: '',                    os: windows-2025, tag: ' (build 26100)' }
+          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2025, tag: ' (build 26100)' }
           - { link: asan,    flags: '-DRAPPORT_ASAN=ON',   os: windows-2025, tag: ' (build 26100)' }
     steps:
       - uses: actions/checkout@v4
