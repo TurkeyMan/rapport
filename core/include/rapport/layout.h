@@ -307,6 +307,14 @@ struct list
     // A checkbox in each row's first cell: list_model::checked and
     // toggle_checked.
     bool checkboxes = false;
+    // Its rows' height, in logical px (at 96 DPI and a 100% text size),
+    // instead of the platform's or the density's: scaled with the DPI and
+    // the text size, never shorter than the font's line and 2 px. It
+    // overrides compact's and file_view's rows (compact's smaller font
+    // stays), in every look. Unset: the platform's, as ever. Limits: on
+    // Windows never under the font's line and 4 (the list view's least); on
+    // Qt the text size enters only through the line-and-2 least.
+    std::optional<float> row_height;
     std::function<void()> on_selection_changed;
     std::function<void(size_t)> on_activate;
     std::function<void(size_t, sort_order)> on_sort_requested;
@@ -335,6 +343,11 @@ struct tree
     // indent and tall rows, and no horizontal scroll bar). Nothing on
     // Windows 10, or on other toolkits yet.
     bool navigator = false;
+    // Its rows' height, as list's row_height: scaled with the DPI and the
+    // text size, never shorter than the font's line and 2 px, overriding
+    // the platform's, the density's and a navigator's (its indent stays).
+    // On Qt the text size enters only through the line-and-2 least.
+    std::optional<float> row_height;
     rap::tree** bind = nullptr;
 };
 struct menu_button
@@ -1070,6 +1083,12 @@ public:
         s().file_view = v;
         return *this;
     }
+    // Rows `dips` tall (logical px at 96 DPI and 100% text: see spec::list).
+    list& row_height(float dips)
+    {
+        s().row_height = dips;
+        return *this;
+    }
     list& headers(bool v)
     {
         s().headers = v;
@@ -1150,6 +1169,12 @@ public:
     tree& navigator(bool v = true)
     {
         s().navigator = v;
+        return *this;
+    }
+    // Rows `dips` tall (logical px at 96 DPI and 100% text: see spec::tree).
+    tree& row_height(float dips)
+    {
+        s().row_height = dips;
         return *this;
     }
     tree& on_selection_changed(std::function<void()> f)

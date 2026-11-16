@@ -4330,7 +4330,9 @@ private:
 // a band field keeps it (TextControlThemePadding's top and bottom): never
 // clipping its text. (A tree's, a tab control's and a list box's set height
 // is kept however tall the font is.)
-int fluent_row(HWND h, const band_density& d, float logical, UINT dpi)
+// The line of the font control `h` has, device px (the UI font's at `dpi`
+// if it can't be read).
+int font_line(HWND h, UINT dpi)
 {
     int line = int(font_metrics(dpi).cy);
     if (HDC dc = GetDC(h))
@@ -4341,7 +4343,34 @@ int fluent_row(HWND h, const band_density& d, float logical, UINT dpi)
         SelectObject(dc, old);
         ReleaseDC(h, dc);
     }
-    return std::max(band_px(logical, dpi), line + band_px(d.text_top + d.text_bottom, dpi));
+    return line;
+}
+int fluent_row(HWND h, const band_density& d, float logical, UINT dpi)
+{
+    return std::max(band_px(logical, dpi), font_line(h, dpi) + band_px(d.text_top + d.text_bottom, dpi));
+}
+// The app's row height for every list, tree and sidebar
+// (look_options::row_height; 0 unset), as the backend's made.
+float g_app_row_height = 0;
+// The row height a list or a tree asks for: its own (spec's row_height),
+// else the app's, else none.
+std::optional<float> asked_row(const std::optional<float>& own)
+{
+    if (own) return own;
+    if (g_app_row_height > 0) return g_app_row_height;
+    return std::nullopt;
+}
+
+// An app's row height for control `h` (spec::list and spec::tree's
+// row_height), device px: `logical` at `dpi` and the text size, never
+// shorter than its font's line and 2 px. (A list view's rows are never
+// shorter than its font's line and 4, its own least, a tree's than an even
+// height: at a huge text size a little taller still. A sidebar's, a list
+// box's, are 255 device px at most.)
+int fixed_row(HWND h, float logical, UINT dpi)
+{
+    const int row = int(std::lround(logical * float(dpi) / 96.f * text_scale()));
+    return std::max(row, font_line(h, dpi) + int(std::lround(2.f * float(dpi) / 96.f)));
 }
 
 // -- tree ---------------------------------------------------------------------
@@ -4367,6 +4396,7 @@ public:
         theme_control(h_);
         TreeView_SetExtendedStyle(h_, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
         navigator_ = s.navigator && windows_build() >= 22000;
+        fixed_ = asked_row(s.row_height);
         // A new DPI comes with a new font: the spacing follows it.
         SetWindowSubclass(
             h_,
@@ -4405,8 +4435,16 @@ public:
     // presenter's margin), the compact density's where the controls are
     // fluent and compact. A tree's rows the density's where the controls are
     // fluent; else the font's, as the tree view has them.
+    // An app's row height (fixed_) overrides them all, the navigator's
+    // indent kept.
     void apply_spacing()
     {
+        if (fixed_ && !navigator_)
+        {
+            TreeView_SetItemHeight(h_, tree_row(fixed_row(h_, *fixed_, win_.dpi())));
+            rows_set_ = true;
+            return;
+        }
         if (!navigator_)
         {
             if (density_)
@@ -4423,12 +4461,14 @@ public:
         TreeView_SetExtendedStyle(h_, tvs_ex_full_size_expanders, tvs_ex_full_size_expanders);
         TreeView_SetIndent(h_, px(8));
         const band_density& d = density_ ? *density_ : standard_band;
-        TreeView_SetItemHeight(h_, tree_row(fluent_row(h_, d, d.item, win_.dpi())));
+        TreeView_SetItemHeight(h_, tree_row(fixed_ ? fixed_row(h_, *fixed_, win_.dpi())
+                                                   : fluent_row(h_, d, d.item, win_.dpi())));
     }
     // A tree view keeps an even row height (no TVS_NONEVENHEIGHT): an odd
     // one rounded up, not down into the text.
     static int tree_row(int h) { return h + (h & 1); }
     bool navigator_ = false;
+    std::optional<float> fixed_;             // the app's row height (spec::tree::row_height)
     const band_density* density_ = nullptr;  // fluent controls': the rows' (set_in_band)
     bool rows_set_ = false;                  // a plain tree's rows set from density_
     std::unordered_set<std::string> lines_;  // ids with tree_item::separator_before
@@ -6680,6 +6720,7 @@ public:
         set_model(s.model);
         soft_ = s.soft_selection;
         compact_ = s.compact;
+        fixed_ = asked_row(s.row_height);
         checks_ = s.checkboxes;
         if (checks_) SetWindowSubclass(h_, check_proc, 9, reinterpret_cast<DWORD_PTR>(this));
         if (s.auto_scroll) SetWindowSubclass(h_, auto_scroll_proc, 7, reinterpret_cast<DWORD_PTR>(this));
@@ -6731,9 +6772,11 @@ public:
     // 96 DPI, 28; in its compact view the compact density's), a list's the
     // density's where the controls are fluent, each taller where the text
     // is (fluent_row); 0: the font's, as the list_view has it.
+    // An app's row height (fixed_) overrides them all.
     int row_height() const
     {
         const UINT dpi = win_.dpi();
+        if (fixed_) return fixed_row(h_, *fixed_, dpi);
         if (file_view_)
         {
             const band_density& d = density_ ? *density_ : standard_band;
@@ -8439,6 +8482,7 @@ private:
     bool checks_ = false;                                 // a checkbox at the start of column 0
     bool file_view_ = false;                              // Windows 11 file_view: column 0's content inset
     bool compact_ = false;                                // spec::list::compact
+    std::optional<float> fixed_;                          // spec::list::row_height
     const band_density* density_ = nullptr;  // fluent controls': the rows' (set_in_band)
     bool rows_set_ = false;                  // its rows' image list set (apply_rows)
     HIMAGELIST header_images_ = nullptr;                  // its one blank, for the header's first title
@@ -8815,10 +8859,18 @@ public:
     // A row's height: the density's where the controls are fluent (taller
     // where the text is: fluent_row); else the font's line and 12 px. What
     // the rows are given and what's measured.
+    // The app's row height (look_options::row_height) overrides them. A
+    // list box's rows are 255 device px at most (LB_SETITEMHEIGHT refuses
+    // more): capped there, so what measure() reserves is what's set.
     int row_height() const
     {
-        return density_ ? fluent_row(h_, *density_, density_->item, win_.dpi())
-                        : font_metrics(win_.dpi()).cy + px(12);
+        int row = 0;
+        if (g_app_row_height > 0)
+            row = fixed_row(h_, g_app_row_height, win_.dpi());
+        else
+            row = density_ ? fluent_row(h_, *density_, density_->item, win_.dpi())
+                           : font_metrics(win_.dpi()).cy + px(12);
+        return std::min(row, 255);
     }
     void apply_rows() { SendMessageW(h_, LB_SETITEMHEIGHT, 0, row_height()); }
     const band_density* density_ = nullptr;  // fluent controls': the rows' (set_in_band)
@@ -14168,6 +14220,7 @@ public:
         trace::install_message_hooks();
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
         set_control_style(look.controls, look.density);
+        g_app_row_height = look.row_height;
         // Per-monitor DPI awareness (v2) where the system has it.
         using fn_t = BOOL(WINAPI*)(HANDLE);
         if (auto fn = reinterpret_cast<fn_t>(reinterpret_cast<void*>(
