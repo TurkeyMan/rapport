@@ -510,17 +510,17 @@ public:
             this);
     }
     double value() const override { return map_.value(gtk_range_or_spin_value(this->w_)); }
+    // The value it shows: nothing (#88). A spin button shows its value only
+    // while its text says so: text typed and not yet taken (a pending edit)
+    // isn't the value, so the value is set and shown again.
     void set_value(double v) override
     {
         const double want = GTK_IS_SPIN_BUTTON(this->w_) ? v : map_.track(v);
-        if (gtk_range_or_spin_value(this->w_) == want) return;  // (#88)
-        quiet_ = true;
-        if (GTK_IS_SPIN_BUTTON(this->w_))
-            gtk_spin_button_set_value(GTK_SPIN_BUTTON(this->w_), v);
-        else
-            gtk_range_set_value(GTK_RANGE(this->w_), map_.track(v));
-        quiet_ = false;
+        if (gtk_range_or_spin_value(this->w_) == want && !spin_edit_pending()) return;  // (#88)
+        apply_value(v);
     }
+    // A new range, and the value applied again in it (rule 11): the
+    // native one and value() agree whatever the range did to it.
     void set_range(double min, double max) override
     {
         GtkAdjustment* adj = GTK_IS_SPIN_BUTTON(this->w_) ? gtk_spin_button_get_adjustment(GTK_SPIN_BUTTON(this->w_))
@@ -529,16 +529,41 @@ public:
         if (adj && gtk_adjustment_get_lower(adj) == (spin ? min : map_.track(min)) &&
             gtk_adjustment_get_upper(adj) == (spin ? max : map_.track(max)))
             return;  // (#88)
+        const double was = value();
         quiet_ = true;
         if (GTK_IS_SPIN_BUTTON(this->w_))
             gtk_spin_button_set_range(GTK_SPIN_BUTTON(this->w_), min, max);
         else
             gtk_range_set_range(GTK_RANGE(this->w_), map_.track(min), map_.track(max));
         quiet_ = false;
+        apply_value(std::clamp(was, std::min(min, max), std::max(min, max)));
     }
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
 
 private:
+    // The value set and shown, always (set_value's guard aside). A spin
+    // button given its own value again writes its text anew, so a pending
+    // edit gives way to it.
+    void apply_value(double v)
+    {
+        quiet_ = true;
+        if (GTK_IS_SPIN_BUTTON(this->w_))
+            gtk_spin_button_set_value(GTK_SPIN_BUTTON(this->w_), v);
+        else
+            gtk_range_set_value(GTK_RANGE(this->w_), map_.track(v));
+        quiet_ = false;
+    }
+    // A spin button's text isn't its value as shown (typed, not taken).
+    bool spin_edit_pending() const
+    {
+        if (!GTK_IS_SPIN_BUTTON(this->w_)) return false;
+        auto* spin = GTK_SPIN_BUTTON(this->w_);
+        gchar* shown = g_strdup_printf("%0.*f", int(gtk_spin_button_get_digits(spin)),
+                                       gtk_spin_button_get_value(spin));
+        const bool pending = std::string(gtk_editable_get_text(GTK_EDITABLE(spin))) != shown;
+        g_free(shown);
+        return pending;
+    }
     static double gtk_range_or_spin_value(GtkWidget* w)
     {
         return GTK_IS_SPIN_BUTTON(w) ? gtk_spin_button_get_value(GTK_SPIN_BUTTON(w))
@@ -850,13 +875,22 @@ public:
         gtk_widget_set_valign(w_, GTK_ALIGN_CENTER);
     }
 
+    // The fraction it shows: nothing (#88). Not while it's pulsing: a
+    // fraction set then (the one it had, even) shows it again, stopping.
     void set_fraction(float f) override
     {
         const double want = std::clamp(f, 0.f, 1.f);
-        if (gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(w_)) == want) return;  // (#88)
+        if (!pulsing_ && gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(w_)) == want) return;  // (#88)
+        pulsing_ = false;
         gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w_), want);
     }
-    void pulse() override { gtk_progress_bar_pulse(GTK_PROGRESS_BAR(w_)); }
+    void pulse() override
+    {
+        pulsing_ = true;
+        gtk_progress_bar_pulse(GTK_PROGRESS_BAR(w_));
+    }
+private:
+    bool pulsing_ = false;  // pulse() since the last set_fraction
 };
 
 // A menu button showing the date, with a calendar in its popover.
@@ -2579,13 +2613,26 @@ public:
         return gtk_paned_get_wide_handle(paned) ? 5.f : 1.f;
     }
     std::vector<float> sizes() const override { return split_sizes(w_); }
+    // The sizes it's placed at now: nothing (#88). Compared with the panes
+    // as laid out (split_sizes), never the last asked for, and only once
+    // it's laid out with no placement still waiting for room (a position
+    // asked for before the window grew): else it's set as before.
     void set_sizes(const std::vector<float>& s) override
     {
-        if (split_sizes(w_) == s) return;  // (#88)
+        if (gtk_widget_get_width(w_) > 0 && !placement_pending() && split_sizes(w_) == s) return;  // (#88)
         set_split_sizes(w_, s);
     }
 
 private:
+    // A divider of its chain still waiting to reach the position asked for
+    // (place_divider's "rapport-want-position", -1 once there).
+    bool placement_pending() const
+    {
+        for (GtkWidget* p = w_; p; p = next_in_split(p))
+            if (auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(p), "rapport-want-position")))
+                if (*want >= 0) return true;
+        return false;
+    }
     std::function<void()> moved_;
     std::vector<float> pressed_;  // the sizes when a button went down on it
 };
@@ -3577,12 +3624,20 @@ public:
         apply_anchor();
     }
 
+    // The indicator the view shows: nothing (#88). Its sorter's state, as
+    // the user's click left it too, not the one last set.
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
-        if (sort_shown_ && sort_shown_->first == column && sort_shown_->second == order) return;  // (#88)
-        sort_shown_ = std::pair{column, order};
-        suppress_sort_ = true;
         GtkColumnViewColumn* col = column && *column < cols_.size() ? cols_[*column] : nullptr;
+        if (auto* sorter = gtk_column_view_get_sorter(GTK_COLUMN_VIEW(w_));
+            sorter && GTK_IS_COLUMN_VIEW_SORTER(sorter))
+        {
+            auto* cvs = GTK_COLUMN_VIEW_SORTER(sorter);
+            GtkColumnViewColumn* now = gtk_column_view_sorter_get_primary_sort_column(cvs);
+            const bool now_asc = gtk_column_view_sorter_get_primary_sort_order(cvs) == GTK_SORT_ASCENDING;
+            if (now == col && (!col || now_asc == (order == sort_order::ascending))) return;  // (#88)
+        }
+        suppress_sort_ = true;
         gtk_column_view_sort_by_column(GTK_COLUMN_VIEW(w_), col,
                                        order == sort_order::ascending ? GTK_SORT_ASCENDING
                                                                      : GTK_SORT_DESCENDING);
@@ -4834,7 +4889,6 @@ private:
     std::vector<GtkColumnViewColumn*> cols_;
     std::vector<std::unique_ptr<column_ctx>> ctxs_;
     bool suppress_sort_ = false;
-    std::optional<std::pair<std::optional<size_t>, sort_order>> sort_shown_;  // set_sort_indicator's
     bool alive_ = true;
     bool checks_ = false;  // a check button at the start of column 0
     bool fixed_rows_ = false;  // an app's row height (spec or look): no room round the text
@@ -5299,6 +5353,8 @@ public:
                 {
                     auto* self = static_cast<window_impl*>(p);
                     const bool fs = gtk_window_is_fullscreen(GTK_WINDOW(self->win_));
+                    // A request answered: what it is now is the window's again.
+                    if (self->fullscreen_asked_ && *self->fullscreen_asked_ == fs) self->fullscreen_asked_.reset();
                     if (fs == self->fullscreen_) return;
                     self->fullscreen_ = fs;
                     self->show_menu_bar();  // hidden in fullscreen
@@ -5550,9 +5606,14 @@ public:
         return surface && GDK_IS_TOPLEVEL(surface) &&
                (gdk_toplevel_get_state(GDK_TOPLEVEL(surface)) & GDK_TOPLEVEL_STATE_TILED);
     }
+    // Fullscreen is asked for, and comes later: nothing (#88) only when it's
+    // what was last asked for and not yet answered, or, with nothing asked
+    // for, what the window is now. (true then false before the first is
+    // answered: the second asked for, not skipped.)
     void set_fullscreen(bool on) override
     {
-        if (fullscreen() == on) return;  // (#88)
+        if (fullscreen_asked_ ? *fullscreen_asked_ == on : fullscreen() == on) return;  // (#88)
+        fullscreen_asked_ = on;
         if (on)
             gtk_window_fullscreen(GTK_WINDOW(win_));
         else
@@ -5737,6 +5798,7 @@ public:
     bool to_canvas_ = false;     // the last press: to a canvas
     std::function<void(bool)> on_fullscreen;
     bool fullscreen_ = false;
+    std::optional<bool> fullscreen_asked_;  // a fullscreen request not yet answered (set_fullscreen)
 
     struct bar_menu
     {

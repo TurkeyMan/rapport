@@ -101,6 +101,23 @@ GtkWidget* find_column_view(GtkWidget* w)
         if (GtkWidget* found = find_column_view(c)) return found;
     return nullptr;
 }
+// The first widget under `w` (depth first, itself included) `is` says yes to.
+GtkWidget* find_first(GtkWidget* w, const std::function<bool(GtkWidget*)>& is)
+{
+    if (is(w)) return w;
+    for (GtkWidget* c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c))
+        if (GtkWidget* found = find_first(c, is)) return found;
+    return nullptr;
+}
+// A progress bar pulsing: its progress node in activity mode ("pulse").
+bool pulsing(GtkWidget* bar)
+{
+    for (GtkWidget* c = gtk_widget_get_first_child(bar); c; c = gtk_widget_get_next_sibling(c))
+        if (gtk_widget_has_css_class(c, "pulse")) return true;
+        else if (pulsing(c))
+            return true;
+    return false;
+}
 
 class rows_model : public rap::list_model
 {
@@ -145,6 +162,9 @@ int main(int argc, char** argv)
     rap::tabs* tbs = nullptr;
     rap::splitter* spl = nullptr;
     rap::canvas* cv = nullptr;
+    rap::date_picker* dp0 = nullptr;
+    rap::entry* acted = nullptr;
+    rap::entry_action* act = nullptr;
     // Sortable, so a column shows the sort indicator.
     std::vector<rap::column> cols{{"Name", 120_px}, {"Notes", 120_px}};
     for (auto& c : cols) c.sortable = true;
@@ -156,7 +176,8 @@ int main(int argc, char** argv)
               hbox{entry{"one"}.bind(ent), entry{"two"}.clearable().bind(box),
                    drop_down{{"A", "B", "C"}, 0}.bind(dd), combo{{"x", "y"}, "x"}.bind(cmb)},
               hbox{slider{0, 100, 10}.bind(sl), spin{0, 100, 10}.bind(sp), progress_bar{}.bind(pb),
-                   date_picker{rap::date{2024, 5, 6}}.bind(dp)},
+                   date_picker{rap::date{2024, 5, 6}}.bind(dp), date_picker{}.bind(dp0),
+                   entry{"three"}.trailing_action(rap::icon::named("go-down"), "Act", [] {}, act).bind(acted)},
               splitter{rap::orientation::horizontal, list{cols, &g_model}.bind(lst).stretch(),
                        tree{{{"Alpha", "a", {{"Child", "c"}}}, {"Beta", "b"}}}.bind(tr).stretch(),
                        canvas{}.bind(cv).stretch()}
@@ -263,6 +284,166 @@ int main(int argc, char** argv)
     win->set_title("Setters");
     probe("a window's minimum size", [&] { win->set_min_size({300, 200}); }, [&] { win->set_min_size({320, 200}); });
     probe("a window's menu bar visible", [&] { win->set_menu_bar_visible(true); }, nullptr);
+
+    // "Unchanged" is what's on screen, not a value kept: each of these,
+    // changed under the setter (as the user, or another call, would), and
+    // the setter given its old value again must apply it.
+    // A progress bar pulsing, given the fraction it had: shows it, stops.
+    if (GtkWidget* bar = find_first(top, [](GtkWidget* w) { return GTK_IS_PROGRESS_BAR(w); }))
+    {
+        pb->set_fraction(0.5f);
+        pump(200);
+        pb->pulse();
+        pump(200);
+        const bool was = pulsing(bar);
+        pb->set_fraction(0.5f);
+        pump(300);
+        expect(was && !pulsing(bar) && gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(bar)) == 0.5,
+               "a pulsing progress bar given the fraction it had: shown, not pulsing (pulsing before: " +
+                   std::string(was ? "yes" : "no") + ")");
+    }
+    else
+        expect(false, "the progress bar");
+    // A spin with text typed and not taken, given its value: shows the value.
+    if (GtkWidget* spin_w = find_first(top, [](GtkWidget* w) { return GTK_IS_SPIN_BUTTON(w); }))
+    {
+        sp->set_value(4);
+        pump(200);
+        gtk_editable_set_text(GTK_EDITABLE(spin_w), "7");  // typed, not activated
+        pump(100);
+        sp->set_value(4);
+        pump(200);
+        const std::string shown = gtk_editable_get_text(GTK_EDITABLE(spin_w));
+        expect(shown == "4" && sp->value() == 4,
+               "a spin with 7 typed, given its value 4: shows 4 (" + shown + ", " + std::to_string(sp->value()) + ")");
+    }
+    else
+        expect(false, "the spin button");
+    // A new range: the value applied again in it, the native one and value()
+    // agreeing (40 in 20..120).
+    sp->set_range(0, 100);
+    sp->set_value(40);
+    sp->set_range(20, 120);
+    pump(200);
+    if (GtkWidget* spin_w = find_first(top, [](GtkWidget* w) { return GTK_IS_SPIN_BUTTON(w); }))
+        expect(sp->value() == 40 && gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_w)) == 40,
+               "a spin's new range 20..120: its value 40 still, shown");
+    sl->set_range(0, 100);
+    sl->set_value(40);
+    sl->set_range(20, 120);
+    pump(200);
+    if (GtkWidget* scale = find_first(top, [](GtkWidget* w) { return GTK_IS_SCALE(w); }))
+        expect(sl->value() == 40 && gtk_range_get_value(GTK_RANGE(scale)) == 40,
+               "a slider's new range 20..120: its value 40 still, shown (" + std::to_string(sl->value()) + ", " +
+                   std::to_string(gtk_range_get_value(GTK_RANGE(scale))) + ")");
+    // A splitter dragged (its divider moved), given the sizes it had: placed
+    // so again.
+    if (GtkWidget* paned = find_first(top, [](GtkWidget* w) { return GTK_IS_PANED(w); }))
+    {
+        spl->set_sizes({250, 300, 100});
+        pump(600);
+        const int placed = gtk_paned_get_position(GTK_PANED(paned));
+        gtk_paned_set_position(GTK_PANED(paned), 200);  // the user's drag
+        pump(400);
+        spl->set_sizes({250, 300, 100});
+        pump(600);
+        expect(placed == 250 && gtk_paned_get_position(GTK_PANED(paned)) == 250 && spl->sizes()[0] == 250,
+               "a splitter dragged to 200, given 250 again: at 250 (" +
+                   std::to_string(gtk_paned_get_position(GTK_PANED(paned))) + ")");
+    }
+    else
+        expect(false, "the splitter's paned");
+    // The list's header changed by the user (sort, width, order), the setter
+    // given the old state: it's back.
+    if (GtkWidget* cv_w = find_column_view(top))
+    {
+        lst->set_column_order({0, 1});
+        pump(200);
+        GListModel* cols_now = gtk_column_view_get_columns(GTK_COLUMN_VIEW(cv_w));
+        auto* c0 = static_cast<GtkColumnViewColumn*>(g_list_model_get_item(cols_now, 0));
+        auto* c1 = static_cast<GtkColumnViewColumn*>(g_list_model_get_item(cols_now, 1));
+        lst->set_sort_indicator(1, rap::sort_order::descending);
+        pump(200);
+        gtk_column_view_sort_by_column(GTK_COLUMN_VIEW(cv_w), c0, GTK_SORT_ASCENDING);  // the user's click
+        pump(200);
+        lst->set_sort_indicator(1, rap::sort_order::descending);
+        pump(200);
+        auto* sorter = GTK_COLUMN_VIEW_SORTER(gtk_column_view_get_sorter(GTK_COLUMN_VIEW(cv_w)));
+        expect(gtk_column_view_sorter_get_primary_sort_column(sorter) == c1 &&
+                   gtk_column_view_sorter_get_primary_sort_order(sorter) == GTK_SORT_DESCENDING,
+               "a list sorted by the user, given its old sort indicator: column 1 descending again");
+        lst->set_column_widths({150, 130});
+        pump(200);
+        gtk_column_view_column_set_fixed_width(c0, 210);  // the user's resize
+        pump(200);
+        lst->set_column_widths({150, 130});
+        pump(200);
+        expect(gtk_column_view_column_get_fixed_width(c0) == 150,
+               "a column resized by the user, given its old width: 150 again (" +
+                   std::to_string(gtk_column_view_column_get_fixed_width(c0)) + ")");
+        gtk_column_view_insert_column(GTK_COLUMN_VIEW(cv_w), 0, c1);  // the user's drag
+        pump(200);
+        lst->set_column_order({0, 1});
+        pump(200);
+        auto* first = static_cast<GtkColumnViewColumn*>(g_list_model_get_item(cols_now, 0));
+        expect(first == c0, "columns moved by the user, given the old order: back");
+        g_object_unref(first);
+        g_object_unref(c0);
+        g_object_unref(c1);
+    }
+    else
+        expect(false, "the column view");
+    // Fullscreen asked for and then not, before the first is answered: the
+    // second isn't skipped; the window ends not fullscreen. (Broadway may
+    // never answer: the bookkeeping is what's checked then.)
+    win->set_fullscreen(true);
+    win->set_fullscreen(false);
+    pump(1500);
+    expect(!gtk_window_is_fullscreen(GTK_WINDOW(top)), "fullscreen asked for, then not at once: not fullscreen");
+    // A date picker built with the default date shows it (the constructor's
+    // set isn't skipped for matching a default).
+    {
+        GtkWidget* shown = nullptr;
+        find_first(top,
+                   [&](GtkWidget* w)
+                   {
+                       if (!GTK_IS_MENU_BUTTON(w)) return false;
+                       const char* l = gtk_menu_button_get_label(GTK_MENU_BUTTON(w));
+                       if (l && std::string(l).find("70") != std::string::npos) shown = w;
+                       return shown != nullptr;
+                   });
+        expect(dp0 && dp0->date() == rap::date{} && shown != nullptr,
+               "a date picker built with the default date (1970-01-01): it shows it");
+    }
+    // Enabled is a widget's own, not as its parent makes it: an entry's
+    // action disabled itself, under its entry disabled and enabled again,
+    // stays disabled; enabled itself (as it is) under a disabled entry, it's
+    // enabled once the entry is.
+    if (GtkWidget* act_w = find_first(top,
+                                      [](GtkWidget* w)
+                                      {
+                                          if (!GTK_IS_BUTTON(w)) return false;
+                                          const char* t = gtk_widget_get_tooltip_text(w);
+                                          return t && std::string(t) == "Act";
+                                      }))
+    {
+        act->set_enabled(true);
+        acted->set_enabled(false);
+        act->set_enabled(false);
+        acted->set_enabled(true);
+        pump(200);
+        expect(!gtk_widget_get_sensitive(act_w) && !gtk_widget_is_sensitive(act_w),
+               "an action disabled itself under its entry disabled and enabled again: still disabled");
+        act->set_enabled(true);
+        acted->set_enabled(false);
+        act->set_enabled(true);  // as it is: nothing
+        acted->set_enabled(true);
+        pump(200);
+        expect(gtk_widget_get_sensitive(act_w) && gtk_widget_is_sensitive(act_w),
+               "an action enabled under a disabled entry: enabled once the entry is");
+    }
+    else
+        expect(false, "the entry's action");
 
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;

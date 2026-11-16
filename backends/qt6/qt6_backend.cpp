@@ -708,9 +708,13 @@ public:
     }
     // A setter given the value it has does nothing (#88): no native call,
     // no relayout, no repaint.
+    // Its own state (WA_ForceDisabled: disabled itself), not the effective
+    // one: under a disabled parent it's disabled anyway, and a disable of
+    // its own must still be recorded, to keep it so when the parent's
+    // enabled again.
     void set_enabled(bool e) override
     {
-        if (w_->testAttribute(Qt::WA_Disabled) == !e) return;
+        if (w_->testAttribute(Qt::WA_ForceDisabled) == !e) return;
         w_->setEnabled(e);
     }
     void set_visible(bool v) override
@@ -724,7 +728,10 @@ public:
         // Not yet in its parent, showing it would open it as a window; it
         // shows with its parent anyway.
         if (v && !w_->parentWidget()) return;
-        if (w_->isHidden() == !v) return;  // (shown or hidden already, by the app)
+        // Shown or hidden already, explicitly (a new widget not yet shown or
+        // hidden reads as hidden: its first hide must still be made, or it
+        // shows with its window).
+        if (w_->testAttribute(Qt::WA_WState_ExplicitShowHide) && w_->isHidden() == !v) return;
         w_->setVisible(v);
         // A form field's row label goes with it.
         if (auto* label = qobject_cast<QWidget*>(w_->property("rapport-form-label").value<QObject*>()))
@@ -830,7 +837,7 @@ public:
                              [this]
                              {
                                  label()->clear();  // (the same text isn't laid out again)
-                                 set_text(text_);
+                                 apply_text(text_);
                              });
                      return false;
                  });
@@ -846,6 +853,14 @@ public:
     void set_text(const std::string& t) override
     {
         if (shown_ && t == text_) return;
+        apply_text(t);
+    }
+
+private:
+    // The text set on the label, whatever it had: a rebuild (a new
+    // palette) as well as a new text.
+    void apply_text(const std::string& t)
+    {
         shown_ = true;
         text_ = t;
         if (link_)
@@ -2611,7 +2626,7 @@ public:
         slider_->setSingleStep(1);
         slider_->setPageStep(std::max(1, int(std::lround(s.page / step_))));
         apply_range();
-        set_value(s.value);
+        apply_value(s.value);  // shown whatever it is (the label too, at the minimum)
         QObject::connect(slider_, &QSlider::valueChanged, slider_,
                          [this](int)
                          {
@@ -2631,12 +2646,7 @@ public:
     void set_value(double v) override
     {
         if (value() == v) return;
-        quiet_ = true;
-        const double t = std::clamp(map_.track(v), min_, max_);
-        set_ = {t == map_.track(v) ? v : map_.value(t), int(std::lround((t - min_) / step_))};
-        slider_->setValue(set_.second);
-        quiet_ = false;
-        show_value();
+        apply_value(v);
     }
     void set_range(double mn, double mx) override
     {
@@ -2645,7 +2655,7 @@ public:
         min_ = map_.track(mn);
         max_ = map_.track(mx);
         apply_range();
-        set_value(v);
+        apply_value(v);  // its position along the new range, its label with it
     }
     void set_marks(std::vector<std::pair<double, std::string>> marks) override
     {
@@ -2657,6 +2667,17 @@ public:
 
 private:
     int position_of(double v) const { return int(std::lround((std::clamp(map_.track(v), min_, max_) - min_) / step_)); }
+    // `v` set and shown, whatever's there: its position on the track, its
+    // label.
+    void apply_value(double v)
+    {
+        quiet_ = true;
+        const double t = std::clamp(map_.track(v), min_, max_);
+        set_ = {t == map_.track(v) ? v : map_.value(t), int(std::lround((t - min_) / step_))};
+        slider_->setValue(set_.second);
+        quiet_ = false;
+        show_value();
+    }
     // QSlider's ticks are evenly spaced: the first two marks' spacing.
     void apply_range()
     {
@@ -2720,11 +2741,13 @@ public:
                          });
     }
     double value() const override { return box()->value(); }
+    // As it is only if it shows `v`: its value and its text (a user's typing
+    // not yet taken in, or taken in as another value, isn't `v`).
     void set_value(double v) override
     {
-        if (box()->value() == v) return;
+        if (box()->value() == v && box()->cleanText() == box()->textFromValue(v)) return;
         quiet_ = true;
-        box()->setValue(v);
+        box()->setValue(v);  // (its text rewritten too, the same value or not: the typing put back)
         quiet_ = false;
     }
     void set_range(double mn, double mx) override
@@ -3448,9 +3471,15 @@ public:
         bar->setValue(std::clamp(bar->value() + by, bar->minimum(), bar->maximum()));
     }
 
+    // As the header shows it already (live: a click flips it before the app
+    // says what it means), nothing done (#88).
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
-        if (sort_column_ == column && sort_order_ == order) return;
+        const QHeaderView* h = view_->header();
+        const Qt::SortOrder q = order == sort_order::ascending ? Qt::AscendingOrder : Qt::DescendingOrder;
+        if (sort_column_ == column && sort_order_ == order && h->isSortIndicatorShown() == column.has_value() &&
+            (!column || (h->sortIndicatorSection() == int(*column) && h->sortIndicatorOrder() == q)))
+            return;
         sort_column_ = column;
         sort_order_ = order;
         show_sort_indicator();
@@ -4789,9 +4818,14 @@ public:
 
     bool fullscreen() const override { return frame_->isFullScreen(); }
     bool maximized() const override { return frame_->isMaximized(); }
+    // Against what was last asked for (or seen: the window manager's own
+    // change), not windowState(): that changes only once the compositor
+    // acknowledges, so a quick reversal (true, then false) must still be
+    // sent.
     void set_fullscreen(bool on) override
     {
-        if (on == frame_->isFullScreen()) return;
+        if (on == fullscreen_wanted_) return;
+        fullscreen_wanted_ = on;
         if (on)
         {
             was_maximized_ = frame_->isMaximized();
@@ -4881,6 +4915,7 @@ public:
         const bool fs = frame_->isFullScreen();
         if (fs == fullscreen_) return;
         fullscreen_ = fs;
+        fullscreen_wanted_ = fs;  // what it is now, whoever asked
         show_menu_bar();
         if (on_fullscreen_) on_fullscreen_(fs);
     }
@@ -5101,6 +5136,7 @@ private:
     bool dialog_;
     bool finished_ = false;
     bool fullscreen_ = false;
+    bool fullscreen_wanted_ = false;  // asked for last (set_fullscreen), or seen (state_changed)
     bool was_maximized_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;

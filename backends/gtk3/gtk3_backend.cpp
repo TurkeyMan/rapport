@@ -426,7 +426,7 @@ public:
             // keyboard activation; activate-link runs it instead of a URI.
             link_ = true;
             on_click_ = s.on_click;
-            set_text(s.text);
+            apply_text(s.text);  // the link's markup, though the plain text's the same
             g_signal_connect(w_, "activate-link",
                              G_CALLBACK(+[](GtkLabel*, gchar*, gpointer p) -> gboolean
                                         {
@@ -444,6 +444,13 @@ public:
         // Unchanged: nothing set, nothing laid out again (#88). (A link's
         // shown text is its markup's.)
         if (t == gtk_label_get_text(GTK_LABEL(w_))) return;
+        apply_text(t);
+    }
+
+private:
+    // The text set, as plain text or (a link) the link's markup: always.
+    void apply_text(const std::string& t)
+    {
         if (!link_) return gtk_label_set_text(GTK_LABEL(w_), t.c_str());
         gchar* escaped = g_markup_escape_text(t.c_str(), -1);
         gtk_label_set_markup(GTK_LABEL(w_),
@@ -451,7 +458,6 @@ public:
         g_free(escaped);
     }
 
-private:
     // The icon before the text, in a box that becomes the outer widget; on a
     // link it takes the link's click and pointer (an event box, as GTK 3's
     // images have no window of their own).
@@ -896,8 +902,12 @@ public:
         GtkAdjustment* a = gtk_range_get_adjustment(GTK_RANGE(w_));
         if (gtk_adjustment_get_lower(a) == map_.track(min) && gtk_adjustment_get_upper(a) == map_.track(max))
             return;  // unchanged (#88)
+        // The value re-applied against the new range, always (clamped into
+        // it): its position and value() agree.
+        const double was = value();
         quiet_ = true;
         gtk_range_set_range(GTK_RANGE(w_), map_.track(min), map_.track(max));
+        gtk_range_set_value(GTK_RANGE(w_), map_.track(std::clamp(was, min, max)));
         quiet_ = false;
     }
     void set_marks(std::vector<std::pair<double, std::string>> marks) override
@@ -935,25 +945,53 @@ public:
     }
 
     double value() const override { return gtk_spin_button_get_value(GTK_SPIN_BUTTON(w_)); }
+    // Unchanged: its value and the text it shows that value's (#88). Text
+    // the user's typed and not yet committed reads as the old value, so
+    // it's set again: the edit shows `v` and keeps it.
     void set_value(double v) override
     {
-        if (value() == v) return;  // unchanged (#88)
-        quiet_ = true;
-        gtk_spin_button_set_value(GTK_SPIN_BUTTON(w_), v);
-        quiet_ = false;
+        if (value() == v && !text_pending()) return;
+        apply(v);
     }
+    // A new range re-applies the value against it, always (the value
+    // clamped into it, the edit showing it).
     void set_range(double min, double max) override
     {
         double lo = 0, hi = 0;
         gtk_spin_button_get_range(GTK_SPIN_BUTTON(w_), &lo, &hi);
         if (lo == min && hi == max) return;  // unchanged (#88)
+        const double was = value();
         quiet_ = true;
         gtk_spin_button_set_range(GTK_SPIN_BUTTON(w_), min, max);
         quiet_ = false;
+        apply(std::clamp(was, min, max));
     }
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
 
 private:
+    void apply(double v)
+    {
+        quiet_ = true;
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(w_), v);
+        // (The same value as the adjustment's: the text shown again anyway.)
+        if (text_pending()) gtk_spin_button_update(GTK_SPIN_BUTTON(w_));
+        if (text_pending())
+        {
+            gchar* t = g_strdup_printf("%0.*f", int(gtk_spin_button_get_digits(GTK_SPIN_BUTTON(w_))), v);
+            gtk_entry_set_text(GTK_ENTRY(w_), t);
+            g_free(t);
+            gtk_spin_button_set_value(GTK_SPIN_BUTTON(w_), v);
+        }
+        quiet_ = false;
+    }
+    // The entry's text isn't its value's (typed and not yet committed).
+    bool text_pending() const
+    {
+        gchar* shown = g_strdup_printf("%0.*f", int(gtk_spin_button_get_digits(GTK_SPIN_BUTTON(w_))), value());
+        const bool differs = std::string(gtk_entry_get_text(GTK_ENTRY(w_))) != shown;
+        g_free(shown);
+        return differs;
+    }
     bool quiet_ = false;
     std::function<void(double)> changed_;
 };
@@ -1151,13 +1189,25 @@ public:
         gtk_widget_set_valign(w_, GTK_ALIGN_CENTER);
     }
 
+    // Unchanged: shown at that fraction, not pulsing (#88). After pulse()
+    // the bar's in activity mode whatever its fraction reads; setting one,
+    // even the same, is what brings it back.
     void set_fraction(float f) override
     {
         const double want = std::clamp(f, 0.f, 1.f);
-        if (gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(w_)) == want) return;  // unchanged (#88)
+        if (!pulsing_ && gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(w_)) == want) return;
+        pulsing_ = false;
         gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w_), want);
     }
-    void pulse() override { gtk_progress_bar_pulse(GTK_PROGRESS_BAR(w_)); }
+    void pulse() override
+    {
+        pulsing_ = true;
+        gtk_progress_bar_pulse(GTK_PROGRESS_BAR(w_));
+    }
+    bool pulsing() const { return pulsing_; }
+
+private:
+    bool pulsing_ = false;  // in activity mode (pulse), until a fraction's set
 };
 
 // GTK 3 has no date picker: a button showing the date, with a calendar in
@@ -1424,9 +1474,19 @@ public:
     }
     void select(const std::string& id) override
     {
+        // Selected already (the live selection, the user's included): nothing
+        // (#88). (One not in the tree unselects all: nothing if none is.)
+        const std::optional<std::string> now = selected();
+        if (now ? *now == id : !has_id(id)) return;
         lazy_tree::tracker::batch b(lazy_);
         quiet q(*this);
         if (!select_quietly(id)) gtk_tree_selection_unselect_all(sel_);
+    }
+    bool has_id(const std::string& id)
+    {
+        GtkTreePath* path = path_of(id);
+        if (path) gtk_tree_path_free(path);
+        return path != nullptr;
     }
     void set_expanded(const std::string& id, bool open) override
     {
@@ -1725,9 +1785,12 @@ public:
     }
 
     rap::date date() const override { return date_; }
+    // Unchanged once shown: nothing (#88). The first always shows (date_
+    // starts at a default, the button blank).
     void set_date(rap::date d) override
     {
-        if (date_ == d) return;  // unchanged (#88)
+        if (labelled_ && date_ == d) return;
+        labelled_ = true;
         date_ = d;
         update_label();
     }
@@ -1758,6 +1821,7 @@ private:
     GtkWidget* calendar_;
     GtkWidget* popover_;
     rap::date date_, shown_;
+    bool labelled_ = false;  // date_ shown on the button (set_date, once at least)
     std::function<void(rap::date)> changed_;
     bool updating_ = false;
 };
@@ -2219,8 +2283,14 @@ public:
     std::vector<float> sizes() const override { return split_sizes(w_); }
     void set_sizes(const std::vector<float>& s) override
     {
-        // Laid out already, its panes those sizes: nothing moved (#88).
-        if (gtk_widget_get_realized(w_))
+        // Laid out already, its dividers where they're asked and none still
+        // waiting to get there (place_divider's pending position): nothing
+        // moved (#88). Compared with where they are, not what was asked.
+        bool pending = false;
+        for (GtkWidget* w = w_; w && !pending; w = next_in_split(w))
+            if (auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(w), "rapport-want-position")))
+                pending = *want >= 0;
+        if (gtk_widget_get_realized(w_) && !pending)
         {
             const std::vector<float> now = sizes();
             bool same = now.size() >= s.size();
@@ -2505,6 +2575,9 @@ public:
     {
         const int i = state.index_of(id);
         if (i < 0) return;
+        // The tab shown already (the live page, the user's included): nothing
+        // (#88).
+        if (gtk_notebook_get_current_page(GTK_NOTEBOOK(w_)) == i && state.current == i) return;
         state.current = i;
         quiet q(this);
         gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
@@ -3105,7 +3178,10 @@ public:
 
     void set_current(size_t row) override
     {
-        if (row >= rows_->count || cursor_row() == row) return;  // (unchanged: #88)
+        // Unchanged: that row the cursor and selected alone, as setting it
+        // makes it (#88); a selection changed since is set again.
+        if (row >= rows_->count) return;
+        if (cursor_row() == row && selection() == std::vector<size_t>{row}) return;
         GtkTreePath* path = gtk_tree_path_new_from_indices(int(row), -1);
         gtk_tree_view_set_cursor(GTK_TREE_VIEW(w_), path, nullptr, false);
         gtk_tree_path_free(path);
@@ -3155,7 +3231,17 @@ public:
 
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
-        if (sorted_.first == column && (!column || sorted_.second == order)) return;  // unchanged (#88)
+        // Unchanged: the columns show that indicator now, whatever the user
+        // or anything else did since (read from them, not sorted_) (#88).
+        bool shown = true;
+        for (size_t i = 0; shown && i < cols_.size(); ++i)
+        {
+            const bool on = column && *column == i;
+            shown = bool(gtk_tree_view_column_get_sort_indicator(cols_[i])) == on &&
+                    (!on || gtk_tree_view_column_get_sort_order(cols_[i]) ==
+                                (order == sort_order::ascending ? GTK_SORT_ASCENDING : GTK_SORT_DESCENDING));
+        }
+        if (shown) return;
         sorted_ = {column, order};
         for (size_t i = 0; i < cols_.size(); ++i)
         {
@@ -3352,10 +3438,7 @@ private:
     void attach()
     {
         gtk_tree_view_set_model(GTK_TREE_VIEW(w_), GTK_TREE_MODEL(rows_));
-        // (As if unset, so it's applied again.)
-        const auto was = sorted_;
-        sorted_ = {std::nullopt, sort_order::ascending};
-        set_sort_indicator(was.first, was.second);
+        set_sort_indicator(sorted_.first, sorted_.second);
     }
 
     void add_column(const column& c, size_t index)
@@ -5395,7 +5478,11 @@ public:
     bool maximized() const override { return maximized_; }
     void set_fullscreen(bool on) override
     {
-        if (fullscreen_ == on) return;  // unchanged (#88)
+        // Unchanged: so already, and no other request still on its way (it's
+        // asynchronous: true then false before the window manager answers
+        // must still ask false) (#88).
+        if (fullscreen_ == on && (!fullscreen_asked_ || *fullscreen_asked_ == on)) return;
+        fullscreen_asked_ = on;
         if (on)
             gtk_window_fullscreen(GTK_WINDOW(win_));
         else
@@ -5631,6 +5718,7 @@ private:
     std::function<bool(const key_event&)> on_key_;
     GtkGesture* side_buttons_ = nullptr;  // owned: GTK 3 gestures don't belong to their widget
     bool fullscreen_ = false;
+    std::optional<bool> fullscreen_asked_;  // set_fullscreen's last request
     std::optional<size_f> min_size_;  // as last set (#88)
     icon_shown window_icon_;          // as last set (#88)
     bool maximized_ = false;

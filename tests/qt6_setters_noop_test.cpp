@@ -8,8 +8,16 @@
 #include <rapport/rapport.h>
 
 #include <QApplication>
+#include <QDoubleSpinBox>
 #include <QEvent>
+#include <QHeaderView>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QProgressBar>
+#include <QPushButton>
+#include <QSlider>
 #include <QThread>
+#include <QTreeView>
 
 #include <cstdio>
 #include <functional>
@@ -225,6 +233,203 @@ int main(int argc, char** argv)
                                  std::to_string(changes) + ")");
     }
     qApp->removeEventFilter(&count);
+
+    // -- "unchanged" is what's on screen: the cases a cached value got wrong.
+    win->set_title("Setters");  // (the setter checks left it "Setters 2")
+    button->set_text("Press");  // (and the button's text another)
+    settle();
+    auto widgets_of = [](const char* title)
+    {
+        std::vector<QWidget*> out;
+        for (QWidget* w : QApplication::allWidgets())
+            if (w->window() && w->window()->windowTitle() == title) out.push_back(w);
+        return out;
+    };
+    auto first = [&](const char* title, auto pick) -> decltype(pick(nullptr))
+    {
+        for (QWidget* w : widgets_of(title))
+            if (auto* t = pick(w)) return t;
+        return nullptr;
+    };
+    // A busy bar (pulse) given the fraction it had before: determinate again,
+    // at it.
+    {
+        auto* bar = first("Setters", [](QWidget* w) { return qobject_cast<QProgressBar*>(w); });
+        progress->set_fraction(0.75f);
+        progress->pulse();
+        settle();
+        progress->set_fraction(0.75f);
+        settle();
+        expect(bar && bar->maximum() != 0 && bar->value() == 750,
+               "a busy bar given the fraction it had: determinate again at it (" +
+                   std::to_string(bar ? bar->maximum() : -1) + ", " + std::to_string(bar ? bar->value() : -1) + ")");
+    }
+    // A spin box with the user's typing (not taken in, then taken in) given
+    // the value it had: it shows that value.
+    {
+        auto* box = first("Setters", [](QWidget* w) { return qobject_cast<QDoubleSpinBox*>(w); });
+        expect(box != nullptr, "the spin box");
+        if (box)
+        {
+            auto type = [&](const char* text)
+            {
+                box->selectAll();
+                for (const char* c = text; *c; ++c)
+                {
+                    QKeyEvent press(QEvent::KeyPress, Qt::Key_0 + (*c - '0'), Qt::NoModifier, QString(QChar(*c)));
+                    QKeyEvent release(QEvent::KeyRelease, Qt::Key_0 + (*c - '0'), Qt::NoModifier, QString(QChar(*c)));
+                    QApplication::sendEvent(box, &press);
+                    QApplication::sendEvent(box, &release);
+                }
+                settle();
+            };
+            for (const bool tracking : {false, true})
+            {
+                box->setKeyboardTracking(tracking);
+                spin->set_value(4);
+                settle();
+                type("7");
+                const std::string typed = box->cleanText().toStdString();
+                spin->set_value(4);
+                settle();
+                expect(box->value() == 4 && box->cleanText() == box->textFromValue(4),
+                       std::string("a spin box typed into (") + (tracking ? "taken in" : "not taken in") + ", \"" +
+                           typed + "\"), given the value it had: it shows it, \"" +
+                           box->cleanText().toStdString() + "\"");
+            }
+            box->setKeyboardTracking(true);
+        }
+    }
+    // Its own disable kept under a disabled parent: the parent enabled
+    // again, it's still disabled; enabled itself, it is.
+    {
+        auto* press = first("Setters", [](QWidget* w)
+                            {
+                                auto* b = qobject_cast<QPushButton*>(w);
+                                return b && b->text() == "Press" ? b : nullptr;
+                            });
+        QWidget* parent = press ? press->parentWidget() : nullptr;
+        expect(parent != nullptr, "the button and its parent");
+        if (parent)
+        {
+            parent->setEnabled(false);
+            button->set_enabled(true);  // its own: enabled already, nothing
+            button->set_enabled(false);
+            parent->setEnabled(true);
+            settle();
+            expect(!press->isEnabled(), "disabled itself under a disabled parent: still disabled, the parent enabled");
+            button->set_enabled(true);
+            settle();
+            expect(press->isEnabled(), "enabled itself again: enabled");
+        }
+    }
+    // The list's header changed by the user (a sort click, a drag, a
+    // resize), then the app's state given again: the header shows it.
+    {
+        auto* view = first("Setters", [](QWidget* w)
+                           {
+                               auto* v = qobject_cast<QTreeView*>(w);
+                               return v && !v->isHeaderHidden() ? v : nullptr;
+                           });
+        expect(view != nullptr, "the list's view");
+        if (view)
+        {
+            QHeaderView* h = view->header();
+            list->set_sort_indicator(1, rap::sort_order::descending);
+            settle();
+            h->setSortIndicator(0, Qt::AscendingOrder);  // as a click flips it
+            list->set_sort_indicator(1, rap::sort_order::descending);
+            settle();
+            expect(h->sortIndicatorSection() == 1 && h->sortIndicatorOrder() == Qt::DescendingOrder,
+                   "the sort indicator moved by the user, given the app's again: shown (" +
+                       std::to_string(h->sortIndicatorSection()) + ")");
+            list->set_column_widths({120, 120});
+            settle();
+            h->resizeSection(0, 200);  // the user's drag
+            list->set_column_widths({120, 120});
+            settle();
+            expect(h->sectionSize(0) == 120, "a column resized by the user, given the app's width again: " +
+                                                 std::to_string(h->sectionSize(0)));
+            list->set_column_order({0, 1});
+            settle();
+            h->moveSection(0, 1);  // the user's drag
+            list->set_column_order({0, 1});
+            settle();
+            expect(h->logicalIndex(0) == 0, "columns moved by the user, given the app's order again: " +
+                                                std::to_string(h->logicalIndex(0)) + " first");
+        }
+    }
+    // Full screen asked for and taken back at once (before any compositor
+    // acknowledges): not full screen.
+    {
+        win->set_fullscreen(true);
+        win->set_fullscreen(false);
+        settle();
+        expect(!win->fullscreen(), "full screen asked for and taken back at once: not full screen");
+    }
+    // A link label after a new palette (laid out again): its text and link;
+    // a slider showing its value at its minimum: shown from the start; and
+    // a new range: its handle where the value is on it, its label the same.
+    {
+        rap::label* link = nullptr;
+        rap::label* hidden = nullptr;
+        rap::slider* at_min = nullptr;
+        auto win2 = (*ui)->create(
+            window{"Setters B",
+                   {vbox{rap::layout::label{"Go there"}.link([] {}).bind(link),
+                         rap::layout::label{"Hidden from the start"}.visible(false).bind(hidden),
+                         rap::layout::slider{0, 100, 0}.step(1, 10).show_value(0).bind(at_min)}}}
+                .size(400_px, 200_px));
+        win2->show();
+        settle();
+        auto* text = first("Setters B", [](QWidget* w)
+                           {
+                               auto* l = qobject_cast<QLabel*>(w);
+                               return l && l->text().contains("Go there") ? l : nullptr;
+                           });
+        expect(text != nullptr, "the link label");
+        if (text)
+        {
+            QPalette p = text->palette();
+            p.setColor(QPalette::Link, QColor(200, 30, 30));
+            text->setPalette(p);
+            settle();
+            expect(text->text().contains("Go there") && text->text().contains("href"),
+                   "a link label after a new palette: its text and link, \"" + text->text().toStdString() + "\"");
+        }
+        // Made hidden (visible(false)): hidden once its window shows; shown
+        // and hidden again as asked.
+        {
+            auto* h = first("Setters B", [](QWidget* w)
+                            {
+                                auto* l = qobject_cast<QLabel*>(w);
+                                return l && l->text() == "Hidden from the start" ? l : nullptr;
+                            });
+            expect(h && !h->isVisible(), "a label made hidden stays hidden once its window shows");
+            if (h)
+            {
+                hidden->set_visible(true);
+                settle();
+                const bool shown_now = h->isVisible();
+                hidden->set_visible(false);
+                settle();
+                expect(shown_now && !h->isVisible(), "then shown, and hidden again, as asked");
+            }
+        }
+        auto* track = first("Setters B", [](QWidget* w) { return qobject_cast<QSlider*>(w); });
+        QLabel* shown = track ? track->parentWidget()->findChild<QLabel*>() : nullptr;
+        expect(shown && shown->text() == "0", "a slider at its minimum shows its value from the start: \"" +
+                                                  (shown ? shown->text().toStdString() : std::string("none")) + "\"");
+        if (track && shown)
+        {
+            at_min->set_value(40);
+            at_min->set_range(20, 120);
+            settle();
+            expect(at_min->value() == 40 && track->value() == 20 && shown->text() == "40",
+                   "a new range: the handle where 40 is on it (position " + std::to_string(track->value()) +
+                       ", 20 wanted), its label \"" + shown->text().toStdString() + "\"");
+        }
+    }
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

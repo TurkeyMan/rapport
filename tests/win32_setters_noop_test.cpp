@@ -17,9 +17,12 @@
 // After windows.h, which they need.
 #include <commctrl.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -47,6 +50,11 @@ void expect(bool ok, const std::string& what)
     std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
     std::fflush(stdout);
     if (!ok) ++fails;
+}
+void note(const std::string& what)
+{
+    std::printf("note %s\n", what.c_str());
+    std::fflush(stdout);
 }
 
 void pump(int rounds = 10)
@@ -128,6 +136,51 @@ unsigned layouts()
 
 int g_changed = 0;  // change notifications, any widget
 
+// The first of `top`'s descendants of class `cls` (and with text `text`, if
+// given).
+HWND find(HWND top, const wchar_t* cls, const wchar_t* text = nullptr)
+{
+    struct q
+    {
+        const wchar_t* cls;
+        const wchar_t* text;
+        HWND found = nullptr;
+    } f{cls, text};
+    EnumChildWindows(
+        top,
+        [](HWND h, LPARAM lp) -> BOOL
+        {
+            auto* f = reinterpret_cast<q*>(lp);
+            wchar_t c[64]{};
+            GetClassNameW(h, c, 64);
+            if (_wcsicmp(c, f->cls)) return TRUE;
+            if (f->text)
+            {
+                wchar_t t[64]{};
+                GetWindowTextW(h, t, 64);
+                if (wcscmp(t, f->text)) return TRUE;
+            }
+            f->found = h;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&f));
+    return f.found;
+}
+std::wstring text_of(HWND h)
+{
+    const int n = GetWindowTextLengthW(h);
+    std::wstring w(size_t(n) + 1, L'\0');
+    GetWindowTextW(h, w.data(), n + 1);
+    w.resize(size_t(n));
+    return w;
+}
+int width_of(HWND h)
+{
+    RECT r{};
+    GetWindowRect(h, &r);
+    return int(r.right - r.left);
+}
+
 // `set` to a value (the first call, which may change it), then again: the
 // second call sends no write message, asks no relayout and notifies nothing.
 void same_twice(const std::string& what, const std::function<void()>& set)
@@ -154,7 +207,8 @@ void same_twice(const std::string& what, const std::function<void()>& set)
 class rows_model : public rap::list_model
 {
 public:
-    size_t row_count() const override { return 4; }
+    size_t rows = 4;  // changed underneath for the reload check, unannounced
+    size_t row_count() const override { return rows; }
     std::string text(size_t row, size_t col) const override
     {
         return (col == 0 ? "Name " : "Note ") + std::to_string(row);
@@ -191,6 +245,9 @@ int main(int argc, char** argv)
     rap::tree* tr = nullptr;
     rap::tabs* tbs = nullptr;
     rap::splitter* spl = nullptr;
+    rap::slider* sld_shown = nullptr;
+    rap::widget* box_w = nullptr;
+    rap::button* inner = nullptr;
     const std::vector<rap::column> cols{{"Name", 120_px}, {"Notes", 120_px}};
     const std::vector<rap::tree_item> items{{"Alpha", "a", {{"Child", "c"}}}, {"Beta", "b"}};
     auto win = (*ui)->create(
@@ -202,7 +259,9 @@ int main(int argc, char** argv)
                      hbox{spin(0, 10, 1).bind(spn), slider(0, 10, 1).bind(sld), progress_bar{}.bind(prg),
                           date_picker{{2026, 1, 1}}.bind(dp), color_button{rap::color{10, 20, 30}}.bind(clr),
                           menu_button{"Menu"}.bind(mb),
-                          tool_button{rap::icon::named("go-down"), "Down"}.toggle(true).bind(tb)},
+                          tool_button{rap::icon::named("go-down"), "Down"}.toggle(true).bind(tb),
+                          slider(0, 10, 0).show_value(0).bind(sld_shown),
+                          hbox{button{"Inner"}.bind(inner)}.handle(box_w)},
                      splitter(orientation::horizontal, list{cols, &g_model}.bind(lst).stretch(),
                               tree{items}.bind(tr).stretch(),
                               tabs{{"One", label{"one"}}, {"Two", label{"two"}}}.bind(tbs).stretch())
@@ -266,16 +325,257 @@ int main(int argc, char** argv)
     same_twice("list set_current", [&] { lst->set_current(2); });
     same_twice("list set_sort_indicator", [&] { lst->set_sort_indicator(1, rap::sort_order::descending); });
     same_twice("list set_column_widths", [&] { lst->set_column_widths({150, 90}); });
+    // The same model again isn't a no-op: it's a reload (#88's exception).
+    // Its row count changed underneath, unannounced: set again, the list has
+    // the new count.
+    {
+        HWND lv = FindWindowExW(top, nullptr, WC_LISTVIEWW, nullptr);
+        expect(lv != nullptr, "the list's list view");
+        if (lv)
+        {
+            const int before = ListView_GetItemCount(lv);
+            g_model.rows = 6;
+            lst->set_model(&g_model);
+            pump();
+            const int after = ListView_GetItemCount(lv);
+            expect(before == 4 && after == 6, "list set_model with the same model: a reload, its rows read anew, " +
+                                                  std::to_string(before) + " then " + std::to_string(after));
+            g_model.rows = 4;
+            lst->set_model(&g_model);
+            pump();
+        }
+    }
     same_twice("tree select", [&] { tr->select("b"); });
     same_twice("tree set_expanded", [&] { tr->set_expanded("a", true); });
     same_twice("tabs set_current", [&] { tbs->set_current(1); });
-    same_twice("splitter set_sizes", [&] { spl->set_sizes({300, 300, 300}); });
+    spl->set_sizes({300, 300, 300});
+    pump();
+    // The sizes its panes have, laid out (a stretch pane takes the rest):
+    // those again, nothing done.
+    {
+        const std::vector<float> placed = spl->sizes();
+        same_twice("splitter set_sizes", [&] { spl->set_sizes(placed); });
+    }
     same_twice("a widget set_enabled", [&] { btn->set_enabled(false); });
     same_twice("a widget set_enabled again", [&] { btn->set_enabled(true); });
     same_twice("a widget set_tooltip", [&] { btn->set_tooltip("A tip"); });
     same_twice("a widget set_tooltip none", [&] { btn->set_tooltip(""); });
     same_twice("a widget set_visible", [&] { chk->set_visible(false); });
     same_twice("window set_title", [&] { win->set_title("Setters no-op"); });
+    same_twice("text_view set_read_only", [&] { tv->set_read_only(true); });
+    tv->set_read_only(false);
+    pump();
+
+    // -- "unchanged" is what's on screen: user edits, modes, re-applies --
+
+    // A spin's edit with a user's typing not yet committed (7): the app's 4
+    // again shows 4, and leaving the field keeps 4.
+    {
+        HWND ud = find(top, UPDOWN_CLASSW);
+        HWND edit = ud ? reinterpret_cast<HWND>(SendMessageW(ud, UDM_GETBUDDY, 0, 0)) : nullptr;
+        expect(edit != nullptr, "the spin's edit");
+        if (edit)
+        {
+            spn->set_value(4);
+            pump();
+            SendMessageW(edit, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L"7"));
+            SendMessageW(edit, EM_SETMODIFY, TRUE, 0);
+            spn->set_value(4);
+            expect(text_of(edit) == L"4", "a spin's 4 again over a user's uncommitted 7: it shows 4");
+            SendMessageW(edit, WM_KILLFOCUS, 0, 0);
+            pump();
+            expect(spn->value() == 4 && text_of(edit) == L"4", "leaving the field keeps 4: " +
+                                                                    std::to_string(spn->value()));
+            // A new range: the value applied against it (15 in 0..20, then
+            // 0..10: 10, shown).
+            spn->set_range(0, 20);
+            spn->set_value(15);
+            spn->set_range(0, 10);
+            expect(spn->value() == 10 && text_of(edit) == L"10",
+                   "a spin's new range applies its value: 10, " + std::to_string(spn->value()));
+            spn->set_range(0, 20);
+            spn->set_value(4);
+            pump();
+        }
+    }
+    // A slider's new range: its thumb and value() agree (5 in 0..10, then
+    // 0..4: 4, the thumb at the track's end).
+    {
+        HWND tbar = find(top, TRACKBAR_CLASSW);
+        if (tbar)
+        {
+            sld->set_range(0, 10);
+            sld->set_value(5);
+            sld->set_range(0, 4);
+            const LRESULT pos = SendMessageW(tbar, TBM_GETPOS, 0, 0), end = SendMessageW(tbar, TBM_GETRANGEMAX, 0, 0);
+            expect(sld->value() == 4 && pos == end, "a slider's new range applies its value: 4 at the track's end, " +
+                                                        std::to_string(sld->value()) + " at " + std::to_string(pos) +
+                                                        " of " + std::to_string(end));
+            sld->set_range(0, 10);
+            pump();
+        }
+        else
+            expect(false, "the slider's trackbar");
+        // A slider showing its value, at its minimum from the start: shown.
+        expect(sld_shown && find(top, L"Static", L"0") != nullptr,
+               "a slider showing its value, at its minimum, shows it (0)");
+    }
+    // A progress bar pulsing, then the fraction it had: no longer pulsing,
+    // at it.
+    {
+        HWND bar = find(top, PROGRESS_CLASSW);
+        if (bar)
+        {
+            prg->set_fraction(0.5f);
+            prg->pulse();
+            prg->set_fraction(0.5f);
+            const bool marquee = (GetWindowLongPtrW(bar, GWL_STYLE) & PBS_MARQUEE) != 0;
+            const LRESULT pos = SendMessageW(bar, PBM_GETPOS, 0, 0);
+            expect(!marquee && pos == 500, "a progress bar after pulse() at its fraction again: not pulsing, at 500, " +
+                                               std::string(marquee ? "pulsing" : "not pulsing") + " at " +
+                                               std::to_string(pos));
+            pump();
+        }
+        else
+            expect(false, "the progress bar");
+    }
+    // A text view the user edited ("Other"): the app's "Text" again sets it.
+    {
+        HWND rich = find(top, L"RICHEDIT50W");
+        if (rich)
+        {
+            tv->set_text("Text");
+            pump();
+            SendMessageW(rich, EM_SETSEL, 0, -1);
+            SendMessageW(rich, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"Other"));
+            tv->set_text("Text");
+            expect(tv->text() == "Text", "a text view the user edited, given its text again: \"Text\", \"" +
+                                             tv->text() + "\"");
+            pump();
+        }
+        else
+            expect(false, "the text view's RichEdit");
+    }
+    // A read-only text view with text appended, through a new theme (which
+    // sets its text again and appends what was appended): the text once.
+    {
+        tv->set_read_only(true);
+        tv->set_text("base");
+        tv->append(" tail", rap::text_style{});
+        pump();
+        // A new theme as the app takes one: the other colour scheme (a
+        // WM_THEMECHANGED alone changes nothing, so rethemes nothing).
+        (*ui)->set_color_scheme(rap::color_scheme::dark);
+        pump();
+        (*ui)->set_color_scheme(rap::color_scheme::light);
+        pump();
+        expect(tv->text() == "base tail", "a text view through a new theme, appended text once: \"base tail\", \"" +
+                                              tv->text() + "\"");
+        tv->set_read_only(false);
+        tv->set_text("Text");
+        pump();
+    }
+    // A tool button's checked state again: its early return covers it (it
+    // only invalidates, and a never-shown window keeps no update region, so a
+    // repaint can't be seen here: GetUpdateRect is empty even for a change).
+    // A splitter whose window grew (a stretch pane taking the width): the
+    // sizes asked for again are laid out, and the panes and sizes() agree.
+    {
+        HWND lv = find(top, WC_LISTVIEWW), tv2 = find(top, WC_TREEVIEWW);
+        RECT wr{};
+        GetWindowRect(top, &wr);
+        spl->set_sizes({300, 300, 300});
+        pump();
+        SetWindowPos(top, nullptr, 0, 0, wr.right - wr.left + 200, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER |
+                                                                                      SWP_NOACTIVATE);
+        pump();
+        const unsigned was = layouts();
+        spl->set_sizes({300, 300, 300});
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+        expect(layouts() != was, "a splitter given its sizes again after its window grew: laid out");
+#else
+        (void)was;
+#endif
+        pump();
+        const std::vector<float> now = spl->sizes();
+        const float scale = float(GetDpiForWindow(top)) / 96.f;
+        expect(now.size() == 3 && lv && tv2 && std::abs(now[0] * scale - width_of(lv)) <= 2 &&
+                   std::abs(now[1] * scale - width_of(tv2)) <= 2,
+               "its panes and sizes() agree: " + std::to_string(now.size() == 3 ? now[0] : -1) + " / " +
+                   std::to_string(lv ? width_of(lv) : -1) + ", " + std::to_string(now.size() == 3 ? now[1] : -1) +
+                   " / " + std::to_string(tv2 ? width_of(tv2) : -1));
+        SetWindowPos(top, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER |
+                                                                                SWP_NOACTIVATE);
+        pump();
+    }
+    // A list's header changed by someone else (a sort arrow, a column's
+    // width, the columns' order, as a user's drag would): the app's again
+    // applies.
+    {
+        HWND lv = find(top, WC_LISTVIEWW);
+        HWND header = lv ? ListView_GetHeader(lv) : nullptr;
+        if (lv && header)
+        {
+            lst->set_sort_indicator(1, rap::sort_order::descending);
+            HDITEMW hd{};
+            hd.mask = HDI_FORMAT;
+            Header_GetItem(header, 1, &hd);
+            hd.fmt = (hd.fmt & ~(HDF_SORTUP | HDF_SORTDOWN)) | HDF_SORTUP;
+            Header_SetItem(header, 1, &hd);
+            lst->set_sort_indicator(1, rap::sort_order::descending);
+            Header_GetItem(header, 1, &hd);
+            expect((hd.fmt & HDF_SORTDOWN) && !(hd.fmt & HDF_SORTUP), "a list's sort arrow changed under it, set "
+                                                                       "again: descending");
+            lst->set_column_widths({150, 90});
+            ListView_SetColumnWidth(lv, 0, 60);  // as a user's resize
+            lst->set_column_widths({150, 90});
+            const float scale = float(GetDpiForWindow(top)) / 96.f;
+            expect(std::abs(ListView_GetColumnWidth(lv, 0) - std::lround(150 * scale)) <= 1,
+                   "a list's column resized under it, its width set again: " +
+                       std::to_string(ListView_GetColumnWidth(lv, 0)));
+            lst->set_column_order({0, 1});
+            int swapped[2] = {1, 0};
+            ListView_SetColumnOrderArray(lv, 2, swapped);  // as a user's drag
+            lst->set_column_order({0, 1});
+            int order[2] = {};
+            ListView_GetColumnOrderArray(lv, 2, order);
+            expect(order[0] == 0 && order[1] == 1, "a list's columns reordered under it, set again: 0, 1");
+            // set_current, the selection cleared, set_current again: as
+            // before (the row focused).
+            lst->set_current(1);
+            lst->select({});
+            lst->set_current(1);
+            expect(lst->current() == std::optional<size_t>(1), "a list's current row after its selection cleared: 1");
+            pump();
+        }
+        else
+            expect(false, "the list's header");
+    }
+    // Enabled is a control's own, the effective its and its containers'
+    // (F17): the box off, its button off, the box on: the button stays off;
+    // the box off, the button on (already), the box on: the button on.
+    {
+        HWND ih = find(top, L"Button", L"Inner");
+        if (box_w && inner && ih)
+        {
+            box_w->set_enabled(false);
+            inner->set_enabled(false);
+            box_w->set_enabled(true);
+            expect(!IsWindowEnabled(ih), "a button turned off, its box off and on again: still off");
+            inner->set_enabled(true);
+            expect(IsWindowEnabled(ih) != FALSE, "turned on again: on");
+            box_w->set_enabled(false);
+            g_written.clear();
+            inner->set_enabled(true);
+            expect(g_written.empty() && !IsWindowEnabled(ih),
+                   "its box off, the button on again (as it is): nothing done, off with its box" + written());
+            box_w->set_enabled(true);
+            expect(IsWindowEnabled(ih) != FALSE, "the box on again: the button on");
+            pump();
+        }
+        else
+            expect(false, "the box and its button");
+    }
 
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
     // A changed value still relayouts where it did.

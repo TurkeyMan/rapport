@@ -3803,7 +3803,15 @@ public:
     }
     void set_text(const std::string& t, std::vector<span> spans) override
     {
-        if (t == text_ && spans.empty() && spans_.empty() && appended_.empty()) return;  // (#88)
+        // The text it shows (read now: a user's edits change it), plain, with
+        // no styled text set or appended: nothing done (#88).
+        if (spans.empty() && spans_.empty() && appended_.empty() && text() == t) return;
+        apply_text(t, std::move(spans));
+    }
+    // The text set, whatever it shows now: set_text's, and a rebuild's (a
+    // new theme's), which mustn't be skipped as the same.
+    void apply_text(const std::string& t, std::vector<span> spans)
+    {
         text_ = t;
         spans_ = spans;
         appended_.clear();
@@ -3832,7 +3840,11 @@ public:
         format(at.cpMin, after.cpMax, style);
         quiet_ = false;
     }
-    void set_read_only(bool r) override { SendMessageW(h_, EM_SETREADONLY, r, 0); }
+    void set_read_only(bool r) override
+    {
+        if (r == ((GetWindowLongPtrW(h_, GWL_STYLE) & ES_READONLY) != 0)) return;  // (#88)
+        SendMessageW(h_, EM_SETREADONLY, r, 0);
+    }
     std::pair<size_t, size_t> selection() const override
     {
         CHARRANGE cr{};
@@ -4072,7 +4084,7 @@ private:
         const std::string t = text_;
         std::vector<span> spans = spans_;
         auto appended = std::move(appended_);
-        set_text(t, std::move(spans));
+        apply_text(t, std::move(spans));
         for (const auto& [text, style] : appended) append(text, style);
         SendMessageW(h_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&sel));
         SendMessageW(h_, EM_SETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll));
@@ -5266,22 +5278,24 @@ public:
         DestroyWindow(updown_);
     }
     double value() const override { return value_; }
+    // The value it has and shows (its edit's text, which a user's typing not
+    // yet committed changes too): nothing done (#88).
     void set_value(double v) override
     {
-        const double was = value_;
-        value_ = std::clamp(v, min_, max_);
-        if (value_ == was && shown_) return;  // (#88)
-        shown_ = true;
+        const double next = std::clamp(v, min_, max_);
+        if (next == value_ && window_text(h_) == format(next)) return;
+        value_ = next;
         show();
     }
+    // A new range: the value applied against it, always.
     void set_range(double mn, double mx) override
     {
         if (mn == min_ && mx == max_) return;  // (#88)
         min_ = mn;
         max_ = mx;
-        set_value(value_);
+        value_ = std::clamp(value_, min_, max_);
+        show();
     }
-    bool shown_ = false;  // the value shown at least once (set_value)
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
     void command(WORD code) override
     {
@@ -5319,12 +5333,16 @@ public:
     }
 
 private:
-    void show()
+    std::wstring format(double v) const
     {
         wchar_t buf[64];
-        swprintf(buf, 64, L"%.*f", digits_, value_);
+        swprintf(buf, 64, L"%.*f", digits_, v);
+        return buf;
+    }
+    void show()
+    {
         quiet_ = true;
-        SetWindowTextW(h_, buf);
+        SetWindowTextW(h_, format(value_).c_str());
         quiet_ = false;
     }
     void set(double v)
@@ -5388,15 +5406,15 @@ public:
         const LRESULT pos = SendMessageW(h_, TBM_GETPOS, 0, 0);
         return pos == set_.second ? set_.first : map_.value(min_ + double(pos) * step_);
     }
+    // The value it has, where the thumb is (the user's drag reads back
+    // through TBM_GETPOS): nothing done (#88).
     void set_value(double v) override
     {
-        const double t = std::clamp(map_.track(v), min_, max_);
-        const auto next = std::pair{t == map_.track(v) ? v : map_.value(t), std::lround((t - min_) / step_)};
-        if (next == set_ && SendMessageW(h_, TBM_GETPOS, 0, 0) == next.second) return;  // (#88)
-        set_ = next;
-        SendMessageW(h_, TBM_SETPOS, TRUE, set_.second);
-        update_label();
+        const auto next = target_of(v);
+        if (next == set_ && SendMessageW(h_, TBM_GETPOS, 0, 0) == next.second) return;
+        apply_value(v);
     }
+    // A new range or marks: the value applied against them, always.
     void set_range(double mn, double mx) override
     {
         if (map_.track(mn) == min_ && map_.track(mx) == max_) return;  // (#88)
@@ -5404,7 +5422,7 @@ public:
         min_ = map_.track(mn);
         max_ = map_.track(mx);
         apply_range();
-        set_value(v);
+        apply_value(v);
     }
     void set_marks(std::vector<std::pair<double, std::string>> marks) override
     {
@@ -5413,8 +5431,19 @@ public:
         const double v = value();
         marks_ = std::move(marks);
         apply_range();
-        set_value(v);
+        apply_value(v);
         if (ticks != !marks_.empty()) win_.relayout();  // ticks take height
+    }
+    std::pair<double, long> target_of(double v) const
+    {
+        const double t = std::clamp(map_.track(v), min_, max_);
+        return std::pair{t == map_.track(v) ? v : map_.value(t), std::lround((t - min_) / step_)};
+    }
+    void apply_value(double v)
+    {
+        set_ = target_of(v);
+        SendMessageW(h_, TBM_SETPOS, TRUE, set_.second);
+        update_label();
     }
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
     void scroll(WORD code) override
@@ -5707,7 +5736,8 @@ public:
     bool checked() const override { return toggle_ && checked_; }
     void set_checked(bool c) override
     {
-        if (!toggle_) return;
+        // checked_ is what it paints (owner-drawn; a click flips it too).
+        if (!toggle_ || c == checked_) return;  // (#88)
         checked_ = c;
         InvalidateRect(h_, nullptr, TRUE);
     }
@@ -7010,9 +7040,9 @@ public:
         if (model_) model_->remove_observer(this);
     }
 
+    // The same model again is a reload (not #88's no-op): rows read anew.
     void set_model(list_model* m) override
     {
-        if (m == model_) return;  // (#88)
         if (model_) model_->remove_observer(this);
         model_ = m;
         if (model_) model_->add_observer(this);
@@ -7104,9 +7134,19 @@ public:
     }
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
-        if (sort_shown_ && sort_shown_->first == column && sort_shown_->second == order) return;  // (#88)
-        sort_shown_ = std::pair{column, order};
         HWND header = ListView_GetHeader(h_);
+        // The arrows its header shows (its items' own flags, exact, whoever
+        // set them): nothing done (#88).
+        auto want = [&](int i) -> int
+        { return column && size_t(i) == *column ? (order == sort_order::ascending ? HDF_SORTUP : HDF_SORTDOWN) : 0; };
+        bool same = true;
+        for (int i = 0; i < int(columns_.size()) && same; ++i)
+        {
+            HDITEMW hd{};
+            hd.mask = HDI_FORMAT;
+            same = Header_GetItem(header, i, &hd) && (hd.fmt & (HDF_SORTUP | HDF_SORTDOWN)) == want(i);
+        }
+        if (same) return;
         for (int i = 0; i < int(columns_.size()); ++i)
         {
             HDITEMW hd{};
@@ -8594,8 +8634,6 @@ private:
     bool quiet_ = false;
     bool user_sized_ = false;  // the user has sized a column: stretch columns fit no more
     std::vector<bool> restored_;  // per column: given its width by set_column_widths
-    // The sort indicator as last set (the same again does nothing, #88).
-    std::optional<std::pair<std::optional<size_t>, sort_order>> sort_shown_;
     bool sel_pending_ = false;  // a selection change is posted, not yet reported
     com<ID2D1DCRenderTarget> row_target_;
     com<IDWriteRenderingParams> row_params_;  // GDI-classic, for row_target_'s smoothed text
@@ -10434,13 +10472,12 @@ public:
         was.resize(panes.size(), 0);
         std::vector<long> next(panes.size(), 0);
         for (size_t i = 0; i < panes.size(); ++i)
-            next[i] = i < s.size() && s[i] > 0 ? long(s[i] * win_.scale()) : was[i];
-        // The sizes it has (those it keeps, which a layout places from, or
-        // as they are now): no relayout (#88).
-        const bool same = next == was || (sizes_.size() == panes.size() && next == sizes_);
+            next[i] = i < s.size() && s[i] > 0 ? std::lround(s[i] * win_.scale()) : was[i];
+        // The sizes its panes have as laid out, none asked for since: no
+        // relayout (#88). Otherwise asked for and laid out, as any change.
+        if (!asked_ && placed_.size() == panes.size() && next == placed_) return;
         sizes_ = std::move(next);
         asked_ = true;
-        if (same) return;
         win_.relayout();
     }
 

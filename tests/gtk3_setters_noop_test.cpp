@@ -10,6 +10,7 @@
 
 #include <gtk/gtk.h>
 
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <string>
@@ -27,7 +28,7 @@ void expect(bool ok, const std::string& what)
     if (!ok) ++fails;
 }
 
-int g_draws = 0, g_resizes = 0, g_notes = 0;
+int g_draws = 0, g_resizes = 0, g_notes = 0, g_link_clicks = 0;
 
 // The main loop run for `ms`: everything queued drawn and laid out.
 void settle(int ms = 200)
@@ -52,6 +53,34 @@ public:
     }
 };
 rows g_rows;
+
+// `w`'s descendants of type `t`, in order.
+void all_of(GtkWidget* w, GType t, std::vector<GtkWidget*>& out)
+{
+    if (G_TYPE_CHECK_INSTANCE_TYPE(w, t)) out.push_back(w);
+    if (GTK_IS_CONTAINER(w))
+    {
+        GList* kids = gtk_container_get_children(GTK_CONTAINER(w));
+        for (GList* l = kids; l; l = l->next) all_of(GTK_WIDGET(l->data), t, out);
+        g_list_free(kids);
+    }
+}
+GtkWidget* first_of(GtkWidget* w, GType t)
+{
+    std::vector<GtkWidget*> v;
+    all_of(w, t, v);
+    return v.empty() ? nullptr : v[0];
+}
+GtkWidget* window_titled(const char* title)
+{
+    GtkWidget* top = nullptr;
+    GList* tops = gtk_window_list_toplevels();
+    for (GList* l = tops; l; l = l->next)
+        if (const char* t = gtk_window_get_title(GTK_WINDOW(l->data)); t && std::string(t) == title)
+            top = GTK_WIDGET(l->data);
+    g_list_free(tops);
+    return top;
+}
 
 rap::tree_item item(std::string id)
 {
@@ -196,10 +225,240 @@ int main(int argc, char** argv)
     probe<bool>("list::set_column_visible", [&](const bool& v) { list_h->set_column_visible(1, v); }, false, true);
     probe<bool>("tree::set_expanded", [&](const bool& v) { tree_h->set_expanded("a", v); }, false, false, false);
     probe<int>("tabs::set_current", [&](const int& v) { tabs_h->set_current(v); }, 1, 0);
+    probe<S>("tree::select", [&](const S& v) { tree_h->select(v); }, "a", "b");
     probe<bool>("widget::set_enabled", [&](const bool& v) { button_h->set_enabled(v); }, false, true);
     probe<bool>("widget::set_visible", [&](const bool& v) { check_box_h->set_visible(v); }, false, true);
     probe<S>("widget::set_tooltip", [&](const S& v) { label_h->set_tooltip(v); }, "Tip", "Other tip", false);
     probe<S>("window::set_title", [&](const S& v) { win->set_title(v); }, "setters", "setters again", false);
+
+    // -- what's on screen, not a cache (#91's review) --------------------
+    rap::progress_bar* bar = nullptr;
+    rap::spin* sp = nullptr;
+    rap::slider* sl = nullptr;
+    rap::date_picker* plain_date = nullptr;
+    rap::date_picker* epoch_date = nullptr;
+    rap::list* lst = nullptr;
+    rap::splitter* parent = nullptr;
+    rap::button* child = nullptr;
+    rap::splitter* split = nullptr;
+    rap::entry* ent = nullptr;
+    rap::text_view* txt = nullptr;
+    rap::combo* cmb = nullptr;
+    rap::check* chk = nullptr;
+    rap::tabs* tbs = nullptr;
+    auto win2 = (*ui)->create(window{
+        "regressions",
+        {vbox{hbox{progress_bar{}.bind(bar).stretch(), spin{0, 100, 1}.bind(sp), slider{0, 100, 1}.bind(sl).stretch(),
+                   date_picker{}.bind(plain_date), date_picker{{1970, 1, 1}}.bind(epoch_date)},
+              hbox{entry{}.bind(ent).stretch(), combo{{"one", "two"}, "one"}.bind(cmb), check{"Check"}.bind(chk)},
+              splitter(orientation::horizontal, button{"Child"}.bind(child), label{"other"}).bind(parent),
+              splitter(orientation::horizontal, list{{{"Name", 100_px}, {"Notes", 100_px}}, &g_rows}.bind(lst),
+                       text_view{}.bind(txt))
+                  .bind(split)
+                  .stretch(),
+              tabs{{"One", label{"one"}}, {"Two", label{"two"}}}.bind(tbs),
+              label{"A link"}.link([] { ++g_link_clicks; })}}}
+                                  .size(800_px, 500_px));
+    win2->show();
+    settle(800);
+    GtkWidget* top2 = window_titled("regressions");
+    expect(top2 && bar && sp && sl && plain_date && epoch_date && lst && parent && child && split && ent && txt &&
+               cmb && chk && tbs,
+           "the regressions' window and widgets");
+    if (top2 && bar && sp && sl && plain_date && epoch_date && lst && parent && child && split && ent && txt && cmb &&
+        chk && tbs)
+    {
+        // A new link label: its link's markup in place, and it activates.
+        {
+            GtkWidget* link = nullptr;
+            std::vector<GtkWidget*> labels;
+            all_of(top2, GTK_TYPE_LABEL, labels);
+            for (GtkWidget* l : labels)
+                if (std::string(gtk_label_get_text(GTK_LABEL(l))) == "A link") link = l;
+            const std::string markup = link ? gtk_label_get_label(GTK_LABEL(link)) : "";
+            gboolean handled = false;
+            if (link) g_signal_emit_by_name(link, "activate-link", "rapport:", &handled);
+            expect(markup.find("<a ") != std::string::npos && g_link_clicks == 1,
+                   "a new link label: its link's markup (" + markup + ") and activated (" +
+                       std::to_string(g_link_clicks) + " clicks)");
+        }
+
+        // Progress: pulse, then the fraction it had (the default 0): out of
+        // activity mode, at that fraction.
+        GtkWidget* pb = first_of(top2, GTK_TYPE_PROGRESS_BAR);
+        bar->set_fraction(0);
+        bar->pulse();
+        bar->set_fraction(0);
+        settle();
+        expect(pb && gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(pb)) == 0 &&
+                   gtk_progress_bar_get_pulse_step(GTK_PROGRESS_BAR(pb)) > 0,
+               "progress: pulse then the same fraction (0) shows the fraction");
+        // GTK 3 doesn't say whether it's pulsing; the bar's activity block
+        // is gone when its fraction's set, which the backend now always does.
+        bar->set_fraction(0.5f);
+        bar->pulse();
+        bar->set_fraction(0.5f);
+        settle();
+        expect(pb && gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(pb)) == 0.5,
+               "progress: pulse then the same fraction (0.5) shows 0.5");
+
+        // Spin: set 4, the user types 7 (not committed), set 4: the edit shows
+        // 4 and keeps it on leaving.
+        GtkWidget* sb = first_of(top2, GTK_TYPE_SPIN_BUTTON);
+        sp->set_value(4);
+        settle();
+        gtk_entry_set_text(GTK_ENTRY(sb), "7");  // as typed: not yet the adjustment's
+        sp->set_value(4);
+        settle();
+        const std::string shown = gtk_entry_get_text(GTK_ENTRY(sb));
+        gtk_spin_button_update(GTK_SPIN_BUTTON(sb));  // leaving the field commits what it shows
+        expect(shown == "4" && sp->value() == 4,
+               "spin: 4, typed 7, set 4: the edit shows 4 (" + shown + ") and keeps it (" +
+                   std::to_string(sp->value()) + ")");
+        // A new range: the value re-applied, the adjustment and value() agree.
+        sp->set_value(40);
+        sp->set_range(20, 120);
+        settle();
+        expect(gtk_spin_button_get_value(GTK_SPIN_BUTTON(sb)) == 40 && sp->value() == 40,
+               "spin: 40, then range 20..120: still 40, natively and value()");
+        sp->set_range(50, 120);
+        settle();
+        expect(gtk_spin_button_get_value(GTK_SPIN_BUTTON(sb)) == 50 && sp->value() == 50 &&
+                   std::string(gtk_entry_get_text(GTK_ENTRY(sb))) == "50",
+               "spin: range 50..120 clamps 40 to 50, natively, value() and shown");
+
+        // Slider: range 0..100 at 40, then 20..120: still 40 everywhere.
+        GtkWidget* sc = first_of(top2, GTK_TYPE_SCALE);
+        sl->set_value(40);
+        sl->set_range(20, 120);
+        settle();
+        expect(sc && gtk_range_get_value(GTK_RANGE(sc)) == 40 && sl->value() == 40,
+               "slider: 40, then range 20..120: still 40, natively and value()");
+
+        // Dates: a default picker and one set to 1970-01-01 both show it.
+        std::vector<GtkWidget*> buttons;
+        all_of(top2, GTK_TYPE_BUTTON, buttons);
+        int dated = 0;
+        for (GtkWidget* b : buttons)
+            if (const char* l = gtk_button_get_label(GTK_BUTTON(b)); l && std::string(l).find("70") != std::string::npos)
+                ++dated;
+        expect(dated >= 2, "date pickers: the default and 1970-01-01 both show their date (" + std::to_string(dated) +
+                               " labelled)");
+
+        // List set_current: set 1, select nothing, set 1: row 1 selected
+        // again.
+        lst->set_current(1);
+        settle();
+        lst->select({});
+        settle();
+        lst->set_current(1);
+        settle();
+        expect(lst->selection() == std::vector<size_t>{1}, "list: set_current(1), select({}), set_current(1): row 1 "
+                                                           "selected again");
+
+        // The sort indicator changed underneath (as a header click would),
+        // then the app's restored: shown again.
+        GtkWidget* tv = first_of(top2, GTK_TYPE_TREE_VIEW);
+        lst->set_sort_indicator(1, rap::sort_order::descending);
+        settle();
+        GtkTreeViewColumn* c0 = gtk_tree_view_get_column(GTK_TREE_VIEW(tv), 0);
+        GtkTreeViewColumn* c1 = gtk_tree_view_get_column(GTK_TREE_VIEW(tv), 1);
+        gtk_tree_view_column_set_sort_indicator(c1, false);
+        gtk_tree_view_column_set_sort_indicator(c0, true);
+        gtk_tree_view_column_set_sort_order(c0, GTK_SORT_ASCENDING);
+        lst->set_sort_indicator(1, rap::sort_order::descending);
+        settle();
+        expect(gtk_tree_view_column_get_sort_indicator(c1) && !gtk_tree_view_column_get_sort_indicator(c0) &&
+                   gtk_tree_view_column_get_sort_order(c1) == GTK_SORT_DESCENDING,
+               "list: the sort indicator changed underneath, then the app's again: shown");
+        // The column order changed as a user's drag would, then restored.
+        lst->set_column_order({0, 1});
+        gtk_tree_view_move_column_after(GTK_TREE_VIEW(tv), c0, c1);
+        lst->set_column_order({0, 1});
+        settle();
+        expect(lst->column_order() == std::vector<size_t>{0, 1} &&
+                   gtk_tree_view_get_column(GTK_TREE_VIEW(tv), 0) == c0,
+               "list: the columns dragged, then the app's order again: restored");
+
+        // Splitter: 300, a window resize moves the divider, 300 again: 300.
+        GtkWidget* pane = nullptr;
+        {
+            std::vector<GtkWidget*> paneds;
+            all_of(top2, GTK_TYPE_PANED, paneds);
+            for (GtkWidget* w : paneds)
+                if (first_of(w, GTK_TYPE_TREE_VIEW)) pane = w;
+        }
+        split->set_sizes({300, 300});
+        settle(500);
+        if (pane) gtk_paned_set_position(GTK_PANED(pane), 200);  // moved, as a drag or a resize would
+        settle(300);
+        split->set_sizes({300, 300});
+        settle(500);
+        expect(pane && gtk_paned_get_position(GTK_PANED(pane)) == 300 && split->sizes().size() >= 1 &&
+                   std::lround(split->sizes()[0]) == 300,
+               "splitter: 300, moved, 300 again: placed at 300 (" +
+                   std::to_string(pane ? gtk_paned_get_position(GTK_PANED(pane)) : -1) + ")");
+
+        // Editable values changed as the user would, then the app's again.
+        GtkWidget* en = nullptr;
+        {
+            std::vector<GtkWidget*> entries;
+            all_of(top2, GTK_TYPE_ENTRY, entries);
+            for (GtkWidget* e : entries)
+                if (!GTK_IS_SPIN_BUTTON(e) && !GTK_IS_COMBO_BOX(gtk_widget_get_parent(e))) en = e;
+        }
+        ent->set_text("A");
+        if (en) gtk_entry_set_text(GTK_ENTRY(en), "B");
+        ent->set_text("A");
+        expect(ent->text() == "A", "entry: A, the user's B, A again: A");
+        txt->set_text("A");
+        {
+            GtkTextBuffer* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(first_of(top2, GTK_TYPE_TEXT_VIEW)));
+            gtk_text_buffer_set_text(buf, "B", -1);
+        }
+        txt->set_text("A");
+        expect(txt->text() == "A", "text view: A, the user's B, A again: A");
+        cmb->set_text("one");
+        {
+            GtkWidget* ce = gtk_bin_get_child(GTK_BIN(first_of(top2, GTK_TYPE_COMBO_BOX)));
+            gtk_entry_set_text(GTK_ENTRY(ce), "two");
+        }
+        cmb->set_text("one");
+        expect(cmb->text() == "one", "combo: one, the user's two, one again: one");
+        chk->set_checked(true);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(first_of(top2, GTK_TYPE_CHECK_BUTTON)), false);
+        chk->set_checked(true);
+        expect(chk->checked(), "check: on, the user's off, on again: on");
+        tbs->set_current(1);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(first_of(top2, GTK_TYPE_NOTEBOOK)), 0);
+        tbs->set_current(1);
+        expect(tbs->current() == 1, "tabs: 1, the user's 0, 1 again: 1");
+
+        // Enabled: a control's own, the effective its and its ancestors'.
+        GtkWidget* cb = nullptr;
+        for (GtkWidget* b : buttons)
+            if (const char* l = gtk_button_get_label(GTK_BUTTON(b)); l && std::string(l) == "Child") cb = b;
+        parent->set_enabled(false);
+        child->set_enabled(false);
+        parent->set_enabled(true);
+        settle();
+        expect(cb && !gtk_widget_get_sensitive(cb) && !gtk_widget_is_sensitive(cb),
+               "enabled: the parent off, the child off, the parent on: the child still off");
+        child->set_enabled(true);
+        parent->set_enabled(false);
+        child->set_enabled(true);  // its own already on: nothing
+        parent->set_enabled(true);
+        settle();
+        expect(cb && gtk_widget_get_sensitive(cb) && gtk_widget_is_sensitive(cb),
+               "enabled: the parent off, the child's own on again (nothing), the parent on: the child on");
+
+        // Fullscreen asked on then off before any answer: off asked too.
+        win2->set_fullscreen(true);
+        win2->set_fullscreen(false);
+        settle(500);
+        const bool full = gdk_window_get_state(gtk_widget_get_window(top2)) & GDK_WINDOW_STATE_FULLSCREEN;
+        expect(!full, "fullscreen: on then off at once: not fullscreen");
+    }
 
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
