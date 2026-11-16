@@ -210,6 +210,25 @@ rect_f without_windows_taskbar(rect_f area)
     return area;
 }
 
+// The app's row height for every list, tree and sidebar
+// (look_options::row_height; 0 unset), as the backend's made.
+float g_app_row_height = 0;
+// The row height a list or a tree asks for: its own (spec's row_height),
+// else the app's, else none.
+std::optional<float> asked_row(const std::optional<float>& own)
+{
+    if (own) return own;
+    if (g_app_row_height > 0) return g_app_row_height;
+    return std::nullopt;
+}
+// An app's row height in a widget with font `f`: `logical` px (Qt's logical
+// px, the DPI already Qt's; the text size is the font's, so it's in the
+// clamp), never shorter than the font's line and 2.
+int fixed_row(const QFont& f, float logical)
+{
+    return std::max(int(std::lround(logical)), QFontMetrics(f).height() + 2);
+}
+
 // The font for compact lists and text views: 90% of `f`, rounded to whole
 // pixels so glyphs sit on the pixel grid.
 QFont compact_font(const QFont& f)
@@ -995,6 +1014,13 @@ class tree_line_delegate : public QStyledItemDelegate
 public:
     static constexpr int line_role = Qt::UserRole + 1;
     using QStyledItemDelegate::QStyledItemDelegate;
+    int height = 0;  // an app's row height (fixed_row), 0: the style's
+    QSize sizeHint(const QStyleOptionViewItem& o, const QModelIndex& i) const override
+    {
+        QSize size = QStyledItemDelegate::sizeHint(o, i);
+        if (height > 0) size.setHeight(height);
+        return size;
+    }
     void paint(QPainter* p, const QStyleOptionViewItem& o, const QModelIndex& i) const override
     {
         QStyledItemDelegate::paint(p, o, i);
@@ -1012,7 +1038,9 @@ public:
     explicit tree_impl(const spec::tree& s)
         : widget_base(new QTreeWidget)
     {
-        view()->setItemDelegate(new tree_line_delegate(view()));
+        fixed_ = asked_row(s.row_height);
+        delegate_ = new tree_line_delegate(view());
+        view()->setItemDelegate(delegate_);
         view()->setHeaderHidden(true);
         view()->setColumnCount(1);
         if (!s.frame) view()->setFrameShape(QFrame::NoFrame);
@@ -1056,8 +1084,27 @@ public:
                  context_menu(static_cast<QContextMenuEvent*>(e));
                  return true;
              });
+        // An app's row height (spec::tree::row_height, else the app's),
+        // and again with a new font (a new text size).
+        if (fixed_)
+        {
+            apply_rows();
+            hook(view(),
+                 [this](QEvent* e)
+                 {
+                     if (e->type() == QEvent::FontChange) apply_rows();
+                     return false;
+                 });
+        }
         set_items(s.items);
     }
+    void apply_rows()
+    {
+        delegate_->height = fixed_row(view()->font(), *fixed_);
+        view()->doItemsLayout();
+    }
+    std::optional<float> fixed_;
+    tree_line_delegate* delegate_ = nullptr;
 
     void set_items(std::vector<tree_item> items) override
     {
@@ -3116,6 +3163,7 @@ public:
     {
         view_ = static_cast<list_view*>(w_);
         view_->owner = this;
+        fixed_ = asked_row(s.row_height);
         if (!s.frame) view_->setFrameShape(QFrame::NoFrame);
         rows_ = new rows_model(s.columns, view_);
         delegate_ = new row_delegate(view_);
@@ -3491,8 +3539,9 @@ public:
     {
         fonts_.clear();
         const QFontMetrics fm(view_->font());
-        // Compact is a smaller font, not less space round it.
-        row_height_ = std::max(fm.height() + 6, 22);
+        // Compact is a smaller font, not less space round it. An app's row
+        // height (spec::list::row_height, else the app's) over it.
+        row_height_ = fixed_ ? fixed_row(view_->font(), *fixed_) : std::max(fm.height() + 6, 22);
         icon_size_ = std::min(16, row_height_ - 1);
         delegate_->height = row_height_;
         view_->doItemsLayout();
@@ -4283,6 +4332,7 @@ private:
     std::optional<soft_colors> soft_;
     int first_text_column_ = 0;
     int row_height_ = 20, icon_size_ = 16;
+    std::optional<float> fixed_;  // an app's row height (spec::list::row_height, else the app's)
     bool fitted_ = false;
     mutable std::map<int, std::pair<QFont, QFontMetrics>> fonts_;
     std::optional<size_t> sort_column_;
@@ -5224,10 +5274,14 @@ private:
         auto* stack = new QStackedWidget;
         lazy_pages lazy{s.lazy, {}, page_builder()};
         int width = 0;
+        // An item's height: the app's row height (look_options::row_height)
+        // where it's set, else the line and room round it.
+        const int item_height = g_app_row_height > 0 ? fixed_row(list->font(), g_app_row_height)
+                                                      : int(g_metrics.line_height) + 16;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             auto* item = new QListWidgetItem(qs(s.titles[i]).remove('_'), list);
-            item->setSizeHint(QSize(0, int(g_metrics.line_height) + 16));
+            item->setSizeHint(QSize(0, item_height));
             width = std::max(width, list->fontMetrics().horizontalAdvance(item->text()));
             const bool is_lazy = i < s.lazy.size() && s.lazy[i];
             QWidget* page = page_of(is_lazy ? nullptr : build(s.pages[i], orientation::vertical));
@@ -5235,6 +5289,10 @@ private:
             lazy.pages.push_back(page);
         }
         list->setFixedWidth(width + 48);
+        // At its natural size every item whole: at least their rows' height
+        // and its frame.
+        if (g_app_row_height > 0)
+            list->setMinimumHeight(item_height * int(s.pages.size()) + 2 * list->frameWidth());
         // No focus outline round the current page's title: it's selected.
         list->setStyleSheet("QListWidget { outline: 0; } "
                             "QListWidget::item { padding-left: 12px; padding-right: 12px; }");
@@ -5530,6 +5588,7 @@ public:
     static backend* create(int* argc, char** argv, const look_options& look)
     {
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
+        g_app_row_height = look.row_height;
         QApplication* app = nullptr;  // one made here, deleted with the backend
         if (!qApp)
         {

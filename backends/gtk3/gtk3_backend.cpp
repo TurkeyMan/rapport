@@ -240,6 +240,139 @@ namespace rap::gtk3
 namespace
 {
 
+// -- rows ---------------------------------------------------------------------
+
+// The app's row height for every list, tree and sidebar
+// (look_options::row_height; 0 unset), as the backend's made.
+float g_app_row_height = 0;
+// The row height a list or a tree asks for: its own (spec's row_height),
+// else the app's, else none.
+std::optional<float> asked_row(const std::optional<float>& own)
+{
+    if (own) return own;
+    if (g_app_row_height > 0) return g_app_row_height;
+    return std::nullopt;
+}
+// The desktop's text size: GTK's font DPI over 96 (GNOME's text scaling
+// factor sets it). GTK's own scale factor is the device's, under logical px.
+float row_text_scale()
+{
+    int dpi = 0;
+    g_object_get(gtk_settings_get_default(), "gtk-xft-dpi", &dpi, nullptr);
+    return dpi > 0 ? float(dpi) / 1024.f / 96.f : 1.f;
+}
+// The line of `w`'s font, logical px.
+int font_line(GtkWidget* w)
+{
+    PangoFontMetrics* m = pango_context_get_metrics(gtk_widget_get_pango_context(w), nullptr, nullptr);
+    const int line = PANGO_PIXELS_CEIL(pango_font_metrics_get_ascent(m) + pango_font_metrics_get_descent(m));
+    pango_font_metrics_unref(m);
+    return line;
+}
+// An app's row height for `w`, logical px: `logical` at the text size, never
+// shorter than its font's line and 2 px.
+int fixed_row(GtkWidget* w, float logical)
+{
+    return std::max(int(std::lround(logical * row_text_scale())), font_line(w) + 2);
+}
+// A tree view's rows `row` tall: every cell that height, less the view's
+// vertical separator (which a row adds round its cells), and the rows
+// measured again.
+void set_tree_view_rows(GtkTreeView* view, int row)
+{
+    gint separator = 0;
+    gtk_widget_style_get(GTK_WIDGET(view), "vertical-separator", &separator, nullptr);
+    const int cell = std::max(1, row - separator);
+    GList* columns = gtk_tree_view_get_columns(view);
+    for (GList* c = columns; c; c = c->next)
+    {
+        auto* column = GTK_TREE_VIEW_COLUMN(c->data);
+        GList* cells = gtk_cell_layout_get_cells(GTK_CELL_LAYOUT(column));
+        for (GList* r = cells; r; r = r->next)
+        {
+            auto* renderer = GTK_CELL_RENDERER(r->data);
+            if (G_TYPE_CHECK_INSTANCE_TYPE(renderer, rapport_paint_renderer_get_type()))
+                RAPPORT_PAINT_RENDERER(renderer)->height = cell;  // its own height, not the fixed size
+            int width = -1;
+            gtk_cell_renderer_get_fixed_size(renderer, &width, nullptr);
+            gtk_cell_renderer_set_fixed_size(renderer, width, cell);
+        }
+        g_list_free(cells);
+        gtk_tree_view_column_queue_resize(column);
+    }
+    g_list_free(columns);
+    // Fixed-height mode measures its one row again only as it's turned on.
+    if (gtk_tree_view_get_fixed_height_mode(view))
+    {
+        gtk_tree_view_set_fixed_height_mode(view, false);
+        gtk_tree_view_set_fixed_height_mode(view, true);
+    }
+}
+// A list's or a tree's rows the app's height (`logical`), now and again as
+// its style (its font, the text size) changes.
+void fix_tree_view_rows(GtkWidget* view, float logical)
+{
+    struct rows
+    {
+        float logical;
+        int applied = 0;
+    };
+    auto* r = new rows{logical};
+    g_object_set_data_full(G_OBJECT(view), "rapport-rows", r, +[](gpointer p) { delete static_cast<rows*>(p); });
+    auto apply = +[](GtkWidget* w, gpointer p)
+    {
+        auto* r = static_cast<rows*>(p);
+        const int row = fixed_row(w, r->logical);
+        if (row == r->applied) return;
+        r->applied = row;
+        set_tree_view_rows(GTK_TREE_VIEW(w), row);
+    };
+    apply(view, r);
+    g_signal_connect(view, "style-updated", G_CALLBACK(apply), r);
+}
+// A sidebar's rows (a list box's) the app's height (`logical`): each row's
+// least height, its padding none (its label centred), now and again as the
+// style changes.
+void fix_list_box_rows(GtkWidget* list, float logical)
+{
+    struct rows
+    {
+        float logical;
+        int applied = 0;
+        GtkCssProvider* css = gtk_css_provider_new();
+        ~rows() { g_object_unref(css); }
+    };
+    auto* r = new rows{logical};
+    g_object_set_data_full(G_OBJECT(list), "rapport-rows", r, +[](gpointer p) { delete static_cast<rows*>(p); });
+    GList* children = gtk_container_get_children(GTK_CONTAINER(list));
+    for (GList* c = children; c; c = c->next)
+    {
+        auto* row = GTK_WIDGET(c->data);
+        gtk_style_context_add_provider(gtk_widget_get_style_context(row), GTK_STYLE_PROVIDER(r->css),
+                                       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        if (GtkWidget* label = gtk_bin_get_child(GTK_BIN(row)))
+        {
+            gtk_widget_set_margin_top(label, 0);
+            gtk_widget_set_margin_bottom(label, 0);
+            gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+        }
+    }
+    g_list_free(children);
+    auto apply = +[](GtkWidget* w, gpointer p)
+    {
+        auto* r = static_cast<rows*>(p);
+        const int row = fixed_row(w, r->logical);
+        if (row == r->applied) return;
+        r->applied = row;
+        const std::string rule = "row { min-height: " + std::to_string(row) +
+                                 "px; padding-top: 0; padding-bottom: 0; border-width: 0; }";
+        gtk_css_provider_load_from_data(r->css, rule.c_str(), -1, nullptr);
+        gtk_widget_queue_resize(w);
+    };
+    apply(list, r);
+    g_signal_connect(list, "style-updated", G_CALLBACK(apply), r);
+}
+
 // -- widgets ------------------------------------------------------------------
 
 // A container (box, form, group, toolbar) as a plain Widget, for handles.
@@ -1050,6 +1183,8 @@ public:
         gtk_tree_view_column_pack_start(column, text, true);
         gtk_tree_view_column_add_attribute(column, text, "text", 0);
         gtk_tree_view_append_column(view, column);
+        // An app's row height (its own, or the app's) over GTK's.
+        if (const auto row = asked_row(s.row_height)) fix_tree_view_rows(w_, *row);
         sel_ = gtk_tree_view_get_selection(view);
         gtk_tree_selection_set_mode(sel_, GTK_SELECTION_SINGLE);
         // Taking focus with no cursor, GTK puts it on the first row and
@@ -2723,6 +2858,8 @@ public:
                                               : GTK_SELECTION_MULTIPLE);
 
         for (size_t i = 0; i < s.columns.size(); ++i) add_column(s.columns[i], i);
+        // An app's row height (its own, or the app's) over GTK's.
+        if (const auto row = asked_row(s.row_height)) fix_tree_view_rows(w_, *row);
         auto first_text = std::ranges::find_if(s.columns, [](auto& c) { return !c.painted; });
         if (first_text != s.columns.end())
             rows_->search_column = guint(first_text - s.columns.begin());
@@ -5732,6 +5869,8 @@ private:
             gtk_stack_add_named(GTK_STACK(stack), page, std::to_string(i).c_str());
             pages.push_back(page);
         }
+        // The app's row height (look_options::row_height) for its rows.
+        if (g_app_row_height > 0) fix_list_box_rows(list, g_app_row_height);
         gtk_box_pack_start(GTK_BOX(box), list, FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(box), stack, TRUE, TRUE, 0);
@@ -5915,6 +6054,7 @@ public:
     static backend* create(int* argc, char** argv, const look_options& look)
     {
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
+        g_app_row_height = look.row_height;
         // Under WSLg, GTK keeps its own choice, Wayland: WSLg's X server
         // doesn't keep the pointer's shape up to date, leaving whatever was
         // set last (often nothing) over the window. Wayland can't place

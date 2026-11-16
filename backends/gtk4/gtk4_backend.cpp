@@ -835,6 +835,127 @@ public:
 // store for a new row (reinsert); that's also how a row shows new text.
 void install_tree_line_css(GtkWidget* w);
 
+// -- an app's row height --------------------------------------------------------
+//
+// spec::list and spec::tree's row_height, else look_options::row_height
+// (lists, trees and sidebars): rows of `logical` px at a 100% text size, so
+// round(logical x the text size) logical px (GTK scales them to the device),
+// never shorter than the font's line and 2. As a CSS class per height, its
+// rule (the row's min-height, no vertical padding on the row or its cells)
+// added to the display once; made again when the text size or the font
+// changes (the settings' gtk-xft-dpi, gtk-font-name).
+
+// The row height asked for: the control's own, else the app's, else none.
+std::optional<float> asked_row(const std::optional<float>& own)
+{
+    if (own) return own;
+    if (adw::look().row_height > 0) return adw::look().row_height;
+    return std::nullopt;
+}
+
+// The text size: GTK's font DPI (gtk-xft-dpi, which a desktop's text
+// scaling sets) over 96.
+float text_scale_now()
+{
+    int dpi = 0;
+    g_object_get(gtk_settings_get_default(), "gtk-xft-dpi", &dpi, nullptr);
+    return dpi > 0 ? float(dpi) / 1024.f / 96.f : 1.f;
+}
+
+// The line of `w`'s font, logical px.
+int font_line_of(GtkWidget* w)
+{
+    PangoFontMetrics* m = pango_context_get_metrics(gtk_widget_get_pango_context(w), nullptr, nullptr);
+    const int line = int(std::ceil(double(pango_font_metrics_get_height(m)) / PANGO_SCALE));
+    pango_font_metrics_unref(m);
+    return line > 0 ? line : 16;
+}
+
+// The rows' height for `w` at `logical`: the text size's, the font's line
+// and 2 at least.
+int fixed_row_px(GtkWidget* w, float logical)
+{
+    return std::max(int(std::lround(logical * text_scale_now())), font_line_of(w) + 2);
+}
+
+// The row height a view keeps (its "rapport-row-height" data): what's asked,
+// and the CSS class it has for it now.
+struct row_height_state
+{
+    float logical;
+    std::string cls;
+};
+
+// `w`'s rows as its row height asks now: the class for the height in px,
+// its rule added to the display the first time.
+void apply_row_height(GtkWidget* w)
+{
+    auto* st = static_cast<row_height_state*>(g_object_get_data(G_OBJECT(w), "rapport-row-height"));
+    if (!st) return;
+    const int row = fixed_row_px(w, st->logical);
+    const std::string cls = "rapport-row-" + std::to_string(row);
+    if (cls == st->cls) return;
+    GdkDisplay* display = gtk_widget_get_display(w);
+    const std::string key = "rapport-css-" + cls;
+    if (!g_object_get_data(G_OBJECT(display), key.c_str()))
+    {
+        const std::string px = std::to_string(row) + "px";
+        const std::string rule =
+            "columnview." + cls + " > listview > row, listview." + cls + " > row, list." + cls +
+            " > row { min-height: " + px + "; padding-top: 0; padding-bottom: 0; } columnview." + cls +
+            " > listview > row > cell, listview." + cls + " > row > treeexpander { padding-top: 0; "
+            "padding-bottom: 0; min-height: 0; }";
+        GtkCssProvider* css = gtk_css_provider_new();
+        gtk_css_provider_load_from_string(css, rule.c_str());
+        gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(css),
+                                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_set_data(G_OBJECT(display), key.c_str(), GINT_TO_POINTER(1));
+        g_object_unref(css);
+    }
+    if (!st->cls.empty()) gtk_widget_remove_css_class(w, st->cls.c_str());
+    gtk_widget_add_css_class(w, cls.c_str());
+    st->cls = cls;
+    // A list view keeps its rows' sizes until they're asked again (a new
+    // class on the view doesn't): each row (a column view's, in its inner
+    // list view) resized for it.
+    auto resize_rows = [](GtkWidget* view)
+    {
+        for (GtkWidget* r = gtk_widget_get_first_child(view); r; r = gtk_widget_get_next_sibling(r))
+            if (!std::strcmp(gtk_widget_get_css_name(r), "row")) gtk_widget_queue_resize(r);
+    };
+    resize_rows(w);
+    for (GtkWidget* c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c))
+        if (GTK_IS_LIST_VIEW(c)) resize_rows(c);
+    gtk_widget_queue_resize(w);
+}
+
+// `w`'s rows (a column view's, a list view's, a list box's) `logical` tall,
+// now and whenever the text size or the font changes (the connections go
+// with the widget).
+void set_row_height(GtkWidget* w, float logical)
+{
+    g_object_set_data_full(G_OBJECT(w), "rapport-row-height", new row_height_state{logical, {}},
+                           [](gpointer p) { delete static_cast<row_height_state*>(p); });
+    apply_row_height(w);
+    for (const char* signal : {"notify::gtk-xft-dpi", "notify::gtk-font-name"})
+        g_signal_connect_object(gtk_settings_get_default(), signal,
+                                G_CALLBACK(+[](GObject*, GParamSpec*, gpointer w)
+                                           {
+                                               // Once GTK's done with the change (its fonts
+                                               // and styles), the widget kept alive till then.
+                                               g_idle_add_full(
+                                                   G_PRIORITY_DEFAULT_IDLE,
+                                                   +[](gpointer w) -> gboolean
+                                                   {
+                                                       apply_row_height(GTK_WIDGET(w));
+                                                       return G_SOURCE_REMOVE;
+                                                   },
+                                                   g_object_ref(w), g_object_unref);
+                                           }),
+                                w, GConnectFlags(0));
+}
+
+
 class tree_impl : public widget_base<rap::tree>
 {
 public:
@@ -873,6 +994,7 @@ public:
             },
             this);
         w_ = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(sel_)), factory);
+        if (const auto row = asked_row(s.row_height)) set_row_height(w_, *row);
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(outer_), w_);
         gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(outer_), s.frame);
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(outer_), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -3154,6 +3276,8 @@ public:
             // padding rather than a rich list's, and none taken away.
             gtk_widget_add_css_class(w_, "data-table");
         }
+        // An app's row height over them all (compact's font kept).
+        if (const auto row = asked_row(s.row_height)) set_row_height(w_, *row);
         if (s.soft_selection)
         {
             // The colours computed as gtk3 does, written into the rule:
@@ -5817,8 +5941,11 @@ private:
             gtk_widget_set_halign(label, GTK_ALIGN_START);
             gtk_widget_set_margin_start(label, 12);
             gtk_widget_set_margin_end(label, 12);
-            gtk_widget_set_margin_top(label, 8);
-            gtk_widget_set_margin_bottom(label, 8);
+            // The app's row height (look_options::row_height): the rows its,
+            // the label centred in them; else the label's margins.
+            const bool fixed = adw::look().row_height > 0;
+            gtk_widget_set_margin_top(label, fixed ? 0 : 8);
+            gtk_widget_set_margin_bottom(label, fixed ? 0 : 8);
             GtkWidget* row = gtk_list_box_row_new();
             gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
             gtk_list_box_append(GTK_LIST_BOX(list), row);
@@ -5831,6 +5958,7 @@ private:
             gtk_stack_add_named(GTK_STACK(stack), page, std::to_string(i).c_str());
             pages.push_back(page);
         }
+        if (adw::look().row_height > 0) set_row_height(list, adw::look().row_height);
         gtk_box_append(GTK_BOX(box), list);
         gtk_box_append(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
         gtk_widget_set_hexpand(stack, TRUE);
