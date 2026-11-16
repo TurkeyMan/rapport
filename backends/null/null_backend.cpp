@@ -280,6 +280,7 @@ public:
     }
     void set_model(list_model* m) override
     {
+        if (m == model) return;  // (#88)
         if (model) model->remove_observer(this);
         model = m;
         if (model) model->add_observer(this);

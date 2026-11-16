@@ -141,6 +141,25 @@ int px(extent e)
     return -1;
 }
 
+// The same icon, as far as can be told without drawing: by name, file and
+// path, neither drawn (a drawn one's function can't be compared: never the
+// same). A setter given the icon it has does nothing (#88).
+bool same_icon(const rap::icon& a, const rap::icon& b)
+{
+    return !a.draw && !b.draw && !a.overlay && !b.overlay && a.name == b.name && a.file == b.file &&
+           a.path == b.path;
+}
+
+QString qs(const std::string& s);
+// A combo box's items already `items`.
+bool same_items(const QComboBox* c, const std::vector<std::string>& items)
+{
+    if (c->count() != int(items.size())) return false;
+    for (int i = 0; i < c->count(); ++i)
+        if (c->itemText(i) != qs(items[size_t(i)])) return false;
+    return true;
+}
+
 QString qs(const std::string& s)
 {
     return QString::fromUtf8(s.data(), qsizetype(s.size()));
@@ -687,21 +706,34 @@ public:
         : w_(w)
     {
     }
-    void set_enabled(bool e) override { w_->setEnabled(e); }
+    // A setter given the value it has does nothing (#88): no native call,
+    // no relayout, no repaint.
+    void set_enabled(bool e) override
+    {
+        if (w_->testAttribute(Qt::WA_Disabled) == !e) return;
+        w_->setEnabled(e);
+    }
     void set_visible(bool v) override
     {
         // In a toolbar, its action shows and hides it.
         if (auto* action = qobject_cast<QAction*>(w_->property("rapport-toolbar-action").value<QObject*>()))
-            return action->setVisible(v);
+        {
+            if (action->isVisible() != v) action->setVisible(v);
+            return;
+        }
         // Not yet in its parent, showing it would open it as a window; it
         // shows with its parent anyway.
         if (v && !w_->parentWidget()) return;
+        if (w_->isHidden() == !v) return;  // (shown or hidden already, by the app)
         w_->setVisible(v);
         // A form field's row label goes with it.
         if (auto* label = qobject_cast<QWidget*>(w_->property("rapport-form-label").value<QObject*>()))
             label->setVisible(v);
     }
-    void set_tooltip(const std::string& t) override { w_->setToolTip(qs(t)); }
+    void set_tooltip(const std::string& t) override
+    {
+        if (const QString q = qs(t); w_->toolTip() != q) w_->setToolTip(q);
+    }
     void focus() override { w_->setFocus(Qt::OtherFocusReason); }
     bool has_focus() const override
     {
@@ -813,6 +845,8 @@ public:
     }
     void set_text(const std::string& t) override
     {
+        if (shown_ && t == text_) return;
+        shown_ = true;
         text_ = t;
         if (link_)
             // Through the full text the label re-applies on resize.
@@ -823,6 +857,7 @@ public:
 
 private:
     std::string text_;
+    bool shown_ = false;  // text_ set on the label (set_text, once at least)
     // With an icon, the label sits after it in a row of its own; on a link
     // the icon takes the link's click and pointer.
     static QWidget* with_icon(elided_label* text, const spec::label& s)
@@ -889,8 +924,19 @@ public:
                              if (click_) click_();
                          });
     }
-    void set_text(const std::string& t) override { button()->setText(mnemonic(t)); }
-    void set_icon(const icon& icon) override { button()->setIcon(to_q_icon(icon, 16, w_)); }
+    void set_text(const std::string& t) override
+    {
+        if (const QString q = mnemonic(t); button()->text() != q) button()->setText(q);
+    }
+    void set_icon(const icon& icon) override
+    {
+        if (icon_set_ && same_icon(icon, icon_)) return;
+        icon_set_ = true;
+        icon_ = icon;
+        button()->setIcon(to_q_icon(icon, 16, w_));
+    }
+    rap::icon icon_;  // the one set (set_icon), to tell a new one by
+    bool icon_set_ = false;
     void on_click(std::function<void()> f) override { click_ = std::move(f); }
 
 private:
@@ -941,6 +987,7 @@ public:
     }
     void set_state(check_state s) override
     {
+        if (state() == s) return;
         box()->setCheckState(s == check_state::indeterminate ? Qt::PartiallyChecked
                              : s == check_state::checked     ? Qt::Checked
                                                             : Qt::Unchecked);
@@ -973,9 +1020,23 @@ public:
                              if (menu_fn_) fill_menu(menu_, menu_fn_());
                          });
     }
-    void set_text(const std::string& t) override { button()->setText(mnemonic(t)); }
-    void set_icon(const icon& icon) override { button()->setIcon(to_q_icon(icon, 16, w_)); }
-    void set_pushed(bool v) override { button()->setChecked(v); }
+    void set_text(const std::string& t) override
+    {
+        if (const QString q = mnemonic(t); button()->text() != q) button()->setText(q);
+    }
+    void set_icon(const icon& icon) override
+    {
+        if (icon_set_ && same_icon(icon, icon_)) return;
+        icon_set_ = true;
+        icon_ = icon;
+        button()->setIcon(to_q_icon(icon, 16, w_));
+    }
+    rap::icon icon_;  // the one set (set_icon), to tell a new one by
+    bool icon_set_ = false;
+    void set_pushed(bool v) override
+    {
+        if (button()->isChecked() != v) button()->setChecked(v);
+    }
     void on_menu(std::function<menu()> f) override { menu_fn_ = std::move(f); }
 
 private:
@@ -996,8 +1057,10 @@ public:
     }
     void set_fraction(float f) override
     {
+        const int v = int(std::clamp(f, 0.f, 1.f) * 1000);
+        if (bar()->maximum() != 0 && bar()->value() == v) return;
         if (bar()->maximum() == 0) bar()->setRange(0, 1000);
-        bar()->setValue(int(std::clamp(f, 0.f, 1.f) * 1000));
+        bar()->setValue(v);
     }
     // Qt animates a busy bar by itself.
     void pulse() override { bar()->setRange(0, 0); }
@@ -1138,6 +1201,7 @@ public:
     {
         if (auto it = by_id_.find(id); it != by_id_.end())
         {
+            if (it->second->isExpanded() == open) return;
             // Asks wait until Qt's finished: a handler may destroy the tree.
             lazy_tree::tracker::batch b(lazy_);
             it->second->setExpanded(open);
@@ -1173,7 +1237,8 @@ public:
     void set_separator_before(const std::string& id, bool on) override
     {
         const auto it = by_id_.find(id);
-        if (it != by_id_.end()) it->second->setData(0, tree_line_delegate::line_role, on);
+        if (it != by_id_.end() && it->second->data(0, tree_line_delegate::line_role).toBool() != on)
+            it->second->setData(0, tree_line_delegate::line_role, on);
     }
     void update_item(const std::string& id, const std::string& label, const rap::icon& icon, bool has_children) override
     {
@@ -1198,7 +1263,7 @@ public:
     void set_check(const std::string& id, check_state st) override
     {
         const auto it = checks_.find(id);
-        if (it == checks_.end()) return;
+        if (it == checks_.end() || it->second == st) return;
         it->second = st;
         quiet q(*this);
         by_id_[id]->setCheckState(0, qt_check(st));
@@ -1334,6 +1399,7 @@ public:
     }
     void set_date(rap::date d) override
     {
+        if (date() == d) return;
         quiet_ = true;
         edit()->setDate(QDate(d.year, d.month, d.day));
         quiet_ = false;
@@ -1390,17 +1456,25 @@ public:
     }
     void set_icon(const icon& i) override
     {
+        if (same_icon(i, icon_)) return;
         icon_ = i;
         refresh();
     }
-    void set_tooltip(const std::string& t) override { action_->setToolTip(qs(t)); }
+    void set_tooltip(const std::string& t) override
+    {
+        if (const QString q = qs(t); action_->toolTip() != q) action_->setToolTip(q);
+    }
     void set_checked(bool c) override
     {
+        if (checked_ == c) return;
         checked_ = c;
         refresh();
     }
     bool checked() const override { return checked_; }
-    void set_enabled(bool e) override { action_->setEnabled(e); }
+    void set_enabled(bool e) override
+    {
+        if (action_->isEnabled() != e) action_->setEnabled(e);
+    }
     void on_menu(std::function<menu()> f) override
     {
         menu_ = std::move(f);
@@ -1476,13 +1550,19 @@ public:
     // The app's change, not the user's: on_changed isn't fired.
     void set_text(const std::string& t) override
     {
+        const QString q = qs(t);
+        if (edit()->text() == q) return;
         quiet_ = true;
-        edit()->setText(qs(t));
+        edit()->setText(q);
         quiet_ = false;
     }
-    void set_placeholder(const std::string& t) override { edit()->setPlaceholderText(qs(t)); }
+    void set_placeholder(const std::string& t) override
+    {
+        if (const QString q = qs(t); edit()->placeholderText() != q) edit()->setPlaceholderText(q);
+    }
     void set_read_only(bool v) override
     {
+        if (edit()->isReadOnly() == v) return;
         edit()->setReadOnly(v);
         update_base();
     }
@@ -1490,6 +1570,7 @@ public:
     // it), so giving the frame back doesn't move the layout.
     void set_frame(bool v) override
     {
+        if (edit()->hasFrame() == v) return;
         if (!v && edit()->hasFrame()) edit()->setMinimumHeight(edit()->sizeHint().height());
         edit()->setFrame(v);
         if (v) edit()->setMinimumHeight(0);
@@ -1536,6 +1617,7 @@ public:
     }
     void set_items(std::vector<std::string> items) override
     {
+        if (same_items(combo(), items)) return;
         quiet_ = true;
         combo()->clear();
         for (auto& i : items) combo()->addItem(qs(i));
@@ -1545,6 +1627,7 @@ public:
     // The app's change, not the user's: on_changed isn't fired.
     void set_current(int i) override
     {
+        if (combo()->currentIndex() == i) return;
         quiet_ = true;
         combo()->setCurrentIndex(i);
         quiet_ = false;
@@ -1579,6 +1662,7 @@ public:
     // the items clears the edit's text, which is put back).
     void set_items(std::vector<std::string> items) override
     {
+        if (same_items(combo(), items)) return;
         quiet_ = true;
         const QString text = combo()->currentText();
         combo()->clear();
@@ -1589,8 +1673,10 @@ public:
     std::string text() const override { return combo()->currentText().toStdString(); }
     void set_text(const std::string& t) override
     {
+        const QString q = qs(t);
+        if (combo()->currentText() == q) return;
         quiet_ = true;
-        combo()->setEditText(qs(t));
+        combo()->setEditText(q);
         quiet_ = false;
     }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
@@ -1642,6 +1728,10 @@ public:
 
     void set_text(const std::string& t, std::vector<span> spans = {}) override
     {
+        // Plain text it has already, plainly (nothing styled since): as it
+        // is. (Styled text is set again: its spans aren't compared.)
+        if (spans.empty() && !styled_ && edit()->toPlainText() == qs(t)) return;
+        styled_ = !spans.empty();
         auto* doc = edit()->document();
         const bool undo = doc->isUndoRedoEnabled();
         doc->setUndoRedoEnabled(false);
@@ -1671,6 +1761,7 @@ public:
 
     void append(const std::string& t, const text_style& style) override
     {
+        styled_ = true;  // (its style isn't told from none)
         QTextCursor c(edit()->document());
         c.movePosition(QTextCursor::End);
         c.insertText(qs(t), char_format(w_, style));
@@ -1678,6 +1769,7 @@ public:
 
     void set_read_only(bool ro) override
     {
+        if (edit()->isReadOnly() == ro) return;
         edit()->setReadOnly(ro);
         // Read-only text is still selectable from the keyboard (Ctrl+A,
         // Shift+arrows), without showing a caret.
@@ -1710,6 +1802,7 @@ public:
 
 private:
     QPlainTextEdit* edit() const { return static_cast<QPlainTextEdit*>(w_); }
+    bool styled_ = false;  // styled text set or appended since its text was last set plainly
     std::function<void()> changed_;
 };
 
@@ -1792,7 +1885,7 @@ public:
     {
         if (laid_out_)
             apply(s);
-        else
+        else if (pending_ != s)
             pending_ = s;
     }
 
@@ -1858,7 +1951,8 @@ private:
             wanted_ = s;
         else
             wanted_.reset();
-        splitter()->setSizes(sizes);
+        // The sizes it has already: no relayout (#88).
+        if (sizes != splitter()->sizes()) splitter()->setSizes(sizes);
     }
 
     std::vector<int> stretch_;
@@ -1915,6 +2009,7 @@ public:
     int current() const override { return tabs()->currentIndex(); }
     void set_current(int i) override
     {
+        if (tabs()->currentIndex() == i) return;
         tabs()->setCurrentIndex(i);
         lazy_.ensure_built(i);
     }
@@ -1952,6 +2047,7 @@ public:
     int current() const override { return std::max(0, list_->currentRow()); }
     void set_current(int i) override
     {
+        if (list_->currentRow() == i) return;
         list_->setCurrentRow(i);
         lazy_.ensure_built(i);
     }
@@ -2458,10 +2554,19 @@ public:
                              if (!quiet_ && toggled_) toggled_(on);
                          });
     }
-    void set_icon(const icon& icon) override { button()->setIcon(to_q_icon(icon, 16, w_)); }
+    void set_icon(const icon& icon) override
+    {
+        if (icon_set_ && same_icon(icon, icon_)) return;
+        icon_set_ = true;
+        icon_ = icon;
+        button()->setIcon(to_q_icon(icon, 16, w_));
+    }
+    rap::icon icon_;  // the one set (set_icon), to tell a new one by
+    bool icon_set_ = false;
     bool checked() const override { return button()->isChecked(); }
     void set_checked(bool c) override
     {
+        if (button()->isChecked() == c) return;
         quiet_ = true;  // set from code: no on_toggled
         button()->setChecked(c);
         quiet_ = false;
@@ -2525,6 +2630,7 @@ public:
     }
     void set_value(double v) override
     {
+        if (value() == v) return;
         quiet_ = true;
         const double t = std::clamp(map_.track(v), min_, max_);
         set_ = {t == map_.track(v) ? v : map_.value(t), int(std::lround((t - min_) / step_))};
@@ -2534,6 +2640,7 @@ public:
     }
     void set_range(double mn, double mx) override
     {
+        if (map_.track(mn) == min_ && map_.track(mx) == max_) return;
         const double v = value();
         min_ = map_.track(mn);
         max_ = map_.track(mx);
@@ -2542,6 +2649,7 @@ public:
     }
     void set_marks(std::vector<std::pair<double, std::string>> marks) override
     {
+        if (marks == marks_) return;
         marks_ = std::move(marks);
         apply_range();
     }
@@ -2614,12 +2722,14 @@ public:
     double value() const override { return box()->value(); }
     void set_value(double v) override
     {
+        if (box()->value() == v) return;
         quiet_ = true;
         box()->setValue(v);
         quiet_ = false;
     }
     void set_range(double mn, double mx) override
     {
+        if (box()->minimum() == mn && box()->maximum() == mx) return;
         quiet_ = true;
         box()->setRange(mn, mx);
         quiet_ = false;
@@ -2660,6 +2770,7 @@ public:
     rap::color color() const override { return color_; }
     void set_color(rap::color c) override
     {
+        if (c.r == color_.r && c.g == color_.g && c.b == color_.b && c.a == color_.a) return;
         color_ = c;
         swatch();
     }
@@ -2753,6 +2864,7 @@ public:
         frames_->stop();
     }
 
+    std::optional<cursor> cursor_;  // the one set (set_cursor)
     void invalidate() override { w_->update(); }
     // Nothing until it has been laid out and shown, as on GTK: before that a
     // Qt widget has a placeholder size (640x480), which an app sizing its
@@ -2764,6 +2876,8 @@ public:
     float device_scale() const override { return float(w_->devicePixelRatioF()); }
     void set_cursor(cursor c) override
     {
+        if (cursor_ == c) return;
+        cursor_ = c;
         switch (c)
         {
         case cursor::default_: w_->unsetCursor(); break;
@@ -3292,6 +3406,8 @@ public:
     void set_current(size_t row) override
     {
         if (row >= size_t(rows_->count)) return;
+        // The cursor there, selected alone, already: as it is.
+        if (current() == row && selection() == std::vector<size_t>{row}) return;
         view_->selectionModel()->setCurrentIndex(rows_->index(int(row), first_text_column_),
                                                  QItemSelectionModel::ClearAndSelect |
                                                      QItemSelectionModel::Rows);
@@ -3334,6 +3450,7 @@ public:
 
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
+        if (sort_column_ == column && sort_order_ == order) return;
         sort_column_ = column;
         sort_order_ = order;
         show_sort_indicator();
@@ -3356,7 +3473,7 @@ public:
     }
     void set_column_order(const std::vector<size_t>& order) override
     {
-        if (!is_column_order(order, cols_.size())) return;
+        if (!is_column_order(order, cols_.size()) || column_order() == order) return;
         QHeaderView* h = view_->header();
         for (size_t v = 0; v < order.size(); ++v)
             h->moveSection(h->visualIndex(int(order[v])), int(v));
@@ -3365,7 +3482,8 @@ public:
     void set_column_widths(const std::vector<float>& widths) override
     {
         for (size_t i = 0; i < widths.size() && i < cols_.size(); ++i)
-            if (widths[i] > 0) view_->header()->resizeSection(int(i), int(widths[i]));
+            if (widths[i] > 0 && view_->header()->sectionSize(int(i)) != int(widths[i]))
+                view_->header()->resizeSection(int(i), int(widths[i]));
         fitted_ = true;  // restored widths win over stretching
     }
 
@@ -3375,7 +3493,8 @@ public:
     }
     void set_column_visible(size_t column, bool v) override
     {
-        if (column < cols_.size()) view_->setColumnHidden(int(column), !v);
+        if (column >= cols_.size() || column_visible(column) == v) return;
+        view_->setColumnHidden(int(column), !v);
         stretch_last();
     }
 
@@ -4586,7 +4705,10 @@ public:
             frame_->resize(size);
     }
 
-    void set_title(const std::string& t) override { frame_->setWindowTitle(qs(t)); }
+    void set_title(const std::string& t) override
+    {
+        if (const QString q = qs(t); frame_->windowTitle() != q) frame_->setWindowTitle(q);
+    }
     void show() override
     {
         finished_ = false;
@@ -4640,7 +4762,10 @@ public:
         frame_->resize(std::max(1, int(s.w)), std::max(1, int(s.h)));
         keep_on_screen();
     }
-    void set_min_size(size_f s) override { frame_->setMinimumSize(int(s.w), int(s.h)); }
+    void set_min_size(size_f s) override
+    {
+        if (frame_->minimumSize() != QSize(int(s.w), int(s.h))) frame_->setMinimumSize(int(s.w), int(s.h));
+    }
     std::optional<point_f> position() const override
     {
         if (!placeable()) return std::nullopt;
@@ -4681,6 +4806,9 @@ public:
 
     void set_icon(const icon& icon) override
     {
+        if (icon_set_ && same_icon(icon, icon_)) return;
+        icon_set_ = true;
+        icon_ = icon;
         if (!icon.name.empty())
             if (QIcon named = theme_icon(icon.name); !named.isNull())
             {
@@ -4691,8 +4819,11 @@ public:
     }
 
     void set_app_id(const std::string&) override {}  // the process's (.desktop), not a window's
+    rap::icon icon_;  // the window's (set_icon), to tell a new one by
+    bool icon_set_ = false;
     void set_menu_bar_visible(bool on) override
     {
+        if (menu_bar_wanted_ == on) return;
         menu_bar_wanted_ = on;
         show_menu_bar();
     }
@@ -5708,6 +5839,7 @@ public:
 
     void set_color_scheme(color_scheme s) override
     {
+        if (palette::app_scheme() == palette::scheme_number(s)) return;
         palette::app_scheme() = palette::scheme_number(s);
         apply_scheme();
     }

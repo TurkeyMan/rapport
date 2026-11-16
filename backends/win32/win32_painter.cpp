@@ -168,6 +168,11 @@ void set_dpi_for_tests(UINT dpi)
     g_dpi_for_tests = dpi;
 }
 
+unsigned layout_requests_for_tests()
+{
+    return g_layout_pass;
+}
+
 UINT dpi_of(HWND h)
 {
     if (g_dpi_for_tests) return g_dpi_for_tests;

@@ -1,3 +1,10 @@
+# Every test built with MSVC: a failure never opens a dialog on the desktop
+# (the Debug CRT's reports, an abort, a crash), only fails, to stderr
+# (win32_test_no_dialogs.h, force-included: it installs itself).
+if(MSVC)
+    add_compile_options(/FI${CMAKE_CURRENT_SOURCE_DIR}/win32_test_no_dialogs.h)
+endif()
+
 # Headless checks of the core: run by CI on every platform.
 add_executable(rapport-gpu-span-test gpu_span_test.cpp)
 target_include_directories(rapport-gpu-span-test PRIVATE ../core/src)

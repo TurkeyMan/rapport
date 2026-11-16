@@ -923,16 +923,41 @@ HWND window_tooltip(HWND top)
     return tip;
 }
 
+// The tip each control was last given (apply_tooltip), by its window: what
+// it shows, without a native read (whose buffer would bound it). Forgotten
+// as the control goes (WM_NCDESTROY), so a new window given the same
+// handle starts with none.
+std::map<HWND, std::wstring>& tips_shown()
+{
+    static std::map<HWND, std::wstring> shown;
+    return shown;
+}
+LRESULT CALLBACK tip_forget_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR)
+{
+    if (msg == WM_NCDESTROY)
+    {
+        tips_shown().erase(h);
+        RemoveWindowSubclass(h, tip_forget_proc, id);
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
 void apply_tooltip(HWND control, const std::string& text)
 {
+    std::wstring w = wide(text);
+    // The tip it has already (or none, and none wanted): nothing done (#88).
+    auto& shown = tips_shown();
+    const auto had = shown.find(control);
+    if (had != shown.end() ? had->second == w : w.empty()) return;
     HWND top = GetAncestor(control, GA_ROOT);
     HWND tip = window_tooltip(top);
-    std::wstring w = wide(text);
     TOOLINFOW ti{};
     ti.cbSize = TTTOOLINFOW_V2_SIZE;  // also accepted by comctl32 v5
     ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     ti.hwnd = top;
     ti.uId = reinterpret_cast<UINT_PTR>(control);
+    if (had == shown.end()) SetWindowSubclass(control, tip_forget_proc, 0x7469, 0);
+    shown[control] = w;
     ti.lpszText = w.data();
     SendMessageW(tip, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     if (!text.empty()) SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
@@ -1081,13 +1106,27 @@ void track_container_control(HWND h)
     if (!scope.effective_tip().empty()) apply_tooltip(h, scope.effective_tip());
 }
 
+// The same icon, as far as can be told: the same name, file and path, and
+// neither drawn (a function can't be compared, so a drawn one is new).
+// Setters given the icon they have do nothing (#88).
+bool same_icon(const icon& a, const icon& b)
+{
+    return a.name == b.name && a.file == b.file && a.path == b.path && !a.draw && !b.draw && !a.overlay &&
+           !b.overlay;
+}
+
+// (A value it has already: nothing done, #88.)
 void set_control_enabled(HWND h, bool enabled)
 {
     if (auto* scope = control_container(h))
     {
-        scope->controls.at(h).enabled = enabled;
-        enabled = enabled && scope->effective_enabled();
+        auto& c = scope->controls.at(h);
+        const bool effective = enabled && scope->effective_enabled();
+        if (c.enabled == enabled && (IsWindowEnabled(h) != FALSE) == effective) return;
+        c.enabled = enabled;
+        enabled = effective;
     }
+    if ((IsWindowEnabled(h) != FALSE) == enabled) return;
     EnableWindow(h, enabled);
 }
 
@@ -1095,6 +1134,7 @@ void set_tooltip_text(HWND h, const std::string& text)
 {
     if (auto* scope = control_container(h))
     {
+        if (scope->controls.at(h).tooltip == text) return;  // (#88)
         scope->controls.at(h).tooltip = text;
         if (text.empty()) return apply_tooltip(h, scope->effective_tip());
     }
@@ -2148,6 +2188,7 @@ public:
         , link_(s.link)
         , on_click_(s.on_click)
         , icon_(s.icon)
+        , text_(s.text)
     {
         // The icon before the text: a static of its own (SysLink can't hold
         // one), which on a link takes the link's click and pointer.
@@ -2178,8 +2219,11 @@ public:
             adopt(create_control(win, parent, L"STATIC", wide(s.text),
                                 SS_LEFT | SS_NOPREFIX | (s.ellipsize ? SS_ENDELLIPSIS : 0)));
     }
+    // (Its text already: nothing done, #88.)
     void set_text(const std::string& t) override
     {
+        if (t == text_) return;
+        text_ = t;
         SetWindowTextW(h_, link_         ? link_markup(t).c_str()
                            : selectable_ ? to_crlf(wide(t)).c_str()
                                          : wide(t).c_str());
@@ -2324,6 +2368,7 @@ private:
     bool link_;
     std::function<void()> on_click_;
     icon icon_;
+    std::string text_;  // as last set (set_text: the same again does nothing)
     HWND icon_h_ = nullptr;
     HICON hicon_ = nullptr;
     int icon_px_ = 0;
@@ -2480,11 +2525,14 @@ public:
     }
     void set_text(const std::string& t) override
     {
-        SetWindowTextW(h_, mnemonic(t).c_str());
+        const std::wstring w = mnemonic(t);
+        if (w == window_text(h_)) return;  // (#88)
+        SetWindowTextW(h_, w.c_str());
         win_.relayout();
     }
     void set_icon(const icon& icon) override
     {
+        if (same_icon(icon, icon_)) return;  // (#88)
         icon_ = icon;
         set_button_image(h_, win_, icon_, images_, path_icon_);
         win_.relayout();
@@ -2573,6 +2621,7 @@ public:
     }
     void set_state(check_state s) override
     {
+        if (s == state()) return;  // (#88)
         SendMessageW(h_, BM_SETCHECK,
                      s == check_state::checked         ? BST_CHECKED
                      : s == check_state::indeterminate ? BST_INDETERMINATE
@@ -2774,6 +2823,7 @@ public:
     }
     void set_icon(const icon& i) override
     {
+        if (same_icon(i, icon_)) return;  // (#88)
         icon_ = i;
         want_icon(icon_, 16, win_.dpi());
         InvalidateRect(h_, nullptr, TRUE);
@@ -2781,6 +2831,7 @@ public:
     void set_tooltip(const std::string& t) override { set_tooltip_text(h_, t); }
     void set_checked(bool c) override
     {
+        if (c == checked_) return;  // (#88)
         checked_ = c;
         InvalidateRect(h_, nullptr, TRUE);
     }
@@ -2934,17 +2985,24 @@ public:
     std::string text() const override { return narrow(window_text(h_)); }
     void set_text(const std::string& t) override
     {
+        const std::wstring w = wide(t);
+        if (w == window_text(h_)) return;  // (#88)
         quiet_ = true;
-        SetWindowTextW(h_, wide(t).c_str());
+        SetWindowTextW(h_, w.c_str());
         quiet_ = false;
         place_buttons();
     }
-    void set_read_only(bool v) override { SendMessageW(h_, EM_SETREADONLY, v, 0); }
+    void set_read_only(bool v) override
+    {
+        if (v == ((GetWindowLongPtrW(h_, GWL_STYLE) & ES_READONLY) != 0)) return;  // (#88)
+        SendMessageW(h_, EM_SETREADONLY, v, 0);
+    }
     // Frameless: the edge stays, painted as background (frameless_subclass).
     // Read-only, the text then sits on the window's background
     // (WM_CTLCOLORSTATIC).
     void set_frame(bool v) override
     {
+        if (v == frame_) return;  // (#88)
         frame_ = v;
         if (v)
             RemoveWindowSubclass(h_, frameless_subclass, 2);
@@ -2971,10 +3029,15 @@ public:
     // A band field's font is its own size (field_font, from the text size):
     // it's measured again, as for a new theme.
     void fonts_changed() override { theme_changed(); }
+    // The one it was last given, nothing done (#88): ours alone to set, so
+    // kept, not read back.
     void set_placeholder(const std::string& p) override
     {
+        if (placeholder_ && *placeholder_ == p) return;
+        placeholder_ = p;
         SendMessageW(h_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(wide(p).c_str()));
     }
+    std::optional<std::string> placeholder_;  // the cue banner last set
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
     void command(WORD code) override
@@ -3133,6 +3196,7 @@ public:
     // an automation client listens, and a dialog has many of these.
     void set_items(std::vector<std::string> items) override
     {
+        if (items == items_) return;  // (#88)
         items_ = std::move(items);
         filled_ = false;
         show_current_only();
@@ -3141,6 +3205,7 @@ public:
     int current() const override { return filled_ ? int(SendMessageW(h_, CB_GETCURSEL, 0, 0)) : current_; }
     void set_current(int i) override
     {
+        if (i == current()) return;  // (#88)
         current_ = i;
         if (filled_)
             SendMessageW(h_, CB_SETCURSEL, WPARAM(i), 0);
@@ -3310,6 +3375,8 @@ public:
     // Quiet, as set_text: the text put back is the app's, not the user's.
     void set_items(std::vector<std::string> items) override
     {
+        if (items == items_) return;  // (#88)
+        items_ = items;
         quiet_ = true;
         const std::wstring keep = window_text(h_);
         SendMessageW(h_, CB_RESETCONTENT, 0, 0);
@@ -3320,8 +3387,10 @@ public:
     std::string text() const override { return narrow(window_text(h_)); }
     void set_text(const std::string& t) override
     {
+        const std::wstring w = wide(t);
+        if (w == window_text(h_)) return;  // (#88)
         quiet_ = true;
-        SetWindowTextW(h_, wide(t).c_str());
+        SetWindowTextW(h_, w.c_str());
         quiet_ = false;
     }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
@@ -3596,6 +3665,7 @@ private:
     HBRUSH brush_ = nullptr;
     COLORREF brush_color_ = CLR_INVALID;
     bool quiet_ = false;
+    std::vector<std::string> items_;  // as last set (the same again does nothing, #88)
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
@@ -3733,6 +3803,7 @@ public:
     }
     void set_text(const std::string& t, std::vector<span> spans) override
     {
+        if (t == text_ && spans.empty() && spans_.empty() && appended_.empty()) return;  // (#88)
         text_ = t;
         spans_ = spans;
         appended_.clear();
@@ -4306,6 +4377,8 @@ public:
         // 100% still crawled across. A decrease shows at once: go one past
         // the value, then back (at 100%, the range grows by one meanwhile).
         const int pos = int(std::lround(std::clamp(f, 0.f, 1.f) * 1000));
+        if (pos == pos_) return;  // (#88)
+        pos_ = pos;
         if (pos == 1000) SendMessageW(h_, PBM_SETRANGE32, 0, 1001);
         SendMessageW(h_, PBM_SETPOS, WPARAM(pos + 1), 0);
         SendMessageW(h_, PBM_SETPOS, WPARAM(pos), 0);
@@ -4317,11 +4390,13 @@ public:
         SetWindowLongPtrW(h_, GWL_STYLE, GetWindowLongPtrW(h_, GWL_STYLE) | PBS_MARQUEE);
         SendMessageW(h_, PBM_SETMARQUEE, TRUE, 30);
         marquee_ = true;
+        pos_ = -1;
     }
     SIZE measure() override { return {px(160), px(16)}; }
 
 private:
     bool marquee_ = false;
+    int pos_ = 0;  // the position set (set_fraction: the same again does nothing)
 };
 
 // A row of control `h` (a list, a tree, tabs) at `dpi`, device px:
@@ -4503,6 +4578,7 @@ public:
     }
     void select(const std::string& id) override
     {
+        if (selected() == std::optional<std::string>(id)) return;  // (#88)
         lazy_tree::tracker::batch b(lazy_);
         quiet q(*this);
         if (!select_quietly(id)) TreeView_SelectItem(h_, nullptr);
@@ -4511,6 +4587,7 @@ public:
     {
         const auto it = by_id_.find(id);
         if (it == by_id_.end()) return;
+        if (((TreeView_GetItemState(h_, it->second, TVIS_EXPANDED) & TVIS_EXPANDED) != 0) == open) return;  // (#88)
         // Asks wait until the control's finished: a handler may destroy it.
         lazy_tree::tracker::batch b(lazy_);
         TreeView_Expand(h_, it->second, open ? TVE_EXPAND : TVE_COLLAPSE);
@@ -4523,7 +4600,7 @@ public:
     void set_check(const std::string& id, check_state st) override
     {
         const auto c = checks_.find(id);
-        if (c == checks_.end()) return;
+        if (c == checks_.end() || c->second == st) return;  // (#88)
         c->second = st;
         TreeView_SetItemState(h_, by_id_[id], INDEXTOSTATEIMAGEMASK(int(st) + 1),
                               TVIS_STATEIMAGEMASK);
@@ -5136,6 +5213,8 @@ public:
     }
     void set_date(rap::date d) override
     {
+        const rap::date now = date();
+        if (now.year == d.year && now.month == d.month && now.day == d.day) return;  // (#88)
         SYSTEMTIME st{};
         st.wYear = WORD(d.year);
         st.wMonth = WORD(d.month);
@@ -5189,15 +5268,20 @@ public:
     double value() const override { return value_; }
     void set_value(double v) override
     {
+        const double was = value_;
         value_ = std::clamp(v, min_, max_);
+        if (value_ == was && shown_) return;  // (#88)
+        shown_ = true;
         show();
     }
     void set_range(double mn, double mx) override
     {
+        if (mn == min_ && mx == max_) return;  // (#88)
         min_ = mn;
         max_ = mx;
         set_value(value_);
     }
+    bool shown_ = false;  // the value shown at least once (set_value)
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
     void command(WORD code) override
     {
@@ -5307,12 +5391,15 @@ public:
     void set_value(double v) override
     {
         const double t = std::clamp(map_.track(v), min_, max_);
-        set_ = {t == map_.track(v) ? v : map_.value(t), std::lround((t - min_) / step_)};
+        const auto next = std::pair{t == map_.track(v) ? v : map_.value(t), std::lround((t - min_) / step_)};
+        if (next == set_ && SendMessageW(h_, TBM_GETPOS, 0, 0) == next.second) return;  // (#88)
+        set_ = next;
         SendMessageW(h_, TBM_SETPOS, TRUE, set_.second);
         update_label();
     }
     void set_range(double mn, double mx) override
     {
+        if (map_.track(mn) == min_ && map_.track(mx) == max_) return;  // (#88)
         const double v = value();
         min_ = map_.track(mn);
         max_ = map_.track(mx);
@@ -5321,6 +5408,7 @@ public:
     }
     void set_marks(std::vector<std::pair<double, std::string>> marks) override
     {
+        if (marks == marks_) return;  // (#88)
         const bool ticks = !marks_.empty();
         const double v = value();
         marks_ = std::move(marks);
@@ -5450,6 +5538,7 @@ public:
     rap::color color() const override { return color_; }
     void set_color(rap::color c) override
     {
+        if (c.r == color_.r && c.g == color_.g && c.b == color_.b && c.a == color_.a) return;  // (#88)
         color_ = c;
         InvalidateRect(h_, nullptr, TRUE);
     }
@@ -5519,17 +5608,20 @@ public:
     }
     void set_text(const std::string& t) override
     {
+        if (t == text_) return;  // (#88)
         text_ = t;
         SetWindowTextW(h_, (mnemonic(t) + L"  ▾").c_str());
         win_.relayout();
     }
     void set_icon(const icon& icon) override
     {
+        if (same_icon(icon, icon_)) return;  // (#88)
         icon_ = icon;
         set_button_image(h_, win_, icon_, images_, path_icon_);
     }
     void set_pushed(bool p) override
     {
+        if (p == pushed_) return;  // (#88)
         pushed_ = p;
         SendMessageW(h_, BM_SETSTATE, p, 0);
     }
@@ -5607,6 +5699,7 @@ public:
     }
     void set_icon(const icon& icon) override
     {
+        if (same_icon(icon, icon_)) return;  // (#88)
         icon_ = icon;
         want_icon(icon_, 16, win_.dpi());
         InvalidateRect(h_, nullptr, TRUE);
@@ -5909,11 +6002,16 @@ public:
 
     void set_enabled(int id, bool e)
     {
+        if ((SendMessageW(h_, TB_ISBUTTONENABLED, WPARAM(id), 0) != 0) == e) return;  // (#88)
         SendMessageW(h_, TB_ENABLEBUTTON, WPARAM(id), MAKELPARAM(e, 0));
         update_tab_stop();
         repair_focus();
     }
-    void set_checked(int id, bool c) { SendMessageW(h_, TB_CHECKBUTTON, WPARAM(id), MAKELPARAM(c, 0)); }
+    void set_checked(int id, bool c)
+    {
+        if ((SendMessageW(h_, TB_ISBUTTONCHECKED, WPARAM(id), 0) != 0) == c) return;  // (#88)
+        SendMessageW(h_, TB_CHECKBUTTON, WPARAM(id), MAKELPARAM(c, 0));
+    }
     void set_text(int id, const std::string& text) { entries_[size_t(id) - 1].text = wide(text); }
     void set_icon(int id)
     {
@@ -6484,12 +6582,13 @@ void strip_button::focus() { strip_.focus_button(id_); }
 bool strip_button::has_focus() const { return strip_.button_has_focus(id_); }
 void strip_button::set_icon(const icon& icon)
 {
+    if (same_icon(icon, icon_)) return;  // (#88)
     icon_ = icon;
     strip_.set_icon(id_);
 }
 void strip_button::set_checked(bool c)
 {
-    if (!toggle_) return;
+    if (!toggle_ || c == checked_) return;  // (#88)
     checked_ = c;
     strip_.set_checked(id_, c);
 }
@@ -6913,6 +7012,7 @@ public:
 
     void set_model(list_model* m) override
     {
+        if (m == model_) return;  // (#88)
         if (model_) model_->remove_observer(this);
         model_ = m;
         if (model_) model_->add_observer(this);
@@ -6932,12 +7032,22 @@ public:
     }
     void select(const std::vector<size_t>& rows) override
     {
+        {
+            std::vector<size_t> want = rows;
+            std::sort(want.begin(), want.end());
+            want.erase(std::unique(want.begin(), want.end()), want.end());
+            if (want == selection()) return;  // (#88)
+        }
         quiet_ = true;
         ListView_SetItemState(h_, -1, 0, LVIS_SELECTED);
         for (size_t r : rows) ListView_SetItemState(h_, int(r), LVIS_SELECTED, LVIS_SELECTED);
         quiet_ = false;
     }
-    void set_current(size_t row) override { ListView_SetItemState(h_, int(row), LVIS_FOCUSED, LVIS_FOCUSED); }
+    void set_current(size_t row) override
+    {
+        if (current() == std::optional<size_t>(row)) return;  // (#88)
+        ListView_SetItemState(h_, int(row), LVIS_FOCUSED, LVIS_FOCUSED);
+    }
     void scroll_to(size_t row, scroll_align align) override
     {
         if (int(row) >= ListView_GetItemCount(h_)) return;
@@ -6994,6 +7104,8 @@ public:
     }
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
+        if (sort_shown_ && sort_shown_->first == column && sort_shown_->second == order) return;  // (#88)
+        sort_shown_ = std::pair{column, order};
         HWND header = ListView_GetHeader(h_);
         for (int i = 0; i < int(columns_.size()); ++i)
         {
@@ -7023,6 +7135,10 @@ public:
         if (!is_column_order(order, columns_.size())) return;
         std::vector<int> o;
         for (size_t i : order) o.push_back(int(i));
+        {
+            std::vector<int> now(o.size());
+            if (ListView_GetColumnOrderArray(h_, int(now.size()), now.data()) && now == o) return;  // (#88)
+        }
         ListView_SetColumnOrderArray(h_, int(o.size()), o.data());
         fill_last();
         InvalidateRect(h_, nullptr, FALSE);
@@ -7036,7 +7152,11 @@ public:
         for (size_t i = 0; i < w.size() && i < columns_.size(); ++i)
         {
             if (!(w[i] > 0)) continue;
-            widths_[i] = px(w[i]);
+            const int width = px(w[i]);
+            if (restored_[i] && widths_[i] == width &&
+                (!visible_[i] || ListView_GetColumnWidth(h_, int(i)) == width))
+                continue;  // (#88)
+            widths_[i] = width;
             restored_[i] = true;
             if (visible_[i]) ListView_SetColumnWidth(h_, int(i), widths_[i]);
         }
@@ -8474,6 +8594,8 @@ private:
     bool quiet_ = false;
     bool user_sized_ = false;  // the user has sized a column: stretch columns fit no more
     std::vector<bool> restored_;  // per column: given its width by set_column_widths
+    // The sort indicator as last set (the same again does nothing, #88).
+    std::optional<std::pair<std::optional<size_t>, sort_order>> sort_shown_;
     bool sel_pending_ = false;  // a selection change is posted, not yet reported
     com<ID2D1DCRenderTarget> row_target_;
     com<IDWriteRenderingParams> row_params_;  // GDI-classic, for row_target_'s smoothed text
@@ -8743,6 +8865,7 @@ public:
     int current() const override { return TabCtrl_GetCurSel(h_); }
     void set_current(int i) override
     {
+        if (TabCtrl_GetCurSel(h_) == i) return;  // (#88)
         TabCtrl_SetCurSel(h_, i);
         ensure_built(i);
         win_.relayout_at_once();
@@ -8881,6 +9004,7 @@ public:
     int current() const override { return std::max(0, int(SendMessageW(h_, LB_GETCURSEL, 0, 0))); }
     void set_current(int i) override
     {
+        if (i == shown_ && SendMessageW(h_, LB_GETCURSEL, 0, 0) == i) return;  // (#88)
         SendMessageW(h_, LB_SETCURSEL, WPARAM(i), 0);
         if (i == shown_) return;
         shown_ = i;
@@ -9387,6 +9511,7 @@ public:
     {
         const int i = state.index_of(id);
         if (i < 0) return;
+        if (state.current == i && TabCtrl_GetCurSel(h_) == i) return;  // (#88)
         state.current = i;
         TabCtrl_SetCurSel(h_, i);  // sends no TCN_SELCHANGE
     }
@@ -10307,10 +10432,15 @@ public:
         trace::scope step(trace::phase::drag_step, uintptr_t(parent_));
         std::vector<long> was = current();
         was.resize(panes.size(), 0);
-        sizes_.assign(panes.size(), 0);
+        std::vector<long> next(panes.size(), 0);
         for (size_t i = 0; i < panes.size(); ++i)
-            sizes_[i] = i < s.size() && s[i] > 0 ? long(s[i] * win_.scale()) : was[i];
+            next[i] = i < s.size() && s[i] > 0 ? long(s[i] * win_.scale()) : was[i];
+        // The sizes it has (those it keeps, which a layout places from, or
+        // as they are now): no relayout (#88).
+        const bool same = next == was || (sizes_.size() == panes.size() && next == sizes_);
+        sizes_ = std::move(next);
         asked_ = true;
+        if (same) return;
         win_.relayout();
     }
 
@@ -11531,6 +11661,7 @@ public:
     float device_scale() const override { return win_.scale(); }
     void set_cursor(cursor c) override
     {
+        if (c == cursor_) return;  // (#88)
         cursor_ = c;
         POINT pt;
         GetCursorPos(&pt);
@@ -12680,7 +12811,12 @@ public:
     int caption_height_ = 0;   // the frame extended by, as the strip was
     bool caption_hc_ = false;  // high contrast, as the frame was set for
 
-    void set_title(const std::string& t) override { SetWindowTextW(hwnd_, wide(t).c_str()); }
+    void set_title(const std::string& t) override
+    {
+        const std::wstring w = wide(t);
+        if (w == window_text(hwnd_)) return;  // (#88)
+        SetWindowTextW(hwnd_, w.c_str());
+    }
     void flush_layout() override
     {
         if (relayout_pending_) layout_now();
@@ -13034,6 +13170,7 @@ public:
     }
     void set_menu_bar_visible(bool on) override
     {
+        if (on == menu_bar_wanted_) return;  // (#88)
         menu_bar_wanted_ = on;
         if (menu_bar_ && !fullscreen_) SetMenu(hwnd_, on ? menu_bar_ : nullptr);
     }
@@ -14366,6 +14503,7 @@ public:
     // in every window now (before one is shown, it starts so).
     void set_color_scheme(color_scheme s) override
     {
+        if (palette::app_scheme() == palette::scheme_number(s)) return;  // (#88)
         palette::app_scheme() = palette::scheme_number(s);
         forget_theme_colors();
         apply_app_mode();
