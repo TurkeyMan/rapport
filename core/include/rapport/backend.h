@@ -247,7 +247,11 @@ struct look_options
     // platform's or the density's: scaled with the DPI and the text size,
     // never shorter than the font's line and 2 px. A list's or a tree's own
     // row_height wins over it; tab strips keep the density's. 0: unset, the
-    // platform's rows, as ever. Every backend.
+    // platform's rows, as ever. Every backend, with the platforms' own
+    // limits: on Windows a sidebar's rows (a list box's) are 255 device px
+    // at most, that cap winning over the scaling and the line-and-2 least,
+    // and a list's never under its font's line and 4 (the list view's own
+    // least).
     float row_height = 0;
 };
 
