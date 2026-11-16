@@ -133,6 +133,10 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-row-height-test-gtk3 gtk3_row_height_test.cpp)
         target_link_libraries(rapport-row-height-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
         add_dependencies(rapport-row-height-test-gtk3 rapport_gtk3)
+        # A setter given the value it has does nothing (#88).
+        add_executable(rapport-setters-noop-test-gtk3 gtk3_setters_noop_test.cpp)
+        target_link_libraries(rapport-setters-noop-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
+        add_dependencies(rapport-setters-noop-test-gtk3 rapport_gtk3)
     endif()
     # An entry's buttons on GTK 4: named, focusable, Tab order, menus.
     if(TARGET rapport_gtk4)
@@ -175,6 +179,10 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-row-height-test-gtk4 gtk4_row_height_test.cpp)
         target_link_libraries(rapport-row-height-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4)
         add_dependencies(rapport-row-height-test-gtk4 rapport_gtk4)
+        # A setter given the value it has does nothing (#88).
+        add_executable(rapport-setters-noop-test-gtk4 gtk4_setters_noop_test.cpp)
+        target_link_libraries(rapport-setters-noop-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4)
+        add_dependencies(rapport-setters-noop-test-gtk4 rapport_gtk4)
     endif()
     if(TARGET rapport_qt6)
         find_package(Qt6 QUIET COMPONENTS Widgets)
@@ -202,6 +210,10 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-row-height-test-qt6 qt6_row_height_test.cpp)
         target_link_libraries(rapport-row-height-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
         add_dependencies(rapport-row-height-test-qt6 rapport_qt6)
+        # A setter given the value it has does nothing (#88).
+        add_executable(rapport-setters-noop-test-qt6 qt6_setters_noop_test.cpp)
+        target_link_libraries(rapport-setters-noop-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
+        add_dependencies(rapport-setters-noop-test-qt6 rapport_qt6)
         # QTest's keys go through Qt's shortcuts as a user's do.
         find_package(Qt6 QUIET COMPONENTS Test)
         if(TARGET Qt6::Test)
@@ -743,6 +755,19 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-row-height win32-row-height-native win32-row-height-app win32-row-height-app-native
                          win32-row-height-app-large PROPERTIES
         ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+    # A setter given the value it has does nothing (#88): no native call,
+    # no relayout, no repaint; a changed one as before. Never shown;
+    # static builds count through the backend's test hooks.
+    add_executable(rapport-win32-setters-noop-test win32_setters_noop_test.cpp)
+    target_link_libraries(rapport-win32-setters-noop-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-setters-noop-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-setters-noop-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-setters-noop-test rapport_win32)
+    add_test(NAME win32-setters-noop COMMAND rapport-win32-setters-noop-test)
+    set_tests_properties(win32-setters-noop PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
 
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build
