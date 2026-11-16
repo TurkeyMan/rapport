@@ -221,9 +221,12 @@ std::optional<float> asked_row(const std::optional<float>& own)
     if (g_app_row_height > 0) return g_app_row_height;
     return std::nullopt;
 }
-// An app's row height in a widget with font `f`: `logical` px (Qt's logical
-// px, the DPI already Qt's; the text size is the font's, so it's in the
-// clamp), never shorter than the font's line and 2.
+// An app's row height in a widget with font `f`: `logical` px, never
+// shorter than the font's line and 2. The rows are the logical value: Qt
+// scales logical px for the DPI itself. There's no text-size factor here:
+// Qt has no system text-size setting apart from the app font, so there's
+// no honest 100% size to divide by; a larger text size reaches the rows
+// only through the clamp (the font's line and 2).
 int fixed_row(const QFont& f, float logical)
 {
     return std::max(int(std::lround(logical)), QFontMetrics(f).height() + 2);
