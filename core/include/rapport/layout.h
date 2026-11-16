@@ -311,7 +311,9 @@ struct list
     // instead of the platform's or the density's: scaled with the DPI and
     // the text size, never shorter than the font's line and 2 px. It
     // overrides compact's and file_view's rows (compact's smaller font
-    // stays), in every look. Unset: the platform's, as ever.
+    // stays), in every look. Unset: the platform's, as ever. Limits: on
+    // Windows never under the font's line and 4 (the list view's least); on
+    // Qt the text size enters only through the line-and-2 least.
     std::optional<float> row_height;
     std::function<void()> on_selection_changed;
     std::function<void(size_t)> on_activate;
@@ -344,6 +346,7 @@ struct tree
     // Its rows' height, as list's row_height: scaled with the DPI and the
     // text size, never shorter than the font's line and 2 px, overriding
     // the platform's, the density's and a navigator's (its indent stays).
+    // On Qt the text size enters only through the line-and-2 least.
     std::optional<float> row_height;
     rap::tree** bind = nullptr;
 };

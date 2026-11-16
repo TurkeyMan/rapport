@@ -249,9 +249,11 @@ struct look_options
     // row_height wins over it; tab strips keep the density's. 0: unset, the
     // platform's rows, as ever. Every backend, with the platforms' own
     // limits: on Windows a sidebar's rows (a list box's) are 255 device px
-    // at most, that cap winning over the scaling and the line-and-2 least,
-    // and a list's never under its font's line and 4 (the list view's own
-    // least).
+    // at most, that cap winning over the scaling and the line-and-2 least
+    // (at extreme DPI and text sizes a row can be shorter than its line and
+    // 2), and a list's never under its font's line and 4 (the list view's
+    // own least); on Qt the text size enters only through the line-and-2
+    // least (Qt has no text size apart from the app's font).
     float row_height = 0;
 };
 
