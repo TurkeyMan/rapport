@@ -739,8 +739,10 @@ if(TARGET rapport_win32)
     add_test(NAME win32-row-height-native COMMAND rapport-win32-row-height-test --native)
     add_test(NAME win32-row-height-app COMMAND rapport-win32-row-height-test --app)
     add_test(NAME win32-row-height-app-native COMMAND rapport-win32-row-height-test --app --native)
-    set_tests_properties(win32-row-height win32-row-height-native win32-row-height-app win32-row-height-app-native PROPERTIES
-        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 120)
+    add_test(NAME win32-row-height-app-large COMMAND rapport-win32-row-height-test --app-large)
+    set_tests_properties(win32-row-height win32-row-height-native win32-row-height-app win32-row-height-app-native
+                         win32-row-height-app-large PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
 
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build

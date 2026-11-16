@@ -15,7 +15,10 @@
 // 20): a plain list, a file_view, a tree, a navigator and a sidebar's rows
 // 20 at 96 dpi and 30 at 144 (static builds: the DPI hook), a list's own
 // row_height (28) over it; a sidebar at its natural size every row whole.
-//   rapport-win32-row-height-test [--native] [--app]
+// --app-large: the app's 64, at 192 dpi and a 225% text size (static
+// builds: the hooks): a sidebar's rows capped at a list box's 255 device px,
+// and a sidebar at its natural size every row whole.
+//   rapport-win32-row-height-test [--native] [--app | --app-large]
 #include <rapport/rapport.h>
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -281,6 +284,51 @@ void sidebar_fits(rap::ui& ui)
     }
 }
 
+// --app-large: the app's 64 at 192 dpi and 225% text (288 asked for): a
+// sidebar's rows 255, a list box's most, and at its natural size whole.
+int run_app_large(rap::ui& ui)
+{
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+    rap::win32::set_dpi_for_tests(192);
+    rap::win32::set_text_scale_for_tests(2.25f);
+    rap::win32::set_message_font_size_for_tests(27.f);
+    using namespace rap::layout;
+    auto win = ui.create(window{"Row height large",
+                                {tabs{{"General", label{"one"}},
+                                      {"Appearance", label{"two"}},
+                                      {"Fonts", label{"three"}}}
+                                     .sidebar()}});
+    pump();
+    HWND top = FindWindowW(nullptr, L"Row height large");
+    const std::vector<HWND> boxes = top ? all_of(top, L"ListBox") : std::vector<HWND>{};
+    expect(boxes.size() == 1, "a sidebar in a window of its natural size, 192 dpi, 225% text");
+    if (boxes.size() == 1)
+    {
+        const int row = int(SendMessageW(boxes[0], LB_GETITEMHEIGHT, 0, 0));
+        expect(row == 255, "its rows a list box's most, 255 (288 asked for): " + str(row));
+        RECT client{};
+        GetClientRect(boxes[0], &client);
+        for (int i = 0; i < 3; ++i)
+        {
+            RECT r{};
+            SendMessageW(boxes[0], LB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&r));
+            expect(r.top >= client.top && r.bottom <= client.bottom,
+                   "its row " + str(i) + " whole, " + str(r.top) + ".." + str(r.bottom) + " in 0.." +
+                       str(client.bottom));
+        }
+    }
+    rap::win32::set_dpi_for_tests(0);
+    rap::win32::set_text_scale_for_tests(1.f);
+    rap::win32::set_message_font_size_for_tests(0);
+    std::printf(fails ? "%d failed\n" : "all passed\n", fails);
+    return fails ? 1 : 0;
+#else
+    (void)ui;
+    note("skipped: the DPI and text size hooks are static builds'");
+    return 77;
+#endif
+}
+
 int run_app(rap::ui& ui)
 {
     using namespace rap::layout;
@@ -319,11 +367,12 @@ int run_app(rap::ui& ui)
 
 int main(int argc, char** argv)
 {
-    bool native = false, app = false;
+    bool native = false, app = false, app_large = false;
     for (int i = 1; i < argc; ++i)
     {
         if (std::string(argv[i]) == "--native") native = true;
         if (std::string(argv[i]) == "--app") app = true;
+        if (std::string(argv[i]) == "--app-large") app_large = true;
     }
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
     rap::win32::set_text_scale_for_tests(1.f);
@@ -332,9 +381,11 @@ int main(int argc, char** argv)
     rap::load_options options{.backend = "win32"};
     if (native) options.look.controls = rap::control_style::native;
     if (app) options.look.row_height = 20;
+    if (app_large) options.look.row_height = 64;
     auto ui = rap::ui::load(argc, argv, options);
     if (!ui) return 2;
     if (app) return run_app(**ui);
+    if (app_large) return run_app_large(**ui);
     std::printf("%s\n", native ? "native" : "the platform's look");
 
     using namespace rap::layout;

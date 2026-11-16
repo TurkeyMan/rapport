@@ -5293,9 +5293,29 @@ private:
         }
         list->setFixedWidth(width + 48);
         // At its natural size every item whole: at least their rows' height
-        // and its frame.
+        // and its frame. Both again with a new font or style (a larger text
+        // size: the rows never under its line and 2), as a list's and a
+        // tree's rows are.
         if (g_app_row_height > 0)
-            list->setMinimumHeight(item_height * int(s.pages.size()) + 2 * list->frameWidth());
+        {
+            auto size_rows = [list]
+            {
+                const int h = fixed_row(list->font(), g_app_row_height);
+                for (int i = 0; i < list->count(); ++i) list->item(i)->setSizeHint(QSize(0, h));
+                list->setMinimumHeight(h * list->count() + 2 * list->frameWidth());
+                list->doItemsLayout();
+                list->updateGeometry();
+            };
+            size_rows();
+            hook(list,
+                 [size_rows](QEvent* e)
+                 {
+                     if (e->type() == QEvent::FontChange || e->type() == QEvent::ApplicationFontChange ||
+                         e->type() == QEvent::StyleChange)
+                         size_rows();
+                     return false;
+                 });
+        }
         // No focus outline round the current page's title: it's selected.
         list->setStyleSheet("QListWidget { outline: 0; } "
                             "QListWidget::item { padding-left: 12px; padding-right: 12px; }");

@@ -147,7 +147,8 @@ int run_own(rap::ui& ui)
                                       list{cols, &g_model}.compact().row_height(20).stretch(),
                                       list{cols, &g_model}.stretch(),
                                       tree{{{"Alpha", "a"}, {"Beta", "b"}}}.row_height(20).stretch(),
-                                      list{cols, &g_model}.row_height(32).stretch()}}}
+                                      list{cols, &g_model}.row_height(32).stretch(),
+                                      list{cols, &g_model}.row_height(1).stretch()}}}
                          .size(900_px, 400_px));
     win->show();
     pump();
@@ -155,8 +156,15 @@ int run_own(rap::ui& ui)
     expect(top != nullptr, "the window");
     if (!top) return 1;
     const std::vector<GtkWidget*> lists = column_views(top), trees = tree_views(top);
-    expect(lists.size() == 4 && trees.size() == 1, "four lists and a tree");
-    if (lists.size() != 4 || trees.size() != 1) return 1;
+    expect(lists.size() == 5 && trees.size() == 1, "five lists and a tree");
+    if (lists.size() != 5 || trees.size() != 1) return 1;
+    // 1, far under the text: its line and 2, exactly (no room round the
+    // text where the rows are the app's).
+    {
+        GtkWidget* rows = rows_of(lists[4]);
+        const int now = first_row(rows), w = font_line(rows) + 2;
+        expect(now == w, "a list's rows its own 1: its line and 2, " + str(w) + ": " + str(now));
+    }
     // 32, taller than any list's own rows: the override itself.
     {
         GtkWidget* rows = rows_of(lists[3]);
@@ -194,6 +202,9 @@ int run_own(rap::ui& ui)
         expect(now == w && w >= 30, "at a 150% text size a list's rows " + str(w) + ": " + str(now));
         const int tnow = first_row_request(trees[0]), tw = want(trees[0], 20);
         expect(tnow == tw, "at a 150% text size a tree's rows " + str(tw) + ": " + str(tnow));
+        GtkWidget* small = rows_of(lists[4]);
+        const int snow = first_row_request(small), sw = font_line(small) + 2;
+        expect(snow == sw, "at a 150% text size a list's own 1: its larger line and 2, " + str(sw) + ": " + str(snow));
     }
     g_object_set(gtk_settings_get_default(), "gtk-xft-dpi", was, nullptr);
     pump();

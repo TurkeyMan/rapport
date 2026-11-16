@@ -164,6 +164,19 @@ int run_app(rap::ui& ui)
                        std::to_string(r.bottom()) + " in " + std::to_string(view.top()) + ".." +
                        std::to_string(view.bottom()));
         }
+        // A much larger font (a larger text size): its rows its line and 2
+        // at least, and its least height every row, again.
+        QFont big = l->font();
+        big.setPointSizeF(big.pointSizeF() * 3);
+        l->setFont(big);
+        spin();
+        const int line = QFontMetrics(l->font()).height();
+        const int row = l->visualItemRect(l->item(0)).height();
+        expect(row >= line + 2, "a larger font: its rows its line and 2, " + std::to_string(line + 2) + ": " +
+                                    std::to_string(row));
+        const int least = row * l->count() + 2 * l->frameWidth();
+        expect(l->minimumHeight() >= least, "a larger font: its least height every row, " + std::to_string(least) +
+                                                ": " + std::to_string(l->minimumHeight()));
     }
     return 0;
 }

@@ -4365,7 +4365,8 @@ std::optional<float> asked_row(const std::optional<float>& own)
 // row_height), device px: `logical` at `dpi` and the text size, never
 // shorter than its font's line and 2 px. (A list view's rows are never
 // shorter than its font's line and 4, its own least, a tree's than an even
-// height: at a huge text size a little taller still.)
+// height: at a huge text size a little taller still. A sidebar's, a list
+// box's, are 255 device px at most.)
 int fixed_row(HWND h, float logical, UINT dpi)
 {
     const int row = int(std::lround(logical * float(dpi) / 96.f * text_scale()));
@@ -8858,12 +8859,18 @@ public:
     // A row's height: the density's where the controls are fluent (taller
     // where the text is: fluent_row); else the font's line and 12 px. What
     // the rows are given and what's measured.
-    // The app's row height (look_options::row_height) overrides them.
+    // The app's row height (look_options::row_height) overrides them. A
+    // list box's rows are 255 device px at most (LB_SETITEMHEIGHT refuses
+    // more): capped there, so what measure() reserves is what's set.
     int row_height() const
     {
-        if (g_app_row_height > 0) return fixed_row(h_, g_app_row_height, win_.dpi());
-        return density_ ? fluent_row(h_, *density_, density_->item, win_.dpi())
-                        : font_metrics(win_.dpi()).cy + px(12);
+        int row = 0;
+        if (g_app_row_height > 0)
+            row = fixed_row(h_, g_app_row_height, win_.dpi());
+        else
+            row = density_ ? fluent_row(h_, *density_, density_->item, win_.dpi())
+                           : font_metrics(win_.dpi()).cy + px(12);
+        return std::min(row, 255);
     }
     void apply_rows() { SendMessageW(h_, LB_SETITEMHEIGHT, 0, row_height()); }
     const band_density* density_ = nullptr;  // fluent controls': the rows' (set_in_band)

@@ -3277,7 +3277,11 @@ public:
             gtk_widget_add_css_class(w_, "data-table");
         }
         // An app's row height over them all (compact's font kept).
-        if (const auto row = asked_row(s.row_height)) set_row_height(w_, *row);
+        if (const auto row = asked_row(s.row_height))
+        {
+            fixed_rows_ = true;
+            set_row_height(w_, *row);
+        }
         if (s.soft_selection)
         {
             // The colours computed as gtk3 does, written into the rule:
@@ -4464,8 +4468,10 @@ private:
             gtk_widget_set_visible(image, false);
             child = GTK_WIDGET(g_object_new(rapport_cell_get_type(), "orientation",
                                             GTK_ORIENTATION_HORIZONTAL, "spacing", 4, nullptr));
-            gtk_widget_set_margin_top(child, 2);
-            gtk_widget_set_margin_bottom(child, 2);
+            // Room above and below its text, but none where the app sets
+            // the rows' height: they're its, never under the line and 2.
+            gtk_widget_set_margin_top(child, fixed_rows_ ? 0 : 2);
+            gtk_widget_set_margin_bottom(child, fixed_rows_ ? 0 : 2);
             if (checks_ && ctx.column == 0)
             {
                 // The row's checkbox. bind_cell sets it from the model with
@@ -4715,6 +4721,7 @@ private:
     bool suppress_sort_ = false;
     bool alive_ = true;
     bool checks_ = false;  // a check button at the start of column 0
+    bool fixed_rows_ = false;  // an app's row height (spec or look): no room round the text
 
     std::function<void()> sel_changed_;
     std::function<void(size_t)> activate_;
