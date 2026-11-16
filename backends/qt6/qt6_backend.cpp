@@ -5307,12 +5307,27 @@ private:
                 list->updateGeometry();
             };
             size_rows();
+            // After Qt has handled the change (queued): the new font's metrics
+            // and the new style's frame width are only the list's then. A
+            // burst of changes measures once.
+            auto pending = std::make_shared<bool>(false);
             hook(list,
-                 [size_rows](QEvent* e)
+                 [list, size_rows, pending](QEvent* e)
                  {
-                     if (e->type() == QEvent::FontChange || e->type() == QEvent::ApplicationFontChange ||
-                         e->type() == QEvent::StyleChange)
-                         size_rows();
+                     if ((e->type() == QEvent::FontChange || e->type() == QEvent::ApplicationFontChange ||
+                          e->type() == QEvent::StyleChange) &&
+                         !*pending)
+                     {
+                         *pending = true;
+                         QMetaObject::invokeMethod(
+                             list,
+                             [size_rows, pending]
+                             {
+                                 *pending = false;
+                                 size_rows();
+                             },
+                             Qt::QueuedConnection);
+                     }
                      return false;
                  });
         }

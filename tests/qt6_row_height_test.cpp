@@ -13,6 +13,8 @@
 #include <QApplication>
 #include <QFontMetrics>
 #include <QListWidget>
+#include <QProxyStyle>
+#include <QStyleFactory>
 #include <QTreeView>
 #include <QTreeWidget>
 
@@ -75,6 +77,20 @@ int row_of(QTreeView* v)
 {
     return v->visualRect(v->model()->index(0, 0)).height();
 }
+
+// The app's style with a frame of 10 px (PM_DefaultFrameWidth).
+class big_frame_style : public QProxyStyle
+{
+public:
+    big_frame_style()
+        : QProxyStyle(QStyleFactory::create("Fusion"))
+    {
+    }
+    int pixelMetric(PixelMetric m, const QStyleOption* o = nullptr, const QWidget* w = nullptr) const override
+    {
+        return m == PM_DefaultFrameWidth ? 10 : QProxyStyle::pixelMetric(m, o, w);
+    }
+};
 
 QWidget* top_titled(const char* title)
 {
@@ -177,6 +193,33 @@ int run_app(rap::ui& ui)
         const int least = row * l->count() + 2 * l->frameWidth();
         expect(l->minimumHeight() >= least, "a larger font: its least height every row, " + std::to_string(least) +
                                                 ": " + std::to_string(l->minimumHeight()));
+        // A thicker frame (10 px), by the app's style (PM_DefaultFrameWidth,
+        // a proxy style) and then by a style sheet: its least height the rows
+        // and the new frame exactly, measured once the style's the list's,
+        // every row whole.
+        auto framed = [&](const std::string& how)
+        {
+            const int rows = l->visualItemRect(l->item(0)).height() * l->count();
+            const int want = rows + 2 * l->frameWidth();
+            expect(l->frameWidth() >= 10 && l->minimumHeight() == want,
+                   how + ": its least height the rows and the frame, " + std::to_string(want) + ": " +
+                       std::to_string(l->minimumHeight()) + " (frame " + std::to_string(l->frameWidth()) + ")");
+            l->resize(l->width(), l->minimumHeight());
+            spin();
+            const QRect view = l->viewport()->rect();
+            for (int i = 0; i < l->count(); ++i)
+            {
+                const QRect r = l->visualItemRect(l->item(i));
+                expect(r.top() >= view.top() && r.bottom() <= view.bottom(),
+                       how + ": its row " + std::to_string(i) + " whole at its least height");
+            }
+        };
+        QApplication::setStyle(new big_frame_style);
+        spin();
+        framed("the app's style, a frame of 10");
+        l->setStyleSheet(l->styleSheet() + " QListWidget { border: 10px solid gray; }");
+        spin();
+        framed("a style sheet, a frame of 10");
     }
     return 0;
 }
