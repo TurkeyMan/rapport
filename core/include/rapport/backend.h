@@ -21,7 +21,8 @@
 namespace rap
 {
 
-inline constexpr int abi_version = 87;
+// 88: spec::list and spec::tree's row_height, look_options::row_height.
+inline constexpr int abi_version = 88;
 
 // Light or dark: as the desktop has it (system), or the app's own choice
 // (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for
@@ -241,6 +242,13 @@ struct look_options
     // at which of WinUI's densities.
     control_style controls = control_style::automatic;
     rap::density density = rap::density::standard;
+    // Every list's, tree's and sidebar's (tabs::sidebar) rows this tall, in
+    // logical px (at 96 DPI and a 100% text size), instead of the
+    // platform's or the density's: scaled with the DPI and the text size,
+    // never shorter than the font's line and 2 px. A list's or a tree's own
+    // row_height wins over it; tab strips keep the density's. 0: unset, the
+    // platform's rows, as ever. Every backend.
+    float row_height = 0;
 };
 
 // Backend entry point. Returns nullptr if the ABI doesn't match or the

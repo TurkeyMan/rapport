@@ -128,6 +128,11 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
                                                                        ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
         target_link_libraries(rapport-path-icons-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
         add_dependencies(rapport-path-icons-test-gtk3 rapport_gtk3)
+        # An app's row height (list::row_height, tree::row_height,
+        # look_options::row_height): the rows measured.
+        add_executable(rapport-row-height-test-gtk3 gtk3_row_height_test.cpp)
+        target_link_libraries(rapport-row-height-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
+        add_dependencies(rapport-row-height-test-gtk3 rapport_gtk3)
     endif()
     # An entry's buttons on GTK 4: named, focusable, Tab order, menus.
     if(TARGET rapport_gtk4)
@@ -166,6 +171,10 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
                                                                        ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
         target_link_libraries(rapport-path-icons-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4)
         add_dependencies(rapport-path-icons-test-gtk4 rapport_gtk4)
+        # An app's row height: the rows measured (as -gtk3's).
+        add_executable(rapport-row-height-test-gtk4 gtk4_row_height_test.cpp)
+        target_link_libraries(rapport-row-height-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4)
+        add_dependencies(rapport-row-height-test-gtk4 rapport_gtk4)
     endif()
     if(TARGET rapport_qt6)
         find_package(Qt6 QUIET COMPONENTS Widgets)
@@ -189,6 +198,10 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         target_compile_definitions(rapport-back-forward-test-qt6 PRIVATE RAPPORT_TEST_QT6)
         target_link_libraries(rapport-back-forward-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
         add_dependencies(rapport-back-forward-test-qt6 rapport_qt6)
+        # An app's row height: the rows measured (as -gtk3's).
+        add_executable(rapport-row-height-test-qt6 qt6_row_height_test.cpp)
+        target_link_libraries(rapport-row-height-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
+        add_dependencies(rapport-row-height-test-qt6 rapport_qt6)
         # QTest's keys go through Qt's shortcuts as a user's do.
         find_package(Qt6 QUIET COMPONENTS Test)
         if(TARGET Qt6::Test)
@@ -710,6 +723,24 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-fluent-rows-compact-transitions PROPERTIES
         ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light;RAPPORT_DENSITY=compact" SKIP_RETURN_CODE 77 RUN_SERIAL
         TRUE TIMEOUT 180)
+
+    # An app's row height for a list or a tree (list::row_height,
+    # tree::row_height): its rows, scaled with the DPI and the text size
+    # (static builds: the hooks), overriding the density's, a compact list's,
+    # a file_view's and a navigator's; native too. Never shown.
+    add_executable(rapport-win32-row-height-test win32_row_height_test.cpp)
+    target_link_libraries(rapport-win32-row-height-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-row-height-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-row-height-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-row-height-test rapport_win32)
+    add_test(NAME win32-row-height COMMAND rapport-win32-row-height-test)
+    add_test(NAME win32-row-height-native COMMAND rapport-win32-row-height-test --native)
+    add_test(NAME win32-row-height-app COMMAND rapport-win32-row-height-test --app)
+    add_test(NAME win32-row-height-app-native COMMAND rapport-win32-row-height-test --app --native)
+    set_tests_properties(win32-row-height win32-row-height-native win32-row-height-app win32-row-height-app-native PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 TIMEOUT 120)
 
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build

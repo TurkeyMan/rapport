@@ -87,6 +87,7 @@ public:
 class null_tree : public stub<rap::tree>
 {
 public:
+    std::optional<float> row_height;  // spec::tree::row_height, kept
     void set_items(std::vector<tree_item> items) override
     {
         lazy_tree::tracker::batch b(lazy_);
@@ -284,6 +285,7 @@ public:
         if (model) model->add_observer(this);
     }
     void model_reset() override { rows = model ? model->row_count() : 0; }
+    std::optional<float> row_height;  // spec::list::row_height, kept
     void rows_changed(size_t, size_t) override {}
     void rows_inserted(size_t, size_t) override {}
     void rows_removed(size_t, size_t) override {}
@@ -748,8 +750,9 @@ private:
             std::printf("%s%s%s", i ? ", " : "", s.columns[i].title.c_str(),
                         s.columns[i].painted ? "*" : "");
         std::printf("] rows=%zu", s.model ? s.model->row_count() : 0);
+        if (s.row_height) std::printf(" row_height=%g", *s.row_height);
         suffix(n);
-        make<null_list>(n);
+        make<null_list>(n)->row_height = s.row_height;
     }
     void visit(const node& n, const spec::toolbar& s, int d)
     {
@@ -808,8 +811,11 @@ private:
     void visit(const node& n, const spec::tree& s, int)
     {
         std::printf("tree (%zu)", s.items.size());
+        if (s.row_height) std::printf(" row_height=%g", *s.row_height);
         suffix(n);
-        make<null_tree>(n)->set_items(s.items);
+        auto* t = make<null_tree>(n);
+        t->row_height = s.row_height;
+        t->set_items(s.items);
     }
     void visit(const node& n, const spec::buttons& s, int)
     {
