@@ -991,8 +991,14 @@ void run_icons(rap::ui& ui)
         // Set, swapped, removed.
         t->set_page_icon(2, rap::icon::named(minus));
         expect(icon(2) == minus && title_of(2) == "C", kind + "C's set, before its title: " + icon(2));
+        GtkWidget* a_image = header_icon(header(0));
         t->set_page_icon(0, rap::icon::named(minus));
         expect(icon(0) == minus && title_of(0) == "A", kind + "A's swapped: " + icon(0));
+        // One theme icon for another: the same GtkImage, given the new one.
+        if (gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), plus.c_str()) &&
+            gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), minus.c_str()))
+            expect(a_image && GTK_IS_IMAGE(a_image) && header_icon(header(0)) == a_image,
+                   kind + "A's named icon swapped for another: the same GtkImage, not replaced");
         t->set_page_icon(0, rap::icon{});
         expect(icon(0).empty() && title_of(0) == "A", kind + "A's removed: " + icon(0));
 

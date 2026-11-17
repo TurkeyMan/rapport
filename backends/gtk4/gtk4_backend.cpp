@@ -2734,6 +2734,28 @@ public:
             icon_ = i;
             return;
         }
+        // One theme icon for another, or one file type's for another: the
+        // same GtkImage, given the new one (a widget's kind changed: below,
+        // a new widget).
+        if (old && GTK_IS_IMAGE(old) && i.path.empty() && !only_drawn(i))
+        {
+            const GtkImageType kind = gtk_image_get_storage_type(GTK_IMAGE(old));
+            if (!i.name.empty() && i.file.empty() && kind == GTK_IMAGE_ICON_NAME &&
+                gtk_icon_theme_has_icon(gtk_icon_theme_get_for_display(gtk_widget_get_display(old)), i.name.c_str()))
+            {
+                gtk_image_set_from_icon_name(GTK_IMAGE(old), i.name.c_str());
+                gtk_image_set_pixel_size(GTK_IMAGE(old), 16);
+                icon_ = i;
+                return;
+            }
+            if (!i.file.empty() && kind == GTK_IMAGE_GICON)
+            {
+                gtk_image_set_from_gicon(GTK_IMAGE(old), file_type_icon(i.file));
+                gtk_image_set_pixel_size(GTK_IMAGE(old), 16);
+                icon_ = i;
+                return;
+            }
+        }
         icon_ = i;
         if (old) gtk_box_remove(GTK_BOX(slot_), old);
         GtkWidget* w = i ? make_icon(i) : nullptr;

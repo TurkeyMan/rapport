@@ -1056,7 +1056,17 @@ void page_icons(rap::ui& ui, bool sidebar)
     expect(b_icon > b_bare, kind + "B with an icon: its heading wider, " + str(b_bare) + " -> " + str(b_icon));
     // Swapped: A's go-up for go-down, its width kept.
     const int a_width = nat_w(h[0]);
+    GtkWidget* a_image = icon_in(h[0]);
+    if (a_image) g_object_ref(a_image);  // (held: its address can't be reused)
     t->set_page_icon(0, rap::icon::named("go-down"));
+    {
+        GtkIconTheme* theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
+        // One theme icon for another: the same GtkImage, given the new one.
+        if (gtk_icon_theme_has_icon(theme, "go-up") && gtk_icon_theme_has_icon(theme, "go-down"))
+            expect(a_image && GTK_IS_IMAGE(a_image) && icon_in(h[0]) == a_image,
+                   kind + "A's named icon swapped for another: the same GtkImage, not replaced");
+        if (a_image) g_object_unref(a_image);
+    }
     expect(named_as(icon_at(0), "go-down"), kind + "A's icon swapped, go-down: " + icon_at(0));
     expect(nat_w(h[0]) == a_width, kind + "A's icon swapped: its width kept, " + str(a_width) + ": " + str(nat_w(h[0])));
     // A file type's icon.
