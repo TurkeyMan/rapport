@@ -501,7 +501,9 @@ HBRUSH tab_body_under_scan(HWND control)
     GetWindowRect(control, &at);
     for (HWND s = GetWindow(control, GW_HWNDFIRST); s; s = GetWindow(s, GW_HWNDNEXT))
     {
-        if (s == control || !IsWindowVisible(s)) continue;
+        // Shown as its siblings are (its style: a window not shown yet, or
+        // printed, has its pages' grounds as it will have on screen).
+        if (s == control || !(GetWindowLongPtrW(s, GWL_STYLE) & WS_VISIBLE)) continue;
         wchar_t cls[32] = {};
         GetClassNameW(s, cls, 32);
         if (_wcsicmp(cls, WC_TABCONTROLW)) continue;
@@ -590,7 +592,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         RECT c;
         GetClientRect(wnd, &c);
         const int saved = SaveDC(dc);
-        FillRect(dc, &c, theme_brush(surface_of(wnd)));
+        FillRect(dc, &c, content_brush_of(wnd));
         paint_toolbar_band(wnd, dc);  // (a top-level window's, if it has one)
         paint_group_frames(wnd, dc);
         RestoreDC(dc, saved);
@@ -640,8 +642,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
                                               : link              ? theme_color::link
                                                                   : surface_text_of(wnd))));
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
-        HBRUSH on_tab = dark_mode() ? nullptr : tab_body_under(c);
-        result = reinterpret_cast<LRESULT>(on_tab ? on_tab : surface_brush_of(c));
+        result = reinterpret_cast<LRESULT>(surface_brush_of(c));
         return true;
     }
     // Fields and drop-down lists, dark in dark mode (their defaults are
@@ -811,7 +812,7 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             // panel's own paint is done: no loop if the copy fails each time.
             if (!paint_pane(h))
             {
-                FillRect(dc, &ps.rcPaint, theme_brush(surface_of(h)));
+                FillRect(dc, &ps.rcPaint, content_brush_of(h));
                 for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
                     RedrawWindow(c, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
             }
@@ -4285,7 +4286,7 @@ public:
             RECT text{rect_.left + win_.px(9), rect_.top, rect_.left + win_.px(9) + t.cx, rect_.top + t.cy};
             RECT gap = text;
             InflateRect(&gap, win_.px(2), 0);
-            FillRect(dc, &gap, theme_brush(surface_of(parent_)));
+            FillRect(dc, &gap, content_brush_of(parent_));
             SetBkMode(dc, TRANSPARENT);
             if (theme)
                 DrawThemeText(theme, dc, BP_GROUPBOX, GBS_NORMAL, title_.c_str(), -1, DT_SINGLELINE | DT_LEFT, 0,
@@ -8724,8 +8725,8 @@ void draw_dark_tabs(HWND h, HDC dc)
 {
     RECT c;
     GetClientRect(h, &c);
-    const theme_color surface = surface_of(h);
-    FillRect(dc, &c, theme_brush(surface));
+    const HBRUSH surface = content_brush_of(h);
+    FillRect(dc, &c, surface);
     const UINT dpi = dpi_of(h);
     auto px = [dpi](int v) { return MulDiv(v, int(dpi), 96); };
     RECT page = c;
@@ -8746,9 +8747,9 @@ void draw_dark_tabs(HWND h, HDC dc)
         const bool selected = i == current, hot = PtInRect(&r, pointer);
         if (selected) InflateRect(&r, px(2), px(2));
         FillRect(dc, &r,
-                 theme_brush(selected ? theme_color::card
-                             : hot    ? theme_color::hover
-                                      : surface));
+                 selected ? theme_brush(theme_color::card)
+                 : hot    ? theme_brush(theme_color::hover)
+                          : surface);
         FrameRect(dc, &r, theme_brush(theme_color::border));
         if (selected)
         {
@@ -8801,7 +8802,8 @@ void draw_base_tabs(HWND h, HDC dc)
 {
     RECT c;
     GetClientRect(h, &c);
-    FillRect(dc, &c, theme_brush(theme_color::base));
+    const HBRUSH surface = content_brush_of(h);
+    FillRect(dc, &c, surface);
     // Its own erase left out: around the tabs is the surface, filled here.
     DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
     RECT body = c;
@@ -8809,9 +8811,9 @@ void draw_base_tabs(HWND h, HDC dc)
     if (body.right <= body.left || body.bottom <= body.top) return;
     const POINT mid{(body.left + body.right) / 2, (body.top + body.bottom) / 2};
     const COLORREF face = GetPixel(dc, mid.x, mid.y);
-    if (face == CLR_INVALID || face == color_ref(theme_color_of(theme_color::base))) return;
+    if (face == CLR_INVALID || face == color_ref(content_color_of(h))) return;
     // The body's pixels, out to the page's edge, whatever its inset.
-    HGDIOBJ old = SelectObject(dc, theme_brush(theme_color::base));
+    HGDIOBJ old = SelectObject(dc, surface);
     ExtFloodFill(dc, mid.x, mid.y, face, FLOODFILLSURFACE);
     SelectObject(dc, old);
 }
@@ -10237,7 +10239,7 @@ private:
         IntersectRect(&r, &r, &c);
         HDC dc = GetDC(h_);
         FillRect(dc, &r,
-                 dark_mode() || surface_of(h_) == theme_color::base ? theme_brush(surface_of(h_))
+                 dark_mode() || surface_of(h_) == theme_color::base ? content_brush_of(h_)
                                                                     : GetSysColorBrush(COLOR_3DFACE));
         ReleaseDC(h_, dc);
     }
@@ -10506,8 +10508,8 @@ private:
     {
         RECT c;
         GetClientRect(h_, &c);
-        const theme_color surface = surface_of(h_);
-        FillRect(dc, &c, theme_brush(surface));
+        const HBRUSH surface = content_brush_of(h_);
+        FillRect(dc, &c, surface);
         HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h_, WM_GETFONT, 0, 0)));
         SetBkMode(dc, TRANSPARENT);
         const int n = TabCtrl_GetItemCount(h_), current = TabCtrl_GetCurSel(h_);
@@ -10524,9 +10526,9 @@ private:
             const bool selected = i == current, hot = PtInRect(&r, pointer);
             if (selected) InflateRect(&r, px(2), px(2));
             FillRect(dc, &r,
-                     theme_brush(selected ? theme_color::card
-                                 : hot    ? theme_color::hover
-                                          : surface));
+                     selected ? theme_brush(theme_color::card)
+                     : hot    ? theme_brush(theme_color::hover)
+                              : surface);
             FrameRect(dc, &r, theme_brush(theme_color::border));
             if (selected)
             {
@@ -14830,6 +14832,7 @@ public:
         trace::install_message_hooks();
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
         set_control_style(look.controls, look.density);
+        set_content_surface(look.content_surface);
         g_app_row_height = look.row_height;
         // Per-monitor DPI awareness (v2) where the system has it.
         using fn_t = BOOL(WINAPI*)(HANDLE);
@@ -15727,6 +15730,12 @@ private:
 };
 
 }  // namespace
+
+HBRUSH tab_body_brush_under(HWND control)
+{
+    return tab_body_under(control);
+}
+
 }  // namespace rap::win32
 
 RAPPORT_BACKEND_ENTRY(win32, rap::win32::win32_backend)

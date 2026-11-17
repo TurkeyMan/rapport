@@ -499,6 +499,22 @@ if(TARGET rapport_win32)
     add_test(NAME win32-base-surface-light COMMAND rapport-win32-base-surface-test)
     set_tests_properties(win32-base-surface-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
 
+    # What a base surface window's content sits on (look_options::content_surface)
+    # and fluent controls' ground on a tab page; never shown.
+    add_executable(rapport-win32-content-surface-test win32_content_surface_test.cpp)
+    target_link_libraries(rapport-win32-content-surface-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-content-surface-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-content-surface-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-content-surface-test rapport_win32)
+    foreach(mode automatic plain layer native native-layer)
+        foreach(scheme light dark)
+            add_test(NAME win32-content-surface-${mode}-${scheme}
+                     COMMAND rapport-win32-content-surface-test ${mode} ${scheme})
+        endforeach()
+    endforeach()
+
     # The document tabs' row beside its tabs: the window's surface, base or not.
     add_executable(rapport-win32-document-tabs-surface-test win32_document_tabs_surface_test.cpp)
     target_link_libraries(rapport-win32-document-tabs-surface-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi)

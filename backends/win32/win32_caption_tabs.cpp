@@ -1991,7 +1991,7 @@ bool toolbar_band(HWND top, RECT& band)
 // strip's line's colour); high contrast's window and divider.
 toolbar_band_colors band_colors(HWND top)
 {
-    const color surface = theme_color_of(surface_of(top));
+    const color surface = content_color_of(top);
     if (high_contrast()) return {surface, surface, theme_color_of(theme_color::divider)};
     const winui::chrome_palette& p = dark_mode() ? winui::dark : winui::light;
     return {p.layer_on_mica_base_alt_default, p.layer_on_mica_base_alt_tertiary, winui::over(p.stroke, surface)};
