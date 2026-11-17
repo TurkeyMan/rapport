@@ -518,28 +518,50 @@ struct scanning_tab
     scanning_tab(const scanning_tab&) = delete;
     scanning_tab& operator=(const scanning_tab&) = delete;
 };
-// Its body: called by the scan, the tab marked scanning already.
-HBRUSH tab_body_brush(HWND tab)
+void traced_tab_adjust(HWND h, BOOL larger, RECT* rect);
+// A synchronous call into a tab (a message it runs code for: TCM_ADJUSTRECT,
+// WM_PRINTCLIENT), then whether all the scan stands on still does: the tab
+// and the control asking still windows, the tab bodies and the layout pass
+// as they were. Every such call of a scan goes through it.
+template <class Call>
+bool call_tab(HWND tab, HWND control, const tab_scan& scan, Call&& call)
+{
+    call();
+    return scan.still(tab) && IsWindow(control);
+}
+// Its body: called by the scan, the tab marked scanning already. Refused
+// (nothing found, nothing kept) if the tab or the control asking went, or
+// anything changed, on any call into it.
+HBRUSH tab_body_brush(HWND tab, HWND control, bool& refused)
 {
     auto& m = tab_bodies();
     if (auto it = m.find(tab); it != m.end()) return tab_body_brush_of(it->second);
     const tab_scan scan;
-    RECT client;
-    GetClientRect(tab, &client);
+    RECT client{};
+    if (!GetClientRect(tab, &client)) return nullptr;
     RECT body = client;
-    traced_tab_adjust(tab, FALSE, &body);
+    if (!call_tab(tab, control, scan, [&] { traced_tab_adjust(tab, FALSE, &body); }))
+    {
+        refused = true;
+        return nullptr;
+    }
     if (client.right <= 0 || client.bottom <= 0 || body.right <= body.left || body.bottom <= body.top) return nullptr;
     HDC screen = GetDC(tab), mem = CreateCompatibleDC(screen);
     HBITMAP bitmap = CreateCompatibleBitmap(screen, client.right, client.bottom);
     HGDIOBJ old = SelectObject(mem, bitmap);
-    SendMessageW(tab, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND);
-    const COLORREF colour = GetPixel(mem, (body.left + body.right) / 2, (body.top + body.bottom) / 2);
+    const bool still = call_tab(tab, control, scan,
+                                [&] { SendMessageW(tab, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND); });
+    const COLORREF colour = still ? GetPixel(mem, (body.left + body.right) / 2, (body.top + body.bottom) / 2) : CLR_INVALID;
     SelectObject(mem, old);
     DeleteObject(bitmap);
     DeleteDC(mem);
     ReleaseDC(tab, screen);
     // Gone or changed meanwhile: no body, the window's colour, not kept.
-    if (colour == CLR_INVALID || !scan.still(tab)) return nullptr;
+    if (!still || colour == CLR_INVALID)
+    {
+        refused = true;
+        return nullptr;
+    }
     std::erase_if(m, [](const auto& e) { return !IsWindow(e.first); });
     m[tab] = colour;
     return tab_body_brush_of(colour);
@@ -611,8 +633,8 @@ HBRUSH tab_body_under(HWND control)
 }
 HBRUSH tab_body_under_scan(HWND control, bool& refused)
 {
-    RECT at;
-    GetWindowRect(control, &at);
+    RECT at{};
+    if (!GetWindowRect(control, &at)) return nullptr;
     for (HWND s = GetWindow(control, GW_HWNDFIRST); s; s = GetWindow(s, GW_HWNDNEXT))
     {
         // Shown as its siblings are (its style: a window not shown yet, or
@@ -630,12 +652,21 @@ HBRUSH tab_body_under_scan(HWND control, bool& refused)
             return nullptr;
         }
         const scanning_tab asking(s);
-        RECT body;
-        GetClientRect(s, &body);
-        traced_tab_adjust(s, FALSE, &body);
-        MapWindowPoints(s, nullptr, reinterpret_cast<POINT*>(&body), 2);
-        RECT overlap;
-        if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s);
+        const tab_scan scan;
+        RECT body{};
+        if (!GetClientRect(s, &body)) continue;
+        // What TCM_ADJUSTRECT ran may have destroyed the tab or the control
+        // asking, or changed the tab bodies: nothing from here is kept.
+        if (!call_tab(s, control, scan, [&] { traced_tab_adjust(s, FALSE, &body); }))
+        {
+            refused = true;
+            return nullptr;
+        }
+        POINT corners[2]{{body.left, body.top}, {body.right, body.bottom}};
+        if (!ClientToScreen(s, &corners[0]) || !ClientToScreen(s, &corners[1])) continue;
+        body = RECT{corners[0].x, corners[0].y, corners[1].x, corners[1].y};
+        RECT overlap{};
+        if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s, control, refused);
     }
     return nullptr;
 }

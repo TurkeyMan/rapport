@@ -575,7 +575,7 @@ int main(int argc, char** argv)
         // WM_PRINTCLIENT does it (once), through a subclass of the test's.
         if (!g_dark && seams.ok)
         {
-            enum class does { destroy_control, destroy_tab, retheme };
+            enum class does { destroy_control, destroy_tab, retheme, destroy_tab_on_adjust };
             struct hook_data
             {
                 does what;
@@ -585,7 +585,15 @@ int main(int argc, char** argv)
             auto hook = [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) -> LRESULT
             {
                 auto* d = reinterpret_cast<hook_data*>(ref);
-                if (msg == WM_PRINTCLIENT && !d->done)
+                // The tab destroying itself on the scan's first message to
+                // it (TCM_ADJUSTRECT) instead of its print.
+                if (d->what == does::destroy_tab_on_adjust && msg == TCM_ADJUSTRECT && !d->done)
+                {
+                    d->done = true;
+                    DestroyWindow(h);
+                    return 0;
+                }
+                if (d->what != does::destroy_tab_on_adjust && msg == WM_PRINTCLIENT && !d->done)
                 {
                     d->done = true;
                     if (d->what == does::destroy_control) DestroyWindow(d->control);
@@ -599,12 +607,13 @@ int main(int argc, char** argv)
                 return DefSubclassProc(h, msg, wp, lp);
             };
             int n = 0;
-            for (does what : {does::destroy_control, does::destroy_tab, does::retheme})
+            for (does what : {does::destroy_control, does::destroy_tab, does::retheme, does::destroy_tab_on_adjust})
             {
                 const std::wstring title = L"Content surface, reentrant " + std::to_wstring(++n);
-                const std::string name = what == does::destroy_control ? "the control asking destroyed"
-                                         : what == does::destroy_tab   ? "the tab destroyed"
-                                                                       : "the tab bodies forgotten";
+                const std::string name = what == does::destroy_control         ? "the control asking destroyed"
+                                         : what == does::destroy_tab           ? "the tab destroyed"
+                                         : what == does::destroy_tab_on_adjust ? "the tab destroyed on its adjust"
+                                                                               : "the tab bodies forgotten";
                 auto w = (*ui)->create(window{std::string(title.begin(), title.end()), {vbox{
                     tabs{{"One", vbox{entry{}.placeholder("Asking")}}, {"Two", label{"Second"}}},
                 }}}.size(360_px, 200_px));
@@ -616,6 +625,11 @@ int main(int argc, char** argv)
                     expect(false, name + ": the entry and the tab control found");
                     continue;
                 }
+                // At the screen's origin, as the window codex found it in
+                // (a dead tab's points mapped there are where a live one's
+                // are).
+                if (what == does::destroy_tab_on_adjust)
+                    SetWindowPos(t, nullptr, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
                 expect(!seams.known(tc[0]), name + ": its tab not measured yet");
                 hook_data d{what, e[0], tc[0], t};
                 SetWindowSubclass(tc[0], hook, 0x5eed, reinterpret_cast<DWORD_PTR>(&d));
@@ -623,7 +637,7 @@ int main(int argc, char** argv)
                 // the later ones after the tab's print is over).
                 const int found = seams.lookup(e[0]);
                 if (IsWindow(tc[0])) RemoveWindowSubclass(tc[0], hook, 0x5eed);
-                expect(d.done, name + ": the tab was printed for the lookup");
+                expect(d.done, name + ": the tab was sent the scan's message (its print, or its adjust)");
                 expect(!found, name + ": the lookup found no body (" + std::to_string(found) + ")");
                 expect(!seams.cached(e[0]), name + ": no answer kept for the control");
                 // (The control's going changes nothing of the tab's: its body,
@@ -635,7 +649,8 @@ int main(int argc, char** argv)
                 else
                 {
                     // Asked again, with nothing in the way: what's there now.
-                    const DWORD want = what == does::destroy_tab ? window_colour : tab_body(tc[0]);
+                    const DWORD want =
+                        what == does::destroy_tab || what == does::destroy_tab_on_adjust ? window_colour : tab_body(tc[0]);
                     const DWORD got = look_of(e[0]).corner;
                     expect(got == want, name + ": printed again, the entry is on " + hex(want) + ": " + hex(got));
                 }
