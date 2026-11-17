@@ -117,6 +117,36 @@ int main(int argc, char** argv)
         expect(t->current() == 0 && lazy_label != nullptr, kind + "A made current: built");
     }
 
+    // A page's icon and title (#101): at build time and at runtime, pages
+    // out of range ignored, neither firing on_changed (the null backend
+    // prints them; nothing to read back but that nothing breaks).
+    for (const bool sidebar : {false, true})
+    {
+        const std::string kind = sidebar ? "sidebar, icons: " : "strip, icons: ";
+        rap::tabs* t = nullptr;
+        int changes = 0;
+        auto win = (*ui)->create(window{
+            "Tabs icons",
+            {tabs{page{"A", label{"a"}}.icon(rap::icon::named("go-up")),
+                  page{"B", label{"b"}}.icon(rap::icon::drawn([](rap::painter&, rap::size_f) {})),
+                  {"C", label{"c"}}}
+                 .sidebar(sidebar)
+                 .on_changed([&](int) { ++changes; })
+                 .bind(t)}});
+        expect(t != nullptr, kind + "bound");
+        if (!t) return 1;
+        t->set_page_icon(2, rap::icon::named("go-down"));
+        t->set_page_icon(0, rap::icon{});
+        t->set_page_title(1, "Build");
+        t->set_page_title(1, "Build");
+        t->set_page_icon(9, rap::icon::named("go-up"));
+        t->set_page_title(-1, "nothing");
+        t->set_page_visible(1, false);
+        t->set_page_title(1, "Build (hidden)");
+        t->set_page_visible(1, true);
+        expect(changes == 0 && t->current() == 0, kind + "no on_changed, A still current, " + std::to_string(changes));
+    }
+
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

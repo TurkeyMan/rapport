@@ -123,6 +123,8 @@ struct tabs
     bool sidebar = false;
     // Per page: shown from the start (layout::page::visible). Empty: all.
     std::vector<bool> visible;
+    // Per page: the icon before its title (layout::page::icon). Empty: none.
+    std::vector<rap::icon> icons;
     // With at most one page visible, no strip (or sidebar list) at all: the
     // page fills the area, and measuring leaves the strip out.
     bool hide_single_tab = false;
@@ -694,10 +696,18 @@ struct page
         shown = on;
         return *this;
     }
+    // Its icon, before its title on its tab (rap::tabs::set_page_icon
+    // changes it later).
+    page& icon(rap::icon i)
+    {
+        page_icon = std::move(i);
+        return *this;
+    }
     std::string title;
     node content;
     std::function<node()> build;
     bool shown = true;
+    rap::icon page_icon;
 };
 
 class tabs : public builder<tabs, spec::tabs>
@@ -705,11 +715,13 @@ class tabs : public builder<tabs, spec::tabs>
 public:
     tabs(std::initializer_list<page> pages)
     {
-        bool any_lazy = false, any_hidden = false;
+        bool any_lazy = false, any_hidden = false, any_icon = false;
         for (auto& p : pages)
         {
             any_lazy |= bool(p.build);
             any_hidden |= !p.shown;
+            any_icon |= !p.page_icon.name.empty() || !p.page_icon.file.empty() || !p.page_icon.path.empty() ||
+                        bool(p.page_icon.draw);
         }
         for (auto& p : pages)
         {
@@ -717,6 +729,7 @@ public:
             s().pages.push_back(p.build ? node{spec::box{vertical, {}, false, {}}, {}} : p.content);
             if (any_lazy) s().lazy.push_back(p.build);
             if (any_hidden) s().visible.push_back(p.shown);
+            if (any_icon) s().icons.push_back(p.page_icon);
         }
     }
     // With at most one page visible, no strip (or sidebar list): the page

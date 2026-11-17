@@ -2690,6 +2690,106 @@ private:
     bool was_;
 };
 
+// A tab's (or a sidebar row's) heading: its icon before its title, in a box
+// (rap::tabs::set_page_icon, set_page_title). The icon sits in a slot of its
+// own, hidden with none (the box's spacing goes with it), at 16 px: a file
+// type's image, a drawing area for a drawn one, else icon_widget's (named or
+// a path's). One drawn icon swapped for another keeps its area and takes the
+// new drawing: repainted, never resized. A hidden page's tab or row keeps
+// its heading, and shows it again with the page.
+class tab_heading
+{
+public:
+    tab_heading(const std::string& title, const icon& i)
+        : box_(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6))
+        , slot_(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0))
+        , label_(gtk_label_new_with_mnemonic(title.c_str()))
+        , title_(title)
+    {
+        gtk_widget_set_valign(slot_, GTK_ALIGN_CENTER);
+        gtk_widget_set_visible(slot_, false);
+        gtk_box_append(GTK_BOX(box_), slot_);
+        gtk_box_append(GTK_BOX(box_), label_);
+        set_icon(i);
+    }
+    GtkWidget* widget() const { return box_; }
+    // What the title's access key activates: the notebook's tab label (the
+    // box, which the notebook listens on), a sidebar's row.
+    void mnemonic_for(GtkWidget* w) { gtk_label_set_mnemonic_widget(GTK_LABEL(label_), w); }
+
+    void set_title(const std::string& t)
+    {
+        if (t == title_) return;  // (#91)
+        title_ = t;
+        gtk_label_set_text_with_mnemonic(GTK_LABEL(label_), t.c_str());
+    }
+    void set_icon(const icon& i)
+    {
+        if (same_icon(icon_, i)) return;  // (#91; none for none too)
+        GtkWidget* old = gtk_widget_get_first_child(slot_);
+        if (old && GTK_IS_DRAWING_AREA(old) && only_drawn(icon_) && only_drawn(i))
+        {
+            // Can't be compared: drawn again, in place (no relayout).
+            set_drawing(old, i.draw);
+            icon_ = i;
+            return;
+        }
+        icon_ = i;
+        if (old) gtk_box_remove(GTK_BOX(slot_), old);
+        GtkWidget* w = i ? make_icon(i) : nullptr;
+        if (w) gtk_box_append(GTK_BOX(slot_), w);
+        gtk_widget_set_visible(slot_, w != nullptr);
+    }
+
+private:
+    using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
+    static bool only_drawn(const icon& i)
+    {
+        return i.draw && i.name.empty() && i.file.empty() && i.path.empty();
+    }
+    // As icon_widget's drawn icons: drawn whenever it paints, so it follows
+    // scale and theme.
+    static void set_drawing(GtkWidget* area, draw_fn draw)
+    {
+        gtk_drawing_area_set_draw_func(
+            GTK_DRAWING_AREA(area),
+            +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
+            {
+                snap_to_device(cr, GTK_WIDGET(a));
+                cairo_painter painter(cr, GTK_WIDGET(a));
+                (*static_cast<draw_fn*>(p))(painter, {float(w), float(h)});
+            },
+            new draw_fn(std::move(draw)), +[](gpointer p) { delete static_cast<draw_fn*>(p); });
+    }
+    static GtkWidget* make_icon(const icon& i)
+    {
+        constexpr int size = 16;
+        if (only_drawn(i))
+        {
+            GtkWidget* area = gtk_drawing_area_new();
+            gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(area), size);
+            gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), size);
+            gtk_widget_set_halign(area, GTK_ALIGN_CENTER);
+            gtk_widget_set_valign(area, GTK_ALIGN_CENTER);
+            set_drawing(area, i.draw);
+            return area;
+        }
+        if (!i.file.empty() && i.path.empty())
+        {
+            GtkWidget* img = gtk_image_new_from_gicon(file_type_icon(i.file));
+            gtk_image_set_pixel_size(GTK_IMAGE(img), size);
+            return img;
+        }
+        return icon_widget(i, size);
+    }
+
+    GtkWidget* box_;
+    GtkWidget* slot_;
+    GtkWidget* label_;
+    std::string title_;
+    icon icon_;  // the one it shows (empty: none)
+};
+
 class tabs_impl : public widget_base<rap::tabs>
 {
 public:
@@ -2764,6 +2864,17 @@ public:
     }
     bool page_visible(int page) const override { return shown_.at(page); }
 
+    // Each page's tab label (a heading), as built.
+    void set_headings(std::vector<tab_heading> h) { headings_ = std::move(h); }
+    void set_page_icon(int page, const icon& i) override
+    {
+        if (page >= 0 && size_t(page) < headings_.size()) headings_[size_t(page)].set_icon(i);
+    }
+    void set_page_title(int page, const std::string& t) override
+    {
+        if (page >= 0 && size_t(page) < headings_.size()) headings_[size_t(page)].set_title(t);
+    }
+
     // Lazy pages: an empty box each, filled the first time it's shown.
     void set_lazy(std::vector<std::function<node()>> lazy, std::vector<GtkWidget*> pages,
                  std::function<GtkWidget*(const node&)> build)
@@ -2802,6 +2913,7 @@ private:
     }
 
     page_shown shown_;
+    std::vector<tab_heading> headings_;  // per page
     bool quiet_ = false;
     int settled_ = 0;  // current() as the last operation or switch left it
     std::function<void(int)> changed_;
@@ -2881,6 +2993,17 @@ public:
         settled_ = current();
     }
     bool page_visible(int page) const override { return shown_.at(page); }
+
+    // Each page's row's heading, as built.
+    void set_headings(std::vector<tab_heading> h) { headings_ = std::move(h); }
+    void set_page_icon(int page, const icon& i) override
+    {
+        if (page >= 0 && size_t(page) < headings_.size()) headings_[size_t(page)].set_icon(i);
+    }
+    void set_page_title(int page, const std::string& t) override
+    {
+        if (page >= 0 && size_t(page) < headings_.size()) headings_[size_t(page)].set_title(t);
+    }
     // A stack page shown or hidden: GtkStackPage:visible is apart from its
     // widget's own, and the stack needs both to show it (or to show none
     // once every page is hidden).
@@ -2943,6 +3066,7 @@ private:
     GtkWidget* list_;
     GtkWidget* stack_;
     page_shown shown_;
+    std::vector<tab_heading> headings_;  // per page
     bool quiet_ = false;
     int settled_ = 0;  // current() as the last operation or switch left it
     std::function<void(int)> changed_;
@@ -6352,6 +6476,7 @@ private:
         if (s.sidebar) return make_sidebar(n, s);
         GtkWidget* nb = gtk_notebook_new();
         std::vector<GtkWidget*> pages;
+        std::vector<tab_heading> headings;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             const bool lazy = i < s.lazy.size() && s.lazy[i];
@@ -6362,10 +6487,15 @@ private:
             gtk_widget_set_margin_top(page, 6);
             gtk_widget_set_margin_bottom(page, 6);
             if (i < s.visible.size() && !s.visible[i]) gtk_widget_set_visible(page, false);
-            gtk_notebook_append_page(GTK_NOTEBOOK(nb), page,
-                                     gtk_label_new_with_mnemonic(s.titles[i].c_str()));
+            // Its tab: the page's icon (if any) and title. The notebook
+            // listens for the access key on the tab label, the box.
+            tab_heading heading(s.titles[i], i < s.icons.size() ? s.icons[i] : rap::icon{});
+            heading.mnemonic_for(heading.widget());
+            gtk_notebook_append_page(GTK_NOTEBOOK(nb), page, heading.widget());
+            headings.push_back(heading);
         }
         auto& tabs = add<tabs_impl>(n, nb);
+        tabs.set_headings(std::move(headings));
         tabs.start(s);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),
@@ -6382,9 +6512,12 @@ private:
         gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_BROWSE);
         GtkWidget* stack = gtk_stack_new();
         std::vector<GtkWidget*> pages;
+        std::vector<tab_heading> headings;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
-            GtkWidget* label = gtk_label_new_with_mnemonic(s.titles[i].c_str());
+            // The page's icon (if any) and title, as a strip's tab has them.
+            tab_heading heading(s.titles[i], i < s.icons.size() ? s.icons[i] : rap::icon{});
+            GtkWidget* label = heading.widget();
             gtk_widget_set_halign(label, GTK_ALIGN_START);
             gtk_widget_set_margin_start(label, 12);
             gtk_widget_set_margin_end(label, 12);
@@ -6395,6 +6528,9 @@ private:
             gtk_widget_set_margin_bottom(label, fixed ? 0 : 8);
             GtkWidget* row = gtk_list_box_row_new();
             gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
+            // The access key selects the row, as the label alone in it did.
+            heading.mnemonic_for(row);
+            headings.push_back(heading);
             const bool hidden = i < s.visible.size() && !s.visible[i];
             if (hidden) gtk_widget_set_visible(row, false);
             gtk_list_box_append(GTK_LIST_BOX(list), row);
@@ -6416,6 +6552,7 @@ private:
         gtk_widget_set_hexpand(stack, TRUE);
         gtk_box_append(GTK_BOX(box), stack);
         auto& tabs = add<side_tabs_impl>(n, box, list, stack);
+        tabs.set_headings(std::move(headings));
         tabs.start(s);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),

@@ -8,17 +8,22 @@
 // natural height counting its visible rows, and hide_single_tab: no strip
 // (or list) with one page visible, the page measuring alone. And #92: a
 // canvas of fixed size as a tab page, a sidebar page, a stack page and a
-// window's root, measured to include it. Never shown: measured only.
+// window's root, measured to include it. Never shown: measured only (but
+// for the scrolled sidebar, and #101's page icons and titles, whose layout
+// requests and paints are counted).
 // Run off the desktop: QT_QPA_PLATFORM=offscreen.
 #include <rapport/rapport.h>
 
 #include <QApplication>
+#include <QEvent>
+#include <QIcon>
 #include <QLabel>
 #include <QListWidget>
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QThread>
 
 #include <algorithm>
 #include <array>
@@ -733,6 +738,207 @@ void run_long_titles(rap::ui& ui)
            "long titles: natural width Qt's own, " + std::to_string(ours) + " (Qt's " + std::to_string(qt) + ")");
 }
 
+// Every layout request, update request and paint the application sees.
+class event_counter : public QObject
+{
+public:
+    int layouts = 0, updates = 0, paints = 0;
+    std::string layout_receivers;  // each layout request's receiver, by class
+    void reset()
+    {
+        layouts = updates = paints = 0;
+        layout_receivers.clear();
+    }
+    int total() const { return layouts + updates + paints; }
+    std::string str() const
+    {
+        return std::to_string(layouts) + " layout requests" +
+               (layout_receivers.empty() ? "" : " (to " + layout_receivers + ")") + ", " + std::to_string(updates) +
+               " update requests, " + std::to_string(paints) + " paints";
+    }
+    bool eventFilter(QObject* o, QEvent* e) override
+    {
+        switch (e->type())
+        {
+        case QEvent::LayoutRequest:
+            ++layouts;
+            layout_receivers += (layout_receivers.empty() ? "" : ", ") + std::string(o->metaObject()->className());
+            break;
+        case QEvent::UpdateRequest: ++updates; break;
+        case QEvent::Paint: ++paints; break;
+        default: break;
+        }
+        return QObject::eventFilter(o, e);
+    }
+};
+
+// Everything due handled, posted events and paints included.
+void settle()
+{
+    for (int i = 0; i < 20; ++i)
+    {
+        QApplication::processEvents();
+        QThread::msleep(5);
+    }
+}
+
+// #101: a page's icon and title, read from the QTabBar's tabs or the
+// sidebar's rows. An icon from the start; set, swapped and removed; a new
+// title; the same title or named icon (or none) again: no event at all; one
+// drawn icon for another: written, but nothing relaid out and no width
+// changed; a title leaving the measured width as it was: nothing relaid out
+// (the sidebar's list made wider by one: relaid out); a hidden page keeping
+// both, shown again with them; pages out of range ignored; no on_changed.
+// Shown off the desktop (QT_QPA_PLATFORM=offscreen), so layout requests
+// and paints are real.
+void run_icons(rap::ui& ui, bool sidebar)
+{
+    using namespace rap::layout;
+    const std::string kind = sidebar ? "sidebar, icons (#101): " : "strip, icons (#101): ";
+    const char* title = sidebar ? "Icons sidebar" : "Icons strip";
+    rap::tabs* t = nullptr;
+    int changes = 0;
+    auto drawn = [] { return rap::icon::drawn([](rap::painter&, rap::size_f) {}); };
+    // Page A wider than the strip's tabs together, with any title below: a
+    // title change leaves the strip's measured width as it was. A's title
+    // the longest: the sidebar's list is as wide as it.
+    auto win = ui.create(
+        window{title,
+               {tabs{page{"Alpha, the longest",
+                          label{"A page much wider than every tab title together, by far, whichever title they're "
+                                "given here"}}
+                         .icon(rap::icon::named("go-up")),
+                     {"B", label{"b"}},
+                     page{"C", label{"c"}}.icon(drawn())}
+                    .sidebar(sidebar)
+                    .on_changed([&](int) { ++changes; })
+                    .bind(t)}});
+    win->show();
+    settle();
+    QWidget* top = top_titled(title);
+    QTabWidget* tw = top && !sidebar ? top->findChild<QTabWidget*>() : nullptr;
+    QTabBar* bar = tw ? tw->tabBar() : nullptr;
+    QListWidget* list = top && sidebar ? top->findChild<QListWidget*>() : nullptr;
+    expect(t && (bar || list), kind + "bound, its native widgets found");
+    if (!t || !(bar || list)) return;
+    auto icon_of = [&](int i) { return list ? list->item(i)->icon() : bar->tabIcon(i); };
+    auto text_of = [&](int i) { return (list ? list->item(i)->text() : bar->tabText(i)).toStdString(); };
+    auto has = [&](int i) { return !icon_of(i).isNull(); };
+    // A tab's width (the list's, in a sidebar), and the tabs' measured width.
+    auto width_of = [&](int i) { return list ? list->width() : bar->tabRect(i).width(); };
+    auto measured = [&] { return list ? list->width() : tw->sizeHint().width(); };
+    auto num = [](int v) { return std::to_string(v); };
+
+    expect(has(0) && !has(1) && has(2), kind + "from the start: icons on A and C, none on B");
+    expect(text_of(0) == "Alpha, the longest" && text_of(1) == "B", kind + "from the start: the titles");
+
+    event_counter count;
+    qApp->installEventFilter(&count);
+
+    // The same title, the same named icon, no icon on B again: nothing.
+    count.reset();
+    t->set_page_title(1, "B");
+    t->set_page_icon(0, rap::icon::named("go-up"));
+    t->set_page_icon(1, rap::icon{});
+    settle();
+    expect(count.total() == 0, kind + "the same title, the same icon, none again: nothing (" + count.str() + ")");
+
+    // Set at runtime: B gets one.
+    t->set_page_icon(1, rap::icon::named("go-down"));
+    settle();
+    expect(has(1), kind + "B's icon set");
+
+    // A's named icon for another: written; its width as it was, and
+    // nothing relaid out.
+    {
+        const qint64 key = icon_of(0).cacheKey();
+        const int width = width_of(0), whole = measured();
+        count.reset();
+        t->set_page_icon(0, rap::icon::named("go-down"));
+        settle();
+        expect(has(0) && icon_of(0).cacheKey() != key, kind + "A's icon for another: written");
+        expect(width_of(0) == width && measured() == whole && count.layouts == 0,
+               kind + "A's icon for another: the width " + num(width) + " to " + num(width_of(0)) + ", measured " +
+                   num(whole) + " to " + num(measured()) + ", " + count.str());
+    }
+    // One drawn icon for another: written (they can't be compared), but
+    // nothing relaid out and no width changed.
+    {
+        const qint64 key = icon_of(2).cacheKey();
+        const int width = width_of(2), whole = measured();
+        count.reset();
+        t->set_page_icon(2, drawn());
+        settle();
+        expect(has(2) && icon_of(2).cacheKey() != key, kind + "C's drawn icon for another drawn one: written");
+        expect(width_of(2) == width && measured() == whole && count.layouts == 0,
+               kind + "C's drawn icon for another: the width " + num(width) + " to " + num(width_of(2)) +
+                   ", measured " + num(whole) + " to " + num(measured()) + ", " + count.str());
+    }
+    // Removed.
+    t->set_page_icon(0, rap::icon{});
+    settle();
+    expect(!has(0), kind + "A's icon removed");
+
+    // A new title, the measured width as it was: nothing relaid out (the
+    // bar still placed to hold it).
+    {
+        const int whole = measured();
+        count.reset();
+        t->set_page_title(1, "Build");
+        settle();
+        expect(text_of(1) == "Build", kind + "B's title now Build, " + text_of(1));
+        expect(measured() == whole && count.layouts == 0,
+               kind + "a new title, the measured width as it was (" + num(whole) + " to " + num(measured()) +
+                   "): nothing relaid out, " + count.str());
+        if (bar)
+            expect(bar->width() >= bar->sizeHint().width(),
+                   kind + "the bar placed for the new title: " + num(bar->width()) + " for its " +
+                       num(bar->sizeHint().width()));
+    }
+    // The sidebar's list made wider by a title: relaid out, wider.
+    if (list)
+    {
+        const int width = list->width();
+        count.reset();
+        t->set_page_title(1, "Build, now a title much longer than Alpha's");
+        settle();
+        expect(list->width() > width && count.layouts > 0,
+               kind + "a title wider than the list: the list " + num(width) + " to " + num(list->width()) + ", " +
+                   count.str());
+        t->set_page_title(1, "Build");
+        settle();
+        expect(list->width() == width, kind + "the title back: the list " + num(list->width()) + " again");
+    }
+
+    // A hidden page keeps its title and icon, changed while hidden; shown
+    // again with them.
+    t->set_page_visible(1, false);
+    t->set_page_title(1, "Hidden B");
+    t->set_page_icon(1, drawn());
+    settle();
+    expect(!t->page_visible(1) && text_of(1) == "Hidden B" && has(1),
+           kind + "B hidden: its new title and icon kept, " + text_of(1));
+    t->set_page_visible(1, true);
+    settle();
+    const bool b_shown = list ? !list->isRowHidden(1) : bar->isTabVisible(1);
+    expect(b_shown && text_of(1) == "Hidden B" && has(1), kind + "B shown again with its title and icon");
+
+    // Pages out of range: nothing.
+    count.reset();
+    t->set_page_icon(3, rap::icon::named("go-up"));
+    t->set_page_icon(-1, drawn());
+    t->set_page_title(3, "Nothing");
+    t->set_page_title(-1, "Nothing");
+    settle();
+    const int headers = list ? list->count() : bar->count();
+    expect(count.total() == 0 && headers == 3 && text_of(0) == "Alpha, the longest" && text_of(2) == "C",
+           kind + "pages out of range: nothing, " + count.str());
+    qApp->removeEventFilter(&count);
+
+    expect(changes == 0 && t->current() == 0 && (list ? list->currentRow() : tw->currentIndex()) == 0,
+           kind + "no on_changed, A still current, " + num(changes));
+}
+
 }  // namespace
 
 // A sidebar given less height than its rows: it scrolls. Shown, on the
@@ -781,6 +987,7 @@ int main(int argc, char** argv)
     run_scroll(**ui);
     run_hidden_large(**ui);
     run_long_titles(**ui);
+    for (const bool sidebar : {false, true}) run_icons(**ui, sidebar);
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

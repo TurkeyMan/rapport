@@ -8757,7 +8757,7 @@ void draw_dark_tabs(HWND h, HDC dc)
         }
         wchar_t text[128] = {};
         TCITEMW item{};
-        item.mask = TCIF_TEXT;
+        item.mask = TCIF_TEXT | TCIF_IMAGE;
         item.pszText = text;
         item.cchTextMax = int(std::size(text));
         TabCtrl_GetItem(h, i, &item);
@@ -8766,7 +8766,23 @@ void draw_dark_tabs(HWND h, HDC dc)
                                                                  : theme_color::disabled_text)));
         DWORD flags = DT_SINGLELINE | DT_VCENTER | DT_CENTER;
         if (ui & UISF_HIDEACCEL) flags |= DT_HIDEPREFIX;
-        DrawTextW(dc, text, -1, &r, flags);
+        // Its icon (#101), if it has one: before the title, the two centred
+        // together, as the control lays them out.
+        const HIMAGELIST images = TabCtrl_GetImageList(h);
+        int iw = 0, ih = 0;
+        if (item.iImage >= 0 && images && g_comctl.icon_size(images, &iw, &ih))
+        {
+            RECT measured{0, 0, 0, 0};
+            DrawTextW(dc, text, -1, &measured, (flags & ~DT_CENTER) | DT_CALCRECT);
+            const int gap = text[0] ? px(6) : 0;
+            const int x = r.left + (r.right - r.left - (iw + gap + int(measured.right))) / 2;
+            g_comctl.draw(images, item.iImage, dc, x, (r.top + r.bottom - ih) / 2, ILD_TRANSPARENT);
+            RECT title = r;
+            title.left = x + iw + gap;
+            DrawTextW(dc, text, -1, &title, (flags & ~DT_CENTER) | DT_LEFT);
+        }
+        else
+            DrawTextW(dc, text, -1, &r, flags);
         if (selected && GetFocus() == h && !(ui & UISF_HIDEFOCUS))
         {
             RECT focus = r;
@@ -8876,6 +8892,18 @@ LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
     }
 }
 
+HICON tab_icon_handle(const rap::icon& icon, int size, UINT dpi, float scale);
+
+// An icon `size` px square with nothing in it (all masked): for an image
+// list's place that has no icon, which keeps the numbering. A 32-bit
+// bitmap whose alpha is all zero counts as having none, and draws black.
+HICON blank_icon(int size)
+{
+    const size_t bytes = size_t((size + 15) / 16 * 2) * size_t(size);
+    const std::vector<BYTE> transparent(bytes, 0xFF), colour(bytes, 0);
+    return CreateIcon(instance(), size, size, 1, 1, transparent.data(), colour.data());
+}
+
 // Which pages have a tab (or a sidebar's row). The control has no hidden
 // items: a hidden page's is deleted, so its items are the visible pages in
 // order, and a page's item is the count of visible pages before it.
@@ -8939,21 +8967,90 @@ public:
         items_.on = s.visible;
         items_.hide_single = s.hide_single_tab;
         for (const std::string& t : s.titles) titles_.push_back(mnemonic(t));
+        icons_ = s.icons;
+        icons_.resize(size_t(items_.count));
+        if (std::ranges::any_of(icons_, [](const rap::icon& i) { return bool(i); })) rebuild_images();
         // Hidden pages (page::visible(false)) have no tab from the start.
         for (int i = 0; i < items_.count; ++i)
             if (items_.shown(i)) insert_tab(i);
         TabCtrl_SetCurSel(h_, items_.shown_count() > 0 ? 0 : -1);  // the first visible page
         settled_ = current();
-        // A new DPI comes with a new font: the tabs' height follows it.
+        // A new DPI comes with a new font: the tabs' height follows it, and
+        // their icons are made at its size.
         SetWindowSubclass(
             h_,
             [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
             {
                 const LRESULT result = DefSubclassProc(h, msg, wp, lp);
-                if (msg == WM_SETFONT) reinterpret_cast<tabs_impl*>(data)->apply_rows();
+                if (msg == WM_SETFONT)
+                {
+                    auto* self = reinterpret_cast<tabs_impl*>(data);
+                    self->apply_rows();
+                    if (self->images_ && self->images_px_ != self->px(16)) self->rebuild_images();
+                }
                 return result;
             },
             2, reinterpret_cast<DWORD_PTR>(this));
+    }
+    ~tabs_impl() override
+    {
+        if (images_) g_comctl.destroy(images_);
+    }
+    // Drawn icons are in the text colour: made again in the new one.
+    void theme_changed() override
+    {
+        if (images_) rebuild_images();
+    }
+    // Page `page`'s icon (#101): its place in the image list (one per page,
+    // a blank where there's none) made again, the tab told when it gains or
+    // loses one. Swapped for another, only the image changes: the tab keeps
+    // its width, nothing is laid out. Hidden, it's kept for when it's shown.
+    void set_page_icon(int page, const rap::icon& icon) override
+    {
+        if (page < 0 || page >= items_.count) return;
+        rap::icon& now = icons_[size_t(page)];
+        if (same_icon(icon, now)) return;  // (#91)
+        const bool had = bool(now);
+        now = icon;
+        if (!images_)
+        {
+            if (!icon) return;
+            rebuild_images();  // the first icon: every page's place made
+        }
+        else
+        {
+            put_image(images_, page, page);
+            path_icons_.arm([this] { rebuild_images(); });
+        }
+        if (!items_.shown(page)) return;
+        if (had == bool(icon))
+        {
+            RECT r{};
+            if (TabCtrl_GetItemRect(h_, items_.item_of(page), &r)) InvalidateRect(h_, &r, FALSE);
+            return;
+        }
+        const SIZE before = strip_frame();
+        TCITEMW item{};
+        item.mask = TCIF_IMAGE;
+        item.iImage = icon ? page : -1;
+        TabCtrl_SetItem(h_, items_.item_of(page), &item);
+        if (const SIZE after = strip_frame(); after.cx != before.cx || after.cy != before.cy) win_.relayout();
+    }
+    // Its title (TCM_SETITEM); laid out again only if the strip's measure
+    // changed with it. Hidden, it's kept for when it's shown.
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= items_.count) return;
+        std::wstring w = mnemonic(title);
+        if (w == titles_[size_t(page)]) return;  // (#91)
+        titles_[size_t(page)] = std::move(w);
+        if (!items_.shown(page)) return;
+        const SIZE before = strip_frame();
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = titles_[size_t(page)].data();
+        TabCtrl_SetItem(h_, items_.item_of(page), &item);
+        if (const SIZE after = strip_frame(); after.cx != before.cx || after.cy != before.cy) win_.relayout();
     }
     // Fluent controls: its tabs at the density's height (TabViewItemMinHeight
     // standard; the compact density's, as the controls'). Null (native, out
@@ -9088,13 +9185,58 @@ private:
     void insert_tab(int page)
     {
         TCITEMW item{};
-        item.mask = TCIF_TEXT;
+        item.mask = TCIF_TEXT | TCIF_IMAGE;
         item.pszText = titles_[size_t(page)].data();
+        item.iImage = images_ && icons_[size_t(page)] ? page : -1;
         TabCtrl_InsertItem(h_, items_.item_of(page), &item);
+    }
+    // What the strip adds round a page: its measure, less the page's.
+    SIZE strip_frame() const
+    {
+        RECT r{0, 0, 0, 0};
+        traced_tab_adjust(h_, TRUE, &r);
+        return {r.right - r.left, r.bottom - r.top};
+    }
+    // Page `page`'s icon (else a blank) at image `index` of `list` (-1: added).
+    void put_image(HIMAGELIST list, int index, int page)
+    {
+        const rap::icon& icon = icons_[size_t(page)];
+        const int size = px(16);
+        path_icons_.add(icon, size);
+        HICON h = icon ? tab_icon_handle(icon, size, win_.dpi(), win_.scale()) : nullptr;
+        if (!h) h = blank_icon(size);
+        if (h)
+        {
+            g_comctl.replace_icon(list, index, h);
+            DestroyIcon(h);
+        }
+    }
+    // The image list made again whole, at the DPI's small-icon size: one
+    // image per page, so a page's tab's image is its page's number. Made
+    // with the first icon (a strip with none has no list, as it always
+    // was); again at a new DPI, a new theme (drawn ones are in the text
+    // colour), and once a path's own icon is found.
+    void rebuild_images()
+    {
+        path_icons_.clear();
+        const int size = px(16);
+        HIMAGELIST fresh = g_comctl.create(size, size, ILC_COLOR32 | ILC_MASK, std::max(items_.count, 1), 1);
+        if (!fresh) return;
+        for (int i = 0; i < items_.count; ++i) put_image(fresh, -1, i);
+        TabCtrl_SetImageList(h_, fresh);
+        if (images_) g_comctl.destroy(images_);
+        images_ = fresh;
+        images_px_ = size;
+        InvalidateRect(h_, nullptr, FALSE);
+        path_icons_.arm([this] { rebuild_images(); });
     }
     int pad() const { return px(6); }
     page_items items_;
     std::vector<std::wstring> titles_;  // per page, as the tabs show them
+    std::vector<rap::icon> icons_;      // per page (#101); empty: none
+    HIMAGELIST images_ = nullptr;       // one image per page; none until a page has an icon
+    int images_px_ = 0;                 // the size images_ was made at
+    path_icon_rebuild path_icons_;      // images_ made again once a path's own icon is found
     std::function<void(int)> changed_;
     int settled_ = -1;  // current() as the last operation or switch left it
     const band_density* density_ = nullptr;  // fluent controls': the tabs' (set_in_band)
@@ -9123,6 +9265,9 @@ public:
         items_.count = int(s.titles.size());
         items_.on = s.visible;
         items_.hide_single = s.hide_single_tab;
+        icons_.resize(size_t(items_.count));
+        file_icons_.resize(size_t(items_.count));
+        for (size_t i = 0; i < s.icons.size() && i < icons_.size(); ++i) take_icon(int(i), s.icons[i]);
         // Hidden pages (page::visible(false)) have no row from the start.
         for (int i = 0; i < items_.count; ++i)
             if (items_.shown(i)) insert_row(i);
@@ -9140,11 +9285,51 @@ public:
             },
             1, reinterpret_cast<DWORD_PTR>(this));
     }
+    ~side_tabs_impl() override
+    {
+        for (HICON h : file_icons_)
+            if (h) DestroyIcon(h);
+    }
     // Its rows as tall as the new font's line, as they were made for the old.
     void fonts_changed() override
     {
         apply_rows();
         InvalidateRect(h_, nullptr, TRUE);
+    }
+    // Page `page`'s icon (#101), which its row draws as it paints: swapped
+    // for another, only that row is painted again; laid out again only if
+    // the list's width changed (the first icon makes room for them all, the
+    // last takes it away). Hidden, it's kept for when it's shown.
+    void set_page_icon(int page, const rap::icon& icon) override
+    {
+        if (page < 0 || page >= items_.count) return;
+        if (same_icon(icon, icons_[size_t(page)])) return;  // (#91)
+        const int before = list_width();
+        take_icon(page, icon);
+        if (list_width() != before)
+            win_.relayout();
+        else if (items_.shown(page))
+            invalidate_row(page);
+    }
+    // Its title: its row's string replaced (the selection kept), laid out
+    // again only if the list's width changed with it.
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= items_.count) return;
+        std::wstring w = mnemonic(title);
+        w.erase(std::remove(w.begin(), w.end(), L'&'), w.end());
+        if (w == titles_[size_t(page)]) return;  // (#91)
+        const int before = list_width();
+        titles_[size_t(page)] = std::move(w);
+        if (!items_.shown(page)) return;
+        const int row = items_.item_of(page);
+        const LRESULT selected = SendMessageW(h_, LB_GETCURSEL, 0, 0);
+        const LRESULT top = SendMessageW(h_, LB_GETTOPINDEX, 0, 0);
+        SendMessageW(h_, LB_DELETESTRING, WPARAM(row), 0);
+        insert_row(page);
+        if (selected == row) SendMessageW(h_, LB_SETCURSEL, WPARAM(row), 0);
+        SendMessageW(h_, LB_SETTOPINDEX, WPARAM(top), 0);
+        if (list_width() != before) win_.relayout();
     }
     // Fluent controls: its rows at the density's height.
     void set_in_band(const band_density* density, bool) override
@@ -9249,6 +9434,20 @@ public:
         HGDIOBJ old = SelectObject(d->hDC, ui_font(win_.dpi()));
         RECT text = d->rcItem;
         text.left += px(8);
+        // The icons' column (#101), with any page's icon: each row's icon
+        // in it, the titles after it in line.
+        if (icon_column())
+        {
+            const int size = px(16);
+            const int top = (d->rcItem.top + d->rcItem.bottom - size) / 2;
+            const rap::icon& icon = icons_[size_t(page)];
+            if (HICON file = file_icons_[size_t(page)])
+                DrawIconEx(d->hDC, text.left, top, file, size, size, 0, nullptr, DI_NORMAL);
+            else if (icon)
+                draw_icon_on_dc(d->hDC, RECT{text.left, top, text.left + size, top + size}, icon, win_.scale(),
+                                theme_color_of(selected ? theme_color::highlight_text : theme_color::text));
+            text.left += size + icon_gap();
+        }
         DrawTextW(d->hDC, titles_[size_t(page)].c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
         SelectObject(d->hDC, old);
         if ((d->itemState & ODS_FOCUS) && !(d->itemState & ODS_NOFOCUSRECT)) DrawFocusRect(d->hDC, &d->rcItem);
@@ -9299,13 +9498,42 @@ public:
 
 private:
     int gap() const { return px(12); }
-    // As wide as the visible pages' names.
+    // As wide as the visible pages' names, and the icons' column if any
+    // page has an icon.
     int list_width()
     {
         long w = px(120);
+        const long column = icon_column() ? px(16) + icon_gap() : 0;
         for (size_t i = 0; i < titles_.size(); ++i)
-            if (items_.shown(int(i))) w = std::max(w, text_extent(h_, titles_[i]).cx + px(36));
+            if (items_.shown(int(i))) w = std::max(w, text_extent(h_, titles_[i]).cx + px(36) + column);
         return int(w);
+    }
+    int icon_gap() const { return px(8); }
+    // The rows have an icons' column: some page (shown or not) has an icon,
+    // so hiding or showing one never moves the others' titles.
+    bool icon_column() const
+    {
+        return std::ranges::any_of(icons_, [](const rap::icon& i) { return bool(i); });
+    }
+    // Page `page`'s icon taken: a file's kind's handle from the shell made
+    // now (not from paint: the shell is slow); anything else drawn as the
+    // row paints, Windows' own by name prepared for it.
+    void take_icon(int page, const rap::icon& icon)
+    {
+        icons_[size_t(page)] = icon;
+        HICON& file = file_icons_[size_t(page)];
+        if (file) DestroyIcon(file);
+        file = nullptr;
+        if (!icon.file.empty() && icon.path.empty() && !icon.draw)
+            file = tab_icon_handle(icon, px(16), win_.dpi(), win_.scale());
+        else if (icon)
+            want_icon(icon, 16, win_.dpi());
+    }
+    void invalidate_row(int page)
+    {
+        RECT r{};
+        if (SendMessageW(h_, LB_GETITEMRECT, WPARAM(items_.item_of(page)), reinterpret_cast<LPARAM>(&r)) != LB_ERR)
+            InvalidateRect(h_, &r, FALSE);
     }
     // Page `page`'s row, at its place among the visible ones.
     void insert_row(int page)
@@ -9316,6 +9544,8 @@ private:
 
     page_items items_;
     std::vector<std::wstring> titles_;  // per page
+    std::vector<rap::icon> icons_;      // per page (#101); empty: none
+    std::vector<HICON> file_icons_;     // per page: a file's kind's icon (icon::for_file), from the shell
     int shown_ = 0;  // the page showing (-1: none, every page hidden)
     std::function<void(int)> changed_;
 };
