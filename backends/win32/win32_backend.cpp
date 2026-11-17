@@ -504,21 +504,25 @@ std::set<HWND>& tabs_scanning()
     static std::set<HWND> s;
     return s;
 }
-HBRUSH tab_body_brush(HWND tab, bool& refused)
+// Marks a tab being asked of (tabs_scanning) for as long as it lives; a
+// lookup that meets a tab so marked is refused.
+struct scanning_tab
+{
+    HWND tab;
+    explicit scanning_tab(HWND t)
+        : tab(t)
+    {
+        tabs_scanning().insert(tab);
+    }
+    ~scanning_tab() { tabs_scanning().erase(tab); }
+    scanning_tab(const scanning_tab&) = delete;
+    scanning_tab& operator=(const scanning_tab&) = delete;
+};
+// Its body: called by the scan, the tab marked scanning already.
+HBRUSH tab_body_brush(HWND tab)
 {
     auto& m = tab_bodies();
     if (auto it = m.find(tab); it != m.end()) return tab_body_brush_of(it->second);
-    if (tabs_scanning().count(tab))
-    {
-        refused = true;
-        return nullptr;
-    }
-    tabs_scanning().insert(tab);
-    struct done
-    {
-        HWND tab;
-        ~done() { tabs_scanning().erase(tab); }
-    } scanning{tab};
     const tab_scan scan;
     RECT client;
     GetClientRect(tab, &client);
@@ -618,12 +622,20 @@ HBRUSH tab_body_under_scan(HWND control, bool& refused)
         wchar_t cls[32] = {};
         GetClassNameW(s, cls, 32);
         if (_wcsicmp(cls, WC_TABCONTROLW)) continue;
+        // Being asked of already, further up: refused (the first message to
+        // it, TCM_ADJUSTRECT, may come back here as well as its print).
+        if (tabs_scanning().count(s))
+        {
+            refused = true;
+            return nullptr;
+        }
+        const scanning_tab asking(s);
         RECT body;
         GetClientRect(s, &body);
         traced_tab_adjust(s, FALSE, &body);
         MapWindowPoints(s, nullptr, reinterpret_cast<POINT*>(&body), 2);
         RECT overlap;
-        if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s, refused);
+        if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s);
     }
     return nullptr;
 }

@@ -682,7 +682,7 @@ int main(int argc, char** argv)
                 }
             }
 
-            // A tab whose print asks a sibling's colour (WM_CTLCOLORSTATIC,
+            // A tab whose print, and whose TCM_ADJUSTRECT, ask a sibling's colour (WM_CTLCOLORSTATIC,
             // as a sibling painting meanwhile would), which asks the tab's
             // body while it's being printed for it: that nested lookup is
             // refused (no print within the print) and keeps nothing; the
@@ -702,14 +702,16 @@ int main(int argc, char** argv)
                     struct nest
                     {
                         HWND sibling;
-                        int depth = 0, deepest = 0, prints = 0;
+                        int depth = 0, deepest = 0, prints = 0, adjusts = 0;
                     } n{e[1]};
                     auto hook = [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) -> LRESULT
                     {
                         auto* n = reinterpret_cast<nest*>(ref);
-                        if (msg == WM_PRINTCLIENT)
+                        // Its print, and the first message a scan sends it
+                        // (TCM_ADJUSTRECT), each asking the sibling's colour.
+                        if (msg == WM_PRINTCLIENT || msg == TCM_ADJUSTRECT)
                         {
-                            ++n->prints;
+                            ++(msg == WM_PRINTCLIENT ? n->prints : n->adjusts);
                             n->deepest = std::max(n->deepest, ++n->depth);
                             if (n->depth < 4)
                             {
@@ -728,9 +730,10 @@ int main(int argc, char** argv)
                     SetWindowSubclass(tc[0], hook, 0x5eef, reinterpret_cast<DWORD_PTR>(&n));
                     const int found = seams.lookup(e[0]);
                     RemoveWindowSubclass(tc[0], hook, 0x5eef);
-                    expect(n.prints >= 1 && n.deepest <= 1, "a nested scan: the tab printed once deep (" +
-                                                                std::to_string(n.deepest) + " deep, " +
-                                                                std::to_string(n.prints) + " prints)");
+                    expect(n.prints >= 1 && n.adjusts >= 1 && n.deepest <= 1,
+                           "a nested scan: the tab asked of once deep, its print and its TCM_ADJUSTRECT (" +
+                               std::to_string(n.deepest) + " deep, " + std::to_string(n.prints) + " prints, " +
+                               std::to_string(n.adjusts) + " adjusts)");
                     expect(found == 1 && seams.cached(e[0]) && seams.known(tc[0]),
                            "a nested scan: the outer lookup found the body and kept it (found " +
                                std::to_string(found) + ")");
