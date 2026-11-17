@@ -8806,23 +8806,29 @@ void draw_base_tabs(HWND h, HDC dc)
     FillRect(dc, &c, surface);
     // Its own erase left out: around the tabs is the surface, filled here.
     DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
-    // It fills its tabs' row in the window colour all the same: the row
-    // round the tabs (the current one standing 2 px proud) is the surface.
+    // The style fills the row beside and above the tabs in the dialog
+    // colour all the same, on any window: the rest of their row is the
+    // surface, the tabs (the current one standing 2 px out of the row) left
+    // as drawn. Whole or not at all: a tab not taken out of the row would be
+    // painted over, and the style's row is better than no tab.
+    if (const int n = TabCtrl_GetItemCount(h); n > 0)
     {
-        const int n = TabCtrl_GetItemCount(h), current = TabCtrl_GetCurSel(h);
-        const int proud = MulDiv(2, int(dpi_of(h)), 96);
-        RECT row{c.left, c.top, c.right, c.top};
-        const int saved = SaveDC(dc);
-        for (int i = 0; i < n; ++i)
+        const int current = TabCtrl_GetCurSel(h), proud = MulDiv(2, int(dpi_of(h)), 96);
+        RECT first{};
+        HRGN row = TabCtrl_GetItemRect(h, 0, &first) ? CreateRectRgn(0, 0, c.right, first.bottom) : nullptr;
+        bool whole = row != nullptr;
+        for (int i = 0; whole && i < n; ++i)
         {
             RECT r;
-            if (!TabCtrl_GetItemRect(h, i, &r)) continue;
-            row.bottom = std::max(row.bottom, r.bottom);
+            whole = TabCtrl_GetItemRect(h, i, &r) != FALSE;
+            if (!whole) break;
             if (i == current) InflateRect(&r, proud, proud);
-            ExcludeClipRect(dc, r.left, r.top, r.right, r.bottom);
+            HRGN tab = CreateRectRgnIndirect(&r);
+            whole = tab && CombineRgn(row, row, tab, RGN_DIFF) != ERROR;
+            if (tab) DeleteObject(tab);
         }
-        if (row.bottom > row.top) FillRect(dc, &row, surface);
-        RestoreDC(dc, saved);
+        if (whole) FillRgn(dc, row, surface);
+        if (row) DeleteObject(row);
     }
     RECT body = c;
     traced_tab_adjust(h, FALSE, &body);
@@ -10466,36 +10472,11 @@ private:
         }
         return DefSubclassProc(h, msg, wp, lp);
     }
-    // Light, on a base surface: the style's tabs, as the page tabs' are
-    // (draw_base_tabs), and the rest of their row in the surface's colour.
-    // The style fills the row beside and above the tabs in the dialog
-    // colour, on any window; a page's tabs have their body below to match
-    // it, but the strip's row is all there is, across the window's top.
+    // Light, on a base surface: the style's tabs, as the page tabs' are,
+    // the rest of their row in the content's colour (draw_base_tabs).
     void draw_base(HDC dc)
     {
         draw_base_tabs(h_, dc);
-        const int n = TabCtrl_GetItemCount(h_), current = TabCtrl_GetCurSel(h_);
-        RECT first{};
-        if (n <= 0 || !TabCtrl_GetItemRect(h_, 0, &first)) return;
-        RECT c;
-        GetClientRect(h_, &c);
-        // Whole or not at all: a tab not taken out of the row would be
-        // painted over, and the style's row is better than no tab.
-        HRGN row = CreateRectRgn(0, 0, c.right, first.bottom);
-        bool whole = row != nullptr;
-        for (int i = 0; whole && i < n; ++i)
-        {
-            RECT r;
-            whole = TabCtrl_GetItemRect(h_, i, &r) != FALSE;
-            if (!whole) break;
-            if (i == current)
-                InflateRect(&r, px(2), px(2));  // the current one stands out of the row
-            HRGN tab = CreateRectRgnIndirect(&r);
-            whole = tab && CombineRgn(row, row, tab, RGN_DIFF) != ERROR;
-            if (tab) DeleteObject(tab);
-        }
-        if (whole) FillRgn(dc, row, theme_brush(theme_color::base));
-        if (row) DeleteObject(row);
     }
     // New tab, and Close tab for the tab clicked (or the current one, from
     // the keyboard), as the keys do.
