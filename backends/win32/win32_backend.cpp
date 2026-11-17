@@ -467,11 +467,22 @@ HBRUSH tab_body_brush_of(COLORREF colour)
     if (!b) b = CreateSolidBrush(colour);
     return b;
 }
+// A tab body's scan prints a tab control, and what that runs (the app's
+// code, a subclass) may destroy the tab or the control asking, retheme, or
+// lay out: a scan's answer is kept only if `h` is still a window and the
+// tab bodies and the layout pass are as they were when it began.
+struct tab_scan
+{
+    unsigned gen = g_tab_bodies_gen;
+    unsigned pass = g_layout_pass;
+    bool still(HWND h) const { return IsWindow(h) && gen == g_tab_bodies_gen && pass == g_layout_pass; }
+};
 void traced_tab_adjust(HWND, BOOL, RECT*);
 HBRUSH tab_body_brush(HWND tab)
 {
     auto& m = tab_bodies();
     if (auto it = m.find(tab); it != m.end()) return tab_body_brush_of(it->second);
+    const tab_scan scan;
     RECT client;
     GetClientRect(tab, &client);
     RECT body = client;
@@ -486,7 +497,8 @@ HBRUSH tab_body_brush(HWND tab)
     DeleteObject(bitmap);
     DeleteDC(mem);
     ReleaseDC(tab, screen);
-    if (colour == CLR_INVALID) return nullptr;
+    // Gone or changed meanwhile: no body, the window's colour, not kept.
+    if (colour == CLR_INVALID || !scan.still(tab)) return nullptr;
     std::erase_if(m, [](const auto& e) { return !IsWindow(e.first); });
     m[tab] = colour;
     return tab_body_brush_of(colour);
@@ -520,7 +532,8 @@ LRESULT CALLBACK tab_body_answer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UI
 }
 // Asked by each label as it paints (WM_CTLCOLORSTATIC): found once per
 // control and layout pass, not by a walk over its siblings at every paint.
-HBRUSH tab_body_under(HWND control)
+// The answers, those of an earlier pass or tab bodies dropped first.
+std::unordered_map<HWND, HBRUSH>& tab_body_answers_now()
 {
     auto& cache = tab_body_answers();
     static unsigned cache_pass = 0, cache_gen = 0;
@@ -530,11 +543,21 @@ HBRUSH tab_body_under(HWND control)
         cache_pass = g_layout_pass;
         cache_gen = g_tab_bodies_gen;
     }
+    return cache;
+}
+HBRUSH tab_body_under(HWND control)
+{
+    auto& cache = tab_body_answers_now();
     if (auto it = cache.find(control); it != cache.end()) return it->second;
     trace::mark(trace::phase::tab_cache_miss, uintptr_t(control));
+    // Its teardown hook first: the scan prints a tab control, and what that
+    // runs may destroy the control asking. Kept only if the control's still
+    // there, hooked, and nothing tore tab bodies down meanwhile.
+    const bool hooked = SetWindowSubclass(control, tab_body_answer_proc, 0, 0) != FALSE;
+    const tab_scan scan;
     const HBRUSH b = tab_body_under_scan(control);
+    if (!hooked || !scan.still(control)) return nullptr;  // the window's colour, not kept
     cache[control] = b;
-    SetWindowSubclass(control, tab_body_answer_proc, 0, 0);  // (again: the same one)
     return b;
 }
 HBRUSH tab_body_under_scan(HWND control)
@@ -545,7 +568,8 @@ HBRUSH tab_body_under_scan(HWND control)
     {
         // Shown as its siblings are (its style: a window not shown yet, or
         // printed, has its pages' grounds as it will have on screen).
-        if (s == control || !(GetWindowLongPtrW(s, GWL_STYLE) & WS_VISIBLE)) continue;
+        if (s == control || !(GetWindowLongPtrW(s, GWL_STYLE) & WS_VISIBLE) || GetPropW(s, L"rapport-tab-dying"))
+            continue;
         wchar_t cls[32] = {};
         GetClassNameW(s, cls, 32);
         if (_wcsicmp(cls, WC_TABCONTROLW)) continue;
@@ -8952,9 +8976,22 @@ bool render_tabs(HWND h, HDC dc)
 // alike: through render_tabs, else drawn straight onto the DC, so a failure
 // still paints (a light body may keep the style's shade then), and is never
 // retried.
+void (*g_tab_dying_hook_for_tests)(HWND, void*) = nullptr;
+void* g_tab_dying_hook_data = nullptr;
 LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
 {
-    if (msg == WM_NCDESTROY) forget_tab_body(h);
+    // Going: marked so no scan measures it again (what runs below may look
+    // a ground up), and forgotten before and after the rest of its teardown.
+    if (msg == WM_NCDESTROY)
+    {
+        SetPropW(h, L"rapport-tab-dying", h);
+        forget_tab_body(h);
+        if (g_tab_dying_hook_for_tests) g_tab_dying_hook_for_tests(h, g_tab_dying_hook_data);
+        const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+        forget_tab_body(h);
+        RemovePropW(h, L"rapport-tab-dying");
+        return r;
+    }
     if ((msg != WM_PAINT && msg != WM_ERASEBKGND && msg != WM_PRINTCLIENT) || !own_tabs(h))
         return DefSubclassProc(h, msg, wp, lp);
     switch (msg)
@@ -15797,10 +15834,27 @@ HBRUSH tab_body_brush_under(HWND control)
 
 }  // namespace rap::win32
 
-// Private test seam: whether `control`'s tab body answer is cached.
+// Private test seams: whether `control`'s tab body answer is cached, and
+// whether tab control `tab`'s body colour is.
 extern "C" __declspec(dllexport) int rapport_win32_tab_body_cached(HWND control)
 {
-    return rap::win32::tab_body_answers().count(control) ? 1 : 0;
+    return rap::win32::tab_body_answers_now().count(control) ? 1 : 0;
+}
+// One lookup of `control`'s tab body, as a ground asks: 1 found, 0 not.
+extern "C" __declspec(dllexport) int rapport_win32_tab_body_lookup(HWND control)
+{
+    return rap::win32::tab_body_under(control) ? 1 : 0;
+}
+extern "C" __declspec(dllexport) int rapport_win32_tab_body_known(HWND tab)
+{
+    return rap::win32::tab_bodies().count(tab) ? 1 : 0;
+}
+// And a call from inside a tab control's WM_NCDESTROY, once it's forgotten
+// and before the rest of its teardown (what a subclass below rapport's sees).
+extern "C" __declspec(dllexport) void rapport_win32_set_tab_dying_hook(void (*hook)(HWND, void*), void* data)
+{
+    rap::win32::g_tab_dying_hook_for_tests = hook;
+    rap::win32::g_tab_dying_hook_data = data;
 }
 
 namespace rap::win32

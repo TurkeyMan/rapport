@@ -44,6 +44,13 @@
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
 RAPPORT_BUILTIN_BACKEND(win32);
 extern "C" int rapport_win32_tab_body_cached(HWND);
+extern "C" int rapport_win32_tab_body_known(HWND);
+extern "C" int rapport_win32_tab_body_lookup(HWND);
+extern "C" void rapport_win32_set_tab_dying_hook(void (*)(HWND, void*), void*);
+namespace rap::win32
+{
+unsigned layout_requests_for_tests();  // win32_common.h
+}  // namespace rap::win32
 #endif
 
 namespace
@@ -192,9 +199,28 @@ DWORD tab_body(HWND tab, bool beside = false)
     return p.at((body.left + body.right) / 2, (body.top + body.bottom) / 2);
 }
 
+// This thread's top-level window titled `title` (never another process's:
+// the variants run side by side under ctest -j, their windows titled alike).
 HWND top_of(const wchar_t* title)
 {
-    return FindWindowW(nullptr, title);
+    struct find
+    {
+        const wchar_t* title;
+        HWND found = nullptr;
+    } f{title};
+    EnumThreadWindows(
+        GetCurrentThreadId(),
+        [](HWND h, LPARAM p) -> BOOL
+        {
+            auto* f = reinterpret_cast<find*>(p);
+            wchar_t text[128]{};
+            GetWindowTextW(h, text, 128);
+            if (std::wcscmp(text, f->title)) return TRUE;
+            f->found = h;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&f));
+    return f.found;
 }
 std::vector<HWND> children_of(HWND top, const wchar_t* cls)
 {
@@ -406,22 +432,33 @@ int main(int argc, char** argv)
                 HWND t = top_of(L"Content surface, cycled");
                 const std::vector<HWND> e = t ? children_of(t, L"Edit") : std::vector<HWND>{};
                 HWND b = t ? button_named(t, L"Cycled push") : nullptr;
+                const std::vector<HWND> tc = t ? children_of(t, WC_TABCONTROLW) : std::vector<HWND>{};
                 // Each found and printed on the page's body (light: not the
                 // window colour), or the cycle doesn't count.
-                if (!e.empty() && b)
+                // A cycle that fails says why, on a line of its own.
+                if (!t || e.empty() || !b || tc.empty())
+                    std::printf("     cycle %d: not found:%s%s%s%s\n", i, t ? "" : " window", tc.empty() ? " tab" : "",
+                                e.empty() ? " entry" : "", b ? "" : " button");
+                else
                 {
                     const field_look f = look_of(e[0]);
                     const printed pb = print_whole(b);
-                    if (f.corner != 0xDEADBEEF && f.corner == tab_body(children_of(t, WC_TABCONTROLW).front()) &&
-                        pb.w > 0 && pb.at(0, 0) == f.corner)
+                    const DWORD page_body = tab_body(tc.front());
+                    if (f.corner != 0xDEADBEEF && f.corner == page_body && pb.w > 0 && pb.at(0, 0) == f.corner)
                         ++printed_ok;
+                    else
+                        std::printf("     cycle %d: entry corner %s, page body %s, button %dx%d corner %s\n", i,
+                                    hex(f.corner).c_str(), hex(page_body).c_str(), pb.w, pb.h,
+                                    hex(pb.at(0, 0)).c_str());
                 }
             }
             pump(2);
             lookups_ok = lookups_ok && look_of(e2[0]).fill == before_e2;
             if (i == 9) baseline = gdi();
         }
-        const long grew = gdi() - baseline;
+        const long final_count = gdi();
+        const long grew = final_count - baseline;
+        expect(final_count > 0, "GDI objects counted at the end (" + std::to_string(final_count) + ")");
         expect(printed_ok == cycles, "every cycled window's entry and button found and printed on its page: " +
                                          std::to_string(printed_ok) + " of " + std::to_string(cycles));
         expect(baseline > 0, "GDI objects counted (" + std::to_string(baseline) + ")");
@@ -453,8 +490,10 @@ int main(int argc, char** argv)
                         cached += rapport_win32_tab_body_cached(edit);
                     }
                 }
-                pump(2);
+                // At once: WM_NCDESTROY has run, and no later lookup (a new
+                // pass clearing the map) has had the chance to.
                 if (edit && !rapport_win32_tab_body_cached(edit)) ++gone;
+                pump(2);
             }
             expect(asked == 20 && cached == 20, "a lone entry's lookup cached, a miss (" + std::to_string(cached) +
                                                     " of " + std::to_string(asked) + ")");
@@ -467,12 +506,140 @@ int main(int argc, char** argv)
         if (!g_dark)
         {
             const DWORD on_page = look_of(e2[0]).corner;
+            expect(body != window_colour && on_page == body, "before: the page's body " + hex(body) +
+                                                                 " isn't the window's " + hex(window_colour) +
+                                                                 ", and the entry is on it: " + hex(on_page));
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+            const unsigned layouts_before = rap::win32::layout_requests_for_tests();
+#endif
             DestroyWindow(t2[0]);
+            expect(!IsWindow(t2[0]) && IsWindow(e2[0]), "the tab control destroyed, the entry still there");
             const field_look after = look_of(e2[0]);
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+            expect(rap::win32::layout_requests_for_tests() == layouts_before,
+                   "no relayout asked for between the teardown and the print");
+#endif
             expect(on_page == body && after.corner == window_colour,
                    "its tab control destroyed, the entry is on the window " + hex(window_colour) + ", not the page " +
                        hex(on_page) + ": " + hex(after.corner));
         }
+
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+        // A tab body's scan prints the tab control, and what that runs may
+        // destroy the control asking, destroy the tab, or forget the tab
+        // bodies (a theme change): nothing is kept from such a scan. Each in
+        // a window of its own, its tab not yet measured; the tab's
+        // WM_PRINTCLIENT does it (once), through a subclass of the test's.
+        if (!g_dark)
+        {
+            enum class does { destroy_control, destroy_tab, retheme };
+            struct hook_data
+            {
+                does what;
+                HWND control, tab, top;
+                bool done = false;
+            };
+            auto hook = [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) -> LRESULT
+            {
+                auto* d = reinterpret_cast<hook_data*>(ref);
+                if (msg == WM_PRINTCLIENT && !d->done)
+                {
+                    d->done = true;
+                    if (d->what == does::destroy_control) DestroyWindow(d->control);
+                    if (d->what == does::destroy_tab)
+                    {
+                        DestroyWindow(h);
+                        return 0;
+                    }
+                    if (d->what == does::retheme) SendMessageW(d->top, WM_THEMECHANGED, 0, 0);
+                }
+                return DefSubclassProc(h, msg, wp, lp);
+            };
+            int n = 0;
+            for (does what : {does::destroy_control, does::destroy_tab, does::retheme})
+            {
+                const std::wstring title = L"Content surface, reentrant " + std::to_wstring(++n);
+                const std::string name = what == does::destroy_control ? "the control asking destroyed"
+                                         : what == does::destroy_tab   ? "the tab destroyed"
+                                                                       : "the tab bodies forgotten";
+                auto w = (*ui)->create(window{std::string(title.begin(), title.end()), {vbox{
+                    tabs{{"One", vbox{entry{}.placeholder("Asking")}}, {"Two", label{"Second"}}},
+                }}}.size(360_px, 200_px));
+                HWND t = top_of(title.c_str());
+                const std::vector<HWND> e = t ? children_of(t, L"Edit") : std::vector<HWND>{};
+                const std::vector<HWND> tc = t ? children_of(t, WC_TABCONTROLW) : std::vector<HWND>{};
+                if (e.empty() || tc.empty())
+                {
+                    expect(false, name + ": the entry and the tab control found");
+                    continue;
+                }
+                expect(!rapport_win32_tab_body_known(tc[0]), name + ": its tab not measured yet");
+                hook_data d{what, e[0], tc[0], t};
+                SetWindowSubclass(tc[0], hook, 0x5eed, reinterpret_cast<DWORD_PTR>(&d));
+                // One lookup, as a ground asks (a print asks several times,
+                // the later ones after the tab's print is over).
+                const int found = rapport_win32_tab_body_lookup(e[0]);
+                if (IsWindow(tc[0])) RemoveWindowSubclass(tc[0], hook, 0x5eed);
+                expect(d.done, name + ": the tab was printed for the lookup");
+                expect(!found, name + ": the lookup found no body (" + std::to_string(found) + ")");
+                expect(!rapport_win32_tab_body_cached(e[0]), name + ": no answer kept for the control");
+                // (The control's going changes nothing of the tab's: its body,
+                // measured whole, may be kept.)
+                if (what != does::destroy_control)
+                    expect(!rapport_win32_tab_body_known(tc[0]), name + ": no body kept for the tab");
+                if (what == does::destroy_control)
+                    expect(!IsWindow(e[0]), name + ": it's gone");
+                else
+                {
+                    // Asked again, with nothing in the way: what's there now.
+                    const DWORD want = what == does::destroy_tab ? window_colour : tab_body(tc[0]);
+                    const DWORD got = look_of(e[0]).corner;
+                    expect(got == want, name + ": printed again, the entry is on " + hex(want) + ": " + hex(got));
+                }
+            }
+
+            // A ground looked up from inside the tab control's own
+            // WM_NCDESTROY, after rapport's forgetting and before the rest of
+            // its teardown (a subclass below rapport's): the dying tab isn't
+            // measured again, and nothing kept refers to it.
+            {
+                auto w = (*ui)->create(window{"Content surface, dying tab", {vbox{
+                    tabs{{"One", vbox{entry{}.placeholder("Asking")}}, {"Two", label{"Second"}}},
+                }}}.size(360_px, 200_px));
+                HWND t = top_of(L"Content surface, dying tab");
+                const std::vector<HWND> e = t ? children_of(t, L"Edit") : std::vector<HWND>{};
+                const std::vector<HWND> tc = t ? children_of(t, WC_TABCONTROLW) : std::vector<HWND>{};
+                if (e.empty() || tc.empty())
+                    expect(false, "a dying tab: the entry and the tab control found");
+                else
+                {
+                    const DWORD before = look_of(e[0]).corner;
+                    struct dying
+                    {
+                        HWND entry;
+                        DWORD seen = 0xDEADBEEF;
+                    } d{e[0]};
+                    rapport_win32_set_tab_dying_hook(
+                        [](HWND, void* p)
+                        {
+                            auto* d = static_cast<dying*>(p);
+                            d->seen = DWORD(rapport_win32_tab_body_lookup(d->entry));
+                        },
+                        &d);
+                    DestroyWindow(tc[0]);
+                    rapport_win32_set_tab_dying_hook(nullptr, nullptr);
+                    expect(before == body && d.seen == 0,
+                           "a dying tab: the entry was on the page " + hex(before) +
+                               ", and looked up as it went found no body (" + std::to_string(d.seen) + ")");
+                    expect(!rapport_win32_tab_body_known(tc[0]), "a dying tab: no body kept for it");
+                    expect(!rapport_win32_tab_body_cached(e[0]), "a dying tab: no answer kept for the entry");
+                    const DWORD after = look_of(e[0]).corner;
+                    expect(after == window_colour, "a dying tab: the entry's now on the window's colour " +
+                                                       hex(window_colour) + ": " + hex(after));
+                }
+            }
+        }
+#endif
     }
 
     // An empty document-tab strip on a base surface (under a menu bar, as
