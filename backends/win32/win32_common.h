@@ -95,6 +95,9 @@ UINT dpi_of(HWND h);
 // For tests: every window taken to be at `dpi` (0: its own again), so a
 // never-shown window can be sent WM_DPICHANGED for it.
 void set_dpi_for_tests(UINT dpi);
+// For tests: the layout pass counter (g_layout_pass), which every relayout
+// request moves on: a setter given the value it has asks none (#88).
+unsigned layout_requests_for_tests();
 // The system message font at `dpi` (cached; owned by the cache), in
 // Segoe UI Variable where it's Segoe UI and that's installed.
 HFONT ui_font(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f);

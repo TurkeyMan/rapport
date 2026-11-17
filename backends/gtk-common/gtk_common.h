@@ -1062,9 +1062,21 @@ public:
     {
     }
 
-    void set_enabled(bool e) override { gtk_widget_set_sensitive(outer_, e); }
+    // Each unchanged does nothing (#88).
+    void set_enabled(bool e) override
+    {
+        if (bool(gtk_widget_get_sensitive(outer_)) == e) return;
+        gtk_widget_set_sensitive(outer_, e);
+    }
     void set_visible(bool v) override
     {
+#if GTK_MAJOR_VERSION >= 4
+        if (bool(gtk_widget_get_visible(outer_)) == v) return;
+#else
+        // (Shown asked for while it's not shown yet, nor kept from showing:
+        // shown with its window, as ever.)
+        if (bool(gtk_widget_get_visible(outer_)) == v && bool(gtk_widget_get_no_show_all(outer_)) == !v) return;
+#endif
         show(outer_, v);
         // A form field's row label goes with it.
         if (auto* label = static_cast<GtkWidget*>(g_object_get_data(G_OBJECT(outer_), "rapport-form-label")))
@@ -1084,7 +1096,20 @@ public:
             gtk_widget_hide(w);
 #endif
     }
-    void set_tooltip(const std::string& t) override { gtk_widget_set_tooltip_text(w_, t.c_str()); }
+    void set_tooltip(const std::string& t) override
+    {
+#if GTK_MAJOR_VERSION >= 4
+        // GTK 4's is the widget's own, not to be freed.
+        const char* now = gtk_widget_get_tooltip_text(w_);
+        const bool same = t == (now ? now : "");
+#else
+        gchar* now = gtk_widget_get_tooltip_text(w_);
+        const bool same = t == (now ? now : "");
+        g_free(now);
+#endif
+        if (same) return;
+        gtk_widget_set_tooltip_text(w_, t.c_str());
+    }
     void focus() override { gtk_widget_grab_focus(w_); }
     bool has_focus() const override
     {
@@ -1563,6 +1588,9 @@ public:
 
     void set_text(const std::string& t, std::vector<span> spans = {}) override
     {
+        // The same plain text it has, none of it styled: nothing (#88).
+        if (spans.empty() && !styled_ && t == text()) return;
+        styled_ = !spans.empty();
         gtk_text_buffer_set_text(buffer_, t.c_str(), int(t.size()));
         tags_.apply(buffer_, w_, t, std::move(spans));
     }
@@ -1573,10 +1601,12 @@ public:
         gtk_text_buffer_get_end_iter(buffer_, &end);
         gtk_text_buffer_insert_with_tags(buffer_, &end, t.c_str(), int(t.size()),
                                          tags_.get(buffer_, w_, style), nullptr);
+        styled_ = true;
     }
 
     void set_read_only(bool ro) override
     {
+        if (bool(gtk_text_view_get_editable(GTK_TEXT_VIEW(w_))) == !ro) return;  // unchanged (#88)
         gtk_text_view_set_editable(GTK_TEXT_VIEW(w_), !ro);
         gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(w_), !ro);
     }
@@ -1645,6 +1675,7 @@ protected:
 
 private:
     GtkTextBuffer* buffer_ = nullptr;
+    bool styled_ = false;  // spans or styled text in it (set_text compares plain text only)
     tag_cache tags_;
     std::function<void()> changed_;
 };
