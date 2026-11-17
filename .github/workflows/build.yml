@@ -191,6 +191,13 @@ jobs:
         if: always()
         run: Get-ChildItem build/Testing/Temporary -Filter 'LastTest*.log' | Select-String -Pattern 'fringe check:' | ForEach-Object { $_.Line }
 
+      # win32-content-surface's tab body re-entrancy checks, through the
+      # backend's test seams (linked in, or found in rapport_win32.dll): that
+      # they ran in this job (under ASan in the asan one), from ctest's log.
+      - name: Tab body re-entrancy checks
+        if: always()
+        run: Get-ChildItem build/Testing/Temporary -Filter 'LastTest*.log' | Select-String -Pattern "seams found|a lone entry|gone with its window|asking destroyed:|the tab destroyed:|tab bodies forgotten:|a dying tab:|a dying entry:|a nested scan:" | ForEach-Object { $_.Line }
+
       - name: Shell extension
         working-directory: build/bin/Release
         run: |
