@@ -484,6 +484,55 @@ void reentrant(rap::ui& ui, bool sidebar)
                             selected(r.h, sidebar));
                  expect(r.built[1] != nullptr, r.kind + "B built");
              });
+    // Every page hidden, then the lazy B shown: B made current and built,
+    // and its builder shows C and switches to it. The page shown is the one
+    // current after the build: C, selected too; no on_changed.
+    const hook show_c = [](rap::tabs* t)
+    {
+        t->set_page_visible(2, true);
+        t->set_current(2);
+    };
+    scenario("shown first, re-entered", {nullptr, show_c, nullptr, nullptr},
+             [&](const run& r)
+             {
+                 for (int i : {3, 2, 1, 0}) r.t->set_page_visible(i, false);
+                 pump();
+                 expect(r.t->current() == -1 && !r.built[1], r.kind + "every page hidden: none, B unbuilt");
+                 r.t->set_page_visible(1, true);
+                 pump();
+                 expect(r.changes.empty(), r.kind + "no on_changed, " + seq(r.changes));
+                 expect(r.t->current() == 2 && selected(r.h, sidebar) == "C",
+                        r.kind + "C current and selected, " + str(r.t->current()) + ", " + selected(r.h, sidebar));
+                 expect(showing(r, 2), r.kind + "C shown");
+                 expect(r.built[1] != nullptr, r.kind + "B built");
+             });
+    // A user's switch to the lazy B, whose builder hides every page: none
+    // current, and no on_changed (never -1).
+    const hook hide_all = [](rap::tabs* t)
+    {
+        for (int i : {0, 2, 3, 1}) t->set_page_visible(i, false);
+    };
+    scenario("a user's switch, every page hidden", {nullptr, hide_all, nullptr, nullptr},
+             [&](const run& r)
+             {
+                 user_select(r, 1);
+                 expect(r.changes.empty(), r.kind + "no on_changed, " + seq(r.changes));
+                 expect(r.t->current() == -1 && selected(r.h, sidebar) == "-" && showing(r, -1),
+                        r.kind + "none current, none selected, no page shown, " + str(r.t->current()));
+             });
+    // A user's switch to the lazy B, whose builder switches back to A, the
+    // page current before: A current, selected and shown, no on_changed.
+    const hook to_a = [](rap::tabs* t) { t->set_current(0); };
+    scenario("a user's switch back where it was", {nullptr, to_a, nullptr, nullptr},
+             [&](const run& r)
+             {
+                 user_select(r, 1);
+                 expect(r.changes.empty(), r.kind + "no on_changed, " + seq(r.changes));
+                 expect(r.t->current() == 0 && selected(r.h, sidebar) == "A" && showing(r, 0),
+                        r.kind + "A current, selected and shown, " + str(r.t->current()) + ", " +
+                            selected(r.h, sidebar));
+                 expect(r.built[1] != nullptr, r.kind + "B built");
+             });
 }
 
 // Hidden from the start: no header, never shown, a lazy page unbuilt.

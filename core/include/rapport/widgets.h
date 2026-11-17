@@ -1009,6 +1009,9 @@ public:
     // Doesn't fire on_changed. A hidden page (or an index out of range):
     // nothing.
     virtual void set_current(int) = 0;
+    // Fires only for the user's switch of page, once, with current() as it
+    // ends (a lazy page's builder may switch again, or hide pages): never
+    // with -1, and not when the page ends where it was before the switch.
     virtual void on_changed(std::function<void(int)>) = 0;
     // A hidden page's tab is gone, and the page takes no layout, paint or
     // input; a lazy page stays unbuilt. Hiding the current page makes the

@@ -8943,6 +8943,7 @@ public:
         for (int i = 0; i < items_.count; ++i)
             if (items_.shown(i)) insert_tab(i);
         TabCtrl_SetCurSel(h_, items_.shown_count() > 0 ? 0 : -1);  // the first visible page
+        settled_ = current();
         // A new DPI comes with a new font: the tabs' height follows it.
         SetWindowSubclass(
             h_,
@@ -8984,6 +8985,7 @@ public:
         TabCtrl_SetCurSel(h_, items_.item_of(i));
         ensure_built(i);
         win_.relayout_at_once();
+        settled_ = current();
     }
     // A hidden page's tab deleted, a page shown again inserted at its place
     // among the visible ones; the selection set without TCN_SELCHANGE, so
@@ -9006,6 +9008,7 @@ public:
         TabCtrl_SetCurSel(h_, now < 0 ? -1 : items_.item_of(now));
         ensure_built(now);
         win_.relayout_at_once();
+        settled_ = current();
     }
     bool page_visible(int page) const override { return items_.shown(page); }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
@@ -9014,9 +9017,14 @@ public:
         handled = n->code == TCN_SELCHANGE;
         if (handled)
         {
+            // A user's switch: on_changed once, with the page current after
+            // the build (a builder may have switched again, or hidden every
+            // page), if there's one and it isn't the page current before.
+            const int before = settled_;
             ensure_built(current());
             win_.relayout_at_once();
-            if (changed_) changed_(current());
+            settled_ = current();
+            if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
         }
         return 0;
     }
@@ -9071,6 +9079,7 @@ public:
         show_control(h_, shown && visible && items_.strip());
         if (shown && visible) ensure_built(current());  // the first time a lazy page is the one showing
         const int now = current();
+        settled_ = now;
         for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == now);
     }
 
@@ -9087,6 +9096,7 @@ private:
     page_items items_;
     std::vector<std::wstring> titles_;  // per page, as the tabs show them
     std::function<void(int)> changed_;
+    int settled_ = -1;  // current() as the last operation or switch left it
     const band_density* density_ = nullptr;  // fluent controls': the tabs' (set_in_band)
     bool rows_set_ = false;                  // its tabs' height set from density_
 };
@@ -9186,10 +9196,14 @@ public:
     {
         // A click on the empty space below the names reports a change too.
         if (code != LBN_SELCHANGE || current() == shown_) return;
+        // As tabs_impl's: on_changed once, with the page current after the
+        // build, if there's one and it isn't the page shown before.
+        const int before = shown_;
         shown_ = current();
         ensure_built(current());
         win_.relayout_at_once();
-        if (changed_) changed_(current());
+        const int now = current();
+        if (changed_ && now >= 0 && now != before) changed_(now);
     }
     // A hidden page's row deleted, a page shown again inserted at its place
     // among the visible ones; LB_SETCURSEL sends no LBN_SELCHANGE, so no

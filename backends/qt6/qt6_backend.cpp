@@ -2087,10 +2087,9 @@ public:
         QObject::connect(t, &QTabWidget::currentChanged, t,
                          [this](int i)
                          {
+                             const int before = settled_;
                              lazy_.ensure_built(i);
-                             // The page it ends on: a builder may have
-                             // switched again.
-                             if (changed_ && !quiet_) changed_(tabs()->currentIndex());
+                             if (!quiet_) user_switched(before);
                          });
     }
     // Its pages hidden from the start (spec::tabs::visible) and its strip
@@ -2109,6 +2108,7 @@ public:
             if (!visible_[size_t(i)]) tabs()->setTabVisible(i, false);
         if (first < 0) set_none(true);
         update_strip(true);
+        settled_ = current();
     }
     int current() const override { return none_ ? -1 : tabs()->currentIndex(); }
     // A hidden page, or one out of range: nothing.
@@ -2121,6 +2121,7 @@ public:
             tabs()->setCurrentIndex(i);
         }
         lazy_.ensure_built(i);
+        settled_ = current();
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
     void set_page_visible(int page, bool on) override
@@ -2151,13 +2152,17 @@ public:
             tabs()->setTabVisible(page, true);
             if (none_)  // the first page shown again: current
             {
+                // Out of "none" before the build, so a builder calling the
+                // tabs back finds the page current, and what it does stands
+                // (every page hidden again: none again).
+                set_none(false);
                 tabs()->setCurrentIndex(page);
                 lazy_.ensure_built(page);
-                set_none(false);
             }
         }
         update_strip(false);
         tabs()->updateGeometry();
+        settled_ = current();
     }
     bool page_visible(int page) const override
     {
@@ -2167,10 +2172,19 @@ public:
     {
         lazy_ = std::move(pages);
         lazy_.ensure_built(current());
+        settled_ = current();
     }
 
 private:
     tab_widget* tabs() const { return static_cast<tab_widget*>(w_); }
+    // A user's switch from `before` (current() as it was), its page built:
+    // on_changed once, with the page current now (a builder may have switched
+    // again, or hidden every page), if there's one and it isn't `before`.
+    void user_switched(int before)
+    {
+        settled_ = current();
+        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+    }
     // QTabWidget's page stack, hidden with every page: no page shows.
     void set_none(bool none)
     {
@@ -2198,6 +2212,7 @@ private:
     bool hide_single_ = false;
     bool none_ = false;   // every page hidden: current() is -1
     bool quiet_ = false;  // our own change of page: no on_changed
+    int settled_ = 0;     // current() as the last operation or switch left it
 };
 
 // A sidebar's list of page names: at its natural size, its visible rows
@@ -2255,12 +2270,12 @@ public:
                          [this](int i)
                          {
                              if (i < 0) return;
+                             const int before = settled_;
                              lazy_.ensure_built(i);
                              // A builder that selected another page has
-                             // put that one up; on_changed has the page it
-                             // ends on.
+                             // put that one up.
                              if (list_->currentRow() == i) stack_->setCurrentIndex(i);
-                             if (changed_ && !quiet_) changed_(list_->currentRow());
+                             if (!quiet_) user_switched(before);
                          });
         stack_->shown = [this](int i) { return page_visible(i); };
     }
@@ -2280,6 +2295,7 @@ public:
         if (first < 0) set_none(true);
         update_strip();
         relayout();
+        settled_ = current();
     }
     int current() const override { return none_ ? -1 : std::max(0, list_->currentRow()); }
     // A hidden page, or one out of range: nothing.
@@ -2292,6 +2308,7 @@ public:
             list_->setCurrentRow(i);
         }
         lazy_.ensure_built(i);
+        settled_ = current();
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
     void set_page_visible(int page, bool on) override
@@ -2316,14 +2333,19 @@ public:
             list_->setRowHidden(page, false);
             if (none_)  // the first page shown again: current
             {
+                // Out of "none" before the build, so a builder calling the
+                // tabs back finds the page current; then up goes the page
+                // current after it, as with the row still selected (every
+                // page hidden again: none, nothing up).
+                set_none(false);
                 list_->setCurrentRow(page);
                 lazy_.ensure_built(page);
-                stack_->setCurrentIndex(page);
-                set_none(false);
+                if (!none_) stack_->setCurrentIndex(current());
             }
         }
         update_strip();
         relayout();
+        settled_ = current();
     }
     bool page_visible(int page) const override
     {
@@ -2333,12 +2355,20 @@ public:
     {
         lazy_ = std::move(pages);
         lazy_.ensure_built(current());
+        settled_ = current();
     }
     // Sizes the rows again (an app's row height: the list's least height
     // counts its visible rows).
     std::function<void()> size_rows;
 
 private:
+    // As tabs_impl's: on_changed once, with the page current now, if there's
+    // one and it isn't `before`.
+    void user_switched(int before)
+    {
+        settled_ = current();
+        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+    }
     void set_none(bool none)
     {
         none_ = none;
@@ -2369,6 +2399,7 @@ private:
     bool hide_single_ = false;
     bool none_ = false;   // every page hidden: current() is -1
     bool quiet_ = false;  // our own change of page: no on_changed
+    int settled_ = 0;     // current() as the last operation or switch left it
 };
 
 // -- stack --------------------------------------------------------------------

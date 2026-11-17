@@ -577,6 +577,57 @@ void reentrant(rap::ui& ui, bool sidebar)
                         kind + "C current, natively too, and shown, " + str(t->current()) + "/" + str(native(n)));
                  expect(built[1] != nullptr, kind + "B built");
              });
+    // Every page hidden, then the lazy B shown: B made current and built,
+    // and its builder shows C and switches to it. The page shown is the one
+    // current after the build: C, natively too; no on_changed.
+    const hook show_c = [](rap::tabs* t)
+    {
+        t->set_page_visible(2, true);
+        t->set_current(2);
+    };
+    scenario("shown first, re-entered", {nullptr, show_c, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 for (int i : {3, 2, 1, 0}) t->set_page_visible(i, false);
+                 spin();
+                 expect(t->current() == -1 && !built[1], kind + "every page hidden: none, B unbuilt");
+                 t->set_page_visible(1, true);
+                 spin();
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == 2 && native(n) == 2 && n.shown() == 2,
+                        kind + "C current, natively too, " + str(t->current()) + "/" + str(native(n)) + "/" +
+                            str(n.shown()));
+                 expect(showing(n, "page c"), kind + "C shown");
+                 expect(built[1] != nullptr, kind + "B built");
+             });
+    // A user's switch to the lazy B, whose builder hides every page: none
+    // current, and no on_changed (never -1).
+    const hook hide_all = [](rap::tabs* t)
+    {
+        for (int i : {0, 2, 3, 1}) t->set_page_visible(i, false);
+    };
+    scenario("a user's switch, every page hidden", {nullptr, hide_all, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label**, std::vector<int>& changes, const std::string& kind)
+             {
+                 user_select(n, 1);
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == -1 && n.shown() == -1,
+                        kind + "none current, no page shown, " + str(t->current()) + "/" + str(n.shown()));
+             });
+    // A user's switch to the lazy B, whose builder switches back to A, the
+    // page current before: A current and shown, no on_changed.
+    const hook to_a = [](rap::tabs* t) { t->set_current(0); };
+    scenario("a user's switch back where it was", {nullptr, to_a, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 user_select(n, 1);
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == 0 && native(n) == 0 && n.shown() == 0 && showing(n, "page a"),
+                        kind + "A current, natively too, and shown, " + str(t->current()) + "/" + str(native(n)));
+                 expect(built[1] != nullptr, kind + "B built");
+             });
 }
 
 // A sidebar's natural height: its visible rows only.
