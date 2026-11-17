@@ -47,11 +47,51 @@ extern "C" int rapport_win32_tab_body_cached(HWND);
 extern "C" int rapport_win32_tab_body_known(HWND);
 extern "C" int rapport_win32_tab_body_lookup(HWND);
 extern "C" void rapport_win32_set_tab_dying_hook(void (*)(HWND, void*), void*);
+extern "C" void rapport_win32_set_ground_dying_hook(void (*)(HWND, void*), void*);
 namespace rap::win32
 {
 unsigned layout_requests_for_tests();  // win32_common.h
 }  // namespace rap::win32
 #endif
+
+namespace
+{
+// The backend's private test seams (win32_backend.cpp, exported): linked in
+// a static build, looked up in rapport_win32.dll in a plugin one (the asan
+// job's), once the backend's loaded.
+struct seam_fns
+{
+    using hook = void (*)(HWND, void*);
+    int (*cached)(HWND) = nullptr;
+    int (*known)(HWND) = nullptr;
+    int (*lookup)(HWND) = nullptr;
+    void (*set_tab_dying)(hook, void*) = nullptr;
+    void (*set_ground_dying)(hook, void*) = nullptr;
+    bool ok = false;
+    void find()
+    {
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+        cached = rapport_win32_tab_body_cached;
+        known = rapport_win32_tab_body_known;
+        lookup = rapport_win32_tab_body_lookup;
+        set_tab_dying = rapport_win32_set_tab_dying_hook;
+        set_ground_dying = rapport_win32_set_ground_dying_hook;
+#else
+        if (HMODULE m = GetModuleHandleW(L"rapport_win32.dll"))
+        {
+            cached = reinterpret_cast<int (*)(HWND)>(GetProcAddress(m, "rapport_win32_tab_body_cached"));
+            known = reinterpret_cast<int (*)(HWND)>(GetProcAddress(m, "rapport_win32_tab_body_known"));
+            lookup = reinterpret_cast<int (*)(HWND)>(GetProcAddress(m, "rapport_win32_tab_body_lookup"));
+            set_tab_dying =
+                reinterpret_cast<void (*)(hook, void*)>(GetProcAddress(m, "rapport_win32_set_tab_dying_hook"));
+            set_ground_dying =
+                reinterpret_cast<void (*)(hook, void*)>(GetProcAddress(m, "rapport_win32_set_ground_dying_hook"));
+        }
+#endif
+        ok = cached && known && lookup && set_tab_dying && set_ground_dying;
+    }
+} seams;
+}  // namespace
 
 namespace
 {
@@ -298,6 +338,8 @@ int main(int argc, char** argv)
     if (mode == "native" || mode == "native-layer") options.look.controls = rap::control_style::native;
     auto ui = rap::ui::load(argc, argv, options);
     if (!ui) return 1;
+    seams.find();
+    expect(seams.ok, "the backend's test seams found (linked in, or exported by rapport_win32.dll)");
 
     const DWORD build = windows_build();
     const bool eleven = build >= 22000, hc = high_contrast();
@@ -469,9 +511,9 @@ int main(int argc, char** argv)
 
         // A control's cached answer, a miss in a window with no tabs, goes
         // with the control (so a control made at its handle asks again).
-        // Light: dark mode's grounds never ask.
-#ifdef RAPPORT_TEST_BUILTIN_WIN32
-        if (!g_dark)
+        // Light: dark mode's grounds never ask. (The seams: exported by the
+        // backend, linked in or loaded.)
+        if (!g_dark && seams.ok)
         {
             int asked = 0, cached = 0, gone = 0;
             for (int i = 0; i < 20; ++i)
@@ -487,19 +529,19 @@ int main(int argc, char** argv)
                         edit = e[0];
                         ++asked;
                         look_of(edit);
-                        cached += rapport_win32_tab_body_cached(edit);
+                        cached += seams.cached(edit);
                     }
                 }
                 // At once: WM_NCDESTROY has run, and no later lookup (a new
                 // pass clearing the map) has had the chance to.
-                if (edit && !rapport_win32_tab_body_cached(edit)) ++gone;
+                if (edit && !seams.cached(edit)) ++gone;
                 pump(2);
             }
             expect(asked == 20 && cached == 20, "a lone entry's lookup cached, a miss (" + std::to_string(cached) +
                                                     " of " + std::to_string(asked) + ")");
             expect(gone == 20, "and gone with its window (" + std::to_string(gone) + " of 20)");
         }
-#endif
+
 
         // A tab control destroyed under its page's controls, with no layout
         // since: the entry it held asks again, and is on the window now.
@@ -524,13 +566,14 @@ int main(int argc, char** argv)
                        hex(on_page) + ": " + hex(after.corner));
         }
 
-#ifdef RAPPORT_TEST_BUILTIN_WIN32
+
+        // (With the seams, whichever build: under ASan in the plugin one.)
         // A tab body's scan prints the tab control, and what that runs may
         // destroy the control asking, destroy the tab, or forget the tab
         // bodies (a theme change): nothing is kept from such a scan. Each in
         // a window of its own, its tab not yet measured; the tab's
         // WM_PRINTCLIENT does it (once), through a subclass of the test's.
-        if (!g_dark)
+        if (!g_dark && seams.ok)
         {
             enum class does { destroy_control, destroy_tab, retheme };
             struct hook_data
@@ -573,20 +616,20 @@ int main(int argc, char** argv)
                     expect(false, name + ": the entry and the tab control found");
                     continue;
                 }
-                expect(!rapport_win32_tab_body_known(tc[0]), name + ": its tab not measured yet");
+                expect(!seams.known(tc[0]), name + ": its tab not measured yet");
                 hook_data d{what, e[0], tc[0], t};
                 SetWindowSubclass(tc[0], hook, 0x5eed, reinterpret_cast<DWORD_PTR>(&d));
                 // One lookup, as a ground asks (a print asks several times,
                 // the later ones after the tab's print is over).
-                const int found = rapport_win32_tab_body_lookup(e[0]);
+                const int found = seams.lookup(e[0]);
                 if (IsWindow(tc[0])) RemoveWindowSubclass(tc[0], hook, 0x5eed);
                 expect(d.done, name + ": the tab was printed for the lookup");
                 expect(!found, name + ": the lookup found no body (" + std::to_string(found) + ")");
-                expect(!rapport_win32_tab_body_cached(e[0]), name + ": no answer kept for the control");
+                expect(!seams.cached(e[0]), name + ": no answer kept for the control");
                 // (The control's going changes nothing of the tab's: its body,
                 // measured whole, may be kept.)
                 if (what != does::destroy_control)
-                    expect(!rapport_win32_tab_body_known(tc[0]), name + ": no body kept for the tab");
+                    expect(!seams.known(tc[0]), name + ": no body kept for the tab");
                 if (what == does::destroy_control)
                     expect(!IsWindow(e[0]), name + ": it's gone");
                 else
@@ -619,27 +662,127 @@ int main(int argc, char** argv)
                         HWND entry;
                         DWORD seen = 0xDEADBEEF;
                     } d{e[0]};
-                    rapport_win32_set_tab_dying_hook(
+                    seams.set_tab_dying(
                         [](HWND, void* p)
                         {
                             auto* d = static_cast<dying*>(p);
-                            d->seen = DWORD(rapport_win32_tab_body_lookup(d->entry));
+                            d->seen = DWORD(seams.lookup(d->entry));
                         },
                         &d);
                     DestroyWindow(tc[0]);
-                    rapport_win32_set_tab_dying_hook(nullptr, nullptr);
+                    seams.set_tab_dying(nullptr, nullptr);
                     expect(before == body && d.seen == 0,
                            "a dying tab: the entry was on the page " + hex(before) +
                                ", and looked up as it went found no body (" + std::to_string(d.seen) + ")");
-                    expect(!rapport_win32_tab_body_known(tc[0]), "a dying tab: no body kept for it");
-                    expect(!rapport_win32_tab_body_cached(e[0]), "a dying tab: no answer kept for the entry");
+                    expect(!seams.known(tc[0]), "a dying tab: no body kept for it");
+                    expect(!seams.cached(e[0]), "a dying tab: no answer kept for the entry");
                     const DWORD after = look_of(e[0]).corner;
                     expect(after == window_colour, "a dying tab: the entry's now on the window's colour " +
                                                        hex(window_colour) + ": " + hex(after));
                 }
             }
+
+            // A tab whose print asks a sibling's colour (WM_CTLCOLORSTATIC,
+            // as a sibling painting meanwhile would), which asks the tab's
+            // body while it's being printed for it: that nested lookup is
+            // refused (no print within the print) and keeps nothing; the
+            // outer one's answer is kept. Capped at 4 deep, so without the
+            // guard this fails rather than overflowing the stack.
+            {
+                auto w = (*ui)->create(window{"Content surface, nested scan", {vbox{
+                    tabs{{"One", vbox{entry{}.placeholder("Asking"), entry{"Sibling"}}}, {"Two", label{"Second"}}},
+                }}}.size(360_px, 240_px));
+                HWND t = top_of(L"Content surface, nested scan");
+                const std::vector<HWND> e = t ? children_of(t, L"Edit") : std::vector<HWND>{};
+                const std::vector<HWND> tc = t ? children_of(t, WC_TABCONTROLW) : std::vector<HWND>{};
+                if (e.size() < 2 || tc.empty())
+                    expect(false, "a nested scan: the entries and the tab control found");
+                else
+                {
+                    struct nest
+                    {
+                        HWND sibling;
+                        int depth = 0, deepest = 0, prints = 0;
+                    } n{e[1]};
+                    auto hook = [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) -> LRESULT
+                    {
+                        auto* n = reinterpret_cast<nest*>(ref);
+                        if (msg == WM_PRINTCLIENT)
+                        {
+                            ++n->prints;
+                            n->deepest = std::max(n->deepest, ++n->depth);
+                            if (n->depth < 4)
+                            {
+                                HDC dc = GetDC(n->sibling);
+                                SendMessageW(GetParent(n->sibling), WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(dc),
+                                             reinterpret_cast<LPARAM>(n->sibling));
+                                ReleaseDC(n->sibling, dc);
+                            }
+                            const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+                            --n->depth;
+                            return r;
+                        }
+                        return DefSubclassProc(h, msg, wp, lp);
+                    };
+                    expect(!seams.known(tc[0]), "a nested scan: its tab not measured yet");
+                    SetWindowSubclass(tc[0], hook, 0x5eef, reinterpret_cast<DWORD_PTR>(&n));
+                    const int found = seams.lookup(e[0]);
+                    RemoveWindowSubclass(tc[0], hook, 0x5eef);
+                    expect(n.prints >= 1 && n.deepest <= 1, "a nested scan: the tab printed once deep (" +
+                                                                std::to_string(n.deepest) + " deep, " +
+                                                                std::to_string(n.prints) + " prints)");
+                    expect(found == 1 && seams.cached(e[0]) && seams.known(tc[0]),
+                           "a nested scan: the outer lookup found the body and kept it (found " +
+                               std::to_string(found) + ")");
+                    expect(!seams.cached(e[1]), "a nested scan: nothing kept for the sibling asked within it");
+                }
+            }
+
+            // The same for the control asking: its ground looked up from
+            // inside its own WM_NCDESTROY, below rapport's forgetting (a
+            // subclass below): nothing kept for it once it's gone.
+            {
+                auto w = (*ui)->create(window{"Content surface, dying entry", {vbox{
+                    tabs{{"One", vbox{entry{}.placeholder("Asking"), entry{"Staying"}}}, {"Two", label{"Second"}}},
+                }}}.size(360_px, 240_px));
+                HWND t = top_of(L"Content surface, dying entry");
+                const std::vector<HWND> e = t ? children_of(t, L"Edit") : std::vector<HWND>{};
+                if (e.size() < 2)
+                    expect(false, "a dying entry: the entries found");
+                else
+                {
+                    const DWORD before = look_of(e[0]).corner;
+                    const bool kept_before = seams.cached(e[0]) != 0;
+                    struct dying
+                    {
+                        HWND entry;
+                        int found = -1, kept = -1;
+                    } d{e[0]};
+                    seams.set_ground_dying(
+                        [](HWND h, void* p)
+                        {
+                            auto* d = static_cast<dying*>(p);
+                            if (h != d->entry) return;
+                            d->found = seams.lookup(d->entry);
+                            d->kept = seams.cached(d->entry);
+                        },
+                        &d);
+                    DestroyWindow(e[0]);
+                    seams.set_ground_dying(nullptr, nullptr);
+                    expect(before == body && kept_before,
+                           "a dying entry: on the page " + hex(before) + " with its answer kept, before");
+                    expect(d.found == 0 && d.kept == 0,
+                           "a dying entry: looked up as it went, found no body and kept nothing (found " +
+                               std::to_string(d.found) + ", kept " + std::to_string(d.kept) + ")");
+                    expect(!IsWindow(e[0]) && !seams.cached(e[0]),
+                           "a dying entry: gone, and nothing kept for it");
+                    const DWORD other = look_of(e[1]).corner;
+                    expect(other == body, "a dying entry: the one beside it still on the page " + hex(body) + ": " +
+                                              hex(other));
+                }
+            }
         }
-#endif
+
     }
 
     // An empty document-tab strip on a base surface (under a menu bar, as
