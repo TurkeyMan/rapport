@@ -2348,20 +2348,28 @@ public:
                 auto* self = static_cast<tabs_impl*>(p);
                 // Never to a hidden page (GTK's own move off one it's had
                 // hidden goes to a visible one, or nowhere).
-                if (!self->state_.shown(int(page)))
-                {
-                    g_signal_stop_emission_by_name(nb, "switch-page");
-                    return;
-                }
+                if (!self->state_.shown(int(page))) g_signal_stop_emission_by_name(nb, "switch-page");
+            },
+            this);
+        // After GtkNotebook's own switch, so a builder that switches again
+        // (set_current) has the last word, and on_changed has the page it
+        // ends on.
+        connect_after(
+            w_, "switch-page",
+            +[](GtkNotebook*, GtkWidget*, guint page, gpointer p)
+            {
+                auto* self = static_cast<tabs_impl*>(p);
                 if (self->quiet_) return;
+                const int before = self->settled_;
                 self->ensure_built(int(page));
-                if (self->changed_) self->changed_(int(page));
+                self->user_switched(before);
             },
             this);
         quiet q(this);
         if (const int first = first_visible_page(state_.visible, state_.count); first >= 0)
             gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), first);
         update_strip();
+        settled_ = current();
     }
 
     int current() const override
@@ -2372,7 +2380,12 @@ public:
     {
         // Hidden (or out of range), or current already (#88): nothing.
         if (!state_.shown(i) || current() == i) return;
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
+        {
+            quiet q(this);  // the app's own: no on_changed (#98)
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
+        }
+        ensure_built(i);
+        settled_ = current();
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
@@ -2396,6 +2409,7 @@ public:
             ensure_built(now);
         }
         update_strip();
+        settled_ = current();
     }
     bool page_visible(int page) const override { return state_.shown(page); }
 
@@ -2407,6 +2421,7 @@ public:
         pages_ = std::move(pages);
         build_ = std::move(build);
         ensure_built(current());
+        settled_ = current();
     }
     void ensure_built(int i)
     {
@@ -2421,6 +2436,14 @@ public:
     }
 
 private:
+    // A user's switch from `before` (current() as it was), its page built:
+    // on_changed once, with the page current now (a builder may have switched
+    // again, or hidden every page), if there's one and it isn't `before`.
+    void user_switched(int before)
+    {
+        settled_ = current();
+        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+    }
     // hide_single_tab: with one page visible (or none), no tabs and no
     // frame, the page filling the notebook.
     void update_strip()
@@ -2445,6 +2468,7 @@ private:
 
     tab_pages state_;
     bool quiet_ = false;
+    int settled_ = 0;  // current() as the last operation or switch left it
     std::function<void(int)> changed_;
     std::vector<std::function<node()>> lazy_;
     std::vector<GtkWidget*> pages_;
@@ -2471,12 +2495,14 @@ public:
                 if (!row || self->quiet_) return;
                 const int i = gtk_list_box_row_get_index(row);
                 if (!self->state_.shown(i)) return;
+                const int before = self->settled_;
                 self->show_page(i);
-                if (self->changed_) self->changed_(i);
+                self->user_switched(before);
             },
             this);
         if (const int first = first_visible_page(state_.visible, state_.count); first >= 0) select(first);
         update_strip();
+        settled_ = current();
     }
 
     int current() const override
@@ -2490,7 +2516,8 @@ public:
         if (!state_.shown(i)) return;  // hidden, or out of range
         GtkListBoxRow* row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i);
         if (row && gtk_list_box_get_selected_row(GTK_LIST_BOX(list_)) == row) return;  // unchanged (#88)
-        gtk_list_box_select_row(GTK_LIST_BOX(list_), row);
+        select(i);  // the app's own: no on_changed (#98)
+        settled_ = current();
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
@@ -2518,6 +2545,7 @@ public:
         else if (on && was < 0)
             select(page);
         update_strip();
+        settled_ = current();
     }
     bool page_visible(int page) const override { return state_.shown(page); }
 
@@ -2529,6 +2557,7 @@ public:
         pages_ = std::move(pages);
         build_ = std::move(build);
         ensure_built(current());
+        settled_ = current();
     }
     void ensure_built(int i)
     {
@@ -2543,9 +2572,19 @@ public:
     }
 
 private:
+    // As tabs_impl's: on_changed once, with the page current now, if there's
+    // one and it isn't `before`.
+    void user_switched(int before)
+    {
+        settled_ = current();
+        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+    }
     void show_page(int i)
     {
         ensure_built(i);
+        // A builder that selected another page has put that one up.
+        GtkListBoxRow* row = gtk_list_box_get_selected_row(GTK_LIST_BOX(list_));
+        if (!row || gtk_list_box_row_get_index(row) != i) return;
         gtk_stack_set_visible_child_name(GTK_STACK(stack_), std::to_string(i).c_str());
     }
     // Row i selected and its page shown, without on_changed.
@@ -2583,6 +2622,7 @@ private:
     GtkWidget* stack_;
     tab_pages state_;
     bool quiet_ = false;
+    int settled_ = 0;  // current() as the last operation or switch left it
     std::function<void(int)> changed_;
     std::vector<std::function<node()>> lazy_;
     std::vector<GtkWidget*> pages_;

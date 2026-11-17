@@ -16,9 +16,11 @@
 
 #include <gtk/gtk.h>
 
+#include <array>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -158,6 +160,21 @@ struct native_tabs
     GtkWidget* list = nullptr;   // a sidebar's list
     GtkWidget* stack = nullptr;  // and its stack
     std::string headers() const { return nb ? notebook_headers(nb) : list_headers(list); }
+    // Page `i`'s widget the only one the notebook or stack shows (visible,
+    // and child-visible: GTK clears that on the pages it isn't showing).
+    bool only_shown(int i) const
+    {
+        for (int j = 0;; ++j)
+        {
+            GtkWidget* page = nb ? (j < gtk_notebook_get_n_pages(GTK_NOTEBOOK(nb))
+                                        ? gtk_notebook_get_nth_page(GTK_NOTEBOOK(nb), j)
+                                        : nullptr)
+                                 : gtk_stack_get_child_by_name(GTK_STACK(stack), std::to_string(j).c_str());
+            if (!page) return true;
+            const bool on = gtk_widget_get_visible(page) && gtk_widget_get_child_visible(page);
+            if (on != (j == i)) return false;
+        }
+    }
     std::string pages() const { return nb ? notebook_pages_shown(nb) : stack_pages_shown(stack); }
     int count() const { return nb ? gtk_notebook_get_n_pages(GTK_NOTEBOOK(nb)) : list_rows(list); }
     // The page natively current, or -1 when no page shows.
@@ -336,6 +353,311 @@ void hidden_from_start(rap::ui& ui, bool sidebar)
     expect(changes == 0, kind + "no on_changed from any of it, " + str(changes));
     t->set_current(0);
     expect(t->current() == 0 && n.shown() == 0 && lazy_label != nullptr, kind + "A made current: built, shown");
+}
+
+void spin();
+
+// Whether `w` (itself, or under it) is a shown label reading `text`.
+bool holds_label(GtkWidget* w, const char* text)
+{
+    if (!w || !gtk_widget_get_visible(w)) return false;
+    if (GTK_IS_LABEL(w) && std::string(gtk_label_get_text(GTK_LABEL(w))) == text) return true;
+    for (GtkWidget* c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c))
+        if (holds_label(c, text)) return true;
+    return false;
+}
+std::string seq(const std::vector<int>& v)
+{
+    std::string s;
+    for (int i : v) s += (s.empty() ? "" : ",") + std::to_string(i);
+    return "[" + s + "]";
+}
+
+// #98: set_current is the app's own: no on_changed, the page made current
+// natively, a lazy one built and shown; to the current page, nothing. A lazy
+// page made current by hiding the current one: built and shown, no
+// on_changed. A user's selection, made on the native widget as a click's
+// reaches rapport: on_changed once, with the page.
+void set_current_quiet(rap::ui& ui, bool sidebar)
+{
+    using namespace rap::layout;
+    const std::string kind = sidebar ? "sidebar, set_current (#98): " : "strip, set_current (#98): ";
+    const std::string title = sidebar ? "Quiet sidebar" : "Quiet strip";
+    rap::tabs* t = nullptr;
+    rap::label* built[4] = {};
+    std::vector<int> changes;
+    auto lazy_page = [&built](int i, const char* text)
+    { return lazy{[&built, i, text] { return rap::node(label{text}.bind(built[i])); }}; };
+    auto win = ui.create(window{title,
+                                {tabs{{"A", label{"page a"}},
+                                      {"B", lazy_page(1, "page b")},
+                                      {"C", lazy_page(2, "page c")},
+                                      {"D", lazy_page(3, "page d")}}
+                                     .sidebar(sidebar)
+                                     .on_changed([&](int i) { changes.push_back(i); })
+                                     .bind(t)}});
+    GtkWidget* top = window_titled(title.c_str());
+    const native_tabs n = top ? find_tabs(top, sidebar) : native_tabs{};
+    expect(t && top && (n.nb || (n.list && n.stack)), kind + "bound, its native widgets found");
+    if (!t || !top || !(n.nb || (n.list && n.stack))) return;
+    // The page natively current: the notebook's, or the selected row's when
+    // the stack shows the same page (-2 when they disagree).
+    auto native = [&]() -> int
+    {
+        if (n.nb) return gtk_notebook_get_current_page(GTK_NOTEBOOK(n.nb));
+        GtkListBoxRow* row = gtk_list_box_get_selected_row(GTK_LIST_BOX(n.list));
+        const int r = row ? gtk_list_box_row_get_index(row) : -1;
+        return stack_shown(n.stack) == r ? r : -2;
+    };
+    // The page natively shown holds the label `text`: the notebook's current
+    // page, or the stack's visible child.
+    auto showing = [&](const char* text) -> bool
+    {
+        GtkWidget* page = nullptr;
+        if (n.stack)
+            page = gtk_stack_get_visible_child(GTK_STACK(n.stack));
+        else if (const int i = gtk_notebook_get_current_page(GTK_NOTEBOOK(n.nb)); i >= 0)
+            page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(n.nb), i);
+        return holds_label(page, text);
+    };
+    expect(t->current() == 0 && native() == 0 && showing("page a") && !built[1] && !built[2] && !built[3],
+           kind + "A current and shown, the lazy B, C and D unbuilt");
+    changes.clear();
+
+    // To the lazy B: no on_changed; current, natively too; built, shown.
+    t->set_current(1);
+    spin();
+    expect(changes.empty(), kind + "set_current(1): no on_changed, " + seq(changes));
+    expect(t->current() == 1 && native() == 1,
+           kind + "set_current(1): B current, natively too, " + str(t->current()) + "/" + str(native()));
+    expect(built[1] && showing("page b"), kind + "set_current(1): the lazy B built and shown");
+    // The current page again: nothing.
+    t->set_current(1);
+    spin();
+    expect(changes.empty(), kind + "set_current(1) again: no on_changed, " + seq(changes));
+    expect(t->current() == 1 && native() == 1 && showing("page b") && !built[2] && !built[3],
+           kind + "set_current(1) again: nothing changed, " + str(t->current()) + "/" + str(native()));
+    // B (current) hidden: the lazy C, the nearest after it, built and shown,
+    // no on_changed.
+    t->set_page_visible(1, false);
+    spin();
+    expect(t->current() == 2 && native() == 2,
+           kind + "B (current) hidden: C current, natively too, " + str(t->current()) + "/" + str(native()));
+    expect(built[2] && showing("page c"), kind + "B (current) hidden: the lazy C built and shown");
+    expect(changes.empty(), kind + "B (current) hidden: no on_changed, " + seq(changes));
+
+    // A user's selection of the lazy D, on the native widget: on_changed
+    // once, with 3; built and shown.
+    if (n.list)
+        gtk_list_box_select_row(GTK_LIST_BOX(n.list), gtk_list_box_get_row_at_index(GTK_LIST_BOX(n.list), 3));
+    else
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(n.nb), 3);
+    spin();
+    expect(changes == std::vector<int>{3}, kind + "a user's selection of D: on_changed once, with 3, " + seq(changes));
+    expect(t->current() == 3 && native() == 3 && built[3] && showing("page d"),
+           kind + "a user's selection of D: D current, built and shown, " + str(t->current()) + "/" + str(native()));
+    // set_current to the current page: nothing.
+    changes.clear();
+    t->set_current(3);
+    spin();
+    expect(changes.empty() && t->current() == 3 && native() == 3 && showing("page d"),
+           kind + "set_current(3), current already: nothing, " + seq(changes));
+    // Back to A, the app's: no on_changed.
+    t->set_current(0);
+    spin();
+    expect(changes.empty() && t->current() == 0 && native() == 0 && showing("page a"),
+           kind + "set_current(0): A current and shown, no on_changed, " + seq(changes));
+}
+
+// #98, re-entered: a lazy page's builder that calls the tabs back while the
+// switch that built it is still being handled. The app's set_current to B,
+// whose builder calls set_current(2): no on_changed, C current and shown. B
+// (current) hidden, the lazy C made current, whose builder hides D: no
+// on_changed, C current and shown, D's header gone. A user's switch to a
+// lazy page: built, shown, on_changed once with it; to B whose builder calls
+// set_current(2): C current and shown, on_changed once, with 2.
+void reentrant(rap::ui& ui, bool sidebar)
+{
+    using namespace rap::layout;
+    using hook = std::function<void(rap::tabs*)>;
+    const std::string side = sidebar ? "sidebar" : "strip";
+    // A window of A and the lazy B, C and D, page i's builder calling
+    // then[i] first; `body` run on it.
+    auto scenario = [&](const std::string& name, std::array<hook, 4> then,
+                        const std::function<void(rap::tabs*, const native_tabs&, rap::label**, std::vector<int>&,
+                                                 const std::string&)>& body)
+    {
+        const std::string kind = side + ", " + name + " (#98): ";
+        const std::string title = "Reentrant " + side + " " + name;
+        rap::tabs* t = nullptr;
+        rap::label* built[4] = {};
+        std::vector<int> changes;
+        auto lazy_page = [&](int i, const char* text)
+        {
+            return lazy{[&, i, text]
+                        {
+                            if (then[size_t(i)]) then[size_t(i)](t);
+                            return rap::node(label{text}.bind(built[i]));
+                        }};
+        };
+        auto win = ui.create(window{title,
+                                    {tabs{{"A", label{"page a"}},
+                                          {"B", lazy_page(1, "page b")},
+                                          {"C", lazy_page(2, "page c")},
+                                          {"D", lazy_page(3, "page d")}}
+                                         .sidebar(sidebar)
+                                         .on_changed([&](int i) { changes.push_back(i); })
+                                         .bind(t)}});
+        GtkWidget* top = window_titled(title.c_str());
+        const native_tabs n = top ? find_tabs(top, sidebar) : native_tabs{};
+        expect(t && top && (n.nb || (n.list && n.stack)), kind + "bound, its native widgets found");
+        if (!t || !top || !(n.nb || (n.list && n.stack))) return;
+        spin();
+        changes.clear();
+        body(t, n, built, changes, kind);
+    };
+    // The page natively current: the notebook's, or the selected row's when
+    // the stack shows the same page (-2 when they disagree).
+    auto native = [](const native_tabs& n) -> int
+    {
+        if (n.nb) return gtk_notebook_get_current_page(GTK_NOTEBOOK(n.nb));
+        GtkListBoxRow* row = gtk_list_box_get_selected_row(GTK_LIST_BOX(n.list));
+        const int r = row ? gtk_list_box_row_get_index(row) : -1;
+        return stack_shown(n.stack) == r ? r : -2;
+    };
+    // The page natively shown holds the label `text`.
+    auto showing = [](const native_tabs& n, const char* text) -> bool
+    {
+        GtkWidget* page = nullptr;
+        if (n.stack)
+            page = gtk_stack_get_visible_child(GTK_STACK(n.stack));
+        else if (const int i = gtk_notebook_get_current_page(GTK_NOTEBOOK(n.nb)); i >= 0)
+            page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(n.nb), i);
+        return holds_label(page, text);
+    };
+    // A user's selection, on the native widget, as a click's reaches rapport.
+    auto user_select = [](const native_tabs& n, int i)
+    {
+        if (n.list)
+            gtk_list_box_select_row(GTK_LIST_BOX(n.list), gtk_list_box_get_row_at_index(GTK_LIST_BOX(n.list), i));
+        else
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(n.nb), i);
+        spin();
+    };
+    const hook to_c = [](rap::tabs* t) { t->set_current(2); };
+    const hook hide_d = [](rap::tabs* t) { t->set_page_visible(3, false); };
+
+    scenario("set_current re-entered", {nullptr, to_c, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 t->set_current(1);
+                 spin();
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == 2 && native(n) == 2,
+                        kind + "C current, natively too, " + str(t->current()) + "/" + str(native(n)));
+                 expect(showing(n, "page c"), kind + "C shown");
+                 expect(n.only_shown(2), kind + "C's page the only one shown, B's not");
+                 expect(built[1] != nullptr, kind + "B built");
+             });
+    scenario("set_page_visible re-entered", {nullptr, nullptr, hide_d, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label**, std::vector<int>& changes, const std::string& kind)
+             {
+                 t->set_current(1);
+                 spin();
+                 changes.clear();
+                 t->set_page_visible(1, false);
+                 spin();
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == 2 && native(n) == 2 && showing(n, "page c"),
+                        kind + "C current and shown, " + str(t->current()) + "/" + str(native(n)));
+                 expect(!t->page_visible(3) && n.headers() == "AC",
+                        kind + "D hidden, its header gone: " + n.headers());
+             });
+    scenario("a user's switch to a lazy page", {},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 user_select(n, 1);
+                 expect(changes == std::vector<int>{1}, kind + "on_changed once, with 1, " + seq(changes));
+                 expect(t->current() == 1 && native(n) == 1 && built[1] && showing(n, "page b"),
+                        kind + "B current, built and shown, " + str(t->current()) + "/" + str(native(n)));
+             });
+    scenario("a user's switch re-entered", {nullptr, to_c, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 user_select(n, 1);
+                 expect(changes == std::vector<int>{2}, kind + "on_changed once, with 2, " + seq(changes));
+                 expect(t->current() == 2 && native(n) == 2 && showing(n, "page c"),
+                        kind + "C current, natively too, and shown, " + str(t->current()) + "/" + str(native(n)));
+                 expect(built[1] != nullptr, kind + "B built");
+             });
+    // Every page hidden, then the lazy B shown: B made current and built,
+    // and its builder shows C and switches to it. The page shown is the one
+    // current after the build: C, natively too; no on_changed.
+    const hook show_c = [](rap::tabs* t)
+    {
+        t->set_page_visible(2, true);
+        t->set_current(2);
+    };
+    scenario("shown first, re-entered", {nullptr, show_c, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 for (int i : {3, 2, 1, 0}) t->set_page_visible(i, false);
+                 spin();
+                 expect(t->current() == -1 && !built[1], kind + "every page hidden: none, B unbuilt");
+                 t->set_page_visible(1, true);
+                 spin();
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == 2 && native(n) == 2 && n.shown() == 2,
+                        kind + "C current, natively too, " + str(t->current()) + "/" + str(native(n)) + "/" +
+                            str(n.shown()));
+                 expect(showing(n, "page c"), kind + "C shown");
+                 expect(n.only_shown(2), kind + "C's page the only one shown, B's not");
+                 expect(built[1] != nullptr, kind + "B built");
+             });
+    // A user's switch to the lazy B, whose builder hides every page: none
+    // current, and no on_changed (never -1).
+    const hook hide_all = [](rap::tabs* t)
+    {
+        for (int i : {0, 2, 3, 1}) t->set_page_visible(i, false);
+    };
+    scenario("a user's switch, every page hidden", {nullptr, hide_all, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label**, std::vector<int>& changes, const std::string& kind)
+             {
+                 user_select(n, 1);
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == -1 && n.shown() == -1,
+                        kind + "none current, no page shown, " + str(t->current()) + "/" + str(n.shown()));
+             });
+    // Shown first with every page hidden, its builder hiding every page
+    // again: none current, nothing shown, no on_changed.
+    scenario("shown first, its builder hiding every page", {nullptr, hide_all, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label**, std::vector<int>& changes, const std::string& kind)
+             {
+                 for (int i : {3, 2, 1, 0}) t->set_page_visible(i, false);
+                 spin();
+                 t->set_page_visible(1, true);  // B's builder hides every page again
+                 spin();
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == -1 && n.shown() == -1,
+                        kind + "none current, no page shown, " + str(t->current()) + "/" + str(n.shown()));
+             });
+    // A user's switch to the lazy B, whose builder switches back to A, the
+    // page current before: A current and shown, no on_changed.
+    const hook to_a = [](rap::tabs* t) { t->set_current(0); };
+    scenario("a user's switch back where it was", {nullptr, to_a, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 user_select(n, 1);
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == 0 && native(n) == 0 && n.shown() == 0 && showing(n, "page a"),
+                        kind + "A current, natively too, and shown, " + str(t->current()) + "/" + str(native(n)));
+                 expect(built[1] != nullptr, kind + "B built");
+             });
 }
 
 // A sidebar's natural height: its visible rows only.
@@ -627,6 +949,8 @@ int main(int argc, char** argv)
     }
     for (const bool sidebar : {false, true}) visibility(**ui, sidebar);
     for (const bool sidebar : {false, true}) hidden_from_start(**ui, sidebar);
+    for (const bool sidebar : {false, true}) set_current_quiet(**ui, sidebar);
+    for (const bool sidebar : {false, true}) reentrant(**ui, sidebar);
     sidebar_measure(**ui);
     strip_measure(**ui);
     fixed_canvas(**ui);

@@ -22,7 +22,9 @@
 // After windows.h, which they need.
 #include <commctrl.h>
 
+#include <array>
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -252,6 +254,298 @@ void visibility(rap::ui& ui, bool sidebar)
     t->set_page_visible(9, false);
     expect(!t->page_visible(9) && !t->page_visible(-1) && headers(h, sidebar) == "ABCD",
            kind + "pages out of range: not visible, nothing changed");
+}
+
+std::string seq(const std::vector<int>& v)
+{
+    std::string s;
+    for (int i : v) s += (s.empty() ? "" : ",") + std::to_string(i);
+    return "[" + s + "]";
+}
+
+// #98: set_current is the app's own: no on_changed, the page made current
+// natively, a lazy one built and shown; to the current page, nothing. A lazy
+// page made current by hiding the current one: built and shown, no
+// on_changed. A user's selection, made on the native control as a click's
+// reaches rapport: on_changed once, with the page. A strip's by
+// TabCtrl_SetCurFocus (it selects and sends TCN_SELCHANGE, as a click
+// does), a sidebar's by LB_SETCURSEL and the LBN_SELCHANGE the list box
+// sends its parent.
+void set_current_quiet(rap::ui& ui, bool sidebar)
+{
+    using namespace rap::layout;
+    const std::string kind = sidebar ? "sidebar, set_current (#98): " : "strip, set_current (#98): ";
+    const std::wstring title = sidebar ? L"Quiet sidebar" : L"Quiet strip";
+    rap::tabs* t = nullptr;
+    rap::label* built[4] = {};
+    std::vector<int> changes;
+    auto lazy_page = [&built](int i, const char* text)
+    { return lazy{[&built, i, text] { return rap::node(label{text}.bind(built[i])); }}; };
+    auto win = ui.create(window{narrow(title),
+                                {tabs{{"A", label{"page a"}},
+                                      {"B", lazy_page(1, "page b")},
+                                      {"C", lazy_page(2, "page c")},
+                                      {"D", lazy_page(3, "page d")}}
+                                     .sidebar(sidebar)
+                                     .on_changed([&](int i) { changes.push_back(i); })
+                                     .bind(t)}});
+    pump();
+    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
+    expect(t && h, kind + "the window, never shown, and its " + (sidebar ? "list" : "tab control"));
+    if (!t || !h) return;
+    // The page shown natively: its label's control visible, every other
+    // page's not (an unbuilt page has none).
+    const wchar_t* texts[] = {L"page a", L"page b", L"page c", L"page d"};
+    auto showing = [&](int page)
+    {
+        for (int i = 0; i < 4; ++i)
+            if (shown(with_text(top, texts[i])) != (i == page)) return false;
+        return true;
+    };
+    expect(t->current() == 0 && selected(h, sidebar) == "A" && showing(0) && !built[1] && !built[2] && !built[3],
+           kind + "A current and shown, the lazy B, C and D unbuilt");
+    changes.clear();
+
+    // To the lazy B: no on_changed; current and selected; built, shown.
+    t->set_current(1);
+    pump();
+    expect(changes.empty(), kind + "set_current(1): no on_changed, " + seq(changes));
+    expect(t->current() == 1 && selected(h, sidebar) == "B",
+           kind + "set_current(1): B current and selected, " + str(t->current()) + ", " + selected(h, sidebar));
+    expect(built[1] && showing(1), kind + "set_current(1): the lazy B built and shown");
+    // The current page again: nothing.
+    t->set_current(1);
+    pump();
+    expect(changes.empty(), kind + "set_current(1) again: no on_changed, " + seq(changes));
+    expect(t->current() == 1 && selected(h, sidebar) == "B" && showing(1) && !built[2] && !built[3],
+           kind + "set_current(1) again: nothing changed");
+    // B (current) hidden: the lazy C, the nearest after it, built and shown,
+    // no on_changed.
+    t->set_page_visible(1, false);
+    pump();
+    expect(t->current() == 2 && selected(h, sidebar) == "C",
+           kind + "B (current) hidden: C current and selected, " + str(t->current()) + ", " + selected(h, sidebar));
+    expect(built[2] && showing(2), kind + "B (current) hidden: the lazy C built and shown");
+    expect(changes.empty(), kind + "B (current) hidden: no on_changed, " + seq(changes));
+
+    // A user's selection of the lazy D (its header the third of ACD): on
+    // the native control, on_changed once, with 3; built and shown.
+    const int item = int(headers(h, sidebar).find('D'));
+    expect(item == 2, kind + "D's header the third, " + str(item));
+    if (sidebar)
+    {
+        SendMessageW(h, LB_SETCURSEL, WPARAM(item), 0);
+        SendMessageW(GetParent(h), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(h), LBN_SELCHANGE), LPARAM(h));
+    }
+    else
+        TabCtrl_SetCurFocus(h, item);
+    pump();
+    expect(changes == std::vector<int>{3}, kind + "a user's selection of D: on_changed once, with 3, " + seq(changes));
+    expect(t->current() == 3 && selected(h, sidebar) == "D" && built[3] && showing(3),
+           kind + "a user's selection of D: D current, built and shown, " + str(t->current()));
+    // set_current to the current page: nothing.
+    changes.clear();
+    t->set_current(3);
+    pump();
+    expect(changes.empty() && t->current() == 3 && selected(h, sidebar) == "D" && showing(3),
+           kind + "set_current(3), current already: nothing, " + seq(changes));
+    // Back to A, the app's: no on_changed.
+    t->set_current(0);
+    pump();
+    expect(changes.empty() && t->current() == 0 && selected(h, sidebar) == "A" && showing(0),
+           kind + "set_current(0): A current and shown, no on_changed, " + seq(changes));
+}
+
+// #98, re-entered: a lazy page's builder that calls the tabs back while the
+// switch that built it is still being handled. The app's set_current to B,
+// whose builder calls set_current(2): no on_changed, C current and shown. B
+// (current) hidden, the lazy C made current, whose builder hides D: no
+// on_changed, C current and shown, D's header gone. A user's switch to a
+// lazy page: built, shown, on_changed once with it; to B whose builder calls
+// set_current(2): C current and shown, on_changed once, with 2. A user's
+// switch as in set_current_quiet: TabCtrl_SetCurFocus, or LB_SETCURSEL and
+// LBN_SELCHANGE.
+void reentrant(rap::ui& ui, bool sidebar)
+{
+    using namespace rap::layout;
+    using hook = std::function<void(rap::tabs*)>;
+    // The tabs, their native control and window, the pages built so far,
+    // the on_changed calls, and the checks' prefix.
+    struct run
+    {
+        rap::tabs* t;
+        HWND top;
+        HWND h;
+        rap::label** built;
+        std::vector<int>& changes;
+        std::string kind;
+    };
+    const std::string side = sidebar ? "sidebar" : "strip";
+    // The page shown natively: its label's control visible, every other
+    // page's not (an unbuilt page has none).
+    auto showing = [](const run& r, int page)
+    {
+        const wchar_t* texts[] = {L"page a", L"page b", L"page c", L"page d"};
+        for (int i = 0; i < 4; ++i)
+            if (shown(with_text(r.top, texts[i])) != (i == page)) return false;
+        return true;
+    };
+    // A user's selection of the item `item`, as a click's reaches rapport.
+    auto user_select = [sidebar](const run& r, int item)
+    {
+        if (sidebar)
+        {
+            SendMessageW(r.h, LB_SETCURSEL, WPARAM(item), 0);
+            SendMessageW(GetParent(r.h), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(r.h), LBN_SELCHANGE), LPARAM(r.h));
+        }
+        else
+            TabCtrl_SetCurFocus(r.h, item);
+        pump();
+    };
+    // A window of A and the lazy B, C and D, page i's builder calling
+    // then[i] first; `body` run on it.
+    auto scenario = [&](const std::string& name, std::array<hook, 4> then, const std::function<void(const run&)>& body)
+    {
+        const std::string kind = side + ", " + name + " (#98): ";
+        const std::string title = "Reentrant " + side + " " + name;
+        rap::tabs* t = nullptr;
+        rap::label* built[4] = {};
+        std::vector<int> changes;
+        auto lazy_page = [&](int i, const char* text)
+        {
+            return lazy{[&, i, text]
+                        {
+                            if (then[size_t(i)]) then[size_t(i)](t);
+                            return rap::node(label{text}.bind(built[i]));
+                        }};
+        };
+        auto win = ui.create(window{title,
+                                    {tabs{{"A", label{"page a"}},
+                                          {"B", lazy_page(1, "page b")},
+                                          {"C", lazy_page(2, "page c")},
+                                          {"D", lazy_page(3, "page d")}}
+                                         .sidebar(sidebar)
+                                         .on_changed([&](int i) { changes.push_back(i); })
+                                         .bind(t)}});
+        pump();
+        const std::wstring wtitle(title.begin(), title.end());
+        HWND top = FindWindowW(nullptr, wtitle.c_str());
+        HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
+        expect(t && h, kind + "the window, never shown, and its " + (sidebar ? "list" : "tab control"));
+        if (!t || !h) return;
+        changes.clear();
+        body(run{t, top, h, built, changes, kind});
+    };
+    const hook to_c = [](rap::tabs* t) { t->set_current(2); };
+    const hook hide_d = [](rap::tabs* t) { t->set_page_visible(3, false); };
+
+    scenario("set_current re-entered", {nullptr, to_c, nullptr, nullptr},
+             [&](const run& r)
+             {
+                 r.t->set_current(1);
+                 pump();
+                 expect(r.changes.empty(), r.kind + "no on_changed, " + seq(r.changes));
+                 expect(r.t->current() == 2 && selected(r.h, sidebar) == "C",
+                        r.kind + "C current and selected, " + str(r.t->current()) + ", " + selected(r.h, sidebar));
+                 expect(showing(r, 2), r.kind + "C shown");
+                 expect(r.built[1] != nullptr, r.kind + "B built");
+             });
+    scenario("set_page_visible re-entered", {nullptr, nullptr, hide_d, nullptr},
+             [&](const run& r)
+             {
+                 r.t->set_current(1);
+                 pump();
+                 r.changes.clear();
+                 r.t->set_page_visible(1, false);
+                 pump();
+                 expect(r.changes.empty(), r.kind + "no on_changed, " + seq(r.changes));
+                 expect(r.t->current() == 2 && selected(r.h, sidebar) == "C" && showing(r, 2),
+                        r.kind + "C current, selected and shown, " + str(r.t->current()) + ", " +
+                            selected(r.h, sidebar));
+                 expect(!r.t->page_visible(3) && headers(r.h, sidebar) == "AC",
+                        r.kind + "D hidden, its header gone: " + headers(r.h, sidebar));
+             });
+    scenario("a user's switch to a lazy page", {},
+             [&](const run& r)
+             {
+                 user_select(r, 1);
+                 expect(r.changes == std::vector<int>{1}, r.kind + "on_changed once, with 1, " + seq(r.changes));
+                 expect(r.t->current() == 1 && selected(r.h, sidebar) == "B" && r.built[1] && showing(r, 1),
+                        r.kind + "B current, built and shown, " + str(r.t->current()));
+             });
+    scenario("a user's switch re-entered", {nullptr, to_c, nullptr, nullptr},
+             [&](const run& r)
+             {
+                 user_select(r, 1);
+                 expect(r.changes == std::vector<int>{2}, r.kind + "on_changed once, with 2, " + seq(r.changes));
+                 expect(r.t->current() == 2 && selected(r.h, sidebar) == "C" && showing(r, 2),
+                        r.kind + "C current, selected and shown, " + str(r.t->current()) + ", " +
+                            selected(r.h, sidebar));
+                 expect(r.built[1] != nullptr, r.kind + "B built");
+             });
+    // Every page hidden, then the lazy B shown: B made current and built,
+    // and its builder shows C and switches to it. The page shown is the one
+    // current after the build: C, selected too; no on_changed.
+    const hook show_c = [](rap::tabs* t)
+    {
+        t->set_page_visible(2, true);
+        t->set_current(2);
+    };
+    scenario("shown first, re-entered", {nullptr, show_c, nullptr, nullptr},
+             [&](const run& r)
+             {
+                 for (int i : {3, 2, 1, 0}) r.t->set_page_visible(i, false);
+                 pump();
+                 expect(r.t->current() == -1 && !r.built[1], r.kind + "every page hidden: none, B unbuilt");
+                 r.t->set_page_visible(1, true);
+                 pump();
+                 expect(r.changes.empty(), r.kind + "no on_changed, " + seq(r.changes));
+                 expect(r.t->current() == 2 && selected(r.h, sidebar) == "C",
+                        r.kind + "C current and selected, " + str(r.t->current()) + ", " + selected(r.h, sidebar));
+                 expect(showing(r, 2), r.kind + "C shown");
+                 expect(r.built[1] != nullptr, r.kind + "B built");
+             });
+    // A user's switch to the lazy B, whose builder hides every page: none
+    // current, and no on_changed (never -1).
+    const hook hide_all = [](rap::tabs* t)
+    {
+        for (int i : {0, 2, 3, 1}) t->set_page_visible(i, false);
+    };
+    scenario("a user's switch, every page hidden", {nullptr, hide_all, nullptr, nullptr},
+             [&](const run& r)
+             {
+                 user_select(r, 1);
+                 expect(r.changes.empty(), r.kind + "no on_changed, " + seq(r.changes));
+                 expect(r.t->current() == -1 && selected(r.h, sidebar) == "-" && showing(r, -1),
+                        r.kind + "none current, none selected, no page shown, " + str(r.t->current()));
+             });
+    // Shown first with every page hidden, its builder hiding every page
+    // again: none current, nothing shown, no on_changed.
+    scenario("shown first, its builder hiding every page", {nullptr, hide_all, nullptr, nullptr},
+             [&](const run& r)
+             {
+                 for (int i : {3, 2, 1, 0}) r.t->set_page_visible(i, false);
+                 pump();
+                 r.t->set_page_visible(1, true);  // B's builder hides every page again
+                 pump();
+                 expect(r.changes.empty(), r.kind + "no on_changed, " + seq(r.changes));
+                 expect(r.t->current() == -1 && selected(r.h, sidebar) == "-" && showing(r, -1),
+                        r.kind + "none current, none selected, no page shown, " + str(r.t->current()));
+             });
+    // A user's switch to the lazy B, whose builder switches back to A, the
+    // page current before: A current, selected and shown, no on_changed.
+    const hook to_a = [](rap::tabs* t) { t->set_current(0); };
+    scenario("a user's switch back where it was", {nullptr, to_a, nullptr, nullptr},
+             [&](const run& r)
+             {
+                 user_select(r, 1);
+                 expect(r.changes.empty(), r.kind + "no on_changed, " + seq(r.changes));
+                 expect(r.t->current() == 0 && selected(r.h, sidebar) == "A" && showing(r, 0),
+                        r.kind + "A current, selected and shown, " + str(r.t->current()) + ", " +
+                            selected(r.h, sidebar));
+                 expect(r.built[1] != nullptr, r.kind + "B built");
+             });
 }
 
 // Hidden from the start: no header, never shown, a lazy page unbuilt.
@@ -490,6 +784,8 @@ int main(int argc, char** argv)
     }
     for (const bool sidebar : {false, true}) visibility(**ui, sidebar);
     for (const bool sidebar : {false, true}) hidden_from_start(**ui, sidebar);
+    for (const bool sidebar : {false, true}) set_current_quiet(**ui, sidebar);
+    for (const bool sidebar : {false, true}) reentrant(**ui, sidebar);
     sidebar_rows(**ui);
     for (const bool sidebar : {false, true}) single_tab(**ui, sidebar);
     for (int kind = 0; kind < 3; ++kind) fixed_canvas(**ui, kind);
