@@ -5296,6 +5296,24 @@ private:
     point_f last_pos_{}, last_move_{};
 };
 
+// Test seam (#88): the fullscreen requests this backend has made, in order,
+// "F" for each fullscreen and "U" for each unfullscreen; read and cleared
+// through rapport_gtk4_fullscreen_requests_for_tests below.
+std::string& fullscreen_requests_for_tests()
+{
+    static std::string requests;
+    return requests;
+}
+// Test seam (#88): the state a notify::fullscreened reports instead of the
+// window's, set only while rapport_gtk4_fullscreen_seen_for_tests notifies
+// (an outside change, simulated: GTK can't be made fullscreen without a
+// compositor that answers).
+std::optional<bool>& fullscreen_seen_for_tests()
+{
+    static std::optional<bool> seen;
+    return seen;
+}
+
 class window_impl : public rap::window, public part
 {
 public:
@@ -5352,9 +5370,12 @@ public:
                 +[](GObject*, GParamSpec*, gpointer p)
                 {
                     auto* self = static_cast<window_impl*>(p);
-                    const bool fs = gtk_window_is_fullscreen(GTK_WINDOW(self->win_));
-                    // A request answered: what it is now is the window's again.
-                    if (self->fullscreen_asked_ && *self->fullscreen_asked_ == fs) self->fullscreen_asked_.reset();
+                    const bool fs =
+                        fullscreen_seen_for_tests().value_or(gtk_window_is_fullscreen(GTK_WINDOW(self->win_)));
+                    // Any notification, answering a request or not: what it is
+                    // now is the window's again, so an unanswered reversal
+                    // can't hide a later outside change.
+                    self->fullscreen_asked_.reset();
                     if (fs == self->fullscreen_) return;
                     self->fullscreen_ = fs;
                     self->show_menu_bar();  // hidden in fullscreen
@@ -5608,12 +5629,15 @@ public:
     }
     // Fullscreen is asked for, and comes later: nothing (#88) only when it's
     // what was last asked for and not yet answered, or, with nothing asked
-    // for, what the window is now. (true then false before the first is
-    // answered: the second asked for, not skipped.)
+    // for, what the window was last seen to be (notify::fullscreened, which
+    // replaces the request with it, an outside change included). (true then
+    // false before the first is answered: the second asked for, not
+    // skipped; true twice: asked once.)
     void set_fullscreen(bool on) override
     {
-        if (fullscreen_asked_ ? *fullscreen_asked_ == on : fullscreen() == on) return;  // (#88)
+        if (fullscreen_asked_ ? *fullscreen_asked_ == on : fullscreen_ == on) return;  // (#88)
         fullscreen_asked_ = on;
+        fullscreen_requests_for_tests() += on ? 'F' : 'U';
         if (on)
             gtk_window_fullscreen(GTK_WINDOW(win_));
         else
@@ -7107,5 +7131,23 @@ private:
 
 }  // namespace
 }  // namespace rap::gtk4
+
+// Test seam (#88): the fullscreen requests made since the last call ("F",
+// "U", in order), cleared. Not part of the backend's interface.
+extern "C" RAPPORT_EXPORT const char* rapport_gtk4_fullscreen_requests_for_tests()
+{
+    static std::string out;
+    out = std::exchange(rap::gtk4::fullscreen_requests_for_tests(), std::string());
+    return out.c_str();
+}
+
+// Test seam (#88): `window` (a GtkWindow) notified as fullscreen or not,
+// whatever it is: an outside change, as the window manager's would come.
+extern "C" RAPPORT_EXPORT void rapport_gtk4_fullscreen_seen_for_tests(void* window, int fullscreen)
+{
+    rap::gtk4::fullscreen_seen_for_tests() = fullscreen != 0;
+    g_object_notify(G_OBJECT(window), "fullscreened");
+    rap::gtk4::fullscreen_seen_for_tests().reset();
+}
 
 RAPPORT_BACKEND_ENTRY(gtk4, rap::gtk4::gtk4_backend)

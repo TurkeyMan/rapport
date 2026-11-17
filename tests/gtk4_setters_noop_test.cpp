@@ -9,8 +9,12 @@
 
 #include <gtk/gtk.h>
 
+#include <dlfcn.h>
+#include <link.h>
+
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -48,6 +52,30 @@ struct counts
 };
 counts g_counts;
 std::string g_last_notify;
+
+// A test seam of the backend's (`name`): linked in (a static build), or in
+// its module, loaded already (`module`, "rapport_gtk3" say) by ui::load.
+void* backend_seam(const char* module, const char* name)
+{
+    if (void* f = dlsym(RTLD_DEFAULT, name)) return f;
+    struct found
+    {
+        const char* module;
+        std::string path;
+    } f{module, {}};
+    dl_iterate_phdr(
+        +[](dl_phdr_info* info, size_t, void* p) -> int
+        {
+            auto* f = static_cast<found*>(p);
+            if (!info->dlpi_name || !std::strstr(info->dlpi_name, f->module)) return 0;
+            f->path = info->dlpi_name;
+            return 1;
+        },
+        &f);
+    if (f.path.empty()) return nullptr;
+    void* h = dlopen(f.path.c_str(), RTLD_NOW | RTLD_NOLOAD);  // (loaded already: only its handle)
+    return h ? dlsym(h, name) : nullptr;
+}
 
 void watch_tree(GtkWidget* w)
 {
@@ -400,6 +428,43 @@ int main(int argc, char** argv)
     win->set_fullscreen(false);
     pump(1500);
     expect(!gtk_window_is_fullscreen(GTK_WINDOW(top)), "fullscreen asked for, then not at once: not fullscreen");
+    // The requests themselves, counted by the backend's seam: none answered
+    // in between (no main loop run); a notify::fullscreened as the window
+    // manager's (an outside change) sent through the backend's other seam.
+    {
+        using requests_fn = const char*();
+        using seen_fn = void(void*, int);
+        auto* requests =
+            reinterpret_cast<requests_fn*>(backend_seam("rapport_gtk4", "rapport_gtk4_fullscreen_requests_for_tests"));
+        auto* seen_seam = reinterpret_cast<seen_fn*>(backend_seam("rapport_gtk4", "rapport_gtk4_fullscreen_seen_for_tests"));
+        expect(requests && seen_seam, "fullscreen: the backend's request counter and notifier");
+        if (requests && seen_seam)
+        {
+            auto seen = [&](bool fs) { seen_seam(top, fs); };
+            seen(false);
+            requests();
+            win->set_fullscreen(true);
+            win->set_fullscreen(false);
+            std::string r = requests();
+            expect(r == "FU", "fullscreen: on then off, unanswered: both asked, in order (" + r + ")");
+            seen(false);
+            requests();
+            win->set_fullscreen(true);
+            win->set_fullscreen(true);
+            r = requests();
+            expect(r == "F", "fullscreen: on twice, unanswered: asked once (" + r + ")");
+            seen(false);
+            requests();
+            win->set_fullscreen(true);
+            win->set_fullscreen(false);
+            seen(true);  // made fullscreen from outside, after the reversal
+            win->set_fullscreen(false);
+            r = requests();
+            expect(r == "FUU", "fullscreen: on, off, then fullscreen from outside: off asked again (" + r + ")");
+            seen(false);
+            pump(500);
+        }
+    }
     // A date picker built with the default date shows it (the constructor's
     // set isn't skipped for matching a default).
     {

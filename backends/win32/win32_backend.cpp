@@ -3805,7 +3805,13 @@ public:
     {
         // The text it shows (read now: a user's edits change it), plain, with
         // no styled text set or appended: nothing done (#88).
-        if (spans.empty() && spans_.empty() && appended_.empty() && text() == t) return;
+        // The text set is still recorded: a theme rebuild restores text_, so
+        // a user's matching edit mustn't leave the old text there.
+        if (spans.empty() && spans_.empty() && appended_.empty() && text() == t)
+        {
+            text_ = t;
+            return;
+        }
         apply_text(t, std::move(spans));
     }
     // The text set, whatever it shows now: set_text's, and a rebuild's (a
@@ -10475,7 +10481,13 @@ public:
             next[i] = i < s.size() && s[i] > 0 ? std::lround(s[i] * win_.scale()) : was[i];
         // The sizes its panes have as laid out, none asked for since: no
         // relayout (#88). Otherwise asked for and laid out, as any change.
-        if (!asked_ && placed_.size() == panes.size() && next == placed_) return;
+        // The request is still recorded: a later layout (a resize) places
+        // sizes_, which mustn't keep an older request.
+        if (!asked_ && placed_.size() == panes.size() && next == placed_)
+        {
+            sizes_ = std::move(next);
+            return;
+        }
         sizes_ = std::move(next);
         asked_ = true;
         win_.relayout();

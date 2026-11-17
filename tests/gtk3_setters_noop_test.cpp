@@ -10,8 +10,12 @@
 
 #include <gtk/gtk.h>
 
+#include <dlfcn.h>
+#include <link.h>
+
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -29,6 +33,31 @@ void expect(bool ok, const std::string& what)
 }
 
 int g_draws = 0, g_resizes = 0, g_notes = 0, g_link_clicks = 0;
+int g_fraction_sets = 0;  // gtk_progress_bar_set_fraction calls (each notifies "fraction")
+
+// A test seam of the backend's (`name`): linked in (a static build), or in
+// its module, loaded already (`module`, "rapport_gtk3" say) by ui::load.
+void* backend_seam(const char* module, const char* name)
+{
+    if (void* f = dlsym(RTLD_DEFAULT, name)) return f;
+    struct found
+    {
+        const char* module;
+        std::string path;
+    } f{module, {}};
+    dl_iterate_phdr(
+        +[](dl_phdr_info* info, size_t, void* p) -> int
+        {
+            auto* f = static_cast<found*>(p);
+            if (!info->dlpi_name || !std::strstr(info->dlpi_name, f->module)) return 0;
+            f->path = info->dlpi_name;
+            return 1;
+        },
+        &f);
+    if (f.path.empty()) return nullptr;
+    void* h = dlopen(f.path.c_str(), RTLD_NOW | RTLD_NOLOAD);  // (loaded already: only its handle)
+    return h ? dlsym(h, name) : nullptr;
+}
 
 // The main loop run for `ms`: everything queued drawn and laid out.
 void settle(int ms = 200)
@@ -46,6 +75,7 @@ void settle(int ms = 200)
 class rows : public rap::list_model
 {
 public:
+    using rap::list_model::notify_reset;  // (the model reset, as an app's would)
     size_t row_count() const override { return 3; }
     std::string text(size_t row, size_t col) const override
     {
@@ -283,24 +313,31 @@ int main(int argc, char** argv)
                        std::to_string(g_link_clicks) + " clicks)");
         }
 
-        // Progress: pulse, then the fraction it had (the default 0): out of
-        // activity mode, at that fraction.
+        // Progress: pulse, then the fraction it had: out of activity mode, at
+        // that fraction. GTK 3 doesn't say whether it's pulsing; only
+        // gtk_progress_bar_set_fraction ends activity mode, so its calls are
+        // counted (it notifies "fraction" every time, the same value or not).
         GtkWidget* pb = first_of(top2, GTK_TYPE_PROGRESS_BAR);
-        bar->set_fraction(0);
-        bar->pulse();
-        bar->set_fraction(0);
-        settle();
-        expect(pb && gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(pb)) == 0 &&
-                   gtk_progress_bar_get_pulse_step(GTK_PROGRESS_BAR(pb)) > 0,
-               "progress: pulse then the same fraction (0) shows the fraction");
-        // GTK 3 doesn't say whether it's pulsing; the bar's activity block
-        // is gone when its fraction's set, which the backend now always does.
-        bar->set_fraction(0.5f);
-        bar->pulse();
-        bar->set_fraction(0.5f);
-        settle();
-        expect(pb && gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(pb)) == 0.5,
-               "progress: pulse then the same fraction (0.5) shows 0.5");
+        if (pb)
+            g_signal_connect(pb, "notify::fraction", G_CALLBACK(+[](GObject*, GParamSpec*, gpointer) { ++g_fraction_sets; }),
+                             nullptr);
+        for (const float f : {0.f, 0.5f})
+        {
+            bar->set_fraction(f);
+            settle();
+            g_fraction_sets = 0;
+            bar->set_fraction(f);  // not pulsing: as it is
+            const int idle = g_fraction_sets;
+            bar->pulse();
+            g_fraction_sets = 0;
+            bar->set_fraction(f);  // pulsing: the fraction set, activity mode left
+            const int after_pulse = g_fraction_sets;
+            settle();
+            expect(pb && idle == 0 && after_pulse == 1 && gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(pb)) == f,
+                   "progress: the same fraction (" + std::to_string(f) + ") sets nothing (" + std::to_string(idle) +
+                       " set_fraction calls); after pulse() it's set, leaving activity mode (" +
+                       std::to_string(after_pulse) + " calls)");
+        }
 
         // Spin: set 4, the user types 7 (not committed), set 4: the edit shows
         // 4 and keeps it on leaving.
@@ -379,6 +416,22 @@ int main(int argc, char** argv)
         expect(lst->column_order() == std::vector<size_t>{0, 1} &&
                    gtk_tree_view_get_column(GTK_TREE_VIEW(tv), 0) == c0,
                "list: the columns dragged, then the app's order again: restored");
+        // The app's indicator asked for while the columns already show it
+        // (changed underneath to it), then the model reset (which clears the
+        // columns' indicators and puts the app's back): the one asked for
+        // last, not the one before it.
+        lst->set_sort_indicator(1, rap::sort_order::descending);
+        settle();
+        gtk_tree_view_column_set_sort_indicator(c1, false);
+        gtk_tree_view_column_set_sort_indicator(c0, true);
+        gtk_tree_view_column_set_sort_order(c0, GTK_SORT_ASCENDING);
+        lst->set_sort_indicator(0, rap::sort_order::ascending);  // shown already: nothing native
+        g_rows.notify_reset();
+        settle();
+        expect(gtk_tree_view_column_get_sort_indicator(c0) && !gtk_tree_view_column_get_sort_indicator(c1) &&
+                   gtk_tree_view_column_get_sort_order(c0) == GTK_SORT_ASCENDING,
+               "list: an indicator asked for as shown already, then the model reset: that one shown, not the "
+               "older one");
 
         // Splitter: 300, a window resize moves the divider, 300 again: 300.
         GtkWidget* pane = nullptr;
@@ -458,6 +511,52 @@ int main(int argc, char** argv)
         settle(500);
         const bool full = gdk_window_get_state(gtk_widget_get_window(top2)) & GDK_WINDOW_STATE_FULLSCREEN;
         expect(!full, "fullscreen: on then off at once: not fullscreen");
+
+        // The requests themselves, counted by the backend's seam: none
+        // answered in between (no main loop run); a window-state-event (as
+        // the window manager's, an outside change) sent by hand.
+        using requests_fn = const char*();
+        auto* requests =
+            reinterpret_cast<requests_fn*>(backend_seam("rapport_gtk3", "rapport_gtk3_fullscreen_requests_for_tests"));
+        expect(requests != nullptr, "fullscreen: the backend's request counter");
+        if (requests)
+        {
+            GdkWindow* gw = gtk_widget_get_window(top2);
+            auto seen = [&](bool fs)
+            {
+                GdkEvent* e = gdk_event_new(GDK_WINDOW_STATE);
+                e->window_state.window = GDK_WINDOW(g_object_ref(gw));
+                e->window_state.send_event = true;
+                e->window_state.changed_mask = GDK_WINDOW_STATE_FULLSCREEN;
+                e->window_state.new_window_state =
+                    GdkWindowState((gdk_window_get_state(gw) & ~GDK_WINDOW_STATE_FULLSCREEN) |
+                                   (fs ? GDK_WINDOW_STATE_FULLSCREEN : 0));
+                gtk_main_do_event(e);
+                gdk_event_free(e);
+            };
+            seen(false);
+            requests();
+            win2->set_fullscreen(true);
+            win2->set_fullscreen(false);
+            std::string r = requests();
+            expect(r == "FU", "fullscreen: on then off, unanswered: both asked, in order (" + r + ")");
+            seen(false);
+            requests();
+            win2->set_fullscreen(true);
+            win2->set_fullscreen(true);
+            r = requests();
+            expect(r == "F", "fullscreen: on twice, unanswered: asked once (" + r + ")");
+            seen(false);
+            requests();
+            win2->set_fullscreen(true);
+            win2->set_fullscreen(false);
+            seen(true);  // made fullscreen from outside, after the reversal
+            win2->set_fullscreen(false);
+            r = requests();
+            expect(r == "FUU", "fullscreen: on, off, then fullscreen from outside: off asked again (" + r + ")");
+            seen(false);
+            settle(500);
+        }
     }
 
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);

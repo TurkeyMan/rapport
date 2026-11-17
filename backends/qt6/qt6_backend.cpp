@@ -4623,6 +4623,15 @@ void list_view::scrollContentsBy(int dx, int dy)
 
 // -- window -------------------------------------------------------------------
 
+// Test seam (#88): the fullscreen requests this backend has made, in order,
+// "F" for each fullscreen and "U" for each unfullscreen; read and cleared
+// through rapport_qt6_fullscreen_requests_for_tests below.
+std::string& fullscreen_requests_for_tests()
+{
+    static std::string requests;
+    return requests;
+}
+
 class window_impl;
 
 // Every window is a QDialog, for its keys: Enter presses the default
@@ -4826,6 +4835,7 @@ public:
     {
         if (on == fullscreen_wanted_) return;
         fullscreen_wanted_ = on;
+        fullscreen_requests_for_tests() += on ? 'F' : 'U';
         if (on)
         {
             was_maximized_ = frame_->isMaximized();
@@ -4913,9 +4923,9 @@ public:
     void state_changed()
     {
         const bool fs = frame_->isFullScreen();
+        fullscreen_wanted_ = fs;  // what it is now, whoever asked: any state change, told or not
         if (fs == fullscreen_) return;
         fullscreen_ = fs;
-        fullscreen_wanted_ = fs;  // what it is now, whoever asked
         show_menu_bar();
         if (on_fullscreen_) on_fullscreen_(fs);
     }
@@ -6235,5 +6245,14 @@ private:
 
 }  // namespace
 }  // namespace rap::qt6
+
+// Test seam (#88): the fullscreen requests made since the last call ("F",
+// "U", in order), cleared. Not part of the backend's interface.
+extern "C" RAPPORT_EXPORT const char* rapport_qt6_fullscreen_requests_for_tests()
+{
+    static std::string out;
+    out = std::exchange(rap::qt6::fullscreen_requests_for_tests(), std::string());
+    return out.c_str();
+}
 
 RAPPORT_BACKEND_ENTRY(qt6, rap::qt6::qt6_backend)

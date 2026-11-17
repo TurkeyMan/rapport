@@ -475,6 +475,34 @@ int main(int argc, char** argv)
         tv->set_text("Text");
         pump();
     }
+    // The text the user typed, then set by the app as it is ("new": nothing
+    // written), appended to, made read-only, through a new theme: the app's
+    // "new" is what the rebuild restores, not the "old" set before.
+    {
+        HWND rich = find(top, L"RICHEDIT50W");
+        if (rich)
+        {
+            tv->set_text("old");
+            pump();
+            SendMessageW(rich, EM_SETSEL, 0, -1);
+            SendMessageW(rich, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"new"));
+            tv->set_text("new");
+            tv->append(" tail", rap::text_style{});
+            tv->set_read_only(true);
+            pump();
+            (*ui)->set_color_scheme(rap::color_scheme::dark);
+            pump();
+            (*ui)->set_color_scheme(rap::color_scheme::light);
+            pump();
+            expect(tv->text() == "new tail", "a text view the user edited to what the app then set, through a new "
+                                             "theme: \"new tail\", \"" + tv->text() + "\"");
+            tv->set_read_only(false);
+            tv->set_text("Text");
+            pump();
+        }
+        else
+            expect(false, "the text view's RichEdit");
+    }
     // A tool button's checked state again: its early return covers it (it
     // only invalidates, and a never-shown window keeps no update region, so a
     // repaint can't be seen here: GetUpdateRect is empty even for a change).
@@ -507,6 +535,39 @@ int main(int argc, char** argv)
         SetWindowPos(top, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER |
                                                                                 SWP_NOACTIVATE);
         pump();
+    }
+    // A new splitter (no sizes asked for), given the sizes it has: nothing
+    // laid out, but the sizes are kept as asked for, so a wider window keeps
+    // the second pane's (without them, the two stretch panes share it).
+    {
+        rap::splitter* fresh = nullptr;
+        auto win2 = (*ui)->create(window{"Setters no-op splitter",
+                                         {splitter(orientation::horizontal, label{"one"}.stretch(),
+                                                   label{"two"}.stretch())
+                                              .bind(fresh)
+                                              .stretch()}}
+                                      .size(800_px, 300_px));
+        pump();
+        HWND top2 = FindWindowW(nullptr, L"Setters no-op splitter");
+        expect(top2 && !IsWindowVisible(top2) && fresh, "the splitter window, never shown");
+        if (top2 && fresh)
+        {
+            const std::vector<float> before = fresh->sizes();
+            fresh->set_sizes(before);
+            pump();
+            RECT r2{};
+            GetWindowRect(top2, &r2);
+            SetWindowPos(top2, nullptr, 0, 0, r2.right - r2.left + 200, r2.bottom - r2.top,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            pump();
+            const std::vector<float> after = fresh->sizes();
+            expect(before.size() == 2 && after.size() == 2 && std::abs(after[1] - before[1]) <= 2 &&
+                       after[0] > before[0] + 100,
+                   "a new splitter given its own sizes, then widened by 200: the second pane keeps its size, " +
+                       (before.size() == 2 ? std::to_string(before[0]) + "/" + std::to_string(before[1]) : "?") +
+                       " then " +
+                       (after.size() == 2 ? std::to_string(after[0]) + "/" + std::to_string(after[1]) : "?"));
+        }
     }
     // A list's header changed by someone else (a sort arrow, a column's
     // width, the columns' order, as a user's drag would): the app's again

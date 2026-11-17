@@ -3233,6 +3233,8 @@ public:
     {
         // Unchanged: the columns show that indicator now, whatever the user
         // or anything else did since (read from them, not sorted_) (#88).
+        // Recorded either way: attach() puts sorted_ back after a model reset.
+        sorted_ = {column, order};
         bool shown = true;
         for (size_t i = 0; shown && i < cols_.size(); ++i)
         {
@@ -3242,7 +3244,6 @@ public:
                                 (order == sort_order::ascending ? GTK_SORT_ASCENDING : GTK_SORT_DESCENDING));
         }
         if (shown) return;
-        sorted_ = {column, order};
         for (size_t i = 0; i < cols_.size(); ++i)
         {
             bool on = column && *column == i;
@@ -5063,6 +5064,15 @@ private:
     point_f last_pos_;
 };
 
+// Test seam (#88): the fullscreen requests this backend has made, in order,
+// "F" for each fullscreen and "U" for each unfullscreen; read and cleared
+// through rapport_gtk3_fullscreen_requests_for_tests below.
+std::string& fullscreen_requests_for_tests()
+{
+    static std::string requests;
+    return requests;
+}
+
 class window_impl : public rap::window, public part
 {
     // Development aid: RAPPORT_SNAPSHOT=file.png saves the window shown last,
@@ -5210,6 +5220,9 @@ public:
                 self->maximized_ = e->new_window_state & (GDK_WINDOW_STATE_MAXIMIZED |
                                                           GDK_WINDOW_STATE_TILED);
                 const bool fs = e->new_window_state & GDK_WINDOW_STATE_FULLSCREEN;
+                // Any state notification: what it is now replaces a request
+                // still on its way (an unanswered reversal included).
+                self->fullscreen_asked_.reset();
                 if (fs != self->fullscreen_)
                 {
                     self->fullscreen_ = fs;
@@ -5476,13 +5489,16 @@ public:
 
     bool fullscreen() const override { return fullscreen_; }
     bool maximized() const override { return maximized_; }
+    // Unchanged against the intent (#88): the request still on its way if
+    // there is one, else the state last seen (window-state-event replaces
+    // the request with it, an outside change included). It's asynchronous:
+    // true then false before the window manager answers asks both, and true
+    // twice asks once.
     void set_fullscreen(bool on) override
     {
-        // Unchanged: so already, and no other request still on its way (it's
-        // asynchronous: true then false before the window manager answers
-        // must still ask false) (#88).
-        if (fullscreen_ == on && (!fullscreen_asked_ || *fullscreen_asked_ == on)) return;
+        if (fullscreen_asked_ ? *fullscreen_asked_ == on : fullscreen_ == on) return;
         fullscreen_asked_ = on;
+        fullscreen_requests_for_tests() += on ? 'F' : 'U';
         if (on)
             gtk_window_fullscreen(GTK_WINDOW(win_));
         else
@@ -5718,7 +5734,7 @@ private:
     std::function<bool(const key_event&)> on_key_;
     GtkGesture* side_buttons_ = nullptr;  // owned: GTK 3 gestures don't belong to their widget
     bool fullscreen_ = false;
-    std::optional<bool> fullscreen_asked_;  // set_fullscreen's last request
+    std::optional<bool> fullscreen_asked_;  // a fullscreen request not yet answered (set_fullscreen)
     std::optional<size_f> min_size_;  // as last set (#88)
     icon_shown window_icon_;          // as last set (#88)
     bool maximized_ = false;
@@ -6664,5 +6680,14 @@ private:
 
 }  // namespace
 }  // namespace rap::gtk3
+
+// Test seam (#88): the fullscreen requests made since the last call ("F",
+// "U", in order), cleared. Not part of the backend's interface.
+extern "C" RAPPORT_EXPORT const char* rapport_gtk3_fullscreen_requests_for_tests()
+{
+    static std::string out;
+    out = std::exchange(rap::gtk3::fullscreen_requests_for_tests(), std::string());
+    return out.c_str();
+}
 
 RAPPORT_BACKEND_ENTRY(gtk3, rap::gtk3::gtk3_backend)

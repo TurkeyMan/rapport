@@ -19,7 +19,11 @@
 #include <QThread>
 #include <QTreeView>
 
+#include <dlfcn.h>
+#include <link.h>
+
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -55,6 +59,30 @@ public:
         return QObject::eventFilter(o, e);
     }
 };
+
+// A test seam of the backend's (`name`): linked in (a static build), or in
+// its module, loaded already (`module`, "rapport_gtk3" say) by ui::load.
+void* backend_seam(const char* module, const char* name)
+{
+    if (void* f = dlsym(RTLD_DEFAULT, name)) return f;
+    struct found
+    {
+        const char* module;
+        std::string path;
+    } f{module, {}};
+    dl_iterate_phdr(
+        +[](dl_phdr_info* info, size_t, void* p) -> int
+        {
+            auto* f = static_cast<found*>(p);
+            if (!info->dlpi_name || !std::strstr(info->dlpi_name, f->module)) return 0;
+            f->path = info->dlpi_name;
+            return 1;
+        },
+        &f);
+    if (f.path.empty()) return nullptr;
+    void* h = dlopen(f.path.c_str(), RTLD_NOW | RTLD_NOLOAD);  // (loaded already: only its handle)
+    return h ? dlsym(h, name) : nullptr;
+}
 
 // Everything due handled, posted events and paints included.
 void settle()
@@ -366,6 +394,68 @@ int main(int argc, char** argv)
         win->set_fullscreen(false);
         settle();
         expect(!win->fullscreen(), "full screen asked for and taken back at once: not full screen");
+    }
+    // The requests themselves, counted by the backend's seam (offscreen
+    // takes a window state at once: each request is answered as it's made);
+    // full screen from outside is the frame's state set as a window
+    // manager's change would set it.
+    {
+        using requests_fn = const char*();
+        auto* requests =
+            reinterpret_cast<requests_fn*>(backend_seam("rapport_qt6", "rapport_qt6_fullscreen_requests_for_tests"));
+        QWidget* frame = nullptr;
+        for (QWidget* w : QApplication::topLevelWidgets())
+            if (w->windowTitle() == "Setters") frame = w;
+        expect(requests && frame, "full screen: the backend's request counter, the window");
+        if (requests && frame)
+        {
+            settle();
+            requests();
+            win->set_fullscreen(true);
+            win->set_fullscreen(false);
+            std::string r = requests();
+            expect(r == "FU", "full screen: on then off: both asked, in order (" + r + ")");
+            win->set_fullscreen(true);
+            win->set_fullscreen(true);
+            r = requests();
+            expect(r == "F", "full screen: on twice: asked once (" + r + ")");
+            win->set_fullscreen(false);
+            requests();
+            win->set_fullscreen(true);
+            win->set_fullscreen(false);
+            frame->setWindowState(frame->windowState() | Qt::WindowFullScreen);  // from outside
+            win->set_fullscreen(false);
+            r = requests();
+            expect(r == "FUU", "full screen: on, off, then full screen from outside: off asked again (" + r + ")");
+            settle();
+            expect(!win->fullscreen(), "full screen: and not full screen after");
+            // A request left unanswered (its state change kept from the
+            // backend), then a state change that leaves it as the backend saw
+            // it last (not full screen, from outside): that state replaces the
+            // request, so full screen asked again is asked, not skipped.
+            {
+                struct eat_state : QObject
+                {
+                    bool on = true;
+                    bool eventFilter(QObject*, QEvent* e) override
+                    {
+                        return on && e->type() == QEvent::WindowStateChange;
+                    }
+                } eater;
+                frame->installEventFilter(&eater);
+                requests();
+                win->set_fullscreen(true);  // unanswered, as far as the backend knows
+                eater.on = false;
+                frame->setWindowState(frame->windowState() & ~Qt::WindowFullScreen);  // from outside
+                frame->removeEventFilter(&eater);
+                win->set_fullscreen(true);
+                r = requests();
+                expect(r == "FF", "full screen: asked, unanswered, then not full screen from outside: asked again (" +
+                                      r + ")");
+                win->set_fullscreen(false);
+                settle();
+            }
+        }
     }
     // A link label after a new palette (laid out again): its text and link;
     // a slider showing its value at its minimum: shown from the start; and
