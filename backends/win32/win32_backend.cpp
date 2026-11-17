@@ -1612,6 +1612,24 @@ HWND create_control(win_context& win, HWND parent, const wchar_t* cls, const std
     return h;
 }
 
+// An item's size with its common constraints: natural, but the width and
+// height it was given (common::width/height) where it has them. What every
+// container measures its content by, root content too (a page's, a
+// stack's, a window's, a scroll's): a canvas sized 300x200 as a page's
+// whole content asks for 300x200, not its 64x64 default (#92).
+SIZE measured_size(item* c)
+{
+    SIZE s = c->natural();
+    if (c->fixed_w > 0) s.cx = c->fixed_w;
+    if (c->fixed_h > 0) s.cy = c->fixed_h;
+    return s;
+}
+// Its height `width` across, with its fixed height where it has one.
+long measured_height(item* c, long width)
+{
+    return c->fixed_h > 0 ? c->fixed_h : c->height_at(width);
+}
+
 // A widget backed by one HWND, laid out as a leaf.
 template <class Base>
 class leaf : public Base, public item, public handler
@@ -4210,12 +4228,12 @@ public:
     bool expands_in_form() const override { return true; }
     SIZE measure() override
     {
-        const SIZE c = content ? content->natural() : SIZE{0, 0};
+        const SIZE c = content ? measured_size(content) : SIZE{0, 0};
         return {std::max(c.cx, title_size().cx + win_.px(16)) + 2 * pad(), c.cy + top() + pad()};
     }
     long measure_height(long width) override
     {
-        return (content ? content->height_at(width - 2 * pad()) : 0) + top() + pad();
+        return (content ? measured_height(content, width - 2 * pad()) : 0) + top() + pad();
     }
     void place(RECT r) override
     {
@@ -8858,6 +8876,57 @@ LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
     }
 }
 
+// Which pages have a tab (or a sidebar's row). The control has no hidden
+// items: a hidden page's is deleted, so its items are the visible pages in
+// order, and a page's item is the count of visible pages before it.
+struct page_items
+{
+    int count = 0;           // pages
+    std::vector<bool> on;    // per page; empty: all visible
+    bool hide_single = false;  // spec::tabs::hide_single_tab
+
+    bool shown(int page) const
+    {
+        return page >= 0 && page < count && (size_t(page) >= on.size() || on[size_t(page)]);
+    }
+    // Its item, if it's shown; else where it would go.
+    int item_of(int page) const
+    {
+        int item = 0;
+        for (int i = 0; i < page && i < count; ++i) item += shown(i);
+        return item;
+    }
+    // The page an item is (-1: none).
+    int page_of(int item) const
+    {
+        if (item < 0) return -1;
+        for (int i = 0; i < count; ++i)
+            if (shown(i) && item-- == 0) return i;
+        return -1;
+    }
+    int shown_count() const
+    {
+        int n = 0;
+        for (int i = 0; i < count; ++i) n += shown(i);
+        return n;
+    }
+    void set(int page, bool v)
+    {
+        on.resize(size_t(count), true);
+        on[size_t(page)] = v;
+    }
+    // The strip (or the list) shows: with hide_single_tab, for two pages or more.
+    bool strip() const { return tabs_strip_shown(on, count, hide_single); }
+    // After `page` was hidden (shown: false) or shown, the page to be
+    // current, from the one that was: the nearest visible to a hidden
+    // current one; a page shown with none current.
+    int current_after(int page, bool shown_now, int was) const
+    {
+        if (!shown_now) return was == page ? nearest_visible_page(on, count, page) : was;
+        return was < 0 ? page : was;
+    }
+};
+
 class tabs_impl : public leaf<rap::tabs>
 {
 public:
@@ -8866,14 +8935,14 @@ public:
     {
         adopt(create_control(win, parent, WC_TABCONTROLW, L"", WS_CLIPSIBLINGS | WS_TABSTOP));
         SetWindowSubclass(h_, dark_tabs_proc, 1, 0);
-        for (size_t i = 0; i < s.titles.size(); ++i)
-        {
-            std::wstring t = mnemonic(s.titles[i]);
-            TCITEMW item{};
-            item.mask = TCIF_TEXT;
-            item.pszText = t.data();
-            TabCtrl_InsertItem(h_, int(i), &item);
-        }
+        items_.count = int(s.titles.size());
+        items_.on = s.visible;
+        items_.hide_single = s.hide_single_tab;
+        for (const std::string& t : s.titles) titles_.push_back(mnemonic(t));
+        // Hidden pages (page::visible(false)) have no tab from the start.
+        for (int i = 0; i < items_.count; ++i)
+            if (items_.shown(i)) insert_tab(i);
+        TabCtrl_SetCurSel(h_, items_.shown_count() > 0 ? 0 : -1);  // the first visible page
         // A new DPI comes with a new font: the tabs' height follows it.
         SetWindowSubclass(
             h_,
@@ -8906,14 +8975,39 @@ public:
     std::vector<std::function<node()>> lazy;
     std::function<item*(const node&)> buildPage;
 
-    int current() const override { return TabCtrl_GetCurSel(h_); }
+    // The selected tab's page: -1 with every page hidden.
+    int current() const override { return items_.page_of(TabCtrl_GetCurSel(h_)); }
     void set_current(int i) override
     {
-        if (TabCtrl_GetCurSel(h_) == i) return;  // (#88)
-        TabCtrl_SetCurSel(h_, i);
+        if (!items_.shown(i)) return;  // hidden, or out of range
+        if (TabCtrl_GetCurSel(h_) == items_.item_of(i)) return;  // (#88)
+        TabCtrl_SetCurSel(h_, items_.item_of(i));
         ensure_built(i);
         win_.relayout_at_once();
     }
+    // A hidden page's tab deleted, a page shown again inserted at its place
+    // among the visible ones; the selection set without TCN_SELCHANGE, so
+    // no on_changed.
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= items_.count || items_.shown(page) == on) return;  // (#88)
+        const int was = current();
+        if (on)
+        {
+            items_.set(page, true);
+            insert_tab(page);
+        }
+        else
+        {
+            TabCtrl_DeleteItem(h_, items_.item_of(page));
+            items_.set(page, false);
+        }
+        const int now = items_.current_after(page, on, was);
+        TabCtrl_SetCurSel(h_, now < 0 ? -1 : items_.item_of(now));
+        ensure_built(now);
+        win_.relayout_at_once();
+    }
+    bool page_visible(int page) const override { return items_.shown(page); }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
     LRESULT notify(NMHDR* n, bool& handled) override
     {
@@ -8945,34 +9039,53 @@ public:
         for (size_t i = 0; i < pages.size(); ++i)
         {
             // An unbuilt page takes the area it's given; once built it has
-            // a size like any other.
+            // a size like any other. A hidden page takes none.
             if (i < lazy.size() && lazy[i]) continue;
-            const SIZE s = pages[i]->natural();
+            if (!items_.shown(int(i))) continue;
+            const SIZE s = measured_size(pages[i]);
             in.cx = std::max(in.cx, s.cx);
             in.cy = std::max(in.cy, s.cy);
         }
+        // No strip (hide_single_tab, one page): the page is the whole area.
+        if (!items_.strip()) return in;
         RECT r{0, 0, in.cx + 2 * pad(), in.cy + 2 * pad()};
         traced_tab_adjust(h_, TRUE, &r);
         return {r.right - r.left, r.bottom - r.top};
     }
     void place(RECT r) override
     {
-        leaf::place(r);
-        RECT in{0, 0, r.right - r.left, r.bottom - r.top};
-        traced_tab_adjust(h_, FALSE, &in);
-        OffsetRect(&in, r.left, r.top);
-        InflateRect(&in, -pad(), -pad());
-        for (item* p : pages) p->place(in);
+        RECT in = r;
+        if (items_.strip())
+        {
+            leaf::place(r);
+            in = {0, 0, r.right - r.left, r.bottom - r.top};
+            traced_tab_adjust(h_, FALSE, &in);
+            OffsetRect(&in, r.left, r.top);
+            InflateRect(&in, -pad(), -pad());
+        }
+        for (size_t i = 0; i < pages.size(); ++i)
+            if (items_.shown(int(i))) pages[i]->place(in);
     }
     void show_all(bool shown) override
     {
-        leaf::show_all(shown);
+        show_control(h_, shown && visible && items_.strip());
         if (shown && visible) ensure_built(current());  // the first time a lazy page is the one showing
-        for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == current());
+        const int now = current();
+        for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == now);
     }
 
 private:
+    // Page `page`'s tab, at its place among the visible ones.
+    void insert_tab(int page)
+    {
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = titles_[size_t(page)].data();
+        TabCtrl_InsertItem(h_, items_.item_of(page), &item);
+    }
     int pad() const { return px(6); }
+    page_items items_;
+    std::vector<std::wstring> titles_;  // per page, as the tabs show them
     std::function<void(int)> changed_;
     const band_density* density_ = nullptr;  // fluent controls': the tabs' (set_in_band)
     bool rows_set_ = false;                  // its tabs' height set from density_
@@ -8996,10 +9109,16 @@ public:
             std::wstring title = mnemonic(t);
             title.erase(std::remove(title.begin(), title.end(), L'&'), title.end());
             titles_.push_back(title);
-            SendMessageW(h_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(title.c_str()));
         }
+        items_.count = int(s.titles.size());
+        items_.on = s.visible;
+        items_.hide_single = s.hide_single_tab;
+        // Hidden pages (page::visible(false)) have no row from the start.
+        for (int i = 0; i < items_.count; ++i)
+            if (items_.shown(i)) insert_row(i);
         apply_rows();
-        SendMessageW(h_, LB_SETCURSEL, 0, 0);
+        shown_ = first_visible_page(items_.on, items_.count);
+        SendMessageW(h_, LB_SETCURSEL, WPARAM(shown_ < 0 ? -1 : 0), 0);
         // A new DPI comes with a new font: the rows follow it.
         SetWindowSubclass(
             h_,
@@ -9045,11 +9164,18 @@ public:
     std::vector<std::function<node()>> lazy;
     std::function<item*(const node&)> buildPage;
 
-    int current() const override { return std::max(0, int(SendMessageW(h_, LB_GETCURSEL, 0, 0))); }
+    // The selected row's page (the page showing if none is): -1 with every
+    // page hidden.
+    int current() const override
+    {
+        const int row = int(SendMessageW(h_, LB_GETCURSEL, 0, 0));
+        return row >= 0 ? items_.page_of(row) : shown_;
+    }
     void set_current(int i) override
     {
-        if (i == shown_ && SendMessageW(h_, LB_GETCURSEL, 0, 0) == i) return;  // (#88)
-        SendMessageW(h_, LB_SETCURSEL, WPARAM(i), 0);
+        if (!items_.shown(i)) return;  // hidden, or out of range
+        if (i == shown_ && SendMessageW(h_, LB_GETCURSEL, 0, 0) == items_.item_of(i)) return;  // (#88)
+        SendMessageW(h_, LB_SETCURSEL, WPARAM(items_.item_of(i)), 0);
         if (i == shown_) return;
         shown_ = i;
         ensure_built(i);
@@ -9065,6 +9191,29 @@ public:
         win_.relayout_at_once();
         if (changed_) changed_(current());
     }
+    // A hidden page's row deleted, a page shown again inserted at its place
+    // among the visible ones; LB_SETCURSEL sends no LBN_SELCHANGE, so no
+    // on_changed.
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= items_.count || items_.shown(page) == on) return;  // (#88)
+        const int was = current();
+        if (on)
+        {
+            items_.set(page, true);
+            insert_row(page);
+        }
+        else
+        {
+            SendMessageW(h_, LB_DELETESTRING, WPARAM(items_.item_of(page)), 0);
+            items_.set(page, false);
+        }
+        shown_ = items_.current_after(page, on, was);
+        SendMessageW(h_, LB_SETCURSEL, WPARAM(shown_ < 0 ? -1 : items_.item_of(shown_)), 0);
+        ensure_built(shown_);
+        win_.relayout_at_once();
+    }
+    bool page_visible(int page) const override { return items_.shown(page); }
     void ensure_built(int i)
     {
         if (i < 0 || size_t(i) >= lazy.size() || !lazy[size_t(i)]) return;
@@ -9075,7 +9224,8 @@ public:
     }
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
-        if (d->itemID == UINT(-1) || d->itemID >= titles_.size()) return false;
+        const int page = d->itemID == UINT(-1) ? -1 : items_.page_of(int(d->itemID));
+        if (page < 0 || size_t(page) >= titles_.size()) return false;
         const bool selected = d->itemState & ODS_SELECTED;
         FillRect(d->hDC, &d->rcItem,
                  theme_brush(selected ? theme_color::highlight : theme_color::base));
@@ -9085,7 +9235,7 @@ public:
         HGDIOBJ old = SelectObject(d->hDC, ui_font(win_.dpi()));
         RECT text = d->rcItem;
         text.left += px(8);
-        DrawTextW(d->hDC, titles_[d->itemID].c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        DrawTextW(d->hDC, titles_[size_t(page)].c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
         SelectObject(d->hDC, old);
         if ((d->itemState & ODS_FOCUS) && !(d->itemState & ODS_NOFOCUSRECT)) DrawFocusRect(d->hDC, &d->rcItem);
         return true;
@@ -9100,40 +9250,59 @@ public:
             // An unbuilt page takes the area it's given; once built it has
             // a size like any other.
             if (i < lazy.size() && lazy[i]) continue;
-            const SIZE s = pages[i]->natural();
+            if (!items_.shown(int(i))) continue;  // a hidden page takes none
+            const SIZE s = measured_size(pages[i]);
             in.cx = std::max(in.cx, s.cx);
             in.cy = std::max(in.cy, s.cy);
         }
-        // Every row whole: the rows and the list's frame (its client edge,
-        // above and below) round them.
+        // No list (hide_single_tab, one page): the page is the whole area.
+        if (!items_.strip()) return in;
+        // Every row whole, the visible pages' only: the rows and the list's
+        // frame (its client edge, above and below) round them.
         const long frame = 2L * GetSystemMetricsForDpi(SM_CYEDGE, win_.dpi());
         return {list_width() + gap() + in.cx,
-                std::max<long>(in.cy, long(titles_.size()) * row_height() + frame)};
+                std::max<long>(in.cy, long(items_.shown_count()) * row_height() + frame)};
     }
     void place(RECT r) override
     {
-        const int lw = list_width();
-        leaf::place({r.left, r.top, r.left + lw, r.bottom});
-        for (item* p : pages) p->place({r.left + lw + gap(), r.top, r.right, r.bottom});
+        RECT in = r;
+        if (items_.strip())
+        {
+            const int lw = list_width();
+            leaf::place({r.left, r.top, r.left + lw, r.bottom});
+            in.left += lw + gap();
+        }
+        for (size_t i = 0; i < pages.size(); ++i)
+            if (items_.shown(int(i))) pages[i]->place(in);
     }
     void show_all(bool shown) override
     {
-        leaf::show_all(shown);
+        show_control(h_, shown && visible && items_.strip());
         if (shown && visible) ensure_built(current());
-        for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == current());
+        const int now = current();
+        for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == now);
     }
 
 private:
     int gap() const { return px(12); }
+    // As wide as the visible pages' names.
     int list_width()
     {
         long w = px(120);
-        for (const std::wstring& t : titles_) w = std::max(w, text_extent(h_, t).cx + px(36));
+        for (size_t i = 0; i < titles_.size(); ++i)
+            if (items_.shown(int(i))) w = std::max(w, text_extent(h_, titles_[i]).cx + px(36));
         return int(w);
     }
+    // Page `page`'s row, at its place among the visible ones.
+    void insert_row(int page)
+    {
+        SendMessageW(h_, LB_INSERTSTRING, WPARAM(items_.item_of(page)),
+                     reinterpret_cast<LPARAM>(titles_[size_t(page)].c_str()));
+    }
 
-    std::vector<std::wstring> titles_;
-    int shown_ = 0;  // the page showing
+    page_items items_;
+    std::vector<std::wstring> titles_;  // per page
+    int shown_ = 0;  // the page showing (-1: none, every page hidden)
     std::function<void(int)> changed_;
 };
 
@@ -10816,7 +10985,7 @@ public:
     bool expands_in_form() const override { return true; }
     SIZE measure() override
     {
-        SIZE c = content ? content->natural() : SIZE{0, 0};
+        SIZE c = content ? measured_size(content) : SIZE{0, 0};
         c.cx += GetSystemMetrics(SM_CXVSCROLL);
         c.cy = std::min<long>(c.cy, font_metrics(win_.dpi()).cy * 10);  // asks for a modest height
         return c;
@@ -10885,11 +11054,11 @@ private:
     {
         RECT client;
         GetClientRect(host_, &client);
-        const SIZE n = content->natural();
+        const SIZE n = measured_size(content);
         // As tall as the content is at the width it's given: text that wraps
         // takes more lines when narrower than its natural width.
         const long w = horizontal_ ? std::max<long>(n.cx, client.right) : client.right;
-        const long h = std::max<long>(content->height_at(w), client.bottom);
+        const long h = std::max<long>(measured_height(content, w), client.bottom);
         SCROLLINFO si{sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, int(h - 1), UINT(client.bottom), 0, 0};
         y_ = std::clamp(y_, 0L, std::max(0L, h - client.bottom));
         si.nPos = int(y_);
@@ -11165,7 +11334,7 @@ public:
         for (size_t i = 0; i < pages_.size(); ++i)
         {
             if (!counts(i)) continue;
-            const SIZE s = pages_[i].page->content->natural();
+            const SIZE s = measured_size(pages_[i].page->content);
             n.cx = std::max(n.cx, s.cx);
             n.cy = std::max(n.cy, s.cy);
         }
@@ -11175,7 +11344,7 @@ public:
     {
         long h = 0;
         for (size_t i = 0; i < pages_.size(); ++i)
-            if (counts(i)) h = std::max(h, pages_[i].page->content->height_at(width));
+            if (counts(i)) h = std::max(h, measured_height(pages_[i].page->content, width));
         return h;
     }
     void place(RECT r) override
@@ -12654,6 +12823,10 @@ public:
             relayout();
             return;
         }
+        // Measured anew, as relayout() has it: what changed (a page shown,
+        // the strip back) may change the natural sizes, and grow_to_content
+        // and WM_GETMINMAXINFO read them.
+        ++g_layout_pass;
         SendMessageW(hwnd_, WM_SETREDRAW, FALSE, 0);
         grow_to_content();
         layout_now();
@@ -12668,7 +12841,7 @@ public:
         if (!root || IsZoomed(hwnd_) || IsIconic(hwnd_)) return;
         RECT c;
         GetClientRect(hwnd_, &c);
-        const SIZE n = root->natural();
+        const SIZE n = measured_size(root);
         const int m = margin();
         const long w = std::max<long>(c.right, n.cx + 2 * m),
                    h = std::max<long>(c.bottom, n.cy + 2 * m + strip_height());
@@ -12875,7 +13048,7 @@ public:
     // The spec's size, but never smaller than the content.
     SIZE first_size()
     {
-        const SIZE n = root ? root->natural() : SIZE{200, 100};
+        const SIZE n = root ? measured_size(root) : SIZE{200, 100};
         const int m = margin();
         return {std::max<long>(n.cx + 2 * m, extent_px(hwnd_, initial_w_, false)),
                 std::max<long>(n.cy + 2 * m + strip_height(), extent_px(hwnd_, initial_h_, true))};
@@ -13024,7 +13197,7 @@ public:
         SIZE least{px(min_size_.w), px(min_size_.h)};
         if (root)
         {
-            const SIZE n = root->natural();
+            const SIZE n = measured_size(root);
             const int m = margin();
             least.cx = std::max<LONG>(least.cx, n.cx + 2 * m);
             least.cy = std::max<LONG>(least.cy, n.cy + 2 * m + strip_height());

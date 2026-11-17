@@ -2008,27 +2008,156 @@ struct lazy_pages
     }
 };
 
+// The size of the visible pages of `count` (`page(i)` each, `shown(i)`
+// whether it's visible): the largest of their sizes (their least sizes for
+// `minimum`), as QStackedLayout measures, a page's explicit minimum
+// included. Hidden pages take no layout. None visible: nothing.
+template <class Page, class Shown>
+QSize visible_pages_size(int count, Page page, Shown shown, bool minimum)
+{
+    QSize s(0, 0);
+    for (int i = 0; i < count; ++i)
+    {
+        const QWidget* w = page(i);
+        if (!w || !shown(i)) continue;
+        const QSize least = w->minimumSizeHint().expandedTo(w->minimumSize());
+        s = s.expandedTo(minimum ? least : w->sizeHint().expandedTo(least).boundedTo(w->maximumSize()));
+    }
+    return s;
+}
+
+// A tabs strip's QTabWidget. With its strip hidden (hide_single_tab), it
+// measures as its visible pages alone: QTabWidget counts its bar unless it
+// auto-hides, which goes by the number of tabs, not the visible ones.
+class tab_widget : public QTabWidget
+{
+public:
+    // Natural: QTabWidget's own with the strip (it counts only the visible
+    // pages, and bounds the bar as it does with scroll buttons), at least
+    // the minimum; without the strip, the visible pages alone.
+    QSize sizeHint() const override
+    {
+        return (strip_hidden ? hint(false) : QTabWidget::sizeHint()).expandedTo(hint(true));
+    }
+    QSize minimumSizeHint() const override { return hint(true); }
+
+    bool strip_hidden = false;
+
+private:
+    // Its visible pages only, strip shown or not: QTabWidget's minimum asks
+    // its page stack, which counts hidden pages too. With the strip, the bar
+    // and the frame as QTabWidget adds them (no corner widgets here).
+    QSize hint(bool minimum) const
+    {
+        const QSize pages = visible_pages_size(
+            count(), [this](int i) { return widget(i); }, [this](int i) { return isTabVisible(i); }, minimum);
+        if (strip_hidden) return pages;
+        const QSize bar = minimum ? tabBar()->minimumSizeHint() : tabBar()->sizeHint();
+        const bool across = tabPosition() == North || tabPosition() == South;
+        const QSize in = across ? QSize(std::max(pages.width(), bar.width()), pages.height() + bar.height())
+                                : QSize(pages.width() + bar.width(), std::max(pages.height(), bar.height()));
+        QStyleOptionTabWidgetFrame opt;
+        initStyleOption(&opt);
+        opt.state = QStyle::State_None;
+        return style()->sizeFromContents(QStyle::CT_TabWidget, &opt, in, this);
+    }
+};
+
+// Sets a flag for as long as it lives: a tabs' own changes to its current
+// page, which fire no on_changed.
+struct quiet_scope
+{
+    explicit quiet_scope(bool& flag)
+        : flag_(flag)
+        , was_(flag)
+    {
+        flag_ = true;
+    }
+    ~quiet_scope() { flag_ = was_; }
+    bool& flag_;
+    bool was_;
+};
+
 class tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    explicit tabs_impl(QTabWidget* t)
+    explicit tabs_impl(tab_widget* t)
         : widget_base(t)
     {
         QObject::connect(t, &QTabWidget::currentChanged, t,
                          [this](int i)
                          {
                              lazy_.ensure_built(i);
-                             if (changed_) changed_(i);
+                             if (changed_ && !quiet_) changed_(i);
                          });
     }
-    int current() const override { return tabs()->currentIndex(); }
+    // Its pages hidden from the start (spec::tabs::visible) and its strip
+    // (hide_single_tab): the first visible page current, the others' tabs
+    // hidden, before anything is shown or a lazy page built.
+    void init(const std::vector<bool>& visible, bool hide_single_tab)
+    {
+        quiet_scope q(quiet_);
+        const int n = tabs()->count();
+        visible_.assign(size_t(n), true);
+        for (int i = 0; i < n && size_t(i) < visible.size(); ++i) visible_[size_t(i)] = visible[size_t(i)];
+        hide_single_ = hide_single_tab;
+        const int first = first_visible_page(visible_, n);
+        if (first >= 0) tabs()->setCurrentIndex(first);
+        for (int i = 0; i < n; ++i)
+            if (!visible_[size_t(i)]) tabs()->setTabVisible(i, false);
+        if (first < 0) set_none(true);
+        update_strip(true);
+    }
+    int current() const override { return none_ ? -1 : tabs()->currentIndex(); }
+    // A hidden page, or one out of range: nothing.
     void set_current(int i) override
     {
-        if (tabs()->currentIndex() == i) return;
+        if (!page_visible(i)) return;
+        if (tabs()->currentIndex() == i) return;  // (#88)
         tabs()->setCurrentIndex(i);
         lazy_.ensure_built(i);
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= tabs()->count() || page_visible(page) == on) return;  // (#88)
+        quiet_scope q(quiet_);
+        visible_[size_t(page)] = on;
+        if (!on)
+        {
+            // The current page hidden: the nearest visible after it (before
+            // it, with none after) made current first, so QTabBar's own
+            // choice never comes into it.
+            if (!none_ && page == tabs()->currentIndex())
+            {
+                const int next = nearest_visible_page(visible_, tabs()->count(), page);
+                if (next >= 0)
+                {
+                    tabs()->setCurrentIndex(next);
+                    lazy_.ensure_built(next);
+                }
+                else
+                    set_none(true);
+            }
+            tabs()->setTabVisible(page, false);
+        }
+        else
+        {
+            tabs()->setTabVisible(page, true);
+            if (none_)  // the first page shown again: current
+            {
+                tabs()->setCurrentIndex(page);
+                lazy_.ensure_built(page);
+                set_none(false);
+            }
+        }
+        update_strip(false);
+        tabs()->updateGeometry();
+    }
+    bool page_visible(int page) const override
+    {
+        return page >= 0 && size_t(page) < visible_.size() && visible_[size_t(page)];
+    }
     void set_lazy(lazy_pages pages)
     {
         lazy_ = std::move(pages);
@@ -2036,18 +2165,85 @@ public:
     }
 
 private:
-    QTabWidget* tabs() const { return static_cast<QTabWidget*>(w_); }
+    tab_widget* tabs() const { return static_cast<tab_widget*>(w_); }
+    // QTabWidget's page stack, hidden with every page: no page shows.
+    void set_none(bool none)
+    {
+        none_ = none;
+        if (auto* stack = tabs()->findChild<QStackedWidget*>(QString(), Qt::FindDirectChildrenOnly))
+            stack->setVisible(!none);
+    }
+    // The strip shown or hidden (hide_single_tab); hidden, the page alone
+    // fills the area, with no frame round it (document mode).
+    void update_strip(bool first)
+    {
+        const bool shown = tabs_strip_shown(visible_, tabs()->count(), hide_single_);
+        if (!first && tabs()->strip_hidden == !shown) return;
+        tabs()->strip_hidden = !shown;
+        tabs()->tabBar()->setVisible(shown);
+        tabs()->setDocumentMode(!shown);
+        tabs()->updateGeometry();
+        QEvent relayout(QEvent::LayoutRequest);
+        QCoreApplication::sendEvent(tabs(), &relayout);
+    }
+
     std::function<void(int)> changed_;
     lazy_pages lazy_;
+    std::vector<bool> visible_;  // per page
+    bool hide_single_ = false;
+    bool none_ = false;   // every page hidden: current() is -1
+    bool quiet_ = false;  // our own change of page: no on_changed
+};
+
+// A sidebar's list of page names: at its natural size, its visible rows
+// whole (a hidden page's row takes no room).
+class side_list : public QListWidget
+{
+public:
+    // Its visible rows, at least one row's height (none visible, or none at
+    // all), and never under Qt's own minimum. Given less, it scrolls.
+    QSize sizeHint() const override
+    {
+        int rows = 0, one = 0;
+        for (int i = 0; i < count(); ++i)
+        {
+            const int h = sizeHintForRow(i);
+            if (one <= 0) one = h;
+            if (!isRowHidden(i)) rows += h;
+        }
+        if (one <= 0) one = fontMetrics().height() + 2 * spacing();
+        const int h = 2 * frameWidth() + std::max(rows, one);
+        return QSize(QListWidget::sizeHint().width(), std::max(h, minimumSizeHint().height()));
+    }
+};
+
+// A sidebar's pages: sized to its largest visible page (a hidden one takes
+// no layout).
+class side_stack : public QStackedWidget
+{
+public:
+    QSize sizeHint() const override
+    {
+        return visible_pages_size(
+            count(), [this](int i) { return widget(i); }, [this](int i) { return shown(i); }, false);
+    }
+    QSize minimumSizeHint() const override
+    {
+        return visible_pages_size(
+            count(), [this](int i) { return widget(i); }, [this](int i) { return shown(i); }, true);
+    }
+
+    std::function<bool(int)> shown = [](int) { return true; };
 };
 
 // Tabs as a list of page names down the left, the page beside it.
 class side_tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    side_tabs_impl(QWidget* box, QListWidget* list, QStackedWidget* stack)
+    side_tabs_impl(QWidget* box, side_list* list, QWidget* line, side_stack* stack)
         : widget_base(box)
         , list_(list)
+        , line_(line)
         , stack_(stack)
     {
         QObject::connect(list_, &QListWidget::currentRowChanged, list_,
@@ -2056,28 +2252,112 @@ public:
                              if (i < 0) return;
                              lazy_.ensure_built(i);
                              stack_->setCurrentIndex(i);
-                             if (changed_) changed_(i);
+                             if (changed_ && !quiet_) changed_(i);
                          });
+        stack_->shown = [this](int i) { return page_visible(i); };
     }
-    int current() const override { return std::max(0, list_->currentRow()); }
+    // As tabs_impl's: the first visible page current, the others' rows
+    // hidden, and the list (hide_single_tab).
+    void init(const std::vector<bool>& visible, bool hide_single_tab)
+    {
+        quiet_scope q(quiet_);
+        const int n = list_->count();
+        visible_.assign(size_t(n), true);
+        for (int i = 0; i < n && size_t(i) < visible.size(); ++i) visible_[size_t(i)] = visible[size_t(i)];
+        hide_single_ = hide_single_tab;
+        const int first = first_visible_page(visible_, n);
+        if (first >= 0) list_->setCurrentRow(first);
+        for (int i = 0; i < n; ++i)
+            if (!visible_[size_t(i)]) list_->setRowHidden(i, true);
+        if (first < 0) set_none(true);
+        update_strip();
+        relayout();
+    }
+    int current() const override { return none_ ? -1 : std::max(0, list_->currentRow()); }
+    // A hidden page, or one out of range: nothing.
     void set_current(int i) override
     {
-        if (list_->currentRow() == i) return;
+        if (!page_visible(i)) return;
+        if (list_->currentRow() == i) return;  // (#88)
         list_->setCurrentRow(i);
         lazy_.ensure_built(i);
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= list_->count() || page_visible(page) == on) return;  // (#88)
+        quiet_scope q(quiet_);
+        visible_[size_t(page)] = on;
+        if (!on)
+        {
+            if (!none_ && page == list_->currentRow())
+            {
+                const int next = nearest_visible_page(visible_, list_->count(), page);
+                if (next >= 0)
+                    list_->setCurrentRow(next);
+                else
+                    set_none(true);
+            }
+            list_->setRowHidden(page, true);
+        }
+        else
+        {
+            list_->setRowHidden(page, false);
+            if (none_)  // the first page shown again: current
+            {
+                list_->setCurrentRow(page);
+                lazy_.ensure_built(page);
+                stack_->setCurrentIndex(page);
+                set_none(false);
+            }
+        }
+        update_strip();
+        relayout();
+    }
+    bool page_visible(int page) const override
+    {
+        return page >= 0 && size_t(page) < visible_.size() && visible_[size_t(page)];
+    }
     void set_lazy(lazy_pages pages)
     {
         lazy_ = std::move(pages);
         lazy_.ensure_built(current());
     }
+    // Sizes the rows again (an app's row height: the list's least height
+    // counts its visible rows).
+    std::function<void()> size_rows;
 
 private:
-    QListWidget* list_;
-    QStackedWidget* stack_;
+    void set_none(bool none)
+    {
+        none_ = none;
+        stack_->setVisible(!none);
+    }
+    // The list and its line hidden with at most one page visible
+    // (hide_single_tab): the page fills the area.
+    void update_strip()
+    {
+        const bool shown = tabs_strip_shown(visible_, list_->count(), hide_single_);
+        list_->setVisible(shown);
+        line_->setVisible(shown);
+    }
+    void relayout()
+    {
+        if (size_rows) size_rows();
+        list_->updateGeometry();
+        stack_->updateGeometry();
+        widget()->updateGeometry();
+    }
+
+    side_list* list_;
+    QWidget* line_;
+    side_stack* stack_;
     std::function<void(int)> changed_;
     lazy_pages lazy_;
+    std::vector<bool> visible_;  // per page
+    bool hide_single_ = false;
+    bool none_ = false;   // every page hidden: current() is -1
+    bool quiet_ = false;  // our own change of page: no on_changed
 };
 
 // -- stack --------------------------------------------------------------------
@@ -5446,7 +5726,7 @@ private:
     QWidget* make(const node& n, const spec::tabs& s, orientation)
     {
         if (s.sidebar) return make_sidebar(n, s);
-        auto* tabs = new QTabWidget;
+        auto* tabs = new tab_widget;
         lazy_pages lazy{s.lazy, {}, page_builder()};
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
@@ -5456,6 +5736,9 @@ private:
             lazy.pages.push_back(page);
         }
         auto& w = add<tabs_impl>(n, tabs);
+        // Pages hidden from the start, before a lazy one is built: only the
+        // first visible page is.
+        w.init(s.visible, s.hide_single_tab);
         if (!s.lazy.empty()) w.set_lazy(std::move(lazy));
         return tabs;
     }
@@ -5467,8 +5750,8 @@ private:
         auto* l = new QHBoxLayout(box);
         l->setContentsMargins(0, 0, 0, 0);
         l->setSpacing(0);
-        auto* list = new QListWidget;
-        auto* stack = new QStackedWidget;
+        auto* list = new side_list;
+        auto* stack = new side_stack;
         lazy_pages lazy{s.lazy, {}, page_builder()};
         int width = 0;
         // An item's height: the app's row height (look_options::row_height)
@@ -5490,17 +5773,25 @@ private:
         // and its frame. Both again with a new font or style (a larger text
         // size: the rows never under its line and 2), as a list's and a
         // tree's rows are.
+        // Its visible rows only (a hidden page's takes no room).
+        std::function<void()> resize_rows;
         if (g_app_row_height > 0)
         {
             auto size_rows = [list]
             {
                 const int h = fixed_row(list->font(), g_app_row_height);
-                for (int i = 0; i < list->count(); ++i) list->item(i)->setSizeHint(QSize(0, h));
-                list->setMinimumHeight(h * list->count() + 2 * list->frameWidth());
+                int shown = 0;
+                for (int i = 0; i < list->count(); ++i)
+                {
+                    list->item(i)->setSizeHint(QSize(0, h));
+                    shown += !list->isRowHidden(i);
+                }
+                list->setMinimumHeight(h * shown + 2 * list->frameWidth());
                 list->doItemsLayout();
                 list->updateGeometry();
             };
             size_rows();
+            resize_rows = size_rows;
             // After Qt has handled the change (queued): the new font's metrics
             // and the new style's frame width are only the list's then. A
             // burst of changes measures once.
@@ -5534,8 +5825,11 @@ private:
         line->setFrameShadow(QFrame::Sunken);
         l->addWidget(line);
         l->addWidget(stack, 1);
-        auto& tabs = add<side_tabs_impl>(n, box, list, stack);
-        tabs.set_current(0);
+        auto& tabs = add<side_tabs_impl>(n, box, list, line, stack);
+        tabs.size_rows = std::move(resize_rows);
+        // Pages hidden from the start, before a lazy one is built: only the
+        // first visible page is.
+        tabs.init(s.visible, s.hide_single_tab);
         if (!s.lazy.empty()) tabs.set_lazy(std::move(lazy));
         return box;
     }

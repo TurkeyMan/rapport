@@ -11,6 +11,7 @@
 #include "layout.h"
 #include "sys.h"
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -22,7 +23,35 @@ namespace rap
 {
 
 // 88: spec::list and spec::tree's row_height, look_options::row_height.
-inline constexpr int abi_version = 88;
+// 89: tabs::set_page_visible and page_visible; spec::tabs visible and
+//     hide_single_tab.
+inline constexpr int abi_version = 89;
+
+// For backends' tabs (rap::tabs::set_page_visible): the page made current
+// when page `from` is hidden, the nearest visible after it, else before it;
+// -1 with none visible. `visible` is per page; past its end, visible.
+inline int nearest_visible_page(const std::vector<bool>& visible, int pages, int from)
+{
+    auto shown = [&](int i) { return size_t(i) >= visible.size() || visible[size_t(i)]; };
+    for (int i = from + 1; i < pages; ++i)
+        if (shown(i)) return i;
+    for (int i = std::min(from, pages) - 1; i >= 0; --i)
+        if (shown(i)) return i;
+    return -1;
+}
+// The page current at the start: the first visible, or -1.
+inline int first_visible_page(const std::vector<bool>& visible, int pages)
+{
+    return nearest_visible_page(visible, pages, -1);
+}
+// Whether the strip shows: with hide_single_tab, only for two pages or more.
+inline bool tabs_strip_shown(const std::vector<bool>& visible, int pages, bool hide_single_tab)
+{
+    if (!hide_single_tab) return true;
+    int n = 0;
+    for (int i = 0; i < pages && n < 2; ++i) n += size_t(i) >= visible.size() || visible[size_t(i)];
+    return n >= 2;
+}
 
 // Light or dark: as the desktop has it (system), or the app's own choice
 // (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for
