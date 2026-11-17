@@ -43,6 +43,7 @@
 
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
 RAPPORT_BUILTIN_BACKEND(win32);
+extern "C" int rapport_win32_tab_body_cached(HWND);
 #endif
 
 namespace
@@ -394,7 +395,9 @@ int main(int argc, char** argv)
         auto gdi = [] { return long(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS)); };
         long baseline = 0;
         bool lookups_ok = true;
-        for (int i = 0; i < 150; ++i)
+        int printed_ok = 0;
+        const int cycles = 150;
+        for (int i = 0; i < cycles; ++i)
         {
             {
                 auto w = (*ui)->create(window{"Content surface, cycled", {vbox{
@@ -402,17 +405,74 @@ int main(int argc, char** argv)
                 }}}.size(360_px, 240_px));
                 HWND t = top_of(L"Content surface, cycled");
                 const std::vector<HWND> e = t ? children_of(t, L"Edit") : std::vector<HWND>{};
-                if (!e.empty()) look_of(e[0]);
-                if (HWND b = t ? button_named(t, L"Cycled push") : nullptr) print_whole(b);
+                HWND b = t ? button_named(t, L"Cycled push") : nullptr;
+                // Each found and printed on the page's body (light: not the
+                // window colour), or the cycle doesn't count.
+                if (!e.empty() && b)
+                {
+                    const field_look f = look_of(e[0]);
+                    const printed pb = print_whole(b);
+                    if (f.corner != 0xDEADBEEF && f.corner == tab_body(children_of(t, WC_TABCONTROLW).front()) &&
+                        pb.w > 0 && pb.at(0, 0) == f.corner)
+                        ++printed_ok;
+                }
             }
             pump(2);
             lookups_ok = lookups_ok && look_of(e2[0]).fill == before_e2;
             if (i == 9) baseline = gdi();
         }
         const long grew = gdi() - baseline;
-        expect(grew <= 4, "140 windows made, printed and destroyed: GDI objects grew by " + std::to_string(grew) +
-                              " (" + std::to_string(baseline) + " after the first 10)");
+        expect(printed_ok == cycles, "every cycled window's entry and button found and printed on its page: " +
+                                         std::to_string(printed_ok) + " of " + std::to_string(cycles));
+        expect(baseline > 0, "GDI objects counted (" + std::to_string(baseline) + ")");
+        expect(baseline > 0 && grew <= 4, "140 windows made, printed and destroyed: GDI objects grew by " +
+                                              std::to_string(grew) + " (" + std::to_string(baseline) +
+                                              " after the first 10)");
         expect(lookups_ok, "the page's entry printed after each, as before: " + hex(look_of(e2[0]).fill));
+
+        // A control's cached answer, a miss in a window with no tabs, goes
+        // with the control (so a control made at its handle asks again).
+        // Light: dark mode's grounds never ask.
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+        if (!g_dark)
+        {
+            int asked = 0, cached = 0, gone = 0;
+            for (int i = 0; i < 20; ++i)
+            {
+                HWND edit = nullptr;
+                {
+                    auto w = (*ui)->create(window{"Content surface, no tabs", {vbox{entry{}.placeholder("Alone")}}}
+                                               .size(300_px, 120_px));
+                    HWND t = top_of(L"Content surface, no tabs");
+                    const std::vector<HWND> e = t ? children_of(t, L"Edit") : std::vector<HWND>{};
+                    if (!e.empty())
+                    {
+                        edit = e[0];
+                        ++asked;
+                        look_of(edit);
+                        cached += rapport_win32_tab_body_cached(edit);
+                    }
+                }
+                pump(2);
+                if (edit && !rapport_win32_tab_body_cached(edit)) ++gone;
+            }
+            expect(asked == 20 && cached == 20, "a lone entry's lookup cached, a miss (" + std::to_string(cached) +
+                                                    " of " + std::to_string(asked) + ")");
+            expect(gone == 20, "and gone with its window (" + std::to_string(gone) + " of 20)");
+        }
+#endif
+
+        // A tab control destroyed under its page's controls, with no layout
+        // since: the entry it held asks again, and is on the window now.
+        if (!g_dark)
+        {
+            const DWORD on_page = look_of(e2[0]).corner;
+            DestroyWindow(t2[0]);
+            const field_look after = look_of(e2[0]);
+            expect(on_page == body && after.corner == window_colour,
+                   "its tab control destroyed, the entry is on the window " + hex(window_colour) + ", not the page " +
+                       hex(on_page) + ": " + hex(after.corner));
+        }
     }
 
     // An empty document-tab strip on a base surface (under a menu bar, as

@@ -458,7 +458,8 @@ void forget_tab_bodies()
 }
 void forget_tab_body(HWND tab)
 {
-    if (tab_bodies().erase(tab)) ++g_tab_bodies_gen;  // nothing found on it kept
+    tab_bodies().erase(tab);
+    ++g_tab_bodies_gen;  // nothing found on it, or found not to be, kept
 }
 HBRUSH tab_body_brush_of(COLORREF colour)
 {
@@ -499,18 +500,29 @@ void traced_tab_adjust(HWND h, BOOL larger, RECT* rect)
 }
 
 HBRUSH tab_body_under_scan(HWND control);
+// Each control's answer, found or not, for this layout pass and these tab
+// bodies; a control's goes with it (its WM_NCDESTROY, through a subclass
+// added as it's first asked), so a window made at a handle another had
+// asks again.
+std::unordered_map<HWND, HBRUSH>& tab_body_answers()
+{
+    static std::unordered_map<HWND, HBRUSH> m;
+    return m;
+}
+LRESULT CALLBACK tab_body_answer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR)
+{
+    if (msg == WM_NCDESTROY)
+    {
+        tab_body_answers().erase(h);
+        RemoveWindowSubclass(h, tab_body_answer_proc, id);
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
 // Asked by each label as it paints (WM_CTLCOLORSTATIC): found once per
 // control and layout pass, not by a walk over its siblings at every paint.
 HBRUSH tab_body_under(HWND control)
 {
-    struct known
-    {
-        unsigned pass, gen;
-        HBRUSH brush;
-    };
-    // Only this pass's answers are any use: the rest go with it, so the
-    // cache holds no control that has gone.
-    static std::unordered_map<HWND, known> cache;
+    auto& cache = tab_body_answers();
     static unsigned cache_pass = 0, cache_gen = 0;
     if (cache_pass != g_layout_pass || cache_gen != g_tab_bodies_gen)
     {
@@ -518,10 +530,11 @@ HBRUSH tab_body_under(HWND control)
         cache_pass = g_layout_pass;
         cache_gen = g_tab_bodies_gen;
     }
-    if (auto it = cache.find(control); it != cache.end()) return it->second.brush;
+    if (auto it = cache.find(control); it != cache.end()) return it->second;
     trace::mark(trace::phase::tab_cache_miss, uintptr_t(control));
     const HBRUSH b = tab_body_under_scan(control);
-    cache[control] = {g_layout_pass, g_tab_bodies_gen, b};
+    cache[control] = b;
+    SetWindowSubclass(control, tab_body_answer_proc, 0, 0);  // (again: the same one)
     return b;
 }
 HBRUSH tab_body_under_scan(HWND control)
@@ -15781,6 +15794,17 @@ HBRUSH tab_body_brush_under(HWND control)
 {
     return tab_body_under(control);
 }
+
+}  // namespace rap::win32
+
+// Private test seam: whether `control`'s tab body answer is cached.
+extern "C" __declspec(dllexport) int rapport_win32_tab_body_cached(HWND control)
+{
+    return rap::win32::tab_body_answers().count(control) ? 1 : 0;
+}
+
+namespace rap::win32
+{
 
 }  // namespace rap::win32
 
