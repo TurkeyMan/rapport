@@ -4850,7 +4850,10 @@ public:
         if (auto& r = fullscreen_requests_for_tests()) *r += on ? 'F' : 'U';
         if (on)
         {
-            was_maximized_ = frame_->isMaximized();
+            // What to go back to, taken only on the way into full screen: a
+            // request made again while the frame is full screen already (on,
+            // off, the first's late answer, on) keeps it.
+            if (!frame_->isFullScreen()) was_maximized_ = frame_->isMaximized();
             frame_->showFullScreen();
         }
         else if (was_maximized_)

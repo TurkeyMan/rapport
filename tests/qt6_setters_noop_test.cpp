@@ -433,8 +433,12 @@ int main(int argc, char** argv)
             // On, off (both unanswered: their state changes kept from the
             // backend), the first answered (the frame full screen, its state
             // change told), on again: the second still pending, so on is asked
-            // again (F, U, F), not skipped.
+            // again (F, U, F), not skipped. It starts maximized, and ends
+            // maximized again: the request made again, with the frame full
+            // screen already, keeps what to go back to.
             {
+                frame->showMaximized();
+                settle();
                 struct eat_state : QObject
                 {
                     bool on = true;
@@ -447,7 +451,8 @@ int main(int argc, char** argv)
                 requests();
                 win->set_fullscreen(true);
                 win->set_fullscreen(false);
-                frame->setWindowState(frame->windowState() | Qt::WindowFullScreen);  // the first's answer, kept
+                // the first's answer, kept (full screen, not maximized, as showFullScreen sets it)
+                frame->setWindowState((frame->windowState() & ~Qt::WindowMaximized) | Qt::WindowFullScreen);
                 eater.on = false;
                 QWindowStateChangeEvent answered(frame->windowState() & ~Qt::WindowFullScreen);
                 QCoreApplication::sendEvent(frame, &answered);  // told
@@ -459,6 +464,9 @@ int main(int argc, char** argv)
                 win->set_fullscreen(false);
                 settle();
                 expect(!win->fullscreen(), "full screen: and not full screen after the race");
+                expect(frame->isMaximized(), "full screen: started maximized, maximized again after the race");
+                frame->showNormal();
+                settle();
             }
         }
     }
