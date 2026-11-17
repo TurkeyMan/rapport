@@ -1022,6 +1022,16 @@ public:
     // visible(false) hides one from the start.)
     virtual void set_page_visible(int page, bool visible) = 0;
     virtual bool page_visible(int page) const = 0;
+    // A page's icon, before its title on its tab (or sidebar row), at the
+    // toolkit's small-icon size: any form (named, for_file, for_path,
+    // drawn; a drawn one redrawn on theme and scale changes). An empty icon
+    // removes it. Swapping one icon for another keeps the tab's width;
+    // adding or removing one may change it (a placeholder icon keeps it
+    // steady). A hidden page keeps its icon and title, and has them when
+    // it's shown again. Pages out of range: nothing. Neither fires
+    // on_changed. (layout::page::icon sets one from the start.)
+    virtual void set_page_icon(int page, const icon& icon) = 0;
+    virtual void set_page_title(int page, const std::string& title) = 0;
 };
 
 class window;

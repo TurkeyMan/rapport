@@ -25,7 +25,8 @@ namespace rap
 // 88: spec::list and spec::tree's row_height, look_options::row_height.
 // 89: tabs::set_page_visible and page_visible; spec::tabs visible and
 //     hide_single_tab.
-inline constexpr int abi_version = 89;
+// 90: tabs::set_page_icon and set_page_title; spec::tabs icons.
+inline constexpr int abi_version = 90;
 
 // For backends' tabs (rap::tabs::set_page_visible): the page made current
 // when page `from` is hidden, the nearest visible after it, else before it;

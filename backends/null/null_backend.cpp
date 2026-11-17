@@ -341,6 +341,29 @@ public:
         ensure_built(i);
     }
     void on_changed(std::function<void(int)>) override {}
+    void set_page_icon(int page, const icon& i) override
+    {
+        if (page < 0 || page >= pages) return;
+        icons.resize(size_t(pages));
+        icons[size_t(page)] = i;
+        std::printf("tabs: page %d's icon %s\n", page, describe(i).c_str());
+    }
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= pages || size_t(page) >= titles.size() || titles[size_t(page)] == title) return;
+        titles[size_t(page)] = title;
+        std::printf("tabs: page %d's title \"%s\"\n", page, title.c_str());
+    }
+    // How an icon prints: its name, file or path, "drawn", or "none".
+    static std::string describe(const icon& i)
+    {
+        if (!i.name.empty()) return i.name;
+        if (!i.file.empty()) return "for " + i.file;
+        if (!i.path.empty()) return "of " + i.path;
+        return i.draw ? "drawn" : "none";
+    }
+    std::vector<std::string> titles;
+    std::vector<icon> icons;  // per page; empty: none
     void set_page_visible(int page, bool on) override
     {
         if (page < 0 || page >= pages || page_visible(page) == on) return;  // (#88)
@@ -690,14 +713,19 @@ private:
         auto* tabs = make<null_tabs>(n);
         tabs->pages = int(s.pages.size());
         tabs->visible = s.visible;
+        tabs->titles = s.titles;
+        tabs->icons = s.icons;
         tabs->hide_single_tab = s.hide_single_tab;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             const bool hidden = i < s.visible.size() && !s.visible[i];
+            std::string title = s.titles[i];
+            if (i < s.icons.size() && null_tabs::describe(s.icons[i]) != "none")
+                title += " (icon " + null_tabs::describe(s.icons[i]) + ")";
             if (i < s.lazy.size() && s.lazy[i])
-                std::printf("%*s[%s] (lazy%s)\n", (d + 1) * 2, "", s.titles[i].c_str(), hidden ? ", hidden" : "");
+                std::printf("%*s[%s] (lazy%s)\n", (d + 1) * 2, "", title.c_str(), hidden ? ", hidden" : "");
             else
-                build(s.pages[i], d + 1, hidden ? s.titles[i] + " (hidden)" : s.titles[i]);
+                build(s.pages[i], d + 1, hidden ? title + " (hidden)" : title);
         }
         if (!tabs->strip_shown()) std::printf("%*s(no strip: one page)\n", (d + 1) * 2, "");
         if (!s.lazy.empty())

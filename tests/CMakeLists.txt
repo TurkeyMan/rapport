@@ -253,6 +253,10 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
             target_compile_definitions(rapport-window-chords-test-qt6 PRIVATE RAPPORT_TEST_QT6)
             target_link_libraries(rapport-window-chords-test-qt6 PRIVATE rapport::rapport Qt6::Widgets Qt6::Test)
             add_dependencies(rapport-window-chords-test-qt6 rapport_qt6)
+            # Alt+B on a hidden tab renamed "_Build" (#101): through Qt's
+            # shortcut map, as QTest's keys go.
+            target_link_libraries(rapport-tabs-visibility-test-qt6 PRIVATE Qt6::Test)
+            target_compile_definitions(rapport-tabs-visibility-test-qt6 PRIVATE RAPPORT_TEST_QTEST)
         endif()
     endif()
 endif()

@@ -2041,9 +2041,43 @@ public:
     }
     QSize minimumSizeHint() const override { return hint(true); }
 
+    // A change to the bar's tabs (a title, an icon for another) made through
+    // the bar itself: QTabWidget's own setters lay everything above out
+    // again. The bar asks its tab widget to lay out (posted); with the tabs'
+    // measured size unchanged, the bar is placed again within them first
+    // (its resize may ask again, a layout left dirty), then every request
+    // the change and the placing posted, to the tab widget or to the bar,
+    // is dropped: nothing above relayouts (#101). Requests due before the
+    // change are handled first, as they would have been.
+    void bar_change(const std::function<void()>& change)
+    {
+        QCoreApplication::sendPostedEvents(this, QEvent::LayoutRequest);
+        QCoreApplication::sendPostedEvents(tabBar(), QEvent::LayoutRequest);
+        const QSize natural = sizeHint(), least = minimumSizeHint();
+        change();
+        if (sizeHint() == natural && minimumSizeHint() == least)
+        {
+            place_bar();
+            QCoreApplication::removePostedEvents(this, QEvent::LayoutRequest);
+            QCoreApplication::removePostedEvents(tabBar(), QEvent::LayoutRequest);
+        }
+        else
+            updateGeometry();
+    }
+
     bool strip_hidden = false;
 
 private:
+    // The bar where QTabWidget puts it (its own layout, for the bar alone).
+    // Not shown, it's placed when it is.
+    void place_bar()
+    {
+        if (!isVisible() || strip_hidden) return;
+        QStyleOptionTabWidgetFrame opt;
+        initStyleOption(&opt);
+        const QRect at = style()->subElementRect(QStyle::SE_TabWidgetTabBar, &opt, this);
+        if (tabBar()->geometry() != at) tabBar()->setGeometry(at);
+    }
     // Its visible pages only, strip shown or not: QTabWidget's minimum asks
     // its page stack, which counts hidden pages too. With the strip, the bar
     // and the frame as QTabWidget adds them (no corner widgets here).
@@ -2078,6 +2112,53 @@ struct quiet_scope
     bool was_;
 };
 
+// A tab page's icon (#101): none for an empty one. One that shows nothing
+// (for_path with no fallback: Qt shows `name` only) still takes its slot, as
+// a blank one: QTabBar and the list size a tab or row by the icon size only
+// for an icon that isn't null.
+QIcon page_q_icon(const rap::icon& i, const QWidget* w)
+{
+    if (!i) return QIcon();
+    QIcon q = to_q_icon(i, 16, w);
+    if (q.isNull())
+    {
+        QPixmap blank(16, 16);
+        blank.fill(Qt::transparent);
+        q = QIcon(blank);
+    }
+    return q;
+}
+
+// Runs `redraw` (queued: once for a burst) when `w`'s palette, style or
+// device scale changes, so drawn icons are drawn again in its new colours
+// and at its new scale. Nothing once `alive` is false: the part goes before
+// its Qt widgets do.
+void on_icon_redraw(QWidget* w, std::shared_ptr<bool> alive, std::function<void()> redraw)
+{
+    auto pending = std::make_shared<bool>(false);
+    hook(w,
+         [w, alive, redraw = std::move(redraw), pending](QEvent* e)
+         {
+             const auto t = e->type();
+             bool redraws = t == QEvent::PaletteChange || t == QEvent::ApplicationPaletteChange ||
+                            t == QEvent::StyleChange || t == QEvent::ScreenChangeInternal;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+             redraws = redraws || t == QEvent::DevicePixelRatioChange;
+#endif
+             if (!redraws || *pending || !*alive) return false;
+             *pending = true;
+             QMetaObject::invokeMethod(
+                 w,
+                 [alive, redraw, pending]
+                 {
+                     *pending = false;
+                     if (*alive) redraw();
+                 },
+                 Qt::QueuedConnection);
+             return false;
+         });
+}
+
 class tabs_impl : public widget_base<rap::tabs>
 {
 public:
@@ -2091,6 +2172,46 @@ public:
                              lazy_.ensure_built(i);
                              if (!quiet_) user_switched(before);
                          });
+        on_icon_redraw(t->tabBar(), alive_, [this] { redraw_icons(); });
+    }
+    ~tabs_impl() override { *alive_ = false; }
+    // Its pages' icons from the start (spec::tabs::icons), already on the
+    // bar: kept, to tell a new one by and to draw again.
+    void keep_icons(const std::vector<rap::icon>& icons)
+    {
+        icons_ = icons;
+        icons_.resize(size_t(tabs()->count()));
+    }
+    // Neither changes the current page (no on_changed, settled_ as it was).
+    void set_page_icon(int page, const rap::icon& i) override
+    {
+        if (page < 0 || page >= tabs()->count()) return;
+        icons_.resize(size_t(tabs()->count()));
+        if (same_icon(i, icons_[size_t(page)])) return;  // (#91; a drawn one is never the same)
+        icons_[size_t(page)] = i;
+        show_icon(page);
+    }
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= tabs()->count()) return;
+        const QString text = mnemonic(title);
+        titles_.resize(size_t(tabs()->count()));
+        auto& kept = titles_[size_t(page)];
+        if ((kept ? *kept : tabs()->tabText(page)) == text) return;  // (#91)
+        // A hidden page's title kept until it's shown: QTabBar::setTabText
+        // enables the tab's mnemonic shortcut whether the tab is visible or
+        // not, so a hidden tab renamed "_Build" would be selected (and built)
+        // by Alt+B. (A sidebar's QListWidgetItem has no shortcut.)
+        if (!page_visible(page))
+        {
+            if (text == tabs()->tabText(page))
+                kept.reset();
+            else
+                kept = text;
+            return;
+        }
+        // Through the bar: relaid out above only if the measured size changes.
+        tabs()->bar_change([&] { tabs()->tabBar()->setTabText(page, text); });
     }
     // Its pages hidden from the start (spec::tabs::visible) and its strip
     // (hide_single_tab): the first visible page current, the others' tabs
@@ -2161,6 +2282,7 @@ public:
             const bool first_shown = none_;
             const unsigned at = ++ops_;
             if (first_shown) set_none(false);
+            show_kept_title(page);
             tabs()->setTabVisible(page, true);
             if (first_shown && ops_ == at)
             {
@@ -2230,10 +2352,44 @@ private:
         QEvent relayout(QEvent::LayoutRequest);
         QCoreApplication::sendEvent(tabs(), &relayout);
     }
+    // Page `page`'s icon on its tab. One for another goes through the bar,
+    // which only repaints the tab (QTabBar's icon size, the same width) and
+    // relayouts nothing; one added or removed may change the tab's width,
+    // through QTabWidget, which lays itself out again.
+    void show_icon(int page)
+    {
+        QTabBar* bar = tabs()->tabBar();
+        const QIcon q = page_q_icon(icons_[size_t(page)], bar);
+        const bool had = !bar->tabIcon(page).isNull();
+        if (!had && q.isNull()) return;
+        if (had && !q.isNull())
+            tabs()->bar_change([&] { bar->setTabIcon(page, q); });
+        else
+            tabs()->setTabIcon(page, q);
+    }
+    // A title set while page `page` was hidden, on its tab as it's shown
+    // (just before: setTabVisible enables the tab's shortcut with it).
+    void show_kept_title(int page)
+    {
+        if (size_t(page) >= titles_.size() || !titles_[size_t(page)]) return;
+        const QString text = *titles_[size_t(page)];
+        titles_[size_t(page)].reset();
+        tabs()->bar_change([&] { tabs()->tabBar()->setTabText(page, text); });
+    }
+    // The icons again, in the bar's new colours or at its new scale (a
+    // drawn one is drawn again): each one for another, so nothing moves.
+    void redraw_icons()
+    {
+        for (int i = 0; i < tabs()->count() && size_t(i) < icons_.size(); ++i)
+            if (icons_[size_t(i)]) show_icon(i);
+    }
 
     std::function<void(int)> changed_;
     lazy_pages lazy_;
     std::vector<bool> visible_;  // per page
+    std::vector<rap::icon> icons_;  // per page, as set; empty: none
+    std::vector<std::optional<QString>> titles_;  // per page: set while hidden, not yet on its tab
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     bool hide_single_ = false;
     bool none_ = false;   // every page hidden: current() is -1
     bool quiet_ = false;  // our own change of page: no on_changed
@@ -2303,6 +2459,47 @@ public:
                              if (!quiet_) user_switched(before);
                          });
         stack_->shown = [this](int i) { return page_visible(i); };
+        on_icon_redraw(list_, alive_, [this] { redraw_icons(); });
+    }
+    ~side_tabs_impl() override { *alive_ = false; }
+    // As tabs_impl's: its pages' icons from the start, already on the rows.
+    void keep_icons(const std::vector<rap::icon>& icons)
+    {
+        icons_ = icons;
+        icons_.resize(size_t(list_->count()));
+    }
+    // Neither changes the current page (no on_changed, settled_ as it was).
+    void set_page_icon(int page, const rap::icon& i) override
+    {
+        if (page < 0 || page >= list_->count()) return;
+        icons_.resize(size_t(list_->count()));
+        if (same_icon(i, icons_[size_t(page)])) return;  // (#91; a drawn one is never the same)
+        icons_[size_t(page)] = i;
+        show_icon(page);
+    }
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= list_->count()) return;
+        const QString text = qs(title).remove('_');  // as built
+        QListWidgetItem* item = list_->item(page);
+        if (item->text() == text) return;  // (#91)
+        item->setText(text);  // the row repainted; its height is fixed
+        fit_width();
+    }
+    // The list's width for its rows' titles and icons (hidden ones' too, so
+    // showing a page never moves it).
+    static int list_width(const QListWidget* list)
+    {
+        const int icon_room = list->iconSize().width() +
+                              2 * (list->style()->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, list) + 1);
+        int width = 0;
+        for (int i = 0; i < list->count(); ++i)
+        {
+            const QListWidgetItem* item = list->item(i);
+            width = std::max(width, list->fontMetrics().horizontalAdvance(item->text()) +
+                                        (item->icon().isNull() ? 0 : icon_room));
+        }
+        return width + 48;
     }
     // As tabs_impl's: the first visible page current, the others' rows
     // hidden, and the list (hide_single_tab).
@@ -2430,6 +2627,31 @@ private:
         stack_->updateGeometry();
         widget()->updateGeometry();
     }
+    // The list as wide as its rows now need: relaid out only when that's
+    // another width (#101).
+    void fit_width()
+    {
+        const int width = list_width(list_);
+        if (list_->minimumWidth() == width && list_->maximumWidth() == width) return;
+        list_->setFixedWidth(width);
+    }
+    // Page `page`'s icon on its row: one for another only repaints the row
+    // (the list's icon size); one added or removed may change its width.
+    void show_icon(int page)
+    {
+        QListWidgetItem* item = list_->item(page);
+        const QIcon q = page_q_icon(icons_[size_t(page)], list_);
+        const bool had = !item->icon().isNull();
+        if (!had && q.isNull()) return;
+        item->setIcon(q);
+        if (had == q.isNull()) fit_width();
+    }
+    // As tabs_impl's: the icons again, each one for another.
+    void redraw_icons()
+    {
+        for (int i = 0; i < list_->count() && size_t(i) < icons_.size(); ++i)
+            if (icons_[size_t(i)]) show_icon(i);
+    }
 
     side_list* list_;
     QWidget* line_;
@@ -2437,6 +2659,8 @@ private:
     std::function<void(int)> changed_;
     lazy_pages lazy_;
     std::vector<bool> visible_;  // per page
+    std::vector<rap::icon> icons_;  // per page, as set; empty: none
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     bool hide_single_ = false;
     bool none_ = false;   // every page hidden: current() is -1
     bool quiet_ = false;  // our own change of page: no on_changed
@@ -5810,15 +6034,18 @@ private:
     {
         if (s.sidebar) return make_sidebar(n, s);
         auto* tabs = new tab_widget;
+        tabs->setIconSize(QSize(16, 16));  // a page's icon (#101): the small-icon size
         lazy_pages lazy{s.lazy, {}, page_builder()};
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             const bool is_lazy = i < s.lazy.size() && s.lazy[i];
             QWidget* page = page_of(is_lazy ? nullptr : build(s.pages[i], orientation::vertical));
-            tabs->addTab(page, mnemonic(s.titles[i]));
+            const QIcon page_icon = i < s.icons.size() ? page_q_icon(s.icons[i], tabs->tabBar()) : QIcon();
+            tabs->addTab(page, page_icon, mnemonic(s.titles[i]));
             lazy.pages.push_back(page);
         }
         auto& w = add<tabs_impl>(n, tabs);
+        w.keep_icons(s.icons);
         // Pages hidden from the start, before a lazy one is built: only the
         // first visible page is.
         w.init(s.visible, s.hide_single_tab);
@@ -5836,7 +6063,7 @@ private:
         auto* list = new side_list;
         auto* stack = new side_stack;
         lazy_pages lazy{s.lazy, {}, page_builder()};
-        int width = 0;
+        list->setIconSize(QSize(16, 16));  // a page's icon (#101): the small-icon size
         // An item's height: the app's row height (look_options::row_height)
         // where it's set, else the line and room round it.
         const int item_height = g_app_row_height > 0 ? fixed_row(list->font(), g_app_row_height)
@@ -5845,13 +6072,13 @@ private:
         {
             auto* item = new QListWidgetItem(qs(s.titles[i]).remove('_'), list);
             item->setSizeHint(QSize(0, item_height));
-            width = std::max(width, list->fontMetrics().horizontalAdvance(item->text()));
+            if (i < s.icons.size() && s.icons[i]) item->setIcon(page_q_icon(s.icons[i], list));
             const bool is_lazy = i < s.lazy.size() && s.lazy[i];
             QWidget* page = page_of(is_lazy ? nullptr : build(s.pages[i], orientation::vertical));
             stack->addWidget(page);
             lazy.pages.push_back(page);
         }
-        list->setFixedWidth(width + 48);
+        list->setFixedWidth(side_tabs_impl::list_width(list));
         // At its natural size every item whole: at least their rows' height
         // and its frame. Both again with a new font or style (a larger text
         // size: the rows never under its line and 2), as a list's and a
@@ -5910,6 +6137,7 @@ private:
         l->addWidget(stack, 1);
         auto& tabs = add<side_tabs_impl>(n, box, list, line, stack);
         tabs.size_rows = std::move(resize_rows);
+        tabs.keep_icons(s.icons);
         // Pages hidden from the start, before a lazy one is built: only the
         // first visible page is.
         tabs.init(s.visible, s.hide_single_tab);
