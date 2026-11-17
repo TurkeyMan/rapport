@@ -2114,6 +2114,7 @@ public:
     // A hidden page, or one out of range: nothing.
     void set_current(int i) override
     {
+        ++ops_;
         if (!page_visible(i)) return;
         if (tabs()->currentIndex() == i) return;  // (#88)
         {
@@ -2127,6 +2128,7 @@ public:
     void set_page_visible(int page, bool on) override
     {
         if (page < 0 || page >= tabs()->count() || page_visible(page) == on) return;  // (#88)
+        ++ops_;
         quiet_scope q(quiet_);
         visible_[size_t(page)] = on;
         if (!on)
@@ -2149,16 +2151,24 @@ public:
         }
         else
         {
+            // The first page shown again with every page hidden: out of
+            // "none" first, since showing its tab may make Qt select it and
+            // build it at once, and a builder calling the tabs back must find
+            // it current. Then it's made current only if nothing nested has
+            // acted since; whatever a builder did stands.
+            const bool first_shown = none_;
+            const unsigned at = ++ops_;
+            if (first_shown) set_none(false);
             tabs()->setTabVisible(page, true);
-            if (none_)  // the first page shown again: current
+            if (first_shown && ops_ == at)
             {
-                // Out of "none" before the build, so a builder calling the
-                // tabs back finds the page current, and what it does stands
-                // (every page hidden again: none again).
-                set_none(false);
-                tabs()->setCurrentIndex(page);
+                if (tabs()->currentIndex() != page) tabs()->setCurrentIndex(page);
                 lazy_.ensure_built(page);
             }
+            // Read back after any build: a visible page current, or none
+            // (a builder that hid every page again).
+            const int now = tabs()->currentIndex();
+            set_none(now < 0 || !page_visible(now));
         }
         update_strip(false);
         tabs()->updateGeometry();
@@ -2192,6 +2202,7 @@ private:
         if (auto* stack = tabs()->findChild<QStackedWidget*>(QString(), Qt::FindDirectChildrenOnly))
             stack->setVisible(!none);
     }
+    unsigned ops_ = 0;  // the app's set_current and set_page_visible calls, nested ones included
     // The strip shown or hidden (hide_single_tab); hidden, the page alone
     // fills the area, with no frame round it (document mode).
     void update_strip(bool first)
@@ -2340,7 +2351,10 @@ public:
                 set_none(false);
                 list_->setCurrentRow(page);
                 lazy_.ensure_built(page);
-                if (!none_) stack_->setCurrentIndex(current());
+                // Read back after the build: a visible page current, or none.
+                const int now = list_->currentRow();
+                set_none(now < 0 || !page_visible(now));
+                if (!none_) stack_->setCurrentIndex(now);
             }
         }
         update_strip();

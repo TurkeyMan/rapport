@@ -592,6 +592,19 @@ void run_reentrant(rap::ui& ui, bool sidebar)
                  expect(t->current() == -1 && !n.stack_shown(), kind + "none current, no page shown, " +
                                                                       num(t->current()));
              });
+    // Shown first with every page hidden, its builder hiding every page
+    // again: none current, nothing shown, no on_changed.
+    scenario("shown first, its builder hiding every page", {nullptr, hide_all, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label**, std::vector<int>& changes, const std::string& kind)
+             {
+                 for (int i : {3, 2, 1, 0}) t->set_page_visible(i, false);
+                 QApplication::processEvents();
+                 t->set_page_visible(1, true);  // B's builder hides every page again
+                 QApplication::processEvents();
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == -1 && !n.stack_shown(),
+                        kind + "none current, no page shown, " + num(t->current()));
+             });
     // A user's switch to the lazy B, whose builder switches back to A, the
     // page current before: A current and shown, no on_changed.
     const hook to_a = [](rap::tabs* t) { t->set_current(0); };
