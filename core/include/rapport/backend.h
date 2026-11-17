@@ -290,9 +290,6 @@ struct look_options
     // at which of WinUI's densities.
     control_style controls = control_style::automatic;
     rap::density density = rap::density::standard;
-    // Windows: a base surface window's content on WinUI's layer or the
-    // plain base colour (content_surface).
-    rap::content_surface content_surface = rap::content_surface::automatic;
     // Every list's, tree's and sidebar's (tabs::sidebar) rows this tall, in
     // logical px (at 96 DPI and a 100% text size), instead of the
     // platform's or the density's: scaled with the DPI and the text size,
@@ -306,6 +303,10 @@ struct look_options
     // own least); on Qt the text size enters only through the line-and-2
     // least (Qt has no text size apart from the app's font).
     float row_height = 0;
+    // Windows: a base surface window's content on WinUI's layer or the
+    // plain base colour (content_surface). Last, so an initialiser that
+    // lists the members before it still compiles.
+    rap::content_surface content_surface = rap::content_surface::automatic;
 };
 
 // Backend entry point. Returns nullptr if the ABI doesn't match or the

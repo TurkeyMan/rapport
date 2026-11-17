@@ -434,23 +434,43 @@ void forget_group_themes(HWND h);
 // in light mode isn't the window's colour (Windows 10 and 11: a shade
 // lighter): their backgrounds take the body's, or each control is a band of
 // the window's on it. Measured once per tab control, from what it prints.
-std::map<HWND, HBRUSH>& tab_bodies()
+// Each tab control's body colour, dropped as the control goes (dark_tabs_proc's
+// WM_NCDESTROY, and any dead one as another's is measured); the brushes are
+// one per colour, shared, so a window made and destroyed again and again
+// holds no more GDI objects than the colours it shows.
+std::map<HWND, COLORREF>& tab_bodies()
 {
-    static std::map<HWND, HBRUSH> m;
+    static std::map<HWND, COLORREF> m;
+    return m;
+}
+std::map<COLORREF, HBRUSH>& tab_body_brushes()
+{
+    static std::map<COLORREF, HBRUSH> m;
     return m;
 }
 unsigned g_tab_bodies_gen = 0;  // bumped as they're forgotten
 void forget_tab_bodies()
 {
-    for (auto& [tab, brush] : tab_bodies()) DeleteObject(brush);
+    for (auto& [colour, brush] : tab_body_brushes()) DeleteObject(brush);
+    tab_body_brushes().clear();
     tab_bodies().clear();
     ++g_tab_bodies_gen;
+}
+void forget_tab_body(HWND tab)
+{
+    if (tab_bodies().erase(tab)) ++g_tab_bodies_gen;  // nothing found on it kept
+}
+HBRUSH tab_body_brush_of(COLORREF colour)
+{
+    HBRUSH& b = tab_body_brushes()[colour];
+    if (!b) b = CreateSolidBrush(colour);
+    return b;
 }
 void traced_tab_adjust(HWND, BOOL, RECT*);
 HBRUSH tab_body_brush(HWND tab)
 {
     auto& m = tab_bodies();
-    if (auto it = m.find(tab); it != m.end()) return it->second;
+    if (auto it = m.find(tab); it != m.end()) return tab_body_brush_of(it->second);
     RECT client;
     GetClientRect(tab, &client);
     RECT body = client;
@@ -466,7 +486,9 @@ HBRUSH tab_body_brush(HWND tab)
     DeleteDC(mem);
     ReleaseDC(tab, screen);
     if (colour == CLR_INVALID) return nullptr;
-    return m[tab] = CreateSolidBrush(colour);
+    std::erase_if(m, [](const auto& e) { return !IsWindow(e.first); });
+    m[tab] = colour;
+    return tab_body_brush_of(colour);
 }
 // The body brush of a visible tab control `control` lies wholly over (a
 // sibling, as its pages' controls are), if any.
@@ -486,10 +508,17 @@ HBRUSH tab_body_under(HWND control)
         unsigned pass, gen;
         HBRUSH brush;
     };
+    // Only this pass's answers are any use: the rest go with it, so the
+    // cache holds no control that has gone.
     static std::unordered_map<HWND, known> cache;
-    if (auto it = cache.find(control);
-        it != cache.end() && it->second.pass == g_layout_pass && it->second.gen == g_tab_bodies_gen)
-        return it->second.brush;
+    static unsigned cache_pass = 0, cache_gen = 0;
+    if (cache_pass != g_layout_pass || cache_gen != g_tab_bodies_gen)
+    {
+        cache.clear();
+        cache_pass = g_layout_pass;
+        cache_gen = g_tab_bodies_gen;
+    }
+    if (auto it = cache.find(control); it != cache.end()) return it->second.brush;
     trace::mark(trace::phase::tab_cache_miss, uintptr_t(control));
     const HBRUSH b = tab_body_under_scan(control);
     cache[control] = {g_layout_pass, g_tab_bodies_gen, b};
@@ -8811,7 +8840,24 @@ void draw_base_tabs(HWND h, HDC dc)
     // surface, the tabs (the current one standing 2 px out of the row) left
     // as drawn. Whole or not at all: a tab not taken out of the row would be
     // painted over, and the style's row is better than no tab.
-    if (const int n = TabCtrl_GetItemCount(h); n > 0)
+    const int n = TabCtrl_GetItemCount(h);
+    if (n == 0)
+    {
+        // No tabs: the row is what's above the page's frame, the style's
+        // colour down to the frame's first line.
+        RECT body = c;
+        traced_tab_adjust(h, FALSE, &body);
+        const int x = (c.left + c.right) / 2;
+        const COLORREF style_row = GetPixel(dc, x, 0);
+        LONG y = 0;
+        while (style_row != CLR_INVALID && y < body.top && GetPixel(dc, x, y) == style_row) ++y;
+        if (y > 0 && y < body.top)
+        {
+            RECT row{c.left, c.top, c.right, y};
+            FillRect(dc, &row, surface);
+        }
+    }
+    else
     {
         const int current = TabCtrl_GetCurSel(h), proud = MulDiv(2, int(dpi_of(h)), 96);
         RECT first{};
@@ -8895,6 +8941,7 @@ bool render_tabs(HWND h, HDC dc)
 // retried.
 LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
 {
+    if (msg == WM_NCDESTROY) forget_tab_body(h);
     if ((msg != WM_PAINT && msg != WM_ERASEBKGND && msg != WM_PRINTCLIENT) || !own_tabs(h))
         return DefSubclassProc(h, msg, wp, lp);
     switch (msg)

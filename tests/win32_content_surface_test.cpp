@@ -289,9 +289,10 @@ int main(int argc, char** argv)
         entry{}.placeholder("Filter paths"),
         entry{"Disabled"}.enabled(false),
         button{"Push"},
+        separator{},
         tabs{{"One", vbox{entry{}.placeholder("On the page"), entry{"Page disabled"}.enabled(false), button{"Page push"}}},
              {"Two", label{"Second"}}},
-    }}}.base_surface().size(480_px, 520_px));
+    }}}.base_surface().size(480_px, 760_px));
     auto plain = (*ui)->create(window{"Content surface, no base", {vbox{
         tabs{{"One", vbox{entry{}.placeholder("On a page"), entry{"Off"}.enabled(false), button{"A push"}}},
              {"Two", label{"Second"}}},
@@ -333,6 +334,37 @@ int main(int argc, char** argv)
         expect(row == content, "the tab row beside the tabs is the content's " + hex(content) + ": " + hex(row));
     }
 
+    // A separator: dark mode draws it (its etched edge is white there), its
+    // area the content's colour round its one divider pixel.
+    if (g_dark)
+    {
+        HWND line = nullptr;
+        for (HWND s : children_of(top, L"Static"))
+            if ((GetWindowLongPtrW(s, GWL_STYLE) & SS_TYPEMASK) == SS_ETCHEDHORZ) line = s;
+        if (!line)
+            expect(false, "a separator found");
+        else
+        {
+            // Its etched edge takes its client area: the whole window, printed.
+            RECT r{};
+            GetWindowRect(line, &r);
+            OffsetRect(&r, -r.left, -r.top);
+            const printed p = into_bitmap(r.right, r.bottom,
+                                          [&](HDC dc)
+                                          {
+                                              SendMessageW(line, WM_PRINT, reinterpret_cast<WPARAM>(dc),
+                                                           PRF_CLIENT | PRF_NONCLIENT);
+                                          });
+            const int mid = (r.bottom - 1) / 2;
+            expect(r.bottom >= 2 && r.right > 0, "a separator " + std::to_string(r.right) + " by " + std::to_string(r.bottom) + ", drawn round a pixel's line");
+            for (int y = 0; y < r.bottom; ++y)
+                if (y != mid)
+                    expect(p.at(r.right / 2, y) == content, "a separator's row " + std::to_string(y) + " of " +
+                                                                std::to_string(r.bottom) + " is the content's " +
+                                                                hex(content) + ": " + hex(p.at(r.right / 2, y)));
+        }
+    }
+
     if (fluent)
     {
         check_controls(edits[0], edits[1], button_named(top, L"Push"), content, "below the band");
@@ -354,6 +386,72 @@ int main(int argc, char** argv)
         std::printf("     no base: the page's body %s, the window %s\n", hex(body).c_str(), hex(window_colour).c_str());
         if (g_dark) expect(body == window_colour, "no base, dark: the page's body is the window colour: " + hex(body));
         check_controls(e2[0], e2[1], button_named(top2, L"A push"), body, "no base, on a tab page");
+
+        // Windows made, their tab page's entry printed (its ground looked up)
+        // and destroyed, again and again: no GDI object kept for one gone,
+        // and the lookup for the window still here right after each.
+        const DWORD before_e2 = look_of(e2[0]).fill;
+        auto gdi = [] { return long(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS)); };
+        long baseline = 0;
+        bool lookups_ok = true;
+        for (int i = 0; i < 150; ++i)
+        {
+            {
+                auto w = (*ui)->create(window{"Content surface, cycled", {vbox{
+                    tabs{{"One", vbox{entry{}.placeholder("Cycled"), button{"Cycled push"}}}, {"Two", label{"Second"}}},
+                }}}.size(360_px, 240_px));
+                HWND t = top_of(L"Content surface, cycled");
+                const std::vector<HWND> e = t ? children_of(t, L"Edit") : std::vector<HWND>{};
+                if (!e.empty()) look_of(e[0]);
+                if (HWND b = t ? button_named(t, L"Cycled push") : nullptr) print_whole(b);
+            }
+            pump(2);
+            lookups_ok = lookups_ok && look_of(e2[0]).fill == before_e2;
+            if (i == 9) baseline = gdi();
+        }
+        const long grew = gdi() - baseline;
+        expect(grew <= 4, "140 windows made, printed and destroyed: GDI objects grew by " + std::to_string(grew) +
+                              " (" + std::to_string(baseline) + " after the first 10)");
+        expect(lookups_ok, "the page's entry printed after each, as before: " + hex(look_of(e2[0]).fill));
+    }
+
+    // An empty document-tab strip on a base surface (under a menu bar, as
+    // the strip is on Windows 11 with one): its row the content's colour,
+    // as the row beside a strip's tabs is.
+    if (eleven)
+    {
+        std::vector<rap::menu_bar_item> menus{{"_File", [] { return rap::menu{}; }}};
+        auto empty = (*ui)->create(window{"Content surface, empty strip", {label{"Content"}}}
+                                       .base_surface()
+                                       .menu_bar(menus)
+                                       .tabs(document_tabs{})
+                                       .size(420_px, 200_px));
+        pump();
+        HWND t = top_of(L"Content surface, empty strip");
+        HWND strip = nullptr;
+        for (HWND c : t ? children_of(t, WC_TABCONTROLW) : std::vector<HWND>{})
+            if (GetWindowLongPtrW(c, GWL_STYLE) & TCS_FIXEDWIDTH) strip = c;
+        if (!strip)
+            expect(false, "an empty strip found");
+        else
+        {
+            RECT c{};
+            GetClientRect(strip, &c);
+            const printed p = into_bitmap(c.right, c.bottom,
+                                          [&](HDC dc)
+                                          {
+                                              SendMessageW(strip, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc),
+                                                           PRF_CLIENT | PRF_ERASEBKGND);
+                                          });
+            // Its top row (above the page frame the style draws round
+            // nothing), and inside that frame.
+            const DWORD row = p.at(c.right / 2, 0);
+            expect(row == content, "an empty document-tab strip's row is the content's " + hex(content) + ": " + hex(row));
+            const DWORD got = p.at(c.right / 2, std::max(1L, c.bottom / 2));
+            expect(c.bottom > 0 && got == content, "an empty document-tab strip (" + std::to_string(c.right) + " by " +
+                                                       std::to_string(c.bottom) + ") is the content's " + hex(content) +
+                                                       ": " + hex(got));
+        }
     }
     return failures ? 1 : 0;
 }

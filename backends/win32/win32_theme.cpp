@@ -329,7 +329,7 @@ void paint_dark_separator(HWND h, HDC dc)
     RECT w;
     GetWindowRect(h, &w);
     OffsetRect(&w, -w.left, -w.top);
-    FillRect(dc, &w, theme_brush(surface_of(h)));
+    FillRect(dc, &w, surface_brush_of(h));
     const bool vertical = (GetWindowLongPtrW(h, GWL_STYLE) & SS_TYPEMASK) == SS_ETCHEDVERT;
     RECT line = w;
     if (vertical)

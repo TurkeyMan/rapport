@@ -458,10 +458,13 @@ struct window_spec
     // A row of document tabs under the menu bar, across the window (outside
     // the margins), above the content: a browser's or a file manager's.
     std::optional<spec::document_tabs> tabs;
-    // The window's background in the base colour (a list's, a field's)
-    // rather than the window colour, as Windows 11 Explorer's panes and
-    // toolbar are white: its labels, check boxes, sliders, group boxes, tab
-    // pages and toolbars on it. Windows 11 only; elsewhere the window colour.
+    // The window's background a surface of its own rather than the window
+    // colour, as Windows 11 Explorer's panes and toolbar are: its labels,
+    // check boxes, sliders, group boxes, tab pages and toolbars on it.
+    // Which surface is look_options::content_surface's: automatic is
+    // WinUI's layer where the controls are in WinUI's look (#F9F9F9, dark
+    // #282828) and the base colour (a list's, a field's: COLOR_WINDOW) where
+    // they're native. Windows 11 only; elsewhere the window colour.
     // With the document tabs in the title bar there, a toolbar or a row of
     // controls (an hbox) that's the content's first item, across it, is
     // Explorer's address row: a band in WinUI's layer colour with a line
