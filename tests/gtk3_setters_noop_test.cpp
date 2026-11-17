@@ -534,27 +534,61 @@ int main(int argc, char** argv)
                 gtk_main_do_event(e);
                 gdk_event_free(e);
             };
-            seen(false);
+            // Nothing pending, not fullscreen: whatever request is still pending is
+            // answered by one of the two notifications (only its own state answers it).
+            auto settled = [&]
+            {
+                seen(true);
+                seen(false);
+            };
+            settled();
             requests();
             win2->set_fullscreen(true);
             win2->set_fullscreen(false);
             std::string r = requests();
             expect(r == "FU", "fullscreen: on then off, unanswered: both asked, in order (" + r + ")");
-            seen(false);
+            settled();
             requests();
             win2->set_fullscreen(true);
             win2->set_fullscreen(true);
             r = requests();
             expect(r == "F", "fullscreen: on twice, unanswered: asked once (" + r + ")");
-            seen(false);
+            settled();
             requests();
             win2->set_fullscreen(true);
             win2->set_fullscreen(false);
-            seen(true);  // made fullscreen from outside, after the reversal
-            win2->set_fullscreen(false);
+            seen(true);  // the first request's answer: the second still pending
+            win2->set_fullscreen(true);
             r = requests();
-            expect(r == "FUU", "fullscreen: on, off, then fullscreen from outside: off asked again (" + r + ")");
-            seen(false);
+            expect(r == "FUF", "fullscreen: on, off, the first answered, on again: asked again, in order (" + r + ")");
+            seen(true);
+            win2->set_fullscreen(false);
+            settled();
+            // Fullscreen answered, then a maximize (changed_mask: maximized only,
+            // the state as Broadway has it, not fullscreen): not a fullscreen
+            // notification, so on again is still nothing asked.
+            auto maximize = [&](bool on)
+            {
+                GdkEvent* e = gdk_event_new(GDK_WINDOW_STATE);
+                e->window_state.window = GDK_WINDOW(g_object_ref(gw));
+                e->window_state.send_event = true;
+                e->window_state.changed_mask = GDK_WINDOW_STATE_MAXIMIZED;
+                e->window_state.new_window_state =
+                    GdkWindowState((gdk_window_get_state(gw) & ~GDK_WINDOW_STATE_MAXIMIZED) |
+                                   (on ? GDK_WINDOW_STATE_MAXIMIZED : 0));
+                gtk_main_do_event(e);
+                gdk_event_free(e);
+            };
+            requests();
+            win2->set_fullscreen(true);
+            seen(true);
+            maximize(true);
+            win2->set_fullscreen(true);
+            r = requests();
+            expect(r == "F", "fullscreen: on, answered, a maximize, on again: asked once (" + r + ")");
+            maximize(false);
+            win2->set_fullscreen(false);
+            settled();
             settle(500);
         }
     }

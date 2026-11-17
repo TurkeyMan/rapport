@@ -142,7 +142,7 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_dependencies(rapport-row-height-test-gtk3 rapport_gtk3)
         # A setter given the value it has does nothing (#88).
         add_executable(rapport-setters-noop-test-gtk3 gtk3_setters_noop_test.cpp)
-        target_link_libraries(rapport-setters-noop-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
+        target_link_libraries(rapport-setters-noop-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3 ${CMAKE_DL_LIBS})
         add_dependencies(rapport-setters-noop-test-gtk3 rapport_gtk3)
     endif()
     # An entry's buttons on GTK 4: named, focusable, Tab order, menus.
@@ -188,7 +188,7 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_dependencies(rapport-row-height-test-gtk4 rapport_gtk4)
         # A setter given the value it has does nothing (#88).
         add_executable(rapport-setters-noop-test-gtk4 gtk4_setters_noop_test.cpp)
-        target_link_libraries(rapport-setters-noop-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4)
+        target_link_libraries(rapport-setters-noop-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4 ${CMAKE_DL_LIBS})
         add_dependencies(rapport-setters-noop-test-gtk4 rapport_gtk4)
     endif()
     if(TARGET rapport_qt6)
@@ -219,7 +219,7 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_dependencies(rapport-row-height-test-qt6 rapport_qt6)
         # A setter given the value it has does nothing (#88).
         add_executable(rapport-setters-noop-test-qt6 qt6_setters_noop_test.cpp)
-        target_link_libraries(rapport-setters-noop-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
+        target_link_libraries(rapport-setters-noop-test-qt6 PRIVATE rapport::rapport Qt6::Widgets ${CMAKE_DL_LIBS})
         add_dependencies(rapport-setters-noop-test-qt6 rapport_qt6)
         # QTest's keys go through Qt's shortcuts as a user's do.
         find_package(Qt6 QUIET COMPONENTS Test)

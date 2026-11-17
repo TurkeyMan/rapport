@@ -569,6 +569,35 @@ int main(int argc, char** argv)
                        (after.size() == 2 ? std::to_string(after[0]) + "/" + std::to_string(after[1]) : "?"));
         }
     }
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+    // A splitter with a hidden pane (placed at 0, its size the one it comes
+    // back at), given the sizes it reports, twice: no relayout either time.
+    {
+        rap::splitter* hid = nullptr;
+        rap::label* middle = nullptr;
+        auto win3 = (*ui)->create(window{"Setters no-op hidden pane",
+                                         {splitter(orientation::horizontal, label{"one"}.stretch(),
+                                                   label{"two"}.bind(middle).stretch(), label{"three"}.stretch())
+                                              .bind(hid)
+                                              .stretch()}}
+                                      .size(900_px, 300_px));
+        pump();
+        expect(hid && middle, "the hidden-pane splitter bound");
+        if (hid && middle)
+        {
+            hid->set_sizes({250, 250, 250});
+            pump();
+            middle->set_visible(false);
+            pump();
+            const unsigned was = layouts();
+            hid->set_sizes(hid->sizes());
+            hid->set_sizes(hid->sizes());
+            expect(layouts() == was, "a splitter with a hidden pane given the sizes it reports, twice: no relayout (" +
+                                         std::to_string(layouts() - was) + ")");
+            pump();
+        }
+    }
+#endif
     // A list's header changed by someone else (a sort arrow, a column's
     // width, the columns' order, as a user's drag would): the app's again
     // applies.

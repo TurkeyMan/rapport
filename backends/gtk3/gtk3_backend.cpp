@@ -5066,10 +5066,11 @@ private:
 
 // Test seam (#88): the fullscreen requests this backend has made, in order,
 // "F" for each fullscreen and "U" for each unfullscreen; read and cleared
-// through rapport_gtk3_fullscreen_requests_for_tests below.
-std::string& fullscreen_requests_for_tests()
+// through rapport_gtk3_fullscreen_requests_for_tests below. Nothing is kept
+// until a test first reads it (an app's requests aren't recorded).
+std::optional<std::string>& fullscreen_requests_for_tests()
 {
-    static std::string requests;
+    static std::optional<std::string> requests;
     return requests;
 }
 
@@ -5219,10 +5220,12 @@ public:
                 auto* self = static_cast<window_impl*>(p);
                 self->maximized_ = e->new_window_state & (GDK_WINDOW_STATE_MAXIMIZED |
                                                           GDK_WINDOW_STATE_TILED);
+                // A fullscreen notification only when fullscreen changed
+                // (a maximize says nothing about it). The pending request is
+                // answered only by its own state (see set_fullscreen).
                 const bool fs = e->new_window_state & GDK_WINDOW_STATE_FULLSCREEN;
-                // Any state notification: what it is now replaces a request
-                // still on its way (an unanswered reversal included).
-                self->fullscreen_asked_.reset();
+                if (!(e->changed_mask & GDK_WINDOW_STATE_FULLSCREEN)) return false;
+                if (self->fullscreen_asked_ && *self->fullscreen_asked_ == fs) self->fullscreen_asked_.reset();
                 if (fs != self->fullscreen_)
                 {
                     self->fullscreen_ = fs;
@@ -5489,16 +5492,22 @@ public:
 
     bool fullscreen() const override { return fullscreen_; }
     bool maximized() const override { return maximized_; }
-    // Unchanged against the intent (#88): the request still on its way if
-    // there is one, else the state last seen (window-state-event replaces
-    // the request with it, an outside change included). It's asynchronous:
-    // true then false before the window manager answers asks both, and true
-    // twice asks once.
+    // Fullscreen is asynchronous (#88). The request still unanswered (pending)
+    // is compared if there is one, else the state last reported: the same is
+    // nothing asked. A notification records the state, and answers the
+    // pending request only when it reports what that asked for; one that
+    // reports otherwise answers an older request, so the newer stays pending
+    // (true, false, true's answer, true again: asked F, U, F). With nothing
+    // pending, a notification (the user's or the window manager's) is simply
+    // the state now. Known limit: a request the window manager refuses
+    // without a notification stays pending, so the same request again is
+    // skipped until a fullscreen notification comes; asking again wouldn't
+    // help.
     void set_fullscreen(bool on) override
     {
         if (fullscreen_asked_ ? *fullscreen_asked_ == on : fullscreen_ == on) return;
         fullscreen_asked_ = on;
-        fullscreen_requests_for_tests() += on ? 'F' : 'U';
+        if (auto& r = fullscreen_requests_for_tests()) *r += on ? 'F' : 'U';
         if (on)
             gtk_window_fullscreen(GTK_WINDOW(win_));
         else
@@ -6682,11 +6691,14 @@ private:
 }  // namespace rap::gtk3
 
 // Test seam (#88): the fullscreen requests made since the last call ("F",
-// "U", in order), cleared. Not part of the backend's interface.
+// "U", in order), cleared. The first call starts the recording. Not part of
+// the backend's interface.
 extern "C" RAPPORT_EXPORT const char* rapport_gtk3_fullscreen_requests_for_tests()
 {
     static std::string out;
-    out = std::exchange(rap::gtk3::fullscreen_requests_for_tests(), std::string());
+    auto& r = rap::gtk3::fullscreen_requests_for_tests();
+    out = r.value_or(std::string());
+    r = std::string();
     return out.c_str();
 }
 

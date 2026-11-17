@@ -10483,7 +10483,9 @@ public:
         // relayout (#88). Otherwise asked for and laid out, as any change.
         // The request is still recorded: a later layout (a resize) places
         // sizes_, which mustn't keep an older request.
-        if (!asked_ && placed_.size() == panes.size() && next == placed_)
+        // Compared with the sizes it reports (current(): a hidden pane's is
+        // the size it comes back at, not the 0 it's placed at).
+        if (!asked_ && placed_.size() == panes.size() && next == current())
         {
             sizes_ = std::move(next);
             return;

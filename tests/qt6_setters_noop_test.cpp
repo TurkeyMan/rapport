@@ -17,6 +17,7 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QThread>
+#include <QWindowStateChangeEvent>
 #include <QTreeView>
 
 #include <dlfcn.h>
@@ -429,10 +430,10 @@ int main(int argc, char** argv)
             expect(r == "FUU", "full screen: on, off, then full screen from outside: off asked again (" + r + ")");
             settle();
             expect(!win->fullscreen(), "full screen: and not full screen after");
-            // A request left unanswered (its state change kept from the
-            // backend), then a state change that leaves it as the backend saw
-            // it last (not full screen, from outside): that state replaces the
-            // request, so full screen asked again is asked, not skipped.
+            // On, off (both unanswered: their state changes kept from the
+            // backend), the first answered (the frame full screen, its state
+            // change told), on again: the second still pending, so on is asked
+            // again (F, U, F), not skipped.
             {
                 struct eat_state : QObject
                 {
@@ -444,16 +445,20 @@ int main(int argc, char** argv)
                 } eater;
                 frame->installEventFilter(&eater);
                 requests();
-                win->set_fullscreen(true);  // unanswered, as far as the backend knows
+                win->set_fullscreen(true);
+                win->set_fullscreen(false);
+                frame->setWindowState(frame->windowState() | Qt::WindowFullScreen);  // the first's answer, kept
                 eater.on = false;
-                frame->setWindowState(frame->windowState() & ~Qt::WindowFullScreen);  // from outside
+                QWindowStateChangeEvent answered(frame->windowState() & ~Qt::WindowFullScreen);
+                QCoreApplication::sendEvent(frame, &answered);  // told
                 frame->removeEventFilter(&eater);
                 win->set_fullscreen(true);
                 r = requests();
-                expect(r == "FF", "full screen: asked, unanswered, then not full screen from outside: asked again (" +
-                                      r + ")");
+                expect(r == "FUF", "full screen: on, off, the first answered, on again: asked again, in order (" + r +
+                                       ")");
                 win->set_fullscreen(false);
                 settle();
+                expect(!win->fullscreen(), "full screen: and not full screen after the race");
             }
         }
     }

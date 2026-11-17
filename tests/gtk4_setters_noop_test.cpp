@@ -441,27 +441,36 @@ int main(int argc, char** argv)
         if (requests && seen_seam)
         {
             auto seen = [&](bool fs) { seen_seam(top, fs); };
-            seen(false);
+            // Nothing pending, not fullscreen: whatever request is still pending is
+            // answered by one of the two notifications (only its own state answers it).
+            auto settled = [&]
+            {
+                seen(true);
+                seen(false);
+            };
+            settled();
             requests();
             win->set_fullscreen(true);
             win->set_fullscreen(false);
             std::string r = requests();
             expect(r == "FU", "fullscreen: on then off, unanswered: both asked, in order (" + r + ")");
-            seen(false);
+            settled();
             requests();
             win->set_fullscreen(true);
             win->set_fullscreen(true);
             r = requests();
             expect(r == "F", "fullscreen: on twice, unanswered: asked once (" + r + ")");
-            seen(false);
+            settled();
             requests();
             win->set_fullscreen(true);
             win->set_fullscreen(false);
-            seen(true);  // made fullscreen from outside, after the reversal
-            win->set_fullscreen(false);
+            seen(true);  // the first request's answer: the second still pending
+            win->set_fullscreen(true);
             r = requests();
-            expect(r == "FUU", "fullscreen: on, off, then fullscreen from outside: off asked again (" + r + ")");
-            seen(false);
+            expect(r == "FUF", "fullscreen: on, off, the first answered, on again: asked again, in order (" + r + ")");
+            seen(true);
+            win->set_fullscreen(false);
+            settled();
             pump(500);
         }
     }

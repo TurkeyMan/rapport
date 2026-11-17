@@ -4625,10 +4625,11 @@ void list_view::scrollContentsBy(int dx, int dy)
 
 // Test seam (#88): the fullscreen requests this backend has made, in order,
 // "F" for each fullscreen and "U" for each unfullscreen; read and cleared
-// through rapport_qt6_fullscreen_requests_for_tests below.
-std::string& fullscreen_requests_for_tests()
+// through rapport_qt6_fullscreen_requests_for_tests below. Nothing is kept
+// until a test first reads it (an app's requests aren't recorded).
+std::optional<std::string>& fullscreen_requests_for_tests()
 {
-    static std::string requests;
+    static std::optional<std::string> requests;
     return requests;
 }
 
@@ -4831,11 +4832,22 @@ public:
     // change), not windowState(): that changes only once the compositor
     // acknowledges, so a quick reversal (true, then false) must still be
     // sent.
+    // Fullscreen is asynchronous (#88). The request still unanswered (pending)
+    // is compared if there is one, else the state last reported: the same is
+    // nothing asked. A notification records the state, and answers the
+    // pending request only when it reports what that asked for; one that
+    // reports otherwise answers an older request, so the newer stays pending
+    // (true, false, true's answer, true again: asked F, U, F). With nothing
+    // pending, a notification (the user's or the window manager's) is simply
+    // the state now. Known limit: a request the window manager refuses
+    // without a notification stays pending, so the same request again is
+    // skipped until a fullscreen notification comes; asking again wouldn't
+    // help.
     void set_fullscreen(bool on) override
     {
-        if (on == fullscreen_wanted_) return;
-        fullscreen_wanted_ = on;
-        fullscreen_requests_for_tests() += on ? 'F' : 'U';
+        if (fullscreen_pending_ ? *fullscreen_pending_ == on : fullscreen_ == on) return;
+        fullscreen_pending_ = on;  // (before the call: offscreen answers inside it)
+        if (auto& r = fullscreen_requests_for_tests()) *r += on ? 'F' : 'U';
         if (on)
         {
             was_maximized_ = frame_->isMaximized();
@@ -4923,7 +4935,9 @@ public:
     void state_changed()
     {
         const bool fs = frame_->isFullScreen();
-        fullscreen_wanted_ = fs;  // what it is now, whoever asked: any state change, told or not
+        // The pending request answered only by its own state (see
+        // set_fullscreen).
+        if (fullscreen_pending_ && *fullscreen_pending_ == fs) fullscreen_pending_.reset();
         if (fs == fullscreen_) return;
         fullscreen_ = fs;
         show_menu_bar();
@@ -5146,7 +5160,7 @@ private:
     bool dialog_;
     bool finished_ = false;
     bool fullscreen_ = false;
-    bool fullscreen_wanted_ = false;  // asked for last (set_fullscreen), or seen (state_changed)
+    std::optional<bool> fullscreen_pending_;  // a fullscreen request not yet answered (set_fullscreen)
     bool was_maximized_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
@@ -6247,11 +6261,14 @@ private:
 }  // namespace rap::qt6
 
 // Test seam (#88): the fullscreen requests made since the last call ("F",
-// "U", in order), cleared. Not part of the backend's interface.
+// "U", in order), cleared. The first call starts the recording. Not part of
+// the backend's interface.
 extern "C" RAPPORT_EXPORT const char* rapport_qt6_fullscreen_requests_for_tests()
 {
     static std::string out;
-    out = std::exchange(rap::qt6::fullscreen_requests_for_tests(), std::string());
+    auto& r = rap::qt6::fullscreen_requests_for_tests();
+    out = r.value_or(std::string());
+    r = std::string();
     return out.c_str();
 }
 
