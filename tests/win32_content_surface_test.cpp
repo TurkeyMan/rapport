@@ -336,10 +336,42 @@ int main(int argc, char** argv)
     if (mode == "plain") options.look.content_surface = rap::content_surface::plain;
     if (mode == "layer" || mode == "native-layer") options.look.content_surface = rap::content_surface::layer;
     if (mode == "native" || mode == "native-layer") options.look.controls = rap::control_style::native;
+    // rtl: every window mirrored (WS_EX_LAYOUTRTL, as an RTL locale's), a
+    // tab page's fluent fields on its body as in a left-to-right window (the
+    // body's found by mapping the page's rectangle, which mirroring flips).
+    if (mode == "rtl") SetProcessDefaultLayout(LAYOUT_RTL);
     auto ui = rap::ui::load(argc, argv, options);
     if (!ui) return 1;
     seams.find();
     expect(seams.ok, "the backend's test seams found (linked in, or exported by rapport_win32.dll)");
+    if (mode == "rtl")
+    {
+        if (windows_build() < 22000 || high_contrast())
+        {
+            std::printf("skipped: no fluent controls here\n");
+            return 0;
+        }
+        using namespace rap::layout;
+        auto w = (*ui)->create(window{"Content surface, mirrored", {vbox{
+            tabs{{"One", vbox{entry{}.placeholder("On a page"), entry{"Off"}.enabled(false), button{"A push"}}},
+                 {"Two", label{"Second"}}},
+        }}}.size(420_px, 300_px));
+        pump();
+        HWND t = top_of(L"Content surface, mirrored");
+        const std::vector<HWND> e = t ? children_of(t, L"Edit") : std::vector<HWND>{};
+        const std::vector<HWND> tc = t ? children_of(t, WC_TABCONTROLW) : std::vector<HWND>{};
+        if (e.size() < 2 || tc.empty())
+        {
+            std::printf("FAIL mirrored: the entries and the tab control found\n");
+            return 2;
+        }
+        expect((GetWindowLongPtrW(t, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) != 0, "mirrored: the window's laid out right to left");
+        const DWORD body = tab_body(tc[0]);
+        const DWORD window_colour = rgb(GetSysColor(COLOR_BTNFACE));
+        expect(body != window_colour, "mirrored: the page's body " + hex(body) + " isn't the window's " + hex(window_colour));
+        check_controls(e[0], e[1], button_named(t, L"A push"), body, "mirrored, on a tab page");
+        return failures ? 1 : 0;
+    }
 
     const DWORD build = windows_build();
     const bool eleven = build >= 22000, hc = high_contrast();

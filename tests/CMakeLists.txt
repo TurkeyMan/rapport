@@ -514,6 +514,8 @@ if(TARGET rapport_win32)
                      COMMAND rapport-win32-content-surface-test ${mode} ${scheme})
         endforeach()
     endforeach()
+    # Mirrored (WS_EX_LAYOUTRTL): a tab page's fields on its body.
+    add_test(NAME win32-content-surface-rtl COMMAND rapport-win32-content-surface-test rtl light)
     # The app asking for the layer under high contrast: the system colours
     # all the same (CI's throwaway runner only, as the other high contrast
     # runs).

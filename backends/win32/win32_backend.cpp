@@ -519,6 +519,16 @@ struct scanning_tab
     scanning_tab& operator=(const scanning_tab&) = delete;
 };
 void traced_tab_adjust(HWND h, BOOL larger, RECT* rect);
+// `r` from `from`'s client coordinates to `to`'s (nullptr: the screen's), as
+// MapWindowPoints maps a rectangle (normalized, mirrored windows included,
+// where two ClientToScreen calls swap its left and right); false if that
+// failed (its 0 is also a window at the origin's offset: told apart by the
+// error it sets).
+bool map_rect(HWND from, HWND to, RECT& r)
+{
+    SetLastError(ERROR_SUCCESS);
+    return MapWindowPoints(from, to, reinterpret_cast<POINT*>(&r), 2) != 0 || GetLastError() == ERROR_SUCCESS;
+}
 // A synchronous call into a tab (a message it runs code for: TCM_ADJUSTRECT,
 // WM_PRINTCLIENT), then whether all the scan stands on still does: the tab
 // and the control asking still windows, the tab bodies and the layout pass
@@ -662,9 +672,7 @@ HBRUSH tab_body_under_scan(HWND control, bool& refused)
             refused = true;
             return nullptr;
         }
-        POINT corners[2]{{body.left, body.top}, {body.right, body.bottom}};
-        if (!ClientToScreen(s, &corners[0]) || !ClientToScreen(s, &corners[1])) continue;
-        body = RECT{corners[0].x, corners[0].y, corners[1].x, corners[1].y};
+        if (!map_rect(s, nullptr, body)) continue;
         RECT overlap{};
         if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s, control, refused);
     }
