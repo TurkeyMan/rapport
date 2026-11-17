@@ -59,6 +59,16 @@ if(RAPPORT_STATIC)
 endif()
 add_dependencies(rapport-stack-test rapport_null)
 add_test(NAME stack COMMAND rapport-stack-test)
+# Tab page visibility (set_page_visible, page::visible, hide_single_tab)
+# through the headless backend.
+add_executable(rapport-tabs-visibility-test tabs_visibility_test.cpp)
+target_link_libraries(rapport-tabs-visibility-test PRIVATE rapport::rapport)
+if(RAPPORT_STATIC)
+    target_link_libraries(rapport-tabs-visibility-test PRIVATE rapport::backend_null)
+    target_compile_definitions(rapport-tabs-visibility-test PRIVATE RAPPORT_TEST_BUILTIN_NULL)
+endif()
+add_dependencies(rapport-tabs-visibility-test rapport_null)
+add_test(NAME tabs-visibility COMMAND rapport-tabs-visibility-test)
 # Which keys a window's on_key has from a focused text field.
 add_executable(rapport-window-chords-test window_chords_test.cpp)
 target_include_directories(rapport-window-chords-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
@@ -144,6 +154,11 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-setters-noop-test-gtk3 gtk3_setters_noop_test.cpp)
         target_link_libraries(rapport-setters-noop-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3 ${CMAKE_DL_LIBS})
         add_dependencies(rapport-setters-noop-test-gtk3 rapport_gtk3)
+        # Tab page visibility and hide_single_tab (strips and sidebars), and
+        # a fixed-size canvas as a page's content (#92): measured, never shown.
+        add_executable(rapport-tabs-visibility-test-gtk3 gtk3_tabs_visibility_test.cpp)
+        target_link_libraries(rapport-tabs-visibility-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3 ${CMAKE_DL_LIBS})
+        add_dependencies(rapport-tabs-visibility-test-gtk3 rapport_gtk3)
     endif()
     # An entry's buttons on GTK 4: named, focusable, Tab order, menus.
     if(TARGET rapport_gtk4)
@@ -190,6 +205,11 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-setters-noop-test-gtk4 gtk4_setters_noop_test.cpp)
         target_link_libraries(rapport-setters-noop-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4 ${CMAKE_DL_LIBS})
         add_dependencies(rapport-setters-noop-test-gtk4 rapport_gtk4)
+        # Tab page visibility and hide_single_tab (strips and sidebars), and
+        # a fixed-size canvas as a page's content (#92): measured, never shown.
+        add_executable(rapport-tabs-visibility-test-gtk4 gtk4_tabs_visibility_test.cpp)
+        target_link_libraries(rapport-tabs-visibility-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4 ${CMAKE_DL_LIBS})
+        add_dependencies(rapport-tabs-visibility-test-gtk4 rapport_gtk4)
     endif()
     if(TARGET rapport_qt6)
         find_package(Qt6 QUIET COMPONENTS Widgets)
@@ -221,6 +241,11 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-setters-noop-test-qt6 qt6_setters_noop_test.cpp)
         target_link_libraries(rapport-setters-noop-test-qt6 PRIVATE rapport::rapport Qt6::Widgets ${CMAKE_DL_LIBS})
         add_dependencies(rapport-setters-noop-test-qt6 rapport_qt6)
+        # Tab page visibility and hide_single_tab (strips and sidebars), and
+        # a fixed-size canvas as a page's content (#92): measured, never shown.
+        add_executable(rapport-tabs-visibility-test-qt6 qt6_tabs_visibility_test.cpp)
+        target_link_libraries(rapport-tabs-visibility-test-qt6 PRIVATE rapport::rapport Qt6::Widgets ${CMAKE_DL_LIBS})
+        add_dependencies(rapport-tabs-visibility-test-qt6 rapport_qt6)
         # QTest's keys go through Qt's shortcuts as a user's do.
         find_package(Qt6 QUIET COMPONENTS Test)
         if(TARGET Qt6::Test)
@@ -775,6 +800,23 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-setters-noop-test rapport_win32)
     add_test(NAME win32-setters-noop COMMAND rapport-win32-setters-noop-test)
     set_tests_properties(win32-setters-noop PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+    # Tab page visibility and hide_single_tab (strips and sidebars), and a
+    # fixed-size canvas as a page's or a stack's content (#92). Never shown.
+    add_executable(rapport-win32-tabs-visibility-test win32_tabs_visibility_test.cpp)
+    target_link_libraries(rapport-win32-tabs-visibility-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-tabs-visibility-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-tabs-visibility-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-tabs-visibility-test rapport_win32)
+    add_test(NAME win32-tabs-visibility COMMAND rapport-win32-tabs-visibility-test)
+    set_tests_properties(win32-tabs-visibility PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+    # Shown (RAPPORT_NO_ACTIVATE: no focus taken): a page shown or the strip
+    # back grows the window's least size at once.
+    add_test(NAME win32-tabs-visibility-shown COMMAND rapport-win32-tabs-visibility-test --shown)
+    set_tests_properties(win32-tabs-visibility-shown PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
 
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build

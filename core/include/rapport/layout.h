@@ -121,6 +121,11 @@ struct tabs
     // The page names as a list down the left with the page beside it (a
     // settings dialog) rather than tabs along the top.
     bool sidebar = false;
+    // Per page: shown from the start (layout::page::visible). Empty: all.
+    std::vector<bool> visible;
+    // With at most one page visible, no strip (or sidebar list) at all: the
+    // page fills the area, and measuring leaves the strip out.
+    bool hide_single_tab = false;
     std::function<void(int)> on_changed;
     rap::tabs** bind = nullptr;
 };
@@ -682,9 +687,17 @@ struct page
         , build(std::move(lazy.build))
     {
     }
+    // Hidden from the start (false): no tab, nothing built if it's lazy,
+    // until rap::tabs::set_page_visible shows it.
+    page& visible(bool on = true)
+    {
+        shown = on;
+        return *this;
+    }
     std::string title;
     node content;
     std::function<node()> build;
+    bool shown = true;
 };
 
 class tabs : public builder<tabs, spec::tabs>
@@ -692,14 +705,26 @@ class tabs : public builder<tabs, spec::tabs>
 public:
     tabs(std::initializer_list<page> pages)
     {
-        bool any_lazy = false;
-        for (auto& p : pages) any_lazy |= bool(p.build);
+        bool any_lazy = false, any_hidden = false;
+        for (auto& p : pages)
+        {
+            any_lazy |= bool(p.build);
+            any_hidden |= !p.shown;
+        }
         for (auto& p : pages)
         {
             s().titles.push_back(p.title);
             s().pages.push_back(p.build ? node{spec::box{vertical, {}, false, {}}, {}} : p.content);
             if (any_lazy) s().lazy.push_back(p.build);
+            if (any_hidden) s().visible.push_back(p.shown);
         }
+    }
+    // With at most one page visible, no strip (or sidebar list): the page
+    // fills the area. The strip is back once a second page is visible.
+    tabs& hide_single_tab(bool on = true)
+    {
+        s().hide_single_tab = on;
+        return *this;
     }
     tabs& on_changed(std::function<void(int)> f)
     {

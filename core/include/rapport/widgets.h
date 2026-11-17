@@ -999,12 +999,25 @@ public:
     virtual float divider() const = 0;
 };
 
+// Pages with a tab (or, as a sidebar, a row) each, one shown at a time.
+// Pages keep their index whether shown or hidden.
 class tabs : public widget
 {
 public:
+    // -1 when every page is hidden.
     virtual int current() const = 0;
+    // A hidden page (or an index out of range): nothing.
     virtual void set_current(int) = 0;
     virtual void on_changed(std::function<void(int)>) = 0;
+    // A hidden page's tab is gone, and the page takes no layout, paint or
+    // input; a lazy page stays unbuilt. Hiding the current page makes the
+    // nearest visible page after it current (before it, if there's none
+    // after), without on_changed; with every page hidden, current() is -1
+    // and no page shows. Shown again, its tab is back at its place among the
+    // visible ones, and the current page stays as it is. (layout::page's
+    // visible(false) hides one from the start.)
+    virtual void set_page_visible(int page, bool visible) = 0;
+    virtual bool page_visible(int page) const = 0;
 };
 
 class window;

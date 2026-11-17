@@ -2310,30 +2310,94 @@ private:
     std::vector<float> pressed_;  // the sizes when a button went down on it
 };
 
+// A layout::tabs' pages: which are visible (set_page_visible) and whether
+// the strip shows (hide_single_tab), for tabs_impl and side_tabs_impl. A
+// hidden page's widget is hidden (and stays so when the window shows
+// everything); GTK leaves a hidden child out of its container's size.
+struct tab_pages
+{
+    int count = 0;
+    std::vector<bool> visible;  // per page; empty: all
+    bool hide_single_tab = false;
+
+    bool shown(int i) const
+    {
+        return i >= 0 && i < count && (size_t(i) >= visible.size() || visible[size_t(i)]);
+    }
+    bool any() const { return first_visible_page(visible, count) >= 0; }
+    bool strip() const { return tabs_strip_shown(visible, count, hide_single_tab); }
+    void set(int i, bool on)
+    {
+        visible.resize(size_t(count), true);
+        visible[size_t(i)] = on;
+    }
+};
+
 class tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    explicit tabs_impl(GtkWidget* notebook)
+    // The notebook's pages already in it, the hidden ones hidden.
+    tabs_impl(GtkWidget* notebook, tab_pages pages)
         : widget_base(notebook)
+        , state_(std::move(pages))
     {
         connect(
             w_, "switch-page",
-            +[](GtkNotebook*, GtkWidget*, guint page, gpointer p)
+            +[](GtkNotebook* nb, GtkWidget*, guint page, gpointer p)
             {
                 auto* self = static_cast<tabs_impl*>(p);
+                // Never to a hidden page (GTK's own move off one it's had
+                // hidden goes to a visible one, or nowhere).
+                if (!self->state_.shown(int(page)))
+                {
+                    g_signal_stop_emission_by_name(nb, "switch-page");
+                    return;
+                }
+                if (self->quiet_) return;
                 self->ensure_built(int(page));
                 if (self->changed_) self->changed_(int(page));
             },
             this);
+        quiet q(this);
+        if (const int first = first_visible_page(state_.visible, state_.count); first >= 0)
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), first);
+        update_strip();
     }
 
-    int current() const override { return gtk_notebook_get_current_page(GTK_NOTEBOOK(w_)); }
+    int current() const override
+    {
+        return state_.any() ? gtk_notebook_get_current_page(GTK_NOTEBOOK(w_)) : -1;
+    }
     void set_current(int i) override
     {
-        if (current() == i) return;  // unchanged (#88)
+        // Hidden (or out of range), or current already (#88): nothing.
+        if (!state_.shown(i) || current() == i) return;
         gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= state_.count || state_.shown(page) == on) return;  // (#88)
+        const int was = current();
+        state_.set(page, on);
+        quiet q(this);
+        show(gtk_notebook_get_nth_page(GTK_NOTEBOOK(w_), page), on);
+        // Hidden while current: the nearest visible; shown with none
+        // current, it; otherwise the current page stays.
+        int now = was;
+        if (!on && page == was)
+            now = nearest_visible_page(state_.visible, state_.count, page);
+        else if (on && was < 0)
+            now = page;
+        if (now >= 0)
+        {
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), now);
+            ensure_built(now);
+        }
+        update_strip();
+    }
+    bool page_visible(int page) const override { return state_.shown(page); }
 
     // Lazy pages: an empty box each, filled the first time it's shown.
     void set_lazy(std::vector<std::function<node()>> lazy, std::vector<GtkWidget*> pages,
@@ -2357,47 +2421,105 @@ public:
     }
 
 private:
+    // hide_single_tab: with one page visible (or none), no tabs and no
+    // frame, the page filling the notebook.
+    void update_strip()
+    {
+        const bool strip = state_.strip();
+        gtk_notebook_set_show_tabs(GTK_NOTEBOOK(w_), strip);
+        gtk_notebook_set_show_border(GTK_NOTEBOOK(w_), strip);
+    }
+    // While it changes pages itself: no on_changed.
+    struct quiet
+    {
+        explicit quiet(tabs_impl* t)
+            : t_(t)
+            , was_(t->quiet_)
+        {
+            t->quiet_ = true;
+        }
+        ~quiet() { t_->quiet_ = was_; }
+        tabs_impl* t_;
+        bool was_;
+    };
+
+    tab_pages state_;
+    bool quiet_ = false;
     std::function<void(int)> changed_;
     std::vector<std::function<node()>> lazy_;
     std::vector<GtkWidget*> pages_;
     std::function<GtkWidget*(const node&)> build_;
 };
 
-// Tabs as a list of page names down the left, the page beside it.
+// Tabs as a list of page names down the left, the page beside it. A hidden
+// page's row is hidden, and its page in the stack.
 class side_tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    side_tabs_impl(GtkWidget* box, GtkWidget* list, GtkWidget* stack)
+    side_tabs_impl(GtkWidget* box, GtkWidget* list, GtkWidget* separator, GtkWidget* stack, tab_pages pages)
         : widget_base(box)
         , list_(list)
+        , separator_(separator)
         , stack_(stack)
+        , state_(std::move(pages))
     {
         connect(
             list_, "row-selected",
             +[](GtkListBox*, GtkListBoxRow* row, gpointer p)
             {
                 auto* self = static_cast<side_tabs_impl*>(p);
-                if (!row) return;
+                if (!row || self->quiet_) return;
                 const int i = gtk_list_box_row_get_index(row);
-                self->ensure_built(i);
-                gtk_stack_set_visible_child_name(GTK_STACK(self->stack_), std::to_string(i).c_str());
+                if (!self->state_.shown(i)) return;
+                self->show_page(i);
                 if (self->changed_) self->changed_(i);
             },
             this);
+        if (const int first = first_visible_page(state_.visible, state_.count); first >= 0) select(first);
+        update_strip();
     }
 
     int current() const override
     {
+        if (!state_.any()) return -1;
         GtkListBoxRow* row = gtk_list_box_get_selected_row(GTK_LIST_BOX(list_));
-        return row ? gtk_list_box_row_get_index(row) : 0;
+        return row ? gtk_list_box_row_get_index(row) : -1;
     }
     void set_current(int i) override
     {
+        if (!state_.shown(i)) return;  // hidden, or out of range
         GtkListBoxRow* row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i);
         if (row && gtk_list_box_get_selected_row(GTK_LIST_BOX(list_)) == row) return;  // unchanged (#88)
         gtk_list_box_select_row(GTK_LIST_BOX(list_), row);
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= state_.count || state_.shown(page) == on) return;  // (#88)
+        const int was = current();
+        state_.set(page, on);
+        GtkWidget* row = GTK_WIDGET(gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), page));
+        show(row, on);
+        show(gtk_stack_get_child_by_name(GTK_STACK(stack_), std::to_string(page).c_str()), on);
+        // Hidden while current: the nearest visible; shown with none
+        // current, it; otherwise the current page stays.
+        if (!on && page == was)
+        {
+            const int now = nearest_visible_page(state_.visible, state_.count, page);
+            if (now >= 0)
+                select(now);
+            else
+            {
+                quiet q(this);
+                gtk_list_box_unselect_row(GTK_LIST_BOX(list_), GTK_LIST_BOX_ROW(row));
+            }
+        }
+        else if (on && was < 0)
+            select(page);
+        update_strip();
+    }
+    bool page_visible(int page) const override { return state_.shown(page); }
 
     // Lazy pages: an empty box each, filled the first time it's shown.
     void set_lazy(std::vector<std::function<node()>> lazy, std::vector<GtkWidget*> pages,
@@ -2421,8 +2543,46 @@ public:
     }
 
 private:
+    void show_page(int i)
+    {
+        ensure_built(i);
+        gtk_stack_set_visible_child_name(GTK_STACK(stack_), std::to_string(i).c_str());
+    }
+    // Row i selected and its page shown, without on_changed.
+    void select(int i)
+    {
+        {
+            quiet q(this);
+            gtk_list_box_select_row(GTK_LIST_BOX(list_), gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i));
+        }
+        show_page(i);
+    }
+    // hide_single_tab: with one page visible (or none), no list, the page
+    // filling the area.
+    void update_strip()
+    {
+        const bool strip = state_.strip();
+        show(list_, strip);
+        show(separator_, strip);
+    }
+    struct quiet
+    {
+        explicit quiet(side_tabs_impl* t)
+            : t_(t)
+            , was_(t->quiet_)
+        {
+            t->quiet_ = true;
+        }
+        ~quiet() { t_->quiet_ = was_; }
+        side_tabs_impl* t_;
+        bool was_;
+    };
+
     GtkWidget* list_;
+    GtkWidget* separator_;
     GtkWidget* stack_;
+    tab_pages state_;
+    bool quiet_ = false;
     std::function<void(int)> changed_;
     std::vector<std::function<node()>> lazy_;
     std::vector<GtkWidget*> pages_;
@@ -5579,13 +5739,27 @@ public:
             for (GtkWidget* w = focus; w; w = gtk_widget_get_parent(w))
                 if (GTK_IS_NOTEBOOK(w) && w != doc_tabs->notebook())
                 {
+                    // Round the visible pages (a hidden one's skipped).
                     auto* nb = GTK_NOTEBOOK(w);
                     const int n = gtk_notebook_get_n_pages(nb);
-                    if (n > 1)
-                        gtk_notebook_set_current_page(nb,
-                                                      (gtk_notebook_get_current_page(nb) +
-                                                       ((ev.modifiers & mod_shift) ? n - 1 : 1)) %
-                                                          n);
+                    // No pages (nothing to divide by), or every one tried
+                    // once at most: with every page hidden, nothing.
+                    if (n <= 0) return true;
+                    const int step = (ev.modifiers & mod_shift) ? n - 1 : 1;
+                    const int from = gtk_notebook_get_current_page(nb);
+                    // With no current page (-1), from just before the first
+                    // (or after the last, going back).
+                    const int base = from >= 0 ? from : (step == 1 ? n - 1 : 0);
+                    for (int k = 1; k <= n; ++k)
+                    {
+                        const int i = int((base + long(k) * step) % n);
+                        if (i == from) break;
+                        if (gtk_widget_get_visible(gtk_notebook_get_nth_page(nb, i)))
+                        {
+                            gtk_notebook_set_current_page(nb, i);
+                            break;
+                        }
+                    }
                     return true;
                 }
             if (focus && GTK_IS_TEXT_VIEW(focus) &&
@@ -6067,17 +6241,24 @@ private:
     {
         if (s.sidebar) return make_sidebar(n, s);
         GtkWidget* nb = gtk_notebook_new();
+        const tab_pages state{int(s.pages.size()), s.visible, s.hide_single_tab};
         std::vector<GtkWidget*> pages;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             const bool lazy = i < s.lazy.size() && s.lazy[i];
             GtkWidget* page = lazy ? gtk_box_new(GTK_ORIENTATION_VERTICAL, 0) : build(s.pages[i], orientation::vertical);
             set_margins(page, 6);
+            // A hidden page (page::visible(false)) never shows, its tab
+            // with it; a visible one is, so the notebook can make it current.
+            if (state.shown(int(i)))
+                gtk_widget_show(page);
+            else
+                widget_base<rap::tabs>::show(page, false);
             gtk_notebook_append_page(GTK_NOTEBOOK(nb), page,
                                      gtk_label_new_with_mnemonic(s.titles[i].c_str()));
             pages.push_back(page);
         }
-        auto& tabs = add<tabs_impl>(n, nb);
+        auto& tabs = add<tabs_impl>(n, nb, state);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),
                           [&win = win_, &sink = sink_, into = into_](const node& page)
@@ -6092,6 +6273,7 @@ private:
         GtkWidget* list = gtk_list_box_new();
         gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_BROWSE);
         GtkWidget* stack = gtk_stack_new();
+        const tab_pages state{int(s.pages.size()), s.visible, s.hide_single_tab};
         std::vector<GtkWidget*> pages;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
@@ -6107,16 +6289,29 @@ private:
             const bool lazy = i < s.lazy.size() && s.lazy[i];
             GtkWidget* page = lazy ? gtk_box_new(GTK_ORIENTATION_VERTICAL, 0) : build(s.pages[i], orientation::vertical);
             set_margins(page, 6);
+            // A hidden page (page::visible(false)): its row and page never
+            // show; a visible page is, so the stack can show it, and its row
+            // (even while hide_single_tab hides the list).
+            if (state.shown(int(i)))
+            {
+                gtk_widget_show(page);
+                gtk_widget_show_all(row);
+            }
+            else
+            {
+                widget_base<rap::tabs>::show(row, false);
+                widget_base<rap::tabs>::show(page, false);
+            }
             gtk_stack_add_named(GTK_STACK(stack), page, std::to_string(i).c_str());
             pages.push_back(page);
         }
         // The app's row height (look_options::row_height) for its rows.
         if (g_app_row_height > 0) fix_list_box_rows(list, g_app_row_height);
+        GtkWidget* separator = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
         gtk_box_pack_start(GTK_BOX(box), list, FALSE, FALSE, 0);
-        gtk_box_pack_start(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(box), separator, FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(box), stack, TRUE, TRUE, 0);
-        auto& tabs = add<side_tabs_impl>(n, box, list, stack);
-        tabs.set_current(0);
+        auto& tabs = add<side_tabs_impl>(n, box, list, separator, stack, state);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),
                           [&win = win_, &sink = sink_, into = into_](const node& page)
