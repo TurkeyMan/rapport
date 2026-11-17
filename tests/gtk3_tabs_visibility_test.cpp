@@ -13,8 +13,10 @@
 
 #include <gtk/gtk.h>
 
+#include <array>
 #include <csignal>
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -439,6 +441,152 @@ void run_set_current_quiet(rap::ui& ui)
     }
 }
 
+// A strip's notebook, or a sidebar's list and stack.
+struct native_tabs
+{
+    GtkWidget* nb = nullptr;
+    GtkWidget* list = nullptr;
+    GtkWidget* stack = nullptr;
+    bool found() const { return nb || (list && stack); }
+    // The page natively current: the notebook's, or the selected row's when
+    // the stack shows the same page (-2 when they disagree).
+    int current() const
+    {
+        if (nb) return gtk_notebook_get_current_page(GTK_NOTEBOOK(nb));
+        GtkListBoxRow* row = gtk_list_box_get_selected_row(GTK_LIST_BOX(list));
+        const int r = row ? gtk_list_box_row_get_index(row) : -1;
+        return stack_shown(stack) == str(r) ? r : -2;
+    }
+    // The page natively shown holds the label `text`.
+    bool showing(const char* text) const
+    {
+        GtkWidget* page = nullptr;
+        if (stack)
+            page = gtk_stack_get_visible_child(GTK_STACK(stack));
+        else if (const int i = gtk_notebook_get_current_page(GTK_NOTEBOOK(nb)); i >= 0)
+            page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(nb), i);
+        return page && gtk_widget_get_visible(page) && holds_label(page, text);
+    }
+    std::string headers() const { return nb ? notebook_tabs(nb) : sidebar_rows(list); }
+    // A user's selection, on the native widget, as a click's reaches rapport.
+    void user_select(int i) const
+    {
+        if (list)
+            gtk_list_box_select_row(GTK_LIST_BOX(list), gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), i));
+        else
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(nb), i);
+        settle();
+    }
+};
+
+// #98, re-entered: a lazy page's builder that calls the tabs back while the
+// switch that built it is still being handled. The app's set_current to B,
+// whose builder calls set_current(2): no on_changed, C current and shown. B
+// (current) hidden, the lazy C made current, whose builder hides D: no
+// on_changed, C current and shown, D's header gone. A user's switch to a
+// lazy page: built, shown, on_changed once with it; to B whose builder calls
+// set_current(2): C current and shown, on_changed once, with 2.
+void run_reentrant(rap::ui& ui)
+{
+    using namespace rap::layout;
+    using hook = std::function<void(rap::tabs*)>;
+    using body_fn = std::function<void(rap::tabs*, const native_tabs&, rap::label**, std::vector<int>&,
+                                       const std::string&)>;
+    for (const bool sidebar : {false, true})
+    {
+        const std::string side = sidebar ? "sidebar" : "strip";
+        // A window of A and the lazy B, C and D, page i's builder calling
+        // then[i] first; `body` run on it.
+        auto scenario = [&](const std::string& name, std::array<hook, 4> then, const body_fn& body)
+        {
+            const std::string kind = side + ", " + name + " (#98): ";
+            const std::string title = "Reentrant " + side + " " + name;
+            rap::tabs* t = nullptr;
+            rap::label* built[4] = {};
+            std::vector<int> changes;
+            auto lazy_page = [&](int i, const char* text)
+            {
+                return lazy{[&, i, text]
+                            {
+                                if (then[size_t(i)]) then[size_t(i)](t);
+                                return rap::node(label{text}.bind(built[i]));
+                            }};
+            };
+            auto win = ui.create(window{title,
+                                        {tabs{{"A", label{"page a"}},
+                                              {"B", lazy_page(1, "page b")},
+                                              {"C", lazy_page(2, "page c")},
+                                              {"D", lazy_page(3, "page d")}}
+                                             .sidebar(sidebar)
+                                             .on_changed([&](int i) { changes.push_back(i); })
+                                             .bind(t)}});
+            settle();
+            native_tabs n;
+            if (sidebar)
+            {
+                n.list = first_in(title.c_str(), GTK_TYPE_LIST_BOX);
+                n.stack = first_in(title.c_str(), GTK_TYPE_STACK);
+            }
+            else
+                n.nb = first_in(title.c_str(), GTK_TYPE_NOTEBOOK);
+            expect(t && n.found(), kind + "bound, and its widgets found");
+            if (!t || !n.found()) return;
+            changes.clear();
+            body(t, n, built, changes, kind);
+        };
+        const hook to_c = [](rap::tabs* t) { t->set_current(2); };
+        const hook hide_d = [](rap::tabs* t) { t->set_page_visible(3, false); };
+
+        scenario("set_current re-entered", {nullptr, to_c, nullptr, nullptr},
+                 [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                     const std::string& kind)
+                 {
+                     t->set_current(1);
+                     settle();
+                     expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                     expect(t->current() == 2 && n.current() == 2,
+                            kind + "C current, natively too, " + str(t->current()) + "/" + str(n.current()));
+                     expect(n.showing("page c"), kind + "C shown");
+                     expect(built[1] != nullptr, kind + "B built");
+                 });
+        scenario("set_page_visible re-entered", {nullptr, nullptr, hide_d, nullptr},
+                 [&](rap::tabs* t, const native_tabs& n, rap::label**, std::vector<int>& changes,
+                     const std::string& kind)
+                 {
+                     t->set_current(1);
+                     settle();
+                     changes.clear();
+                     t->set_page_visible(1, false);
+                     settle();
+                     expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                     expect(t->current() == 2 && n.current() == 2 && n.showing("page c"),
+                            kind + "C current and shown, " + str(t->current()) + "/" + str(n.current()));
+                     expect(!t->page_visible(3) && n.headers() == "AC",
+                            kind + "D hidden, its header gone: " + n.headers());
+                 });
+        scenario("a user's switch to a lazy page", {},
+                 [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                     const std::string& kind)
+                 {
+                     n.user_select(1);
+                     expect(changes == std::vector<int>{1}, kind + "on_changed once, with 1, " + seq(changes));
+                     expect(t->current() == 1 && n.current() == 1 && built[1] && n.showing("page b"),
+                            kind + "B current, built and shown, " + str(t->current()) + "/" + str(n.current()));
+                 });
+        scenario("a user's switch re-entered", {nullptr, to_c, nullptr, nullptr},
+                 [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                     const std::string& kind)
+                 {
+                     n.user_select(1);
+                     expect(changes == std::vector<int>{2}, kind + "on_changed once, with 2, " + seq(changes));
+                     expect(t->current() == 2 && n.current() == 2 && n.showing("page c"),
+                            kind + "C current, natively too, and shown, " + str(t->current()) + "/" +
+                                str(n.current()));
+                     expect(built[1] != nullptr, kind + "B built");
+                 });
+    }
+}
+
 // #92: a canvas of a fixed size as a page's content, the page's container
 // measured to hold it.
 void run_fixed_canvas(rap::ui& ui)
@@ -660,6 +808,7 @@ int main(int argc, char** argv)
     run_api(**ui);
     run_hidden_from_start(**ui);
     run_set_current_quiet(**ui);
+    run_reentrant(**ui);
     run_fixed_canvas(**ui);
     run_ctrl_tab(**ui);
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);

@@ -2088,7 +2088,9 @@ public:
                          [this](int i)
                          {
                              lazy_.ensure_built(i);
-                             if (changed_ && !quiet_) changed_(i);
+                             // The page it ends on: a builder may have
+                             // switched again.
+                             if (changed_ && !quiet_) changed_(tabs()->currentIndex());
                          });
     }
     // Its pages hidden from the start (spec::tabs::visible) and its strip
@@ -2254,8 +2256,11 @@ public:
                          {
                              if (i < 0) return;
                              lazy_.ensure_built(i);
-                             stack_->setCurrentIndex(i);
-                             if (changed_ && !quiet_) changed_(i);
+                             // A builder that selected another page has
+                             // put that one up; on_changed has the page it
+                             // ends on.
+                             if (list_->currentRow() == i) stack_->setCurrentIndex(i);
+                             if (changed_ && !quiet_) changed_(list_->currentRow());
                          });
         stack_->shown = [this](int i) { return page_visible(i); };
     }

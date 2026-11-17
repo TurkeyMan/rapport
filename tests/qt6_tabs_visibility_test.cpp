@@ -21,7 +21,9 @@
 #include <QTabWidget>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -413,6 +415,141 @@ void run_set_current_quiet(rap::ui& ui, bool sidebar)
            kind + "set_current(0): A current and shown, no on_changed, " + seq(changes));
 }
 
+// A strip's QTabWidget, or a sidebar's list and its stack.
+struct native_tabs
+{
+    QTabWidget* tw = nullptr;
+    QListWidget* list = nullptr;
+    QStackedWidget* stack = nullptr;
+    bool found() const { return tw || (list && stack); }
+    // The page natively current: the tab widget's, or the list's current
+    // row when the stack shows the same page (-2 when they disagree).
+    int current() const
+    {
+        if (tw) return tw->currentIndex();
+        return stack->currentIndex() == list->currentRow() ? list->currentRow() : -2;
+    }
+    // The page natively shown holds the label `text`.
+    bool showing(const char* text) const { return holds_label(tw ? tw->currentWidget() : stack->currentWidget(), text); }
+    std::vector<int> headers() const { return tw ? bar_order(tw->tabBar()) : list_order(list); }
+    // A user's selection, on the native widget, as a click's reaches rapport.
+    void user_select(int i) const
+    {
+        if (list)
+            list->setCurrentRow(i);
+        else
+            tw->setCurrentIndex(i);
+        QApplication::processEvents();
+    }
+};
+
+// #98, re-entered: a lazy page's builder that calls the tabs back while the
+// switch that built it is still being handled. The app's set_current to B,
+// whose builder calls set_current(2): no on_changed, C current and shown. B
+// (current) hidden, the lazy C made current, whose builder hides D: no
+// on_changed, C current and shown, D's header gone. A user's switch to a
+// lazy page: built, shown, on_changed once with it; to B whose builder calls
+// set_current(2): C current and shown, on_changed once, with 2.
+void run_reentrant(rap::ui& ui, bool sidebar)
+{
+    using namespace rap::layout;
+    using hook = std::function<void(rap::tabs*)>;
+    using body_fn = std::function<void(rap::tabs*, const native_tabs&, rap::label**, std::vector<int>&,
+                                       const std::string&)>;
+    const std::string side = sidebar ? "sidebar" : "strip";
+    auto seq = [](const std::vector<int>& v) { return str(v); };
+    auto num = [](int v) { return std::to_string(v); };
+    // A window of A and the lazy B, C and D, page i's builder calling
+    // then[i] first; `body` run on it.
+    auto scenario = [&](const std::string& name, std::array<hook, 4> then, const body_fn& body)
+    {
+        const std::string kind = side + ", " + name + " (#98): ";
+        const std::string title = "Reentrant " + side + " " + name;
+        rap::tabs* t = nullptr;
+        rap::label* built[4] = {};
+        std::vector<int> changes;
+        auto lazy_page = [&](int i, const char* text)
+        {
+            return lazy{[&, i, text]
+                        {
+                            if (then[size_t(i)]) then[size_t(i)](t);
+                            return rap::node(label{text}.bind(built[i]));
+                        }};
+        };
+        auto win = ui.create(window{title,
+                                    {tabs{{"A", label{"page a"}},
+                                          {"B", lazy_page(1, "page b")},
+                                          {"C", lazy_page(2, "page c")},
+                                          {"D", lazy_page(3, "page d")}}
+                                         .sidebar(sidebar)
+                                         .on_changed([&](int i) { changes.push_back(i); })
+                                         .bind(t)}});
+        QApplication::processEvents();
+        QWidget* top = top_titled(title.c_str());
+        native_tabs n;
+        if (top && sidebar)
+        {
+            n.list = top->findChild<QListWidget*>();
+            for (QStackedWidget* s : top->findChildren<QStackedWidget*>())
+                if (s->count() == 4) n.stack = s;
+        }
+        else if (top)
+            n.tw = top->findChild<QTabWidget*>();
+        expect(t && n.found(), kind + "bound, its native widgets found");
+        if (!t || !n.found()) return;
+        changes.clear();
+        body(t, n, built, changes, kind);
+    };
+    const hook to_c = [](rap::tabs* t) { t->set_current(2); };
+    const hook hide_d = [](rap::tabs* t) { t->set_page_visible(3, false); };
+
+    scenario("set_current re-entered", {nullptr, to_c, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 t->set_current(1);
+                 QApplication::processEvents();
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == 2 && n.current() == 2,
+                        kind + "C current, natively too, " + num(t->current()) + "/" + num(n.current()));
+                 expect(n.showing("page c"), kind + "C shown");
+                 expect(built[1] != nullptr, kind + "B built");
+             });
+    scenario("set_page_visible re-entered", {nullptr, nullptr, hide_d, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label**, std::vector<int>& changes, const std::string& kind)
+             {
+                 t->set_current(1);
+                 QApplication::processEvents();
+                 changes.clear();
+                 t->set_page_visible(1, false);
+                 QApplication::processEvents();
+                 expect(changes.empty(), kind + "no on_changed, " + seq(changes));
+                 expect(t->current() == 2 && n.current() == 2 && n.showing("page c"),
+                        kind + "C current and shown, " + num(t->current()) + "/" + num(n.current()));
+                 expect(!t->page_visible(3) && n.headers() == std::vector<int>{0, 2},
+                        kind + "D hidden, its header gone: " + str(n.headers()));
+             });
+    scenario("a user's switch to a lazy page", {},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 n.user_select(1);
+                 expect(changes == std::vector<int>{1}, kind + "on_changed once, with 1, " + seq(changes));
+                 expect(t->current() == 1 && n.current() == 1 && built[1] && n.showing("page b"),
+                        kind + "B current, built and shown, " + num(t->current()) + "/" + num(n.current()));
+             });
+    scenario("a user's switch re-entered", {nullptr, to_c, nullptr, nullptr},
+             [&](rap::tabs* t, const native_tabs& n, rap::label** built, std::vector<int>& changes,
+                 const std::string& kind)
+             {
+                 n.user_select(1);
+                 expect(changes == std::vector<int>{2}, kind + "on_changed once, with 2, " + seq(changes));
+                 expect(t->current() == 2 && n.current() == 2 && n.showing("page c"),
+                        kind + "C current, natively too, and shown, " + num(t->current()) + "/" + num(n.current()));
+                 expect(built[1] != nullptr, kind + "B built");
+             });
+}
+
 // Every page hidden from the start: none current, no page shown.
 void run_none(rap::ui& ui, bool sidebar)
 {
@@ -554,6 +691,7 @@ int main(int argc, char** argv)
     for (const bool sidebar : {false, true}) run_visibility(**ui, sidebar);
     for (const bool sidebar : {false, true}) run_hidden(**ui, sidebar);
     for (const bool sidebar : {false, true}) run_set_current_quiet(**ui, sidebar);
+    for (const bool sidebar : {false, true}) run_reentrant(**ui, sidebar);
     for (const bool sidebar : {false, true}) run_none(**ui, sidebar);
     run_fixed_canvas(**ui);
     run_scroll(**ui);
