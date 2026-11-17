@@ -9297,15 +9297,20 @@ public:
         InvalidateRect(h_, nullptr, TRUE);
     }
     // Page `page`'s icon (#101), which its row draws as it paints: swapped
-    // for another, only that row is painted again; laid out again only if
-    // the list's width changed (the first icon makes room for them all, the
-    // last takes it away). Hidden, it's kept for when it's shown.
+    // for another, only that row is painted again; the first icon or the
+    // last, every row (#102); laid out again only if the list's width
+    // changed (the first icon makes room for them all, the last takes it
+    // away). Hidden, it's kept for when it's shown.
     void set_page_icon(int page, const rap::icon& icon) override
     {
         if (page < 0 || page >= items_.count) return;
         if (same_icon(icon, icons_[size_t(page)])) return;  // (#91)
         const int before = list_width();
+        const bool column = icon_column();
         take_icon(page, icon);
+        // The icons' column come or gone (the first icon, the last): every
+        // row's title moves, the page shown or not, the width changed or not.
+        if (icon_column() != column) InvalidateRect(h_, nullptr, FALSE);
         if (list_width() != before)
             win_.relayout();
         else if (items_.shown(page))

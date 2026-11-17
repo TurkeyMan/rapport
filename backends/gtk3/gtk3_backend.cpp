@@ -2407,6 +2407,11 @@ public:
         else
             image_ = icon_widget(icon, size);
         if (!image_) return;
+        // The slot held at the small-icon size whatever it shows, nothing
+        // included: a path's icon being found (for_path with no fallback
+        // shows nothing meanwhile, or ever, if it has none) never shrinks the
+        // tab and grows it again.
+        gtk_widget_set_size_request(image_, size, size);
         gtk_widget_set_valign(image_, GTK_ALIGN_CENTER);
         gtk_box_pack_start(GTK_BOX(box_), image_, false, false, 0);
         gtk_box_reorder_child(GTK_BOX(box_), image_, 0);

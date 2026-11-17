@@ -8,10 +8,13 @@
 // stack page, measured. And Ctrl+Tab with the focus in a page's tabs: round
 // their visible pages (a hidden one skipped), nothing with no pages or none
 // visible, and never stuck. And #101: a page's icon and title, at build time
-// and at runtime. No window is shown but Ctrl+Tab's and the icons'.
+// and at runtime; a hidden page renamed "_Build" that Alt+B leaves alone; a
+// path's icon with none keeping its header's width. No window is shown but
+// Ctrl+Tab's, the icons', Alt+B's and the path icon's.
 //   rapport-tabs-visibility-test-gtk3   (through offscreen.sh gtk3)
 #include <rapport/rapport.h>
 
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
 
 #include <array>
@@ -47,6 +50,55 @@ void settle()
         while (gtk_events_pending()) gtk_main_iteration_do(false);
         g_usleep(2000);
     }
+}
+
+// The test's own two icons, whatever the icon theme (#101's GtkImage reuse
+// needs two names the theme has): tiny SVGs in a temporary directory on the
+// default theme's search path, loose (GTK finds an image file directly in a
+// search path directory as an unthemed icon).
+const char* const test_icon_a = "rapport-test-a";
+const char* const test_icon_b = "rapport-test-b";
+std::string test_icon_dir;
+void add_test_icons()
+{
+    gchar* dir = g_dir_make_tmp("rapport-icons-XXXXXX", nullptr);
+    expect(dir != nullptr, "the test's icons: a temporary directory");
+    if (!dir) return;
+    test_icon_dir = dir;
+    g_free(dir);
+    // PNG, which gdk-pixbuf always loads (SVG needs librsvg's loader, which
+    // a CI container may lack: the icon would be missing).
+    GdkPixbuf* pixels = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, 16, 16);
+    gdk_pixbuf_fill(pixels, 0x808080ff);
+    // Loose in the directory (unthemed), and as hicolor's 16x16/apps (which
+    // GTK 3 searches under every search path, hicolor's index.theme being
+    // the system's).
+    const std::string apps = test_icon_dir + "/hicolor/16x16/apps";
+    g_mkdir_with_parents(apps.c_str(), 0700);
+    for (const char* name : {test_icon_a, test_icon_b})
+        for (const std::string& where : {test_icon_dir, apps})
+        {
+            const std::string path = where + "/" + name + ".png";
+            expect(gdk_pixbuf_save(pixels, path.c_str(), "png", nullptr, nullptr),
+                   std::string("the test's icons: ") + path);
+        }
+    g_object_unref(pixels);
+    gtk_icon_theme_append_search_path(gtk_icon_theme_get_default(), test_icon_dir.c_str());
+    settle();
+}
+void remove_test_icons()
+{
+    if (test_icon_dir.empty()) return;
+    const std::string apps = test_icon_dir + "/hicolor/16x16/apps";
+    for (const char* name : {test_icon_a, test_icon_b})
+    {
+        g_remove((test_icon_dir + "/" + name + ".png").c_str());
+        g_remove((apps + "/" + name + ".png").c_str());
+    }
+    g_rmdir(apps.c_str());
+    g_rmdir((test_icon_dir + "/hicolor/16x16").c_str());
+    g_rmdir((test_icon_dir + "/hicolor").c_str());
+    g_rmdir(test_icon_dir.c_str());
 }
 
 void find_all(GtkWidget* w, GType type, std::vector<GtkWidget*>& out)
@@ -729,13 +781,12 @@ void run_fixed_canvas(rap::ui& ui)
     }
 }
 
-// Ctrl+Tab (Ctrl+Shift+Tab with `shift`) through the window's own key
+// A key (`keyval`, with `state` held) through the window's own key
 // handling, as document_tabs_input_test sends it: a press and a release on
 // the toplevel's GdkWindow, given to gtk_main_do_event.
-void ctrl_tab(GtkWidget* top, bool shift)
+void send_key(GtkWidget* top, guint keyval, guint state)
 {
     static guint32 time = 1000;
-    const guint keyval = shift ? GDK_KEY_ISO_Left_Tab : GDK_KEY_Tab;
     GdkWindow* window = gtk_widget_get_window(top);
     for (GdkEventType type : {GDK_KEY_PRESS, GDK_KEY_RELEASE})
     {
@@ -744,7 +795,7 @@ void ctrl_tab(GtkWidget* top, bool shift)
         e->key.send_event = true;
         e->key.time = ++time;
         e->key.keyval = keyval;
-        e->key.state = GDK_CONTROL_MASK | (shift ? GDK_SHIFT_MASK : 0);
+        e->key.state = state;
         GdkKeymapKey* keys = nullptr;
         gint n = 0;
         if (gdk_keymap_get_entries_for_keyval(gdk_keymap_get_for_display(gdk_display_get_default()), keyval, &keys,
@@ -758,6 +809,11 @@ void ctrl_tab(GtkWidget* top, bool shift)
         gdk_event_free(e);
     }
     settle();
+}
+// Ctrl+Tab (Ctrl+Shift+Tab with `shift`).
+void ctrl_tab(GtkWidget* top, bool shift)
+{
+    send_key(top, shift ? GDK_KEY_ISO_Left_Tab : GDK_KEY_Tab, GDK_CONTROL_MASK | (shift ? GDK_SHIFT_MASK : 0));
 }
 
 // A key that never returns (Ctrl+Tab going round pages none of which it
@@ -991,14 +1047,32 @@ void run_icons(rap::ui& ui)
         // Set, swapped, removed.
         t->set_page_icon(2, rap::icon::named(minus));
         expect(icon(2) == minus && title_of(2) == "C", kind + "C's set, before its title: " + icon(2));
-        GtkWidget* a_image = header_icon(header(0));
         t->set_page_icon(0, rap::icon::named(minus));
         expect(icon(0) == minus && title_of(0) == "A", kind + "A's swapped: " + icon(0));
         // One theme icon for another: the same GtkImage, given the new one.
-        if (gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), plus.c_str()) &&
-            gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), minus.c_str()))
-            expect(a_image && GTK_IS_IMAGE(a_image) && header_icon(header(0)) == a_image,
-                   kind + "A's named icon swapped for another: the same GtkImage, not replaced");
+        // The test's own two icons (main puts them on the theme's search
+        // path), so this runs whatever icon theme there is: the backend
+        // reuses the image only for a name the theme has.
+        {
+            const bool has = gtk_icon_theme_has_icon(theme, test_icon_a) && gtk_icon_theme_has_icon(theme, test_icon_b);
+            expect(has, kind + "the theme has the test's icons, " + test_icon_a + " and " + test_icon_b);
+            if (!has)
+            {
+                gchar** paths = nullptr;
+                gint n = 0;
+                gtk_icon_theme_get_search_path(theme, &paths, &n);
+                for (gint i = 0; i < n; ++i) std::printf("     search path: %s\n", paths[i]);
+                g_strfreev(paths);
+            }
+            t->set_page_icon(0, rap::icon::named(test_icon_a));
+            GtkWidget* a_image = header_icon(header(0));
+            if (a_image) g_object_ref(a_image);  // (held: its address can't be reused)
+            t->set_page_icon(0, rap::icon::named(test_icon_b));
+            expect(a_image && GTK_IS_IMAGE(a_image) && header_icon(header(0)) == a_image && icon(0) == test_icon_b,
+                   kind + "A's named icon swapped for another: the same GtkImage, not replaced (ran, test icons): " +
+                       icon(0));
+            if (a_image) g_object_unref(a_image);
+        }
         t->set_page_icon(0, rap::icon{});
         expect(icon(0).empty() && title_of(0) == "A", kind + "A's removed: " + icon(0));
 
@@ -1070,6 +1144,117 @@ void run_icons(rap::ui& ui)
     }
 }
 
+// A hidden page renamed with an access key ("_Build"): Alt+B, sent as
+// Ctrl+Tab is, leaves it alone: still hidden, its lazy page unbuilt, not
+// current, no on_changed. GTK 3 activates a mnemonic only on a label that's
+// mapped (gtk_mnemonic_hash's sensitive, mapped and viewable), and a hidden
+// page's tab label (a hidden row's child) isn't. And the control: the same
+// Alt+B with a visible page renamed "_Build" selects it, so the key does
+// reach the window's mnemonics. Shown: GTK 3 gives a key only to a window
+// that's viewable, and maps only a shown window's labels.
+void run_mnemonic(rap::ui& ui)
+{
+    using namespace rap::layout;
+    for (const bool sidebar : {false, true})
+    {
+        const std::string kind = sidebar ? "sidebar, Alt+B: " : "strip, Alt+B: ";
+        const char* title = sidebar ? "Mnemonic sidebar" : "Mnemonic strip";
+        rap::tabs* t = nullptr;
+        rap::label* built = nullptr;
+        std::vector<int> changes;
+        auto win = ui.create(window{title,
+                                    {tabs{{"A", label{"a"}},
+                                          {"B", lazy{[&] { return rap::node(label{"b"}.bind(built)); }}},
+                                          {"C", label{"c"}}}
+                                         .sidebar(sidebar)
+                                         .on_changed([&](int i) { changes.push_back(i); })
+                                         .bind(t)}});
+        win->show();
+        settle();
+        settle();
+        GtkWidget* top = window_titled(title);
+        expect(t && top && gtk_widget_get_window(top), kind + "bound, shown");
+        if (!t || !top || !gtk_widget_get_window(top)) continue;
+        auto alt_b = [&] { send_key(top, GDK_KEY_b, GDK_MOD1_MASK); };
+        expect(t->current() == 0 && !built, kind + "A current, B's lazy page unbuilt");
+
+        // B hidden, renamed with an access key, Alt+B: nothing.
+        t->set_page_visible(1, false);
+        t->set_page_title(1, "_Build");
+        settle();
+        changes.clear();
+        alt_b();
+        expect(!t->page_visible(1) && !built && t->current() == 0,
+               kind + "B hidden and renamed _Build: still hidden, unbuilt, not current; current " +
+                   str(t->current()));
+        expect(changes.empty(), kind + "B hidden and renamed _Build: no on_changed, " + str(long(changes.size())));
+
+        // The control: C visible, renamed _Build (B's access key gone
+        // first, so only C has it), Alt+B: C selected, on_changed once.
+        t->set_page_title(1, "B");
+        t->set_page_title(2, "_Build");
+        settle();
+        changes.clear();
+        alt_b();
+        expect(t->current() == 2 && changes == std::vector<int>{2},
+               kind + "control, C visible and renamed _Build: selected (the key reaches the mnemonics), current " +
+                   str(t->current()) + ", " + str(long(changes.size())) + " on_changed");
+
+        // Put back: A current, C's title, B shown.
+        t->set_current(0);
+        t->set_page_title(2, "C");
+        t->set_page_visible(1, true);
+        settle();
+        expect(t->current() == 0 && t->page_visible(1) && !built, kind + "put back: A current, B shown");
+    }
+}
+
+// A named icon swapped for a path's own (icon::for_path, no fallback) on a
+// path that has none: the header as wide before, while GIO looks the path up
+// (the slot empty) and once it's found nothing. The slot holds the
+// small-icon size whatever it shows.
+void run_path_icon(rap::ui& ui)
+{
+    using namespace rap::layout;
+    for (const bool sidebar : {false, true})
+    {
+        const std::string kind = sidebar ? "sidebar, a path's icon: " : "strip, a path's icon: ";
+        const char* title = sidebar ? "Path icon sidebar" : "Path icon strip";
+        rap::tabs* t = nullptr;
+        auto win = ui.create(window{
+            title, {tabs{page{"A", label{"a"}}.icon(rap::icon::named("list-add-symbolic")), {"B", label{"b"}}}
+                        .sidebar(sidebar)
+                        .bind(t)}});
+        win->show();
+        settle();
+        settle();
+        GtkWidget* nb = sidebar ? nullptr : first_in(title, GTK_TYPE_NOTEBOOK);
+        GtkWidget* list = sidebar ? first_in(title, GTK_TYPE_LIST_BOX) : nullptr;
+        expect(t && (nb || list), kind + "bound, and its widgets found");
+        if (!t || !(nb || list)) continue;
+        auto header = [&]() -> GtkWidget*
+        {
+            if (list)
+            {
+                GtkListBoxRow* row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0);
+                return row ? gtk_bin_get_child(GTK_BIN(row)) : nullptr;
+            }
+            GtkWidget* page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(nb), 0);
+            return page ? gtk_notebook_get_tab_label(GTK_NOTEBOOK(nb), page) : nullptr;
+        };
+        const int before = natural(header()).width;
+        // A path of its own per run: one found to have none isn't asked again.
+        t->set_page_icon(0, rap::icon::for_path(std::string("/nonexistent/rapport-test-path-") +
+                                                (sidebar ? "sidebar" : "strip")));
+        const int pending = natural(header()).width;
+        for (int i = 0; i < 50; ++i) settle();  // GIO's lookup, on its threads, answered
+        const int after = natural(header()).width;
+        expect(header_icon(header()) && pending == before && after == before,
+               kind + "A's named icon for a path's with none: its slot kept, the width " + str(before) + ", " +
+                   str(pending) + " while it's found, " + str(after) + " after");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -1082,6 +1267,7 @@ int main(int argc, char** argv)
         std::printf("FAIL no gtk3 backend: %s\n", ui.error().c_str());
         return 1;
     }
+    add_test_icons();
     run_api(**ui);
     run_hidden_from_start(**ui);
     run_set_current_quiet(**ui);
@@ -1089,6 +1275,9 @@ int main(int argc, char** argv)
     run_fixed_canvas(**ui);
     run_ctrl_tab(**ui);
     run_icons(**ui);
+    run_mnemonic(**ui);
+    run_path_icon(**ui);
+    remove_test_icons();
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

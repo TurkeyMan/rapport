@@ -2112,10 +2112,21 @@ struct quiet_scope
     bool was_;
 };
 
-// A tab page's icon (#101): none for an empty one.
+// A tab page's icon (#101): none for an empty one. One that shows nothing
+// (for_path with no fallback: Qt shows `name` only) still takes its slot, as
+// a blank one: QTabBar and the list size a tab or row by the icon size only
+// for an icon that isn't null.
 QIcon page_q_icon(const rap::icon& i, const QWidget* w)
 {
-    return i ? to_q_icon(i, 16, w) : QIcon();
+    if (!i) return QIcon();
+    QIcon q = to_q_icon(i, 16, w);
+    if (q.isNull())
+    {
+        QPixmap blank(16, 16);
+        blank.fill(Qt::transparent);
+        q = QIcon(blank);
+    }
+    return q;
 }
 
 // Runs `redraw` (queued: once for a burst) when `w`'s palette, style or
@@ -2184,7 +2195,21 @@ public:
     {
         if (page < 0 || page >= tabs()->count()) return;
         const QString text = mnemonic(title);
-        if (tabs()->tabText(page) == text) return;  // (#91)
+        titles_.resize(size_t(tabs()->count()));
+        auto& kept = titles_[size_t(page)];
+        if ((kept ? *kept : tabs()->tabText(page)) == text) return;  // (#91)
+        // A hidden page's title kept until it's shown: QTabBar::setTabText
+        // enables the tab's mnemonic shortcut whether the tab is visible or
+        // not, so a hidden tab renamed "_Build" would be selected (and built)
+        // by Alt+B. (A sidebar's QListWidgetItem has no shortcut.)
+        if (!page_visible(page))
+        {
+            if (text == tabs()->tabText(page))
+                kept.reset();
+            else
+                kept = text;
+            return;
+        }
         // Through the bar: relaid out above only if the measured size changes.
         tabs()->bar_change([&] { tabs()->tabBar()->setTabText(page, text); });
     }
@@ -2257,6 +2282,7 @@ public:
             const bool first_shown = none_;
             const unsigned at = ++ops_;
             if (first_shown) set_none(false);
+            show_kept_title(page);
             tabs()->setTabVisible(page, true);
             if (first_shown && ops_ == at)
             {
@@ -2341,6 +2367,15 @@ private:
         else
             tabs()->setTabIcon(page, q);
     }
+    // A title set while page `page` was hidden, on its tab as it's shown
+    // (just before: setTabVisible enables the tab's shortcut with it).
+    void show_kept_title(int page)
+    {
+        if (size_t(page) >= titles_.size() || !titles_[size_t(page)]) return;
+        const QString text = *titles_[size_t(page)];
+        titles_[size_t(page)].reset();
+        tabs()->bar_change([&] { tabs()->tabBar()->setTabText(page, text); });
+    }
     // The icons again, in the bar's new colours or at its new scale (a
     // drawn one is drawn again): each one for another, so nothing moves.
     void redraw_icons()
@@ -2353,6 +2388,7 @@ private:
     lazy_pages lazy_;
     std::vector<bool> visible_;  // per page
     std::vector<rap::icon> icons_;  // per page, as set; empty: none
+    std::vector<std::optional<QString>> titles_;  // per page: set while hidden, not yet on its tab
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     bool hide_single_ = false;
     bool none_ = false;   // every page hidden: current() is -1

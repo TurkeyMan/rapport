@@ -2707,6 +2707,12 @@ public:
         , title_(title)
     {
         gtk_widget_set_valign(slot_, GTK_ALIGN_CENTER);
+        // Shown, the slot is the small-icon size whatever it holds, nothing
+        // included: a path's icon being found (for_path with no fallback
+        // shows nothing meanwhile, or ever, if it has none) never shrinks the
+        // tab and grows it again. (An image's pixel size alone reserves
+        // nothing for an empty one.)
+        gtk_widget_set_size_request(slot_, 16, 16);
         gtk_widget_set_visible(slot_, false);
         gtk_box_append(GTK_BOX(box_), slot_);
         gtk_box_append(GTK_BOX(box_), label_);
@@ -2877,7 +2883,14 @@ public:
         // switch-page); then it's made the one the spec says, quietly.
         {
             quiet_scope q(quiet_);
-            gtk_widget_set_visible(gtk_notebook_get_nth_page(GTK_NOTEBOOK(w_), page), on);
+            GtkWidget* child = gtk_notebook_get_nth_page(GTK_NOTEBOOK(w_), page);
+            gtk_widget_set_visible(child, on);
+            // GtkNotebook hides the tab label of a page hidden in a shown
+            // window, and doesn't show it again with the page: shown, its
+            // label (icon and title) is shown too.
+            if (on)
+                if (GtkWidget* label = gtk_notebook_get_tab_label(GTK_NOTEBOOK(w_), child))
+                    gtk_widget_set_visible(label, true);
             if (now >= 0) gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), now);
         }
         if (now >= 0) ensure_built(now);

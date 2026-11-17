@@ -52,7 +52,20 @@ namespace
 {
 
 // Relayouts asked for so far (static builds; a plugin build can't count
-// them, and its checks of none pass trivially).
+// them: its checks of none pass trivially, and a check that some were asked
+// for is made only where they're counted, laid_out).
+#ifdef RAPPORT_TEST_BUILTIN_WIN32
+constexpr bool layouts_counted = true;
+#else
+constexpr bool layouts_counted = false;
+#endif
+unsigned layouts();
+// Some relayout asked for, `n` of them counted; in a plugin build, unknown:
+// taken as yes (the check's other conditions still checked).
+bool laid_out(unsigned n)
+{
+    return !layouts_counted || n != 0;
+}
 unsigned layouts()
 {
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
@@ -1026,7 +1039,7 @@ void page_icons(rap::ui& ui, bool sidebar)
     pump();
     expect(title_of(h, sidebar, 3) == long_title, kind + "D's long title: " + title_of(h, sidebar, 3));
     if (sidebar)
-        expect(retitled != 0 && list_after > list_before,
+        expect(laid_out(retitled) && list_after > list_before,
                kind + "a long title: laid out, the list wider, " + str(list_before) + " to " + str(list_after));
     else
         expect(retitled == 0, kind + "a long title: the strip's measure the same, no relayout, " + str(long(retitled)));
@@ -1100,11 +1113,102 @@ void page_icons(rap::ui& ui, bool sidebar)
         t->set_page_icon(2, rap::icon{});
         pump();
         const long without = width_of(h);
-        expect(layouts() != before && with - without == MulDiv(16, int(dpi), 96) + MulDiv(8, int(dpi), 96),
+        expect(laid_out(layouts() - before) && with - without == MulDiv(16, int(dpi), 96) + MulDiv(8, int(dpi), 96),
                kind + "every icon removed: the list narrower by the icons' column, " + str(with) + " to " +
                    str(without));
     }
     RemoveWindowSubclass(h, count_writes, 0x101);
+}
+
+// A sidebar's row as drawn (WM_DRAWITEM, unselected): the leftmost column
+// from `from` on with anything unlike the row's background (-1: none): the
+// title's start, past the icon's square.
+int row_ink_x(HWND list, int item, int from)
+{
+    RECT r{};
+    if (SendMessageW(list, LB_GETITEMRECT, WPARAM(item), reinterpret_cast<LPARAM>(&r)) == LB_ERR) return -2;
+    const int w = r.right - r.left, hh = r.bottom - r.top;
+    dib d(w, hh, 0xFF00FF);
+    DRAWITEMSTRUCT di{};
+    di.CtlType = ODT_LISTBOX;
+    di.CtlID = UINT(GetDlgCtrlID(list));
+    di.itemID = UINT(item);
+    di.itemAction = ODA_DRAWENTIRE;
+    di.hwndItem = list;
+    di.hDC = d.dc;
+    di.rcItem = {0, 0, w, hh};
+    SendMessageW(GetParent(list), WM_DRAWITEM, WPARAM(di.CtlID), reinterpret_cast<LPARAM>(&di));
+    GdiFlush();
+    if (!d.bits) return -2;
+    const uint32_t bg = d.bits[w - 1] & 0xFFFFFF;
+    for (int x = from; x < w; ++x)
+        for (int y = 0; y < hh; ++y)
+            if ((d.bits[y * w + x] & 0xFFFFFF) != bg) return x;
+    return -1;
+}
+
+// A path's own icon (icon::for_path) with no fallback, on a path that has
+// none, pending and once found to be none: it still takes the icon's place.
+// A strip's tab keeps its image (an image list entry) and its width; a
+// sidebar keeps its icons' column: the list's width and the titles' start
+// (its own row's and another's) as with a named icon, at once and after
+// the lookup's had time.
+void path_icon_slot(rap::ui& ui, bool sidebar)
+{
+    using namespace rap::layout;
+    const std::string kind = sidebar ? "sidebar, a path's icon pending: " : "strip, a path's icon pending: ";
+    const std::wstring title = sidebar ? L"Path slot sidebar" : L"Path slot strip";
+    rap::tabs* t = nullptr;
+    auto win = ui.create(window{narrow(title),
+                                {tabs{{"A", label{"page a"}},
+                                      page{"Build status", label{"page b"}}.icon(rap::icon::named("go-up")),
+                                      {"C", label{"page c"}}}
+                                     .sidebar(sidebar)
+                                     .bind(t)}});
+    pump();
+    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
+    expect(t && h, kind + "the window and its control");
+    if (!t || !h) return;
+    const UINT dpi = GetDpiForWindow(top);
+    const int past_icon = MulDiv(8 + 16, int(dpi), 96);
+    struct shape
+    {
+        long width;
+        int image, own_x, other_x;
+    };
+    auto now = [&]
+    {
+        shape s{header_width(h, sidebar, 1), -1, -1, -1};
+        if (sidebar)
+        {
+            s.own_x = row_ink_x(h, 1, past_icon);
+            s.other_x = row_ink_x(h, 2, 0);
+        }
+        else
+        {
+            TCITEMW it{};
+            it.mask = TCIF_IMAGE;
+            TabCtrl_GetItem(h, 1, &it);
+            s.image = it.iImage;
+        }
+        return s;
+    };
+    auto say = [](const shape& s)
+    {
+        return "width " + str(s.width) + ", image " + str(s.image) + ", title at " + str(s.own_x) + ", another's at " +
+               str(s.other_x);
+    };
+    const shape named = now();
+    t->set_page_icon(1, rap::icon::for_path("C:\\rapport-no-such-path-101\\nothing-here"));
+    const shape at_once = now();
+    pump(40);
+    const shape later = now();
+    for (const auto& [when, s] : {std::pair{"at once", at_once}, std::pair{"after the lookup", later}})
+        expect(s.width == named.width && s.image == named.image && s.own_x == named.own_x &&
+                   s.other_x == named.other_x && (sidebar || s.image >= 0),
+               kind + "a named icon swapped for a path's with none, " + when + ": as with the named one, " +
+                   say(named) + "; now " + say(s));
 }
 
 // #101 in dark mode: a strip's tabs painted by rapport (draw_dark_tabs),
@@ -1238,6 +1342,54 @@ void page_icons_shown(rap::ui& ui, bool sidebar)
     pump();
 }
 
+// #102, shown: a sidebar of short titles (its list at its least width,
+// which the icons' column doesn't change): the first icon, and the last
+// removed, move every row's title, so every row is left to paint, not only
+// the page's; with the page hidden too (its row gone, the others' still
+// moving).
+void icon_column_repaint(rap::ui& ui)
+{
+    using namespace rap::layout;
+    const std::string kind = "shown, sidebar, the icons' column (#102): ";
+    rap::tabs* t = nullptr;
+    auto win = ui.create(window{"Icon column sidebar",
+                                {tabs{{"A", label{"page a"}}, {"B", label{"page b"}}, {"C", label{"page c"}}}
+                                     .sidebar()
+                                     .bind(t)}});
+    win->show();
+    pump();
+    HWND top = FindWindowW(nullptr, L"Icon column sidebar");
+    HWND h = top ? one_of(top, L"ListBox") : nullptr;
+    expect(t && h, kind + "the window, shown, and its list");
+    if (!t || !h) return;
+    // After `change`: what's left to paint covers rows `first` and `last`
+    // (the others than the page's: the update rect is their union's at least).
+    auto check = [&](const std::string& what, int first, int last, const std::function<void()>& change)
+    {
+        pump();
+        UpdateWindow(top);
+        const long w = width_of(h);
+        ValidateRect(h, nullptr);
+        change();
+        RECT dirty{}, a{}, b{};
+        const bool any = GetUpdateRect(h, &dirty, FALSE) != FALSE;
+        SendMessageW(h, LB_GETITEMRECT, WPARAM(first), reinterpret_cast<LPARAM>(&a));
+        SendMessageW(h, LB_GETITEMRECT, WPARAM(last), reinterpret_cast<LPARAM>(&b));
+        expect(any && dirty.top <= a.top && dirty.bottom >= b.bottom && dirty.left <= a.left && dirty.right >= a.right,
+               kind + what + ": rows " + str(first) + " to " + str(last) + " left to paint, " + str(dirty.left) + "," +
+                   str(dirty.top) + " " + str(dirty.right) + "," + str(dirty.bottom) + " over " + str(a.top) + " to " +
+                   str(b.bottom));
+        expect(width_of(h) == w, kind + what + ": the list's width the same (its least), " + str(w) + " to " +
+                                     str(width_of(h)));
+    };
+    check("B's, the first icon", 0, 2, [&] { t->set_page_icon(1, solid(red)); });
+    check("B's, the last icon, removed", 0, 2, [&] { t->set_page_icon(1, rap::icon{}); });
+    t->set_page_visible(1, false);
+    check("hidden B's, the first icon", 0, 1, [&] { t->set_page_icon(1, solid(red)); });
+    check("hidden B's, the last icon, removed", 0, 1, [&] { t->set_page_icon(1, rap::icon{}); });
+    pump();
+}
+
 int main(int argc, char** argv)
 {
     rap::load_options options{.backend = "win32"};
@@ -1251,6 +1403,7 @@ int main(int argc, char** argv)
     {
         for (const bool sidebar : {false, true}) shown_window(**ui, sidebar);
         for (const bool sidebar : {false, true}) page_icons_shown(**ui, sidebar);
+        icon_column_repaint(**ui);
         std::printf(fails ? "%d failed\n" : "all passed\n", fails);
         return fails ? 1 : 0;
     }
@@ -1263,6 +1416,7 @@ int main(int argc, char** argv)
     for (int kind = 0; kind < 3; ++kind) fixed_canvas(**ui, kind);
     for (const bool sidebar : {false, true}) page_icons(**ui, sidebar);
     page_icons_dark(**ui);
+    for (const bool sidebar : {false, true}) path_icon_slot(**ui, sidebar);
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
