@@ -254,6 +254,107 @@ void visibility(rap::ui& ui, bool sidebar)
            kind + "pages out of range: not visible, nothing changed");
 }
 
+std::string seq(const std::vector<int>& v)
+{
+    std::string s;
+    for (int i : v) s += (s.empty() ? "" : ",") + std::to_string(i);
+    return "[" + s + "]";
+}
+
+// #98: set_current is the app's own: no on_changed, the page made current
+// natively, a lazy one built and shown; to the current page, nothing. A lazy
+// page made current by hiding the current one: built and shown, no
+// on_changed. A user's selection, made on the native control as a click's
+// reaches rapport: on_changed once, with the page. A strip's by
+// TabCtrl_SetCurFocus (it selects and sends TCN_SELCHANGE, as a click
+// does), a sidebar's by LB_SETCURSEL and the LBN_SELCHANGE the list box
+// sends its parent.
+void set_current_quiet(rap::ui& ui, bool sidebar)
+{
+    using namespace rap::layout;
+    const std::string kind = sidebar ? "sidebar, set_current (#98): " : "strip, set_current (#98): ";
+    const std::wstring title = sidebar ? L"Quiet sidebar" : L"Quiet strip";
+    rap::tabs* t = nullptr;
+    rap::label* built[4] = {};
+    std::vector<int> changes;
+    auto lazy_page = [&built](int i, const char* text)
+    { return lazy{[&built, i, text] { return rap::node(label{text}.bind(built[i])); }}; };
+    auto win = ui.create(window{narrow(title),
+                                {tabs{{"A", label{"page a"}},
+                                      {"B", lazy_page(1, "page b")},
+                                      {"C", lazy_page(2, "page c")},
+                                      {"D", lazy_page(3, "page d")}}
+                                     .sidebar(sidebar)
+                                     .on_changed([&](int i) { changes.push_back(i); })
+                                     .bind(t)}});
+    pump();
+    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
+    expect(t && h, kind + "the window, never shown, and its " + (sidebar ? "list" : "tab control"));
+    if (!t || !h) return;
+    // The page shown natively: its label's control visible, every other
+    // page's not (an unbuilt page has none).
+    const wchar_t* texts[] = {L"page a", L"page b", L"page c", L"page d"};
+    auto showing = [&](int page)
+    {
+        for (int i = 0; i < 4; ++i)
+            if (shown(with_text(top, texts[i])) != (i == page)) return false;
+        return true;
+    };
+    expect(t->current() == 0 && selected(h, sidebar) == "A" && showing(0) && !built[1] && !built[2] && !built[3],
+           kind + "A current and shown, the lazy B, C and D unbuilt");
+    changes.clear();
+
+    // To the lazy B: no on_changed; current and selected; built, shown.
+    t->set_current(1);
+    pump();
+    expect(changes.empty(), kind + "set_current(1): no on_changed, " + seq(changes));
+    expect(t->current() == 1 && selected(h, sidebar) == "B",
+           kind + "set_current(1): B current and selected, " + str(t->current()) + ", " + selected(h, sidebar));
+    expect(built[1] && showing(1), kind + "set_current(1): the lazy B built and shown");
+    // The current page again: nothing.
+    t->set_current(1);
+    pump();
+    expect(changes.empty(), kind + "set_current(1) again: no on_changed, " + seq(changes));
+    expect(t->current() == 1 && selected(h, sidebar) == "B" && showing(1) && !built[2] && !built[3],
+           kind + "set_current(1) again: nothing changed");
+    // B (current) hidden: the lazy C, the nearest after it, built and shown,
+    // no on_changed.
+    t->set_page_visible(1, false);
+    pump();
+    expect(t->current() == 2 && selected(h, sidebar) == "C",
+           kind + "B (current) hidden: C current and selected, " + str(t->current()) + ", " + selected(h, sidebar));
+    expect(built[2] && showing(2), kind + "B (current) hidden: the lazy C built and shown");
+    expect(changes.empty(), kind + "B (current) hidden: no on_changed, " + seq(changes));
+
+    // A user's selection of the lazy D (its header the third of ACD): on
+    // the native control, on_changed once, with 3; built and shown.
+    const int item = int(headers(h, sidebar).find('D'));
+    expect(item == 2, kind + "D's header the third, " + str(item));
+    if (sidebar)
+    {
+        SendMessageW(h, LB_SETCURSEL, WPARAM(item), 0);
+        SendMessageW(GetParent(h), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(h), LBN_SELCHANGE), LPARAM(h));
+    }
+    else
+        TabCtrl_SetCurFocus(h, item);
+    pump();
+    expect(changes == std::vector<int>{3}, kind + "a user's selection of D: on_changed once, with 3, " + seq(changes));
+    expect(t->current() == 3 && selected(h, sidebar) == "D" && built[3] && showing(3),
+           kind + "a user's selection of D: D current, built and shown, " + str(t->current()));
+    // set_current to the current page: nothing.
+    changes.clear();
+    t->set_current(3);
+    pump();
+    expect(changes.empty() && t->current() == 3 && selected(h, sidebar) == "D" && showing(3),
+           kind + "set_current(3), current already: nothing, " + seq(changes));
+    // Back to A, the app's: no on_changed.
+    t->set_current(0);
+    pump();
+    expect(changes.empty() && t->current() == 0 && selected(h, sidebar) == "A" && showing(0),
+           kind + "set_current(0): A current and shown, no on_changed, " + seq(changes));
+}
+
 // Hidden from the start: no header, never shown, a lazy page unbuilt.
 void hidden_from_start(rap::ui& ui, bool sidebar)
 {
@@ -490,6 +591,7 @@ int main(int argc, char** argv)
     }
     for (const bool sidebar : {false, true}) visibility(**ui, sidebar);
     for (const bool sidebar : {false, true}) hidden_from_start(**ui, sidebar);
+    for (const bool sidebar : {false, true}) set_current_quiet(**ui, sidebar);
     sidebar_rows(**ui);
     for (const bool sidebar : {false, true}) single_tab(**ui, sidebar);
     for (int kind = 0; kind < 3; ++kind) fixed_canvas(**ui, kind);

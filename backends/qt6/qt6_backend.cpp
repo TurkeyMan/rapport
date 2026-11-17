@@ -2114,7 +2114,10 @@ public:
     {
         if (!page_visible(i)) return;
         if (tabs()->currentIndex() == i) return;  // (#88)
-        tabs()->setCurrentIndex(i);
+        {
+            quiet_scope q(quiet_);  // the app's own: no on_changed (#98)
+            tabs()->setCurrentIndex(i);
+        }
         lazy_.ensure_built(i);
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
@@ -2279,7 +2282,10 @@ public:
     {
         if (!page_visible(i)) return;
         if (list_->currentRow() == i) return;  // (#88)
-        list_->setCurrentRow(i);
+        {
+            quiet_scope q(quiet_);  // the app's own: no on_changed (#98)
+            list_->setCurrentRow(i);
+        }
         lazy_.ensure_built(i);
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }

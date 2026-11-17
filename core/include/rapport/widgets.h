@@ -1006,7 +1006,8 @@ class tabs : public widget
 public:
     // -1 when every page is hidden.
     virtual int current() const = 0;
-    // A hidden page (or an index out of range): nothing.
+    // Doesn't fire on_changed. A hidden page (or an index out of range):
+    // nothing.
     virtual void set_current(int) = 0;
     virtual void on_changed(std::function<void(int)>) = 0;
     // A hidden page's tab is gone, and the page takes no layout, paint or

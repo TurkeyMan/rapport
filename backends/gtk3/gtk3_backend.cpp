@@ -2372,7 +2372,11 @@ public:
     {
         // Hidden (or out of range), or current already (#88): nothing.
         if (!state_.shown(i) || current() == i) return;
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
+        {
+            quiet q(this);  // the app's own: no on_changed (#98)
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
+        }
+        ensure_built(i);
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
@@ -2490,7 +2494,7 @@ public:
         if (!state_.shown(i)) return;  // hidden, or out of range
         GtkListBoxRow* row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i);
         if (row && gtk_list_box_get_selected_row(GTK_LIST_BOX(list_)) == row) return;  // unchanged (#88)
-        gtk_list_box_select_row(GTK_LIST_BOX(list_), row);
+        select(i);  // the app's own: no on_changed (#98)
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
 
