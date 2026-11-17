@@ -580,8 +580,8 @@ if(TARGET rapport_win32)
     # pass.
     if(MSVC)
         add_executable(rapport-win32-caption-glass-test win32_caption_glass_test.cpp)
-        target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::rapport user32 gdi32 dwmapi d3d11 dxgi
-                                                                       windowsapp)
+        target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi
+                                                                       d3d11 dxgi windowsapp)
         target_compile_options(rapport-win32-caption-glass-test PRIVATE /bigobj)
         if(RAPPORT_STATIC)
             target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::backend_win32)
