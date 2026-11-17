@@ -174,8 +174,8 @@ printed print_erase(HWND top)
                        [&](HDC dc) { SendMessageW(top, WM_ERASEBKGND, reinterpret_cast<WPARAM>(dc), 0); });
 }
 // The tab control's page body, as it prints itself (#94: the real ground,
-// not the window's).
-DWORD tab_body(HWND tab)
+// not the window's); with `beside`, its tab row right of the last tab.
+DWORD tab_body(HWND tab, bool beside = false)
 {
     RECT c{};
     GetClientRect(tab, &c);
@@ -187,6 +187,7 @@ DWORD tab_body(HWND tab)
                                       SendMessageW(tab, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc),
                                                    PRF_CLIENT | PRF_ERASEBKGND);
                                   });
+    if (beside) return p.at(c.right - 3, std::max(1, int(body.top) / 2));
     return p.at((body.left + body.right) / 2, (body.top + body.bottom) / 2);
 }
 
@@ -325,7 +326,12 @@ int main(int argc, char** argv)
     // The page's body: the content's colour on a base surface (rapport draws
     // its tabs), whichever it is.
     const DWORD page = tab_body(tabs_found[0]);
-    if (eleven) expect(page == content, "a tab page's body is the content's " + hex(content) + ": " + hex(page));
+    if (eleven)
+    {
+        expect(page == content, "a tab page's body is the content's " + hex(content) + ": " + hex(page));
+        const DWORD row = tab_body(tabs_found[0], true);
+        expect(row == content, "the tab row beside the tabs is the content's " + hex(content) + ": " + hex(row));
+    }
 
     if (fluent)
     {

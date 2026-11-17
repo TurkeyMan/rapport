@@ -8806,6 +8806,24 @@ void draw_base_tabs(HWND h, HDC dc)
     FillRect(dc, &c, surface);
     // Its own erase left out: around the tabs is the surface, filled here.
     DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
+    // It fills its tabs' row in the window colour all the same: the row
+    // round the tabs (the current one standing 2 px proud) is the surface.
+    {
+        const int n = TabCtrl_GetItemCount(h), current = TabCtrl_GetCurSel(h);
+        const int proud = MulDiv(2, int(dpi_of(h)), 96);
+        RECT row{c.left, c.top, c.right, c.top};
+        const int saved = SaveDC(dc);
+        for (int i = 0; i < n; ++i)
+        {
+            RECT r;
+            if (!TabCtrl_GetItemRect(h, i, &r)) continue;
+            row.bottom = std::max(row.bottom, r.bottom);
+            if (i == current) InflateRect(&r, proud, proud);
+            ExcludeClipRect(dc, r.left, r.top, r.right, r.bottom);
+        }
+        if (row.bottom > row.top) FillRect(dc, &row, surface);
+        RestoreDC(dc, saved);
+    }
     RECT body = c;
     traced_tab_adjust(h, FALSE, &body);
     if (body.right <= body.left || body.bottom <= body.top) return;
