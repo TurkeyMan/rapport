@@ -431,6 +431,18 @@ struct native_tabs
     }
     // The page natively shown holds the label `text`.
     bool showing(const char* text) const { return holds_label(tw ? tw->currentWidget() : stack->currentWidget(), text); }
+    // Page `i`'s widget the only one visible (within its tabs).
+    bool only_shown(int i) const
+    {
+        QWidget* within = tw ? static_cast<QWidget*>(tw) : stack;
+        const int count = tw ? tw->count() : stack->count();
+        for (int k = 0; k < count; ++k)
+        {
+            QWidget* w = tw ? tw->widget(k) : stack->widget(k);
+            if (w && w->isVisibleTo(within) != (k == i)) return false;
+        }
+        return true;
+    }
     std::vector<int> headers() const { return tw ? bar_order(tw->tabBar()) : list_order(list); }
     // The pages' stack not hidden (with every page hidden, it is).
     bool stack_shown() const
@@ -520,6 +532,7 @@ void run_reentrant(rap::ui& ui, bool sidebar)
                  expect(t->current() == 2 && n.current() == 2,
                         kind + "C current, natively too, " + num(t->current()) + "/" + num(n.current()));
                  expect(n.showing("page c"), kind + "C shown");
+                 expect(n.only_shown(2), kind + "C's page the only one visible, B's not");
                  expect(built[1] != nullptr, kind + "B built");
              });
     scenario("set_page_visible re-entered", {nullptr, nullptr, hide_d, nullptr},
@@ -576,6 +589,7 @@ void run_reentrant(rap::ui& ui, bool sidebar)
                  expect(t->current() == 2 && n.current() == 2,
                         kind + "C current, natively too, " + num(t->current()) + "/" + num(n.current()));
                  expect(n.stack_shown() && n.showing("page c"), kind + "C shown");
+                 expect(n.only_shown(2), kind + "C's page the only one visible, B's not");
                  expect(built[1] != nullptr, kind + "B built");
              });
     // A user's switch to the lazy B, whose builder hides every page: none

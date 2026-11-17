@@ -160,6 +160,21 @@ struct native_tabs
     GtkWidget* list = nullptr;   // a sidebar's list
     GtkWidget* stack = nullptr;  // and its stack
     std::string headers() const { return nb ? notebook_headers(nb) : list_headers(list); }
+    // Page `i`'s widget the only one the notebook or stack shows (visible,
+    // and child-visible: GTK clears that on the pages it isn't showing).
+    bool only_shown(int i) const
+    {
+        for (int j = 0;; ++j)
+        {
+            GtkWidget* page = nb ? (j < gtk_notebook_get_n_pages(GTK_NOTEBOOK(nb))
+                                        ? gtk_notebook_get_nth_page(GTK_NOTEBOOK(nb), j)
+                                        : nullptr)
+                                 : gtk_stack_get_child_by_name(GTK_STACK(stack), std::to_string(j).c_str());
+            if (!page) return true;
+            const bool on = gtk_widget_get_visible(page) && gtk_widget_get_child_visible(page);
+            if (on != (j == i)) return false;
+        }
+    }
     std::string pages() const { return nb ? notebook_pages_shown(nb) : stack_pages_shown(stack); }
     int count() const { return nb ? gtk_notebook_get_n_pages(GTK_NOTEBOOK(nb)) : list_rows(list); }
     // The page natively current, or -1 when no page shows.
@@ -542,6 +557,7 @@ void reentrant(rap::ui& ui, bool sidebar)
                  expect(t->current() == 2 && native(n) == 2,
                         kind + "C current, natively too, " + str(t->current()) + "/" + str(native(n)));
                  expect(showing(n, "page c"), kind + "C shown");
+                 expect(n.only_shown(2), kind + "C's page the only one shown, B's not");
                  expect(built[1] != nullptr, kind + "B built");
              });
     scenario("set_page_visible re-entered", {nullptr, nullptr, hide_d, nullptr},
@@ -599,6 +615,7 @@ void reentrant(rap::ui& ui, bool sidebar)
                         kind + "C current, natively too, " + str(t->current()) + "/" + str(native(n)) + "/" +
                             str(n.shown()));
                  expect(showing(n, "page c"), kind + "C shown");
+                 expect(n.only_shown(2), kind + "C's page the only one shown, B's not");
                  expect(built[1] != nullptr, kind + "B built");
              });
     // A user's switch to the lazy B, whose builder hides every page: none

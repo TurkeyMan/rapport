@@ -2108,6 +2108,7 @@ public:
             if (!visible_[size_t(i)]) tabs()->setTabVisible(i, false);
         if (first < 0) set_none(true);
         update_strip(true);
+        reconcile();
         settled_ = current();
     }
     int current() const override { return none_ ? -1 : tabs()->currentIndex(); }
@@ -2122,6 +2123,7 @@ public:
             tabs()->setCurrentIndex(i);
         }
         lazy_.ensure_built(i);
+        reconcile();
         settled_ = current();
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
@@ -2172,6 +2174,7 @@ public:
         }
         update_strip(false);
         tabs()->updateGeometry();
+        reconcile();
         settled_ = current();
     }
     bool page_visible(int page) const override
@@ -2182,6 +2185,7 @@ public:
     {
         lazy_ = std::move(pages);
         lazy_.ensure_built(current());
+        reconcile();
         settled_ = current();
     }
 
@@ -2192,6 +2196,7 @@ private:
     // again, or hidden every page), if there's one and it isn't `before`.
     void user_switched(int before)
     {
+        reconcile();
         settled_ = current();
         if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
     }
@@ -2201,6 +2206,15 @@ private:
         none_ = none;
         if (auto* stack = tabs()->findChild<QStackedWidget*>(QString(), Qt::FindDirectChildrenOnly))
             stack->setVisible(!none);
+    }
+    // At the end of every operation: current()'s page the only one visible,
+    // or none (Qt can show a page widget itself after a builder's nested
+    // switch, inside setTabVisible).
+    void reconcile()
+    {
+        const int now = current();
+        for (int i = 0; i < tabs()->count(); ++i)
+            if (QWidget* w = tabs()->widget(i)) w->setVisible(i == now);
     }
     unsigned ops_ = 0;  // the app's set_current and set_page_visible calls, nested ones included
     // The strip shown or hidden (hide_single_tab); hidden, the page alone
@@ -2306,6 +2320,7 @@ public:
         if (first < 0) set_none(true);
         update_strip();
         relayout();
+        reconcile();
         settled_ = current();
     }
     int current() const override { return none_ ? -1 : std::max(0, list_->currentRow()); }
@@ -2319,6 +2334,7 @@ public:
             list_->setCurrentRow(i);
         }
         lazy_.ensure_built(i);
+        reconcile();
         settled_ = current();
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
@@ -2359,6 +2375,7 @@ public:
         }
         update_strip();
         relayout();
+        reconcile();
         settled_ = current();
     }
     bool page_visible(int page) const override
@@ -2369,6 +2386,7 @@ public:
     {
         lazy_ = std::move(pages);
         lazy_.ensure_built(current());
+        reconcile();
         settled_ = current();
     }
     // Sizes the rows again (an app's row height: the list's least height
@@ -2380,6 +2398,7 @@ private:
     // one and it isn't `before`.
     void user_switched(int before)
     {
+        reconcile();
         settled_ = current();
         if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
     }
@@ -2387,6 +2406,14 @@ private:
     {
         none_ = none;
         stack_->setVisible(!none);
+    }
+    // At the end of every operation: current()'s page the only one visible,
+    // or none.
+    void reconcile()
+    {
+        const int now = current();
+        for (int i = 0; i < stack_->count(); ++i)
+            if (QWidget* w = stack_->widget(i)) w->setVisible(i == now);
     }
     // The list and its line hidden with at most one page visible
     // (hide_single_tab): the page fills the area.
