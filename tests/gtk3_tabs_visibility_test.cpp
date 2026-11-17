@@ -258,6 +258,14 @@ void run_hidden_from_start(rap::ui& ui)
         expect(changes == 0, kind + "no on_changed at build, " + str(changes));
 
         // hide_single_tab: one page visible, no strip, the page filling it.
+        // The page's margins made 10 px, unlike the tabs' own 6 px (the window's
+        // round its content): equal, counting them twice or not at all would
+        // measure the same.
+        gtk_widget_set_margin_start(page_c, 10);
+        gtk_widget_set_margin_end(page_c, 10);
+        gtk_widget_set_margin_top(page_c, 10);
+        gtk_widget_set_margin_bottom(page_c, 10);
+        settle();
         expect(!strip(), kind + "one page visible: no strip");
         GtkWidget* outer = sidebar ? box : nb;
         // Preferred sizes count a widget's own margins: the tabs' (the

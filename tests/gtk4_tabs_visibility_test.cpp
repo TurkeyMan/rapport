@@ -292,6 +292,13 @@ void hidden_from_start(rap::ui& ui, bool sidebar)
     GtkWidget* whole = n.nb ? n.nb : gtk_widget_get_parent(n.list);
     GtkWidget* page_c = n.nb ? gtk_notebook_get_nth_page(GTK_NOTEBOOK(n.nb), 2)
                              : gtk_stack_get_child_by_name(GTK_STACK(n.stack), "2");
+    // The page's margins made 10 px, unlike the tabs' own 6 px (the window's
+    // round its content): equal, counting them twice or not at all would
+    // measure the same.
+    gtk_widget_set_margin_start(page_c, 10);
+    gtk_widget_set_margin_end(page_c, 10);
+    gtk_widget_set_margin_top(page_c, 10);
+    gtk_widget_set_margin_bottom(page_c, 10);
     auto strip_shown = [&]
     {
         return n.nb ? bool(gtk_notebook_get_show_tabs(GTK_NOTEBOOK(n.nb)))
