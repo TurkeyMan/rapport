@@ -143,6 +143,10 @@ std::wstring mnemonic(const std::string& s)
 }
 constexpr UINT wm_rapport_frame = WM_APP + 2;
 constexpr UINT wm_rapport_relayout = WM_APP + 3;
+// What waited for a layout (after_layout), run from the message loop: a
+// layout made from inside another call (a flush, relayout_at_once) runs none
+// of the app's code there.
+constexpr UINT wm_rapport_after_layout = WM_APP + 31;
 constexpr UINT wm_rapport_selection = WM_APP + 4;  // a list's coalesced selection change
 constexpr UINT wm_rapport_fill_last = WM_APP + 5;
 constexpr UINT wm_rapport_read_back = WM_APP + 6;  // a pane's canvas's frame, read back  // a list's last column refits, once a header drag lands
@@ -1531,12 +1535,74 @@ public:
     virtual HWND hwnd() const = 0;
     virtual void relayout() = 0;
     // Lays out and repaints now, in one go (a different tab page showing).
-    virtual void relayout_at_once() = 0;
-    // A layout still to come, now: for a size asked for before it.
-    virtual void flush_layout() {}
+    // False if the window went meanwhile (what its sizes' delivery ran
+    // destroyed it): the caller, gone with it, touches nothing more.
+    virtual bool relayout_at_once() = 0;
+    // A layout still to come, now: for a size asked for before it. False
+    // as relayout_at_once's.
+    virtual bool flush_layout() { return true; }
+    // This window's layouts under way (layout_scope). A layout asked for
+    // meanwhile (a resize, a page shown, layout_now from WM_SIZE) only marks
+    // it dirty: never one window's layout within another of its own, which
+    // would place what the outer one is placing and deliver sizes it then
+    // places over. Once the outermost is done, delivery and all, it's laid
+    // out again (layout_settled) while it's dirty.
+    unsigned in_layout = 0;
+    bool layout_dirty = false;
+    // The outermost layout scope done (a drag's): laid out again if a layout
+    // was asked for meanwhile, else what waited for it run.
+    virtual void layout_settled() {}
+    // Gone with the window: what runs app code within a layout (a delivery,
+    // a continuation) checks it after, and touches nothing if it's expired.
+    std::shared_ptr<bool> layout_alive = std::make_shared<bool>(true);
+    // Run once the window's layout is done, delivery and re-runs and all:
+    // what assumes the layout's been made (a splitter's on_moved for a drag
+    // released within one, a stack's focus moved into its new page, a page
+    // switch reported) when it's put off by a layout under way. Otherwise
+    // now. The caller guards its own lifetime (a weak_ptr it checks).
+    std::vector<std::function<void()>> after_layout;
+    void after_layout_or_now(std::function<void()> f)
+    {
+        if (in_layout)
+            after_layout.push_back(std::move(f));
+        else
+            f();
+    }
+    // A relayout_at_once's visibility, taken before it turns drawing off
+    // (WM_SETREDRAW FALSE clears WS_VISIBLE): -1, none under way.
+    int at_once_visible = -1;
     float scale() const { return scale_of(hwnd()); }
     UINT dpi() const { return dpi_of(hwnd()); }
     int px(float logical) const { return int(std::lround(logical * scale())); }
+};
+
+unsigned g_layout_depth_max = 0;
+unsigned g_layout_passes = 0;
+// A window's layout under way (its own, a splitter's drag in it), round the
+// moves it makes and the sizes they deliver. `settles`: the outermost lays
+// the window out again if a layout was asked for meanwhile (layout_now runs
+// its own passes, so not its).
+struct layout_scope
+{
+    explicit layout_scope(win_context& w, bool settles = true)
+        : w_(w)
+        , settles_(settles)
+        , alive_(w.layout_alive)
+    {
+        g_layout_depth_max = std::max(g_layout_depth_max, ++w_.in_layout);
+    }
+    ~layout_scope()
+    {
+        if (alive_.expired()) return;  // the window went with what it delivered
+        if (--w_.in_layout == 0 && settles_ && (w_.layout_dirty || !w_.after_layout.empty())) w_.layout_settled();
+    }
+    layout_scope(const layout_scope&) = delete;
+    layout_scope& operator=(const layout_scope&) = delete;
+
+private:
+    win_context& w_;
+    bool settles_;
+    std::weak_ptr<bool> alive_;
 };
 
 SIZE text_extent(HWND h, const std::wstring& s, bool multiline = false, int max_width = 0)
@@ -1563,8 +1629,20 @@ struct move_batch
     // For a size the window doesn't have yet (see window::resize): nothing
     // moves or shows, and canvases draw for where they'll be.
     bool ahead = false;
+    unsigned id = 0;      // which (g_move_batches): a splitter placed in it knows it
+    HWND window = nullptr;  // whose: another window's layout makes a batch of its own
 };
 move_batch* g_moves = nullptr;
+unsigned g_move_batches = 0;
+// The batch whose moves are being made now, and their sizes delivered (the
+// controls' WM_SIZE, a canvas's on_resize): 0, none.
+unsigned g_delivering = 0;
+// Whether batch `id` is collecting moves (a placement in it, a nested one
+// joining it) or delivering them now.
+bool batch_live(unsigned id)
+{
+    return id && ((g_moves && g_moves->id == id) || g_delivering == id);
+}
 
 // A control that only moves carries its pixels along (no repaint); one that
 // changes size, or has a repaint pending (a label whose text changed as it
@@ -1611,6 +1689,11 @@ std::unordered_map<HWND, RECT> g_parked;
 // resize (window::resize): a canvas taking its size then neither tells the
 // app nor draws, keeping the frame it drew for the size it's about to have.
 bool g_canvases_quiet = false;
+// For tests: called as resize's second, quiet, ahead layout's delivery
+// ends (a test destroys the window there: no app callback of a quiet canvas
+// can).
+void (*g_resize_quiet_hook_for_tests)(void*) = nullptr;
+void* g_resize_quiet_hook_data = nullptr;
 
 void move_control(HWND h, int x, int y, int w, int hgt)
 {
@@ -1651,15 +1734,31 @@ void redraw_now(HWND h, const RECT* rect, HRGN region, UINT flags)
 class moves_in_one_pass
 {
 public:
-    explicit moves_in_one_pass(bool ahead = false)
+    // Joins the batch collecting for the same window (`window`, its top
+    // level), if any; otherwise a batch of its own, delivered as it ends,
+    // the one it was made within (another window's) collecting again after.
+    explicit moves_in_one_pass(HWND window, bool ahead = false)
     {
-        if (!g_moves) g_moves = &batch_, owner_ = true, batch_.ahead = ahead;
+        if (g_moves && g_moves->window == window) return;
+        outer_ = g_moves;
+        g_moves = &batch_;
+        owner_ = true;
+        batch_.ahead = ahead;
+        batch_.id = ++g_move_batches;
+        batch_.window = window;
     }
     ~moves_in_one_pass()
     {
         if (!owner_) return;
-        g_moves = nullptr;
+        g_moves = outer_;
         if (batch_.ahead) return;
+        // Delivering this batch's moves until the end (a nested batch made
+        // meanwhile delivers its own, then this one's again).
+        struct delivering
+        {
+            unsigned was;
+            ~delivering() { g_delivering = was; }
+        } now{std::exchange(g_delivering, batch_.id)};
         trace::scope batch_time(trace::phase::child_moves, batch_.moves.size());
         // On a scroll pane's panel, controls move without painting, and the
         // panel's drawn off screen when it next paints, then shown in one go
@@ -1728,6 +1827,7 @@ private:
     trace::scope pass_time_{trace::phase::move_pass};
     move_batch batch_;
     bool owner_ = false;
+    move_batch* outer_ = nullptr;  // another window's, collecting when this began
 };
 
 // Shows or hides a control. While its window is still hidden (being built)
@@ -9293,7 +9393,7 @@ public:
         if (TabCtrl_GetCurSel(h_) == items_.item_of(i)) return;  // (#88)
         TabCtrl_SetCurSel(h_, items_.item_of(i));
         ensure_built(i);
-        win_.relayout_at_once();
+        if (!win_.relayout_at_once()) return;
         settled_ = current();
     }
     // A hidden page's tab deleted, a page shown again inserted at its place
@@ -9316,7 +9416,7 @@ public:
         const int now = items_.current_after(page, on, was);
         TabCtrl_SetCurSel(h_, now < 0 ? -1 : items_.item_of(now));
         ensure_built(now);
-        win_.relayout_at_once();
+        if (!win_.relayout_at_once()) return;
         settled_ = current();
     }
     bool page_visible(int page) const override { return items_.shown(page); }
@@ -9329,11 +9429,26 @@ public:
             // A user's switch: on_changed once, with the page current after
             // the build (a builder may have switched again, or hidden every
             // page), if there's one and it isn't the page current before.
-            const int before = settled_;
+            // Within a layout, once it's done: one report for however many
+            // switches came meanwhile, as things are then.
+            // Marked first: the build (a builder switching again, a user's
+            // switch within it) and the layout leave settled_ to the report.
+            const bool first = !std::exchange(change_queued_, true);
+            if (first) change_before_ = settled_;
             ensure_built(current());
-            win_.relayout_at_once();
-            settled_ = current();
-            if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+            if (!win_.relayout_at_once()) return 0;
+            if (!first) return 0;
+            win_.after_layout_or_now(
+                [this, alive = std::weak_ptr<bool>(alive_)]
+                {
+                    if (!alive.lock()) return;
+                    change_queued_ = false;
+                    settled_ = current();
+                    // A copy, called last: the app's handler may destroy
+                    // the window, this widget and its changed_ with it.
+                    if (changed_ && settled_ >= 0 && settled_ != change_before_)
+                        if (auto f = changed_) f(settled_);
+                });
         }
         return 0;
     }
@@ -9388,7 +9503,7 @@ public:
         show_control(h_, shown && visible && items_.strip());
         if (shown && visible) ensure_built(current());  // the first time a lazy page is the one showing
         const int now = current();
-        settled_ = now;
+        if (!change_queued_) settled_ = now;  // (a user's switch waiting to be reported settles it then)
         for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == now);
     }
 
@@ -9450,6 +9565,9 @@ private:
     int images_px_ = 0;                 // the size images_ was made at
     path_icon_rebuild path_icons_;      // images_ made again once a path's own icon is found
     std::function<void(int)> changed_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // for what runs after a layout (after_layout_or_now)
+    bool change_queued_ = false;  // a user switch's on_changed waiting for the layout
+    int change_before_ = -1;      // settled_ before the first of them
     int settled_ = -1;  // current() as the last operation or switch left it
     const band_density* density_ = nullptr;  // fluent controls': the tabs' (set_in_band)
     bool rows_set_ = false;                  // its tabs' height set from density_
@@ -9591,7 +9709,7 @@ public:
         if (i == shown_) return;
         shown_ = i;
         ensure_built(i);
-        win_.relayout_at_once();
+        win_.relayout_at_once();  // (the last thing)
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
     void command(WORD code) override
@@ -9600,12 +9718,23 @@ public:
         if (code != LBN_SELCHANGE || current() == shown_) return;
         // As tabs_impl's: on_changed once, with the page current after the
         // build, if there's one and it isn't the page shown before.
-        const int before = shown_;
+        // Within a layout, once it's done: one report for however many
+        // switches came meanwhile, against the page shown before the first.
+        const bool first = !std::exchange(change_queued_, true);
+        if (first) change_before_ = shown_;
         shown_ = current();
         ensure_built(current());
-        win_.relayout_at_once();
-        const int now = current();
-        if (changed_ && now >= 0 && now != before) changed_(now);
+        if (!win_.relayout_at_once()) return;
+        if (!first) return;
+        win_.after_layout_or_now(
+            [this, alive = std::weak_ptr<bool>(alive_)]
+            {
+                if (!alive.lock()) return;
+                change_queued_ = false;
+                const int now = current();
+                if (changed_ && now >= 0 && now != change_before_)
+                    if (auto f = changed_) f(now);  // (a copy, called last: see tabs_impl)
+            });
     }
     // A hidden page's row deleted, a page shown again inserted at its place
     // among the visible ones; LB_SETCURSEL sends no LBN_SELCHANGE, so no
@@ -9627,7 +9756,7 @@ public:
         shown_ = items_.current_after(page, on, was);
         SendMessageW(h_, LB_SETCURSEL, WPARAM(shown_ < 0 ? -1 : items_.item_of(shown_)), 0);
         ensure_built(shown_);
-        win_.relayout_at_once();
+        win_.relayout_at_once();  // (the last thing)
     }
     bool page_visible(int page) const override { return items_.shown(page); }
     void ensure_built(int i)
@@ -9765,6 +9894,9 @@ private:
     std::vector<HICON> file_icons_;     // per page: a file's kind's icon (icon::for_file), from the shell
     int shown_ = 0;  // the page showing (-1: none, every page hidden)
     std::function<void(int)> changed_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // for what runs after a layout (after_layout_or_now)
+    bool change_queued_ = false;  // a user switch's on_changed waiting for the layout
+    int change_before_ = -1;      // the page shown before the first of them
 };
 
 // -- document tabs ------------------------------------------------------------
@@ -11017,8 +11149,16 @@ public:
         , thin_(thin)
     {
     }
+    // A drag still on at teardown ends here, reported to no one: the panes
+    // it would report on are going (the window's items are cleared first),
+    // and the capture released before the bars go, its WM_CAPTURECHANGED
+    // finding no drag.
     ~splitter_impl() override
     {
+        moved_ = nullptr;
+        dragging_ = false;
+        dragged_ = false;
+        if (HWND c = GetCapture(); c && std::find(bars_.begin(), bars_.end(), c) != bars_.end()) ReleaseCapture();
         for (HWND b : bars_) DestroyWindow(b);
     }
     std::vector<item*> panes;
@@ -11079,7 +11219,7 @@ public:
     void set_sizes(const std::vector<float>& s) override
     {
         trace::scope step(trace::phase::drag_step, uintptr_t(parent_));
-        std::vector<long> was = current();
+        std::vector<long> was = intended();  // a callback's ask: from the intent, not the snapshot
         was.resize(panes.size(), 0);
         std::vector<long> next(panes.size(), 0);
         for (size_t i = 0; i < panes.size(); ++i)
@@ -11090,7 +11230,7 @@ public:
         // sizes_, which mustn't keep an older request.
         // Compared with the sizes it reports (current(): a hidden pane's is
         // the size it comes back at, not the 0 it's placed at).
-        if (!asked_ && placed_.size() == panes.size() && next == current())
+        if (!asked_ && placed_.size() == panes.size() && next == intended())
         {
             sizes_ = std::move(next);
             return;
@@ -11189,6 +11329,13 @@ public:
             }
             sz[flex] = std::max(0L, sz[flex]);
         }
+        // The sizes are the splitter's before its panes are placed: a pane
+        // told its size there (a canvas's on_resize) reads sizes() as laid
+        // out now, not as before.
+        placed_ = sz;
+        asked_ = false;
+        reported_ = intended();  // what a pane's callback in this layout reads
+        placed_in_ = g_moves ? g_moves->id : 0;
         long pos = dir_ == orientation::horizontal ? r.left : r.top;
         size_t b = 0;
         for (size_t k = 0; k < shown.size(); ++k)
@@ -11210,8 +11357,6 @@ public:
             }
         }
         for (; b < bars_.size(); ++b) show_control(bars_[b], false);
-        placed_ = sz;
-        asked_ = false;
     }
     void show_all(bool shown) override
     {
@@ -11261,7 +11406,15 @@ private:
     // Each pane's size now: as last laid out. Before that, or with sizes
     // asked for and not laid out yet, the ones asked for. A hidden pane, laid
     // out at nothing, has the size it comes back at.
+    // What sizes() reports. Inside a layout (a pane's callback while it's
+    // delivered), the sizes it's placing, not one asked for since from a
+    // callback (that layout comes after); otherwise intended().
     std::vector<long> current() const
+    {
+        if (placing()) return reported_;
+        return intended();
+    }
+    std::vector<long> intended() const
     {
         const bool remembered = sizes_.size() == panes.size();
         if (placed_.size() != panes.size() || (asked_ && remembered)) return remembered ? sizes_ : placed_;
@@ -11284,6 +11437,7 @@ private:
         case WM_LBUTTONDOWN:
             SetCapture(h);
             dragging_ = true;
+            dragged_ = false;
             pressed_ = sizes_;
             return 0;
         case WM_LBUTTONUP:
@@ -11291,7 +11445,21 @@ private:
             if (!dragging_) break;
             dragging_ = false;
             if (msg == WM_LBUTTONUP) ReleaseCapture();
-            if (sizes_ != pressed_ && moved_) moved_();
+            // Only the drag's own moves count: set_sizes between the press
+            // and the release changes sizes_ without one.
+            if (std::exchange(dragged_, false) && sizes_ != pressed_ && moved_)
+            {
+                // The drag's placement still to come (released within a layout
+                // of the window's own): reported once it's placed.
+                win_.after_layout_or_now(
+                    [this, alive = std::weak_ptr<bool>(alive_)]
+                    {
+                        // A copy, called last: on_moved may destroy the
+                        // window, this splitter and its moved_ with it.
+                        if (alive.lock() && moved_)
+                            if (auto f = moved_) f();
+                    });
+            }
             return 0;
         case WM_MOUSEMOVE:
         {
@@ -11350,6 +11518,7 @@ private:
             }
         sizes_.assign(panes.size(), 0);
         for (size_t k = 0; k < shown.size(); ++k) sizes_[shown[k]] = sz[k];
+        dragged_ = true;
         relayout_dragged();
     }
 
@@ -11369,7 +11538,16 @@ private:
     void relayout_dragged()
     {
         trace::scope timing(trace::phase::layout, uintptr_t(parent_));
-        moves_in_one_pass batch;
+        // Never within a layout of the window's own: after it, the sizes
+        // asked for until then.
+        if (win_.in_layout)
+        {
+            asked_ = true;
+            win_.layout_dirty = true;
+            return;
+        }
+        layout_scope inside(win_);  // round the moves' delivery too
+        moves_in_one_pass batch(win_.hwnd());
         place(rect_);
     }
 
@@ -11379,10 +11557,20 @@ private:
     bool thin_;
     std::vector<HWND> bars_;
     std::vector<std::unique_ptr<std::function<LRESULT(HWND, UINT, WPARAM, LPARAM, bool&)>>> fns_;
-    std::vector<long> sizes_, placed_;
+    std::vector<long> sizes_, placed_, reported_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // for what's queued after a layout
+    unsigned placed_in_ = 0;  // the move batch it was last placed in (move_batch::id); 0, none
+    // Placed in the layout being delivered now: another splitter in the same
+    // window, not placed in it (a drag of this one's neighbour), reports its
+    // intent as ever.
+    bool placing() const
+    {
+        return batch_live(placed_in_) && reported_.size() == panes.size();
+    }
     bool asked_ = false;  // set_sizes since the last layout
     RECT rect_{};
     bool dragging_ = false;
+    bool dragged_ = false;       // the drag has moved the bar
     std::vector<long> pressed_;  // the sizes when the drag began
     std::function<void()> moved_;
 };
@@ -11837,16 +12025,21 @@ private:
     // page it replaced.
     void bring_in(focus_at had)
     {
-        win_.relayout_at_once();
-        win_.flush_layout();
+        if (!win_.relayout_at_once() || !win_.flush_layout()) return;
         if (had == focus_at::none) return;
-        HWND root = GetAncestor(parent_, GA_ROOT);
-        if (auto* p = pages_.shown_entry())
-            focus_page(*p->page, had);
-        else if (had == focus_at::window)
-            SetFocus(root);  // nowhere left in the stack
-        else
-            RemovePropW(root, L"rapport-focus");
+        // Into the page once it's laid out (after a layout under way).
+        win_.after_layout_or_now(
+            [this, had, alive = std::weak_ptr<bool>(alive_)]
+            {
+                if (!alive.lock()) return;
+                HWND root = GetAncestor(parent_, GA_ROOT);
+                if (auto* p = pages_.shown_entry())
+                    focus_page(*p->page, had);
+                else if (had == focus_at::window)
+                    SetFocus(root);  // nowhere left in the stack
+                else
+                    RemovePropW(root, L"rapport-focus");
+            });
     }
     // Where the focus was in the page, else its first control.
     void focus_page(page_parts& p, focus_at how)
@@ -11863,6 +12056,7 @@ private:
 
     win_context& win_;
     HWND parent_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // for what runs after a layout (after_layout_or_now)
     bool homogeneous_;
     // Before the pages: destroyed with the window, the pages go first.
     stack_pages::graveyard<page_ptr> grave_;
@@ -12295,7 +12489,7 @@ public:
     void invalidate() override { InvalidateRect(h_, nullptr, FALSE); }
     size_f size() const override
     {
-        win_.flush_layout();
+        if (!win_.flush_layout()) return {};  // the window went (gone with it)
         const SIZE px = pixels();
         const float s = win_.scale();
         return {px.cx / s, px.cy / s};
@@ -13252,23 +13446,41 @@ public:
     // With drawing off, the old page goes and the new one comes (through
     // the style bit, silently) and everything then paints in one pass,
     // rather than control by control across several frames.
-    void relayout_at_once() override
+    bool relayout_at_once() override
     {
+        if (in_layout)
+        {
+            // After the one under way, as it would have been now: measured
+            // anew, the window grown to its content and redrawn if it's
+            // shown, as decided now, or as the at-once under way decided
+            // before it turned drawing off (WM_SETREDRAW FALSE hides it).
+            at_once_pending_ = true;
+            at_once_grow_ = at_once_grow_ ||
+                            (at_once_visible >= 0 ? at_once_visible != 0 : IsWindowVisible(hwnd_) != FALSE);
+            layout_dirty = true;
+            return true;
+        }
         if (!IsWindowVisible(hwnd_))
         {
             relayout();
-            return;
+            return true;
         }
         // Measured anew, as relayout() has it: what changed (a page shown,
         // the strip back) may change the natural sizes, and grow_to_content
         // and WM_GETMINMAXINFO read them.
         ++g_layout_pass;
+        const int was_visible = std::exchange(at_once_visible, 1);  // shown: past the check above
+        const std::weak_ptr<bool> alive = layout_alive;
         SendMessageW(hwnd_, WM_SETREDRAW, FALSE, 0);
         grow_to_content();
+        if (alive.expired()) return false;
         layout_now();
+        if (alive.expired()) return false;
         SendMessageW(hwnd_, WM_SETREDRAW, TRUE, 0);
+        at_once_visible = was_visible;
         redraw_now(hwnd_, nullptr, nullptr,
                    RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        return !alive.expired();
     }
     // A window made smaller than content it has since gained (a page built
     // the first time it's shown) grows to fit it, as resizing would.
@@ -13287,27 +13499,114 @@ public:
         traced_set_window_pos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
-    void layout_now()
+    // Laid out now, or, within a layout of its own (layout_scope), after it.
+    // Passes again while a layout was asked for during one (a callback
+    // resizing the window, say), up to max_layout_passes; past that, posted.
+    static constexpr unsigned max_layout_passes = 8;
+    bool draining_ = false;         // run_after_layout under way: a nested one waits
+    bool drain_posted_ = false;     // wm_rapport_after_layout on its way
+    bool at_once_pending_ = false;  // a relayout_at_once asked for within a layout
+    bool at_once_grow_ = false;     // and the window shown then: grown to its content
+    // `drain`: run what waited for the layout (after_layout) after it, here;
+    // only from where nothing of the window's is touched after (a message's
+    // handler, a scope's end). Otherwise it's posted (wm_rapport_after_layout).
+    void layout_now(bool drain = false)
     {
+        if (in_layout)
+        {
+            // The posted relayout, or any other, done by the pass this
+            // marks for: none left pending, so the next one asked posts.
+            relayout_pending_ = false;
+            layout_dirty = true;
+            return;
+        }
         trace::scope timing(trace::phase::layout, uintptr_t(hwnd_),
                             std::exchange(layout_cause_, 0));
         relayout_pending_ = false;
         if (!root) return;
-        place_all();
+        unsigned pass = 1;
+        bool redraw_all = false;
+        for (;; ++pass)
+        {
+            layout_dirty = false;
+            const std::weak_ptr<bool> alive = layout_alive;
+            {
+                layout_scope inside(*this, false);
+                // A relayout_at_once asked for in the pass before: what it
+                // does now (measured anew, grown to the content) done here.
+                if (std::exchange(at_once_pending_, false))
+                {
+                    ++g_layout_pass;
+                    if (std::exchange(at_once_grow_, false))
+                    {
+                        grow_to_content();
+                        redraw_all = true;
+                    }
+                }
+                place_all();
+            }
+            if (alive.expired()) return;  // destroyed by what its sizes' delivery ran
+            if (!layout_dirty || !root) break;
+            if (pass == max_layout_passes)
+            {
+                layout_dirty = false;
+#ifndef NDEBUG
+                OutputDebugStringW(L"rapport: a window asked for its layout again every pass; posted\n");
+#endif
+                relayout();
+                break;
+            }
+        }
+        g_layout_passes = pass;
+        if (redraw_all)
+            redraw_now(hwnd_, nullptr, nullptr, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         // The toolbar band's controls on glass, once they're where they
         // went (the moves above are made as one, at the end); once more as
         // the tabs leave the caption, for their own fonts back.
         if (caption_ || glassed_) glass_band_controls(hwnd_);
         glassed_ = caption_;
+        if (drain)
+            run_after_layout();  // last: what it runs may destroy the window
+        else if (!after_layout.empty() && !drain_posted_)
+        {
+            drain_posted_ = true;
+            PostMessageW(hwnd_, wm_rapport_after_layout, 0, 0);
+        }
     }
     bool glassed_ = false;
+    void layout_settled() override
+    {
+        if (layout_dirty)
+            layout_now(true);
+        else
+            run_after_layout();
+    }
+    // What waited for the layout, first first, one at a time while none is
+    // owed (not dirty, no posted relayout: past the pass cap, the posted
+    // one): one that asks for a layout leaves the rest queued, in order, for
+    // after it. One drain at a time (a nested one waits for this one). Each
+    // may destroy the window: nothing's touched after one that did.
+    void run_after_layout()
+    {
+        if (draining_) return;
+        const std::weak_ptr<bool> alive = layout_alive;
+        draining_ = true;
+        while (!after_layout.empty() && !layout_dirty && !relayout_pending_ && !in_layout)
+        {
+            auto f = std::move(after_layout.front());
+            after_layout.erase(after_layout.begin());
+            f();
+            if (alive.expired()) return;
+        }
+        draining_ = false;
+    }
     void place_all()
     {
         sync_caption();  // first: it may change the client area
         sync_band_toolbar();
         RECT r = client();
         const int m = margin();
-        moves_in_one_pass batch(ahead_.has_value() && !grow_ahead_);
+        moves_in_one_pass batch(hwnd_, ahead_.has_value() && !grow_ahead_);
         // The document tabs across the top, edge to edge; the content, with
         // its margins, under them. In the caption, the strip stops at the
         // caption buttons, and the top of a window that isn't maximised is
@@ -13477,9 +13776,15 @@ public:
         if (w == window_text(hwnd_)) return;  // (#88)
         SetWindowTextW(hwnd_, w.c_str());
     }
-    void flush_layout() override
+    // Not from inside a layout (a pane told its size reading a canvas's):
+    // what's placed so far is what it gets, and the layout pending runs
+    // after this one, as posted.
+    bool flush_layout() override
     {
-        if (relayout_pending_) layout_now();
+        if (!relayout_pending_ || in_layout) return true;
+        const std::weak_ptr<bool> alive = layout_alive;
+        layout_now();
+        return !alive.expired();
     }
     // The spec's size, but never smaller than the content.
     SIZE first_size()
@@ -13540,7 +13845,9 @@ public:
             else
                 flags |= SWP_NOMOVE;
             traced_set_window_pos(hwnd_, nullptr, x, y, r.right - r.left, r.bottom - r.top, flags);
+            const std::weak_ptr<bool> alive = layout_alive;
             layout_now();
+            if (alive.expired()) return;  // destroyed by what its sizes' delivery ran
         }
         if (dialog_ && parent && modal_spec_)
         {
@@ -13655,12 +13962,16 @@ public:
         // frame at that size has their new content. Nothing ties a window's
         // resize to its content's frame: drawn after, the last frame showed
         // stretched for several refreshes.
-        const bool ahead = root && IsWindowVisible(hwnd_);
+        // (Not within a layout of its own: the window's resized, and laid out
+        // for it after that one.)
+        const bool ahead = root && IsWindowVisible(hwnd_) && !in_layout;
         if (ahead)
         {
             // First for the new size, nothing moved: canvases draw for it.
             ahead_ = r;
+            const std::weak_ptr<bool> alive = layout_alive;
             layout_now();
+            if (alive.expired()) return;  // destroyed by what its sizes' delivery ran
             redraw_now(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
             // Then its controls are moved, cut to the window as it still is,
             // for the larger of its old size and its new one each way, the
@@ -13675,11 +13986,21 @@ public:
             RECT now;
             GetClientRect(hwnd_, &now);
             grow_ahead_ = true;
-            g_canvases_quiet = true;
-            ahead_ = RECT{0, 0, std::max(r.right, now.right), std::max(r.bottom, now.bottom)};
-            layout_now();
-            redraw_now(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
-            g_canvases_quiet = false;
+            {
+                // The canvases quiet (a thread-wide flag) for this, and only
+                // this, however it ends: the window destroyed by what the
+                // layout's delivery ran leaves the next ones as they were.
+                struct quiet
+                {
+                    bool was = std::exchange(g_canvases_quiet, true);
+                    ~quiet() { g_canvases_quiet = was; }
+                } canvases;
+                ahead_ = RECT{0, 0, std::max(r.right, now.right), std::max(r.bottom, now.bottom)};
+                layout_now();
+                if (g_resize_quiet_hook_for_tests) g_resize_quiet_hook_for_tests(g_resize_quiet_hook_data);
+                if (alive.expired()) return;
+                redraw_now(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+            }
             ahead_.reset();
             grow_ahead_ = false;
             // And the window takes the size once the canvases' frames for it
@@ -13690,7 +14011,9 @@ public:
         adjust(r);
         RECT now;
         GetWindowRect(hwnd_, &now);
+        const std::weak_ptr<bool> alive = layout_alive;
         place_on_screen(now.left, now.top, r.right - r.left, r.bottom - r.top);
+        if (alive.expired()) return;  // destroyed by what its sizes' delivery ran
         // Laid out for the size it got: done in WM_SIZE if that changed
         // (normally to what was drawn for: nothing moves), but not if not.
         if (ahead) layout_now();
@@ -14241,11 +14564,17 @@ private:
             case WM_SIZE:
             {
                 trace::scope timing(trace::phase::window_size, uintptr_t(h));
+                // (Sent within whatever moved the window, a resize from the
+                // app's code: what waited for the layout is posted, not run.)
                 if (self->root) self->layout_now();
                 return 0;
             }
             case wm_rapport_relayout:
-                if (self->relayout_pending_) self->layout_now();
+                if (self->relayout_pending_) self->layout_now(true);
+                return 0;
+            case wm_rapport_after_layout:
+                self->drain_posted_ = false;
+                self->run_after_layout();
                 return 0;
             case WM_GETMINMAXINFO:
             {
@@ -15956,9 +16285,42 @@ extern "C" __declspec(dllexport) void rapport_win32_set_ground_dying_hook(void (
 namespace rap::win32
 {
 
+unsigned layout_depth_max_for_tests(bool reset)
+{
+    const unsigned was = g_layout_depth_max;
+    if (reset) g_layout_depth_max = 0;
+    return was;
+}
+unsigned layout_passes_for_tests()
+{
+    return g_layout_passes;
+}
+
 }  // namespace rap::win32
 
 RAPPORT_BACKEND_ENTRY(win32, rap::win32::win32_backend)
+
+// Private test seams, exported so a plugin build's tests (the asan job's)
+// find them too: the deepest a window's layouts have nested (1: never
+// within another; `reset` nonzero starts again), and how many passes the
+// last layout_now made.
+extern "C" __declspec(dllexport) unsigned rapport_win32_layout_depth_max(int reset)
+{
+    return rap::win32::layout_depth_max_for_tests(reset != 0);
+}
+extern "C" __declspec(dllexport) unsigned rapport_win32_layout_passes()
+{
+    return rap::win32::layout_passes_for_tests();
+}
+// Private test seam, as those above and rapport_win32_trace_splitter_bar
+// (exported in every build, for tests only, no app's to call): a call as
+// window::resize's quiet ahead layout ends. Inert by default: unset (null),
+// resize only checks it.
+extern "C" __declspec(dllexport) void rapport_win32_set_resize_quiet_hook(void (*hook)(void*), void* data)
+{
+    rap::win32::g_resize_quiet_hook_for_tests = hook;
+    rap::win32::g_resize_quiet_hook_data = data;
+}
 
 // Private harness lookup: the caller keeps the splitter alive and drives input on its UI thread.
 extern "C" __declspec(dllexport) void* rapport_win32_trace_splitter_bar(rap::splitter* splitter,

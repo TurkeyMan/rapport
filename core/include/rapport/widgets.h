@@ -989,6 +989,8 @@ public:
     // One size per pane along the split, in logical pixels, for saving
     // layout. set_sizes() restores them (sizes of 0 are left alone); called
     // before the window first shows, it replaces the stretch-based layout.
+    // On Windows, read from a pane's own size callback (a canvas's
+    // on_resize), they're the sizes being laid out.
     virtual std::vector<float> sizes() const = 0;
     virtual void set_sizes(const std::vector<float>&) = 0;
     // A divider dragged by the user, once the drag ends; not layout, the
@@ -1405,6 +1407,11 @@ class canvas : public widget
 {
 public:
     virtual void invalidate() = 0;  // repaint soon
+    // Its size as laid out. On Windows a layout still pending (a set_sizes,
+    // a pane shown or hidden) is done first, with what's pending, so the
+    // size is the one it's about to have; read from inside a layout (an
+    // on_resize), it's the size placed so far and nothing is laid out
+    // within it.
     virtual size_f size() const = 0;
     virtual float device_scale() const = 0;
     virtual void set_cursor(cursor) = 0;
