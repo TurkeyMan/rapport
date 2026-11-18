@@ -200,11 +200,24 @@ HBRUSH theme_brush(theme_color role);
 // the window colour. And the text on it.
 theme_color surface_of(HWND h);
 theme_color surface_text_of(HWND h);
+// What a window's content is painted in: the surface's colour, except a
+// base surface's on WinUI's layer (look_options::content_surface, resolved
+// by layer_content()), and a brush of it (kept until the colours change).
+// Everything rapport fills with the surface uses these, not the role.
+color content_color_of(HWND h);
+HBRUSH content_brush_of(HWND h);
+bool layer_content();
+void set_content_surface(rap::content_surface c);
 // The colour itself, and a brush of it (kept until the colours change): the
-// surface's, or the toolbar band's fill for a control wholly in its
-// window's band (win32_caption_tabs.h).
+// content's (content_color_of); in light mode, the themed body of a tab
+// control the control lies wholly on (a sibling, as its pages' controls
+// are); or the toolbar band's fill for a control wholly in its window's
+// band (win32_caption_tabs.h).
 color surface_color_of(HWND h);
 HBRUSH surface_brush_of(HWND h);
+// The body brush of a visible tab control `control` lies wholly over (a
+// sibling, as its pages' controls are), if any (win32_backend.cpp).
+HBRUSH tab_body_brush_under(HWND control);
 // Marks top-level `h` as a base surface window (base_surface_supported()
 // checked by the caller).
 void set_base_surface(HWND h, bool on);

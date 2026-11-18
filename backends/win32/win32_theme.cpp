@@ -8,6 +8,8 @@
 // left square and plain before it.
 #include "win32_common.h"
 #include "win32_caption_tabs.h"
+#include "win32_band_field.h"
+#include "win32_chrome_palette.h"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -55,12 +57,75 @@ theme_color surface_of(HWND h)
     return root && GetPropW(root, L"rapport-base-surface") ? theme_color::base : theme_color::window;
 }
 
+namespace
+{
+rap::content_surface g_content = rap::content_surface::automatic;
+
+// A solid brush of `c`, one colour at a time, made again as it changes.
+HBRUSH one_brush(HBRUSH& brush, color& made, color c)
+{
+    if (!brush || made.r != c.r || made.g != c.g || made.b != c.b)
+    {
+        if (brush) DeleteObject(brush);
+        brush = CreateSolidBrush(color_ref(c));
+        made = c;
+    }
+    return brush;
+}
+}  // namespace
+
+void set_content_surface(rap::content_surface c)
+{
+    g_content = c;
+}
+
+// WinUI's convention where controls are drawn in its look, Win32's where
+// they're native; the app's choice over either. High contrast: the system
+// colours, always.
+bool layer_content()
+{
+    if (high_contrast()) return false;
+    switch (g_content)
+    {
+    case rap::content_surface::layer: return true;
+    case rap::content_surface::plain: return false;
+    default: return fluent_controls();
+    }
+}
+
+color content_color_of(HWND h)
+{
+    const theme_color s = surface_of(h);
+    if (s == theme_color::base && layer_content()) return dark_mode() ? winui::layer_dark : winui::layer_light;
+    return theme_color_of(s);
+}
+
+HBRUSH content_brush_of(HWND h)
+{
+    const theme_color s = surface_of(h);
+    if (s != theme_color::base || !layer_content()) return theme_brush(s);
+    static HBRUSH brush = nullptr;
+    static color made{};
+    return one_brush(brush, made, dark_mode() ? winui::layer_dark : winui::layer_light);
+}
+
 // In the toolbar band, its colour; while a control there is printed onto a
-// matte for its alpha (win32_band_glass.cpp), the matte.
+// matte for its alpha (win32_band_glass.cpp), the matte. On a tab page in
+// light mode, the page's body (a shade lighter than the window colour, or
+// the content's own where rapport draws the tabs).
 color surface_color_of(HWND h)
 {
     color band{};
-    if (!in_toolbar_band(h, band)) return theme_color_of(surface_of(h));
+    if (!in_toolbar_band(h, band))
+    {
+        if (!dark_mode())
+            if (HBRUSH body = tab_body_brush_under(h))
+            {
+                LOGBRUSH lb{};
+                if (GetObjectW(body, sizeof lb, &lb)) return color{GetRValue(lb.lbColor), GetGValue(lb.lbColor), GetBValue(lb.lbColor), 255};
+            }
+        return content_color_of(h);
+    }
     color matte{};
     return glass_matte(matte) ? matte : band;
 }
@@ -68,7 +133,12 @@ color surface_color_of(HWND h)
 HBRUSH surface_brush_of(HWND h)
 {
     color band{};
-    if (!in_toolbar_band(h, band)) return theme_brush(surface_of(h));
+    if (!in_toolbar_band(h, band))
+    {
+        if (!dark_mode())
+            if (HBRUSH body = tab_body_brush_under(h)) return body;
+        return content_brush_of(h);
+    }
     if (color matte{}; glass_matte(matte))
         return static_cast<HBRUSH>(GetStockObject(matte.r ? WHITE_BRUSH : BLACK_BRUSH));
     // The band's one colour at a time (light, dark), made again as it changes.
@@ -259,7 +329,7 @@ void paint_dark_separator(HWND h, HDC dc)
     RECT w;
     GetWindowRect(h, &w);
     OffsetRect(&w, -w.left, -w.top);
-    FillRect(dc, &w, theme_brush(surface_of(h)));
+    FillRect(dc, &w, surface_brush_of(h));
     const bool vertical = (GetWindowLongPtrW(h, GWL_STYLE) & SS_TYPEMASK) == SS_ETCHEDVERT;
     RECT line = w;
     if (vertical)

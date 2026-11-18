@@ -1,5 +1,6 @@
-// A base surface window (window_spec::base_surface) is painted in the base
-// colour wherever its background shows, on Windows 11: the window's and its
+// A base surface window (window_spec::base_surface) is painted in its
+// content's colour wherever its background shows, on Windows 11 (WinUI's
+// layer, as its controls are fluent: win32-content-surface has the rest): the window's and its
 // containers' own, labels', check boxes', sliders' and the toolbar's, inside
 // a group box, on a tab page, and on a scroll pane after layout passes have
 // resized it (its content drawn off screen, paint_pane). Before Windows 11,
@@ -223,9 +224,11 @@ int main(int argc, char** argv)
     const bool hc = high_contrast();
     const bool dark = !hc && build >= 17763 && (!theme || std::strcmp(theme, "light"));
     const bool base = build >= 22000;
-    // Explorer's dark surfaces (backends/common/theme_palette.h), else the
-    // system colours.
-    const DWORD surface = base ? (dark ? 0x191919 : rgb(GetSysColor(COLOR_WINDOW)))
+    // A base surface's content on WinUI's layer, as the app's controls are
+    // fluent (look_options::content_surface automatic, #96); Explorer's dark
+    // window colour (backends/common/theme_palette.h), else the system
+    // colours, without one; high contrast's system colours.
+    const DWORD surface = base ? (hc ? rgb(GetSysColor(COLOR_WINDOW)) : dark ? 0x282828 : 0xF9F9F9)
                                : (dark ? 0x202020 : rgb(GetSysColor(COLOR_BTNFACE)));
     std::printf("build %lu, %s%s: surface %06lx\n", build, hc ? "high contrast" : dark ? "dark" : "light",
                 base ? ", base surface" : "", surface);

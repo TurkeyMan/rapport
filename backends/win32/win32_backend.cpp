@@ -434,39 +434,147 @@ void forget_group_themes(HWND h);
 // in light mode isn't the window's colour (Windows 10 and 11: a shade
 // lighter): their backgrounds take the body's, or each control is a band of
 // the window's on it. Measured once per tab control, from what it prints.
-std::map<HWND, HBRUSH>& tab_bodies()
+// Each tab control's body colour, dropped as the control goes (dark_tabs_proc's
+// WM_NCDESTROY, and any dead one as another's is measured); the brushes are
+// one per colour, shared, so a window made and destroyed again and again
+// holds no more GDI objects than the colours it shows.
+// A window rapport keeps something for, going (its WM_NCDESTROY in a
+// subclass of rapport's): marked dying with `prop` through the whole of it,
+// so nothing below that looks again keeps anything, and what's kept for it
+// forgotten before and after the rest of its teardown. `hook` is a test's,
+// standing for a subclass below.
+template <class Forget>
+LRESULT tear_down_kept(HWND h, WPARAM wp, LPARAM lp, const wchar_t* prop, Forget&& forget,
+                       void (*hook)(HWND, void*), void* hook_data)
 {
-    static std::map<HWND, HBRUSH> m;
+    SetPropW(h, prop, h);
+    forget();
+    if (hook) hook(h, hook_data);
+    const LRESULT r = DefSubclassProc(h, WM_NCDESTROY, wp, lp);
+    forget();
+    RemovePropW(h, prop);
+    return r;
+}
+std::map<HWND, COLORREF>& tab_bodies()
+{
+    static std::map<HWND, COLORREF> m;
+    return m;
+}
+std::map<COLORREF, HBRUSH>& tab_body_brushes()
+{
+    static std::map<COLORREF, HBRUSH> m;
     return m;
 }
 unsigned g_tab_bodies_gen = 0;  // bumped as they're forgotten
 void forget_tab_bodies()
 {
-    for (auto& [tab, brush] : tab_bodies()) DeleteObject(brush);
+    for (auto& [colour, brush] : tab_body_brushes()) DeleteObject(brush);
+    tab_body_brushes().clear();
     tab_bodies().clear();
     ++g_tab_bodies_gen;
 }
+void forget_tab_body(HWND tab)
+{
+    tab_bodies().erase(tab);
+    ++g_tab_bodies_gen;  // nothing found on it, or found not to be, kept
+}
+HBRUSH tab_body_brush_of(COLORREF colour)
+{
+    HBRUSH& b = tab_body_brushes()[colour];
+    if (!b) b = CreateSolidBrush(colour);
+    return b;
+}
+// A tab body's scan prints a tab control, and what that runs (the app's
+// code, a subclass) may destroy the tab or the control asking, retheme, or
+// lay out: a scan's answer is kept only if `h` is still a window and the
+// tab bodies and the layout pass are as they were when it began.
+struct tab_scan
+{
+    unsigned gen = g_tab_bodies_gen;
+    unsigned pass = g_layout_pass;
+    bool still(HWND h) const { return IsWindow(h) && gen == g_tab_bodies_gen && pass == g_layout_pass; }
+};
 void traced_tab_adjust(HWND, BOOL, RECT*);
-HBRUSH tab_body_brush(HWND tab)
+// Tabs being printed for their body now: a lookup that comes back to one
+// meanwhile (its print asking a sibling's colour, which asks the tab's body)
+// is refused, the window's colour and nothing kept for it, so a print can't
+// start another print of the same tab without end.
+std::set<HWND>& tabs_scanning()
+{
+    static std::set<HWND> s;
+    return s;
+}
+// Marks a tab being asked of (tabs_scanning) for as long as it lives; a
+// lookup that meets a tab so marked is refused.
+struct scanning_tab
+{
+    HWND tab;
+    explicit scanning_tab(HWND t)
+        : tab(t)
+    {
+        tabs_scanning().insert(tab);
+    }
+    ~scanning_tab() { tabs_scanning().erase(tab); }
+    scanning_tab(const scanning_tab&) = delete;
+    scanning_tab& operator=(const scanning_tab&) = delete;
+};
+void traced_tab_adjust(HWND h, BOOL larger, RECT* rect);
+// `r` from `from`'s client coordinates to `to`'s (nullptr: the screen's), as
+// MapWindowPoints maps a rectangle (normalized, mirrored windows included,
+// where two ClientToScreen calls swap its left and right); false if that
+// failed (its 0 is also a window at the origin's offset: told apart by the
+// error it sets).
+bool map_rect(HWND from, HWND to, RECT& r)
+{
+    SetLastError(ERROR_SUCCESS);
+    return MapWindowPoints(from, to, reinterpret_cast<POINT*>(&r), 2) != 0 || GetLastError() == ERROR_SUCCESS;
+}
+// A synchronous call into a tab (a message it runs code for: TCM_ADJUSTRECT,
+// WM_PRINTCLIENT), then whether all the scan stands on still does: the tab
+// and the control asking still windows, the tab bodies and the layout pass
+// as they were. Every such call of a scan goes through it.
+template <class Call>
+bool call_tab(HWND tab, HWND control, const tab_scan& scan, Call&& call)
+{
+    call();
+    return scan.still(tab) && IsWindow(control);
+}
+// Its body: called by the scan, the tab marked scanning already. Refused
+// (nothing found, nothing kept) if the tab or the control asking went, or
+// anything changed, on any call into it.
+HBRUSH tab_body_brush(HWND tab, HWND control, bool& refused)
 {
     auto& m = tab_bodies();
-    if (auto it = m.find(tab); it != m.end()) return it->second;
-    RECT client;
-    GetClientRect(tab, &client);
+    if (auto it = m.find(tab); it != m.end()) return tab_body_brush_of(it->second);
+    const tab_scan scan;
+    RECT client{};
+    if (!GetClientRect(tab, &client)) return nullptr;
     RECT body = client;
-    traced_tab_adjust(tab, FALSE, &body);
+    if (!call_tab(tab, control, scan, [&] { traced_tab_adjust(tab, FALSE, &body); }))
+    {
+        refused = true;
+        return nullptr;
+    }
     if (client.right <= 0 || client.bottom <= 0 || body.right <= body.left || body.bottom <= body.top) return nullptr;
     HDC screen = GetDC(tab), mem = CreateCompatibleDC(screen);
     HBITMAP bitmap = CreateCompatibleBitmap(screen, client.right, client.bottom);
     HGDIOBJ old = SelectObject(mem, bitmap);
-    SendMessageW(tab, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND);
-    const COLORREF colour = GetPixel(mem, (body.left + body.right) / 2, (body.top + body.bottom) / 2);
+    const bool still = call_tab(tab, control, scan,
+                                [&] { SendMessageW(tab, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND); });
+    const COLORREF colour = still ? GetPixel(mem, (body.left + body.right) / 2, (body.top + body.bottom) / 2) : CLR_INVALID;
     SelectObject(mem, old);
     DeleteObject(bitmap);
     DeleteDC(mem);
     ReleaseDC(tab, screen);
-    if (colour == CLR_INVALID) return nullptr;
-    return m[tab] = CreateSolidBrush(colour);
+    // Gone or changed meanwhile: no body, the window's colour, not kept.
+    if (!still || colour == CLR_INVALID)
+    {
+        refused = true;
+        return nullptr;
+    }
+    std::erase_if(m, [](const auto& e) { return !IsWindow(e.first); });
+    m[tab] = colour;
+    return tab_body_brush_of(colour);
 }
 // The body brush of a visible tab control `control` lies wholly over (a
 // sibling, as its pages' controls are), if any.
@@ -476,41 +584,97 @@ void traced_tab_adjust(HWND h, BOOL larger, RECT* rect)
     TabCtrl_AdjustRect(h, larger, rect);
 }
 
-HBRUSH tab_body_under_scan(HWND control);
+HBRUSH tab_body_under_scan(HWND control, bool& refused);
+// Each control's answer, found or not, for this layout pass and these tab
+// bodies; a control's goes with it (its WM_NCDESTROY, through a subclass
+// added as it's first asked), so a window made at a handle another had
+// asks again.
+std::unordered_map<HWND, HBRUSH>& tab_body_answers()
+{
+    static std::unordered_map<HWND, HBRUSH> m;
+    return m;
+}
+void (*g_ground_dying_hook_for_tests)(HWND, void*) = nullptr;
+void* g_ground_dying_hook_data = nullptr;
+// Going: marked dying through the whole of its WM_NCDESTROY, so a lookup
+// from what runs below (a subclass, the control's own teardown) isn't kept,
+// and its answer dropped before and after that.
+LRESULT CALLBACK tab_body_answer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR)
+{
+    if (msg != WM_NCDESTROY) return DefSubclassProc(h, msg, wp, lp);
+    const LRESULT r = tear_down_kept(h, wp, lp, L"rapport-ground-dying", [h] { tab_body_answers().erase(h); },
+                                     g_ground_dying_hook_for_tests, g_ground_dying_hook_data);
+    RemoveWindowSubclass(h, tab_body_answer_proc, id);
+    return r;
+}
 // Asked by each label as it paints (WM_CTLCOLORSTATIC): found once per
 // control and layout pass, not by a walk over its siblings at every paint.
+// The answers, those of an earlier pass or tab bodies dropped first.
+std::unordered_map<HWND, HBRUSH>& tab_body_answers_now()
+{
+    auto& cache = tab_body_answers();
+    static unsigned cache_pass = 0, cache_gen = 0;
+    if (cache_pass != g_layout_pass || cache_gen != g_tab_bodies_gen)
+    {
+        cache.clear();
+        cache_pass = g_layout_pass;
+        cache_gen = g_tab_bodies_gen;
+    }
+    return cache;
+}
 HBRUSH tab_body_under(HWND control)
 {
-    struct known
-    {
-        unsigned pass, gen;
-        HBRUSH brush;
-    };
-    static std::unordered_map<HWND, known> cache;
-    if (auto it = cache.find(control);
-        it != cache.end() && it->second.pass == g_layout_pass && it->second.gen == g_tab_bodies_gen)
-        return it->second.brush;
+    auto& cache = tab_body_answers_now();
+    if (auto it = cache.find(control); it != cache.end()) return it->second;
     trace::mark(trace::phase::tab_cache_miss, uintptr_t(control));
-    const HBRUSH b = tab_body_under_scan(control);
-    cache[control] = {g_layout_pass, g_tab_bodies_gen, b};
+    // A control going: answered, never kept.
+    if (GetPropW(control, L"rapport-ground-dying")) return nullptr;  // the window's colour
+    // Its teardown hook first: the scan prints a tab control, and what that
+    // runs may destroy the control asking. Kept only if the control's still
+    // there, hooked, and nothing tore tab bodies down meanwhile.
+    const bool hooked = SetWindowSubclass(control, tab_body_answer_proc, 0, 0) != FALSE;
+    const tab_scan scan;
+    bool refused = false;
+    const HBRUSH b = tab_body_under_scan(control, refused);
+    if (refused) return nullptr;  // a scan in progress: the window's colour, not kept
+    if (!hooked || !scan.still(control)) return nullptr;  // the window's colour, not kept
+    cache[control] = b;
     return b;
 }
-HBRUSH tab_body_under_scan(HWND control)
+HBRUSH tab_body_under_scan(HWND control, bool& refused)
 {
-    RECT at;
-    GetWindowRect(control, &at);
+    RECT at{};
+    if (!GetWindowRect(control, &at)) return nullptr;
     for (HWND s = GetWindow(control, GW_HWNDFIRST); s; s = GetWindow(s, GW_HWNDNEXT))
     {
-        if (s == control || !IsWindowVisible(s)) continue;
+        // Shown as its siblings are (its style: a window not shown yet, or
+        // printed, has its pages' grounds as it will have on screen).
+        if (s == control || !(GetWindowLongPtrW(s, GWL_STYLE) & WS_VISIBLE) || GetPropW(s, L"rapport-tab-dying"))
+            continue;
         wchar_t cls[32] = {};
         GetClassNameW(s, cls, 32);
         if (_wcsicmp(cls, WC_TABCONTROLW)) continue;
-        RECT body;
-        GetClientRect(s, &body);
-        traced_tab_adjust(s, FALSE, &body);
-        MapWindowPoints(s, nullptr, reinterpret_cast<POINT*>(&body), 2);
-        RECT overlap;
-        if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s);
+        // Being asked of already, further up: refused (the first message to
+        // it, TCM_ADJUSTRECT, may come back here as well as its print).
+        if (tabs_scanning().count(s))
+        {
+            refused = true;
+            return nullptr;
+        }
+        const scanning_tab asking(s);
+        const tab_scan scan;
+        RECT body{};
+        if (!GetClientRect(s, &body)) continue;
+        // What TCM_ADJUSTRECT ran may have destroyed the tab or the control
+        // asking, or changed the tab bodies: nothing from here is kept.
+        if (!call_tab(s, control, scan, [&] { traced_tab_adjust(s, FALSE, &body); }))
+        {
+            refused = true;
+            return nullptr;
+        }
+        if (!map_rect(s, nullptr, body)) continue;
+        RECT overlap{};
+        if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s, control, refused);
     }
     return nullptr;
 }
@@ -590,7 +754,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         RECT c;
         GetClientRect(wnd, &c);
         const int saved = SaveDC(dc);
-        FillRect(dc, &c, theme_brush(surface_of(wnd)));
+        FillRect(dc, &c, content_brush_of(wnd));
         paint_toolbar_band(wnd, dc);  // (a top-level window's, if it has one)
         paint_group_frames(wnd, dc);
         RestoreDC(dc, saved);
@@ -640,8 +804,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
                                               : link              ? theme_color::link
                                                                   : surface_text_of(wnd))));
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
-        HBRUSH on_tab = dark_mode() ? nullptr : tab_body_under(c);
-        result = reinterpret_cast<LRESULT>(on_tab ? on_tab : surface_brush_of(c));
+        result = reinterpret_cast<LRESULT>(surface_brush_of(c));
         return true;
     }
     // Fields and drop-down lists, dark in dark mode (their defaults are
@@ -811,7 +974,7 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             // panel's own paint is done: no loop if the copy fails each time.
             if (!paint_pane(h))
             {
-                FillRect(dc, &ps.rcPaint, theme_brush(surface_of(h)));
+                FillRect(dc, &ps.rcPaint, content_brush_of(h));
                 for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
                     RedrawWindow(c, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
             }
@@ -4285,7 +4448,7 @@ public:
             RECT text{rect_.left + win_.px(9), rect_.top, rect_.left + win_.px(9) + t.cx, rect_.top + t.cy};
             RECT gap = text;
             InflateRect(&gap, win_.px(2), 0);
-            FillRect(dc, &gap, theme_brush(surface_of(parent_)));
+            FillRect(dc, &gap, content_brush_of(parent_));
             SetBkMode(dc, TRANSPARENT);
             if (theme)
                 DrawThemeText(theme, dc, BP_GROUPBOX, GBS_NORMAL, title_.c_str(), -1, DT_SINGLELINE | DT_LEFT, 0,
@@ -8724,8 +8887,8 @@ void draw_dark_tabs(HWND h, HDC dc)
 {
     RECT c;
     GetClientRect(h, &c);
-    const theme_color surface = surface_of(h);
-    FillRect(dc, &c, theme_brush(surface));
+    const HBRUSH surface = content_brush_of(h);
+    FillRect(dc, &c, surface);
     const UINT dpi = dpi_of(h);
     auto px = [dpi](int v) { return MulDiv(v, int(dpi), 96); };
     RECT page = c;
@@ -8746,9 +8909,9 @@ void draw_dark_tabs(HWND h, HDC dc)
         const bool selected = i == current, hot = PtInRect(&r, pointer);
         if (selected) InflateRect(&r, px(2), px(2));
         FillRect(dc, &r,
-                 theme_brush(selected ? theme_color::card
-                             : hot    ? theme_color::hover
-                                      : surface));
+                 selected ? theme_brush(theme_color::card)
+                 : hot    ? theme_brush(theme_color::hover)
+                          : surface);
         FrameRect(dc, &r, theme_brush(theme_color::border));
         if (selected)
         {
@@ -8801,17 +8964,59 @@ void draw_base_tabs(HWND h, HDC dc)
 {
     RECT c;
     GetClientRect(h, &c);
-    FillRect(dc, &c, theme_brush(theme_color::base));
+    const HBRUSH surface = content_brush_of(h);
+    FillRect(dc, &c, surface);
     // Its own erase left out: around the tabs is the surface, filled here.
     DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
+    // The style fills the row beside and above the tabs in the dialog
+    // colour all the same, on any window: the rest of their row is the
+    // surface, the tabs (the current one standing 2 px out of the row) left
+    // as drawn. Whole or not at all: a tab not taken out of the row would be
+    // painted over, and the style's row is better than no tab.
+    const int n = TabCtrl_GetItemCount(h);
+    if (n == 0)
+    {
+        // No tabs: the row is what's above the page's frame, the style's
+        // colour down to the frame's first line.
+        RECT body = c;
+        traced_tab_adjust(h, FALSE, &body);
+        const int x = (c.left + c.right) / 2;
+        const COLORREF style_row = GetPixel(dc, x, 0);
+        LONG y = 0;
+        while (style_row != CLR_INVALID && y < body.top && GetPixel(dc, x, y) == style_row) ++y;
+        if (y > 0 && y < body.top)
+        {
+            RECT row{c.left, c.top, c.right, y};
+            FillRect(dc, &row, surface);
+        }
+    }
+    else
+    {
+        const int current = TabCtrl_GetCurSel(h), proud = MulDiv(2, int(dpi_of(h)), 96);
+        RECT first{};
+        HRGN row = TabCtrl_GetItemRect(h, 0, &first) ? CreateRectRgn(0, 0, c.right, first.bottom) : nullptr;
+        bool whole = row != nullptr;
+        for (int i = 0; whole && i < n; ++i)
+        {
+            RECT r;
+            whole = TabCtrl_GetItemRect(h, i, &r) != FALSE;
+            if (!whole) break;
+            if (i == current) InflateRect(&r, proud, proud);
+            HRGN tab = CreateRectRgnIndirect(&r);
+            whole = tab && CombineRgn(row, row, tab, RGN_DIFF) != ERROR;
+            if (tab) DeleteObject(tab);
+        }
+        if (whole) FillRgn(dc, row, surface);
+        if (row) DeleteObject(row);
+    }
     RECT body = c;
     traced_tab_adjust(h, FALSE, &body);
     if (body.right <= body.left || body.bottom <= body.top) return;
     const POINT mid{(body.left + body.right) / 2, (body.top + body.bottom) / 2};
     const COLORREF face = GetPixel(dc, mid.x, mid.y);
-    if (face == CLR_INVALID || face == color_ref(theme_color_of(theme_color::base))) return;
+    if (face == CLR_INVALID || face == color_ref(content_color_of(h))) return;
     // The body's pixels, out to the page's edge, whatever its inset.
-    HGDIOBJ old = SelectObject(dc, theme_brush(theme_color::base));
+    HGDIOBJ old = SelectObject(dc, surface);
     ExtFloodFill(dc, mid.x, mid.y, face, FLOODFILLSURFACE);
     SelectObject(dc, old);
 }
@@ -8867,8 +9072,15 @@ bool render_tabs(HWND h, HDC dc)
 // alike: through render_tabs, else drawn straight onto the DC, so a failure
 // still paints (a light body may keep the style's shade then), and is never
 // retried.
+void (*g_tab_dying_hook_for_tests)(HWND, void*) = nullptr;
+void* g_tab_dying_hook_data = nullptr;
 LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
 {
+    // Going: marked so no scan measures it again (what runs below may look
+    // a ground up), and forgotten before and after the rest of its teardown.
+    if (msg == WM_NCDESTROY)
+        return tear_down_kept(h, wp, lp, L"rapport-tab-dying", [h] { forget_tab_body(h); },
+                              g_tab_dying_hook_for_tests, g_tab_dying_hook_data);
     if ((msg != WM_PAINT && msg != WM_ERASEBKGND && msg != WM_PRINTCLIENT) || !own_tabs(h))
         return DefSubclassProc(h, msg, wp, lp);
     switch (msg)
@@ -10237,7 +10449,7 @@ private:
         IntersectRect(&r, &r, &c);
         HDC dc = GetDC(h_);
         FillRect(dc, &r,
-                 dark_mode() || surface_of(h_) == theme_color::base ? theme_brush(surface_of(h_))
+                 dark_mode() || surface_of(h_) == theme_color::base ? content_brush_of(h_)
                                                                     : GetSysColorBrush(COLOR_3DFACE));
         ReleaseDC(h_, dc);
     }
@@ -10446,36 +10658,11 @@ private:
         }
         return DefSubclassProc(h, msg, wp, lp);
     }
-    // Light, on a base surface: the style's tabs, as the page tabs' are
-    // (draw_base_tabs), and the rest of their row in the surface's colour.
-    // The style fills the row beside and above the tabs in the dialog
-    // colour, on any window; a page's tabs have their body below to match
-    // it, but the strip's row is all there is, across the window's top.
+    // Light, on a base surface: the style's tabs, as the page tabs' are,
+    // the rest of their row in the content's colour (draw_base_tabs).
     void draw_base(HDC dc)
     {
         draw_base_tabs(h_, dc);
-        const int n = TabCtrl_GetItemCount(h_), current = TabCtrl_GetCurSel(h_);
-        RECT first{};
-        if (n <= 0 || !TabCtrl_GetItemRect(h_, 0, &first)) return;
-        RECT c;
-        GetClientRect(h_, &c);
-        // Whole or not at all: a tab not taken out of the row would be
-        // painted over, and the style's row is better than no tab.
-        HRGN row = CreateRectRgn(0, 0, c.right, first.bottom);
-        bool whole = row != nullptr;
-        for (int i = 0; whole && i < n; ++i)
-        {
-            RECT r;
-            whole = TabCtrl_GetItemRect(h_, i, &r) != FALSE;
-            if (!whole) break;
-            if (i == current)
-                InflateRect(&r, px(2), px(2));  // the current one stands out of the row
-            HRGN tab = CreateRectRgnIndirect(&r);
-            whole = tab && CombineRgn(row, row, tab, RGN_DIFF) != ERROR;
-            if (tab) DeleteObject(tab);
-        }
-        if (whole) FillRgn(dc, row, theme_brush(theme_color::base));
-        if (row) DeleteObject(row);
     }
     // New tab, and Close tab for the tab clicked (or the current one, from
     // the keyboard), as the keys do.
@@ -10506,8 +10693,8 @@ private:
     {
         RECT c;
         GetClientRect(h_, &c);
-        const theme_color surface = surface_of(h_);
-        FillRect(dc, &c, theme_brush(surface));
+        const HBRUSH surface = content_brush_of(h_);
+        FillRect(dc, &c, surface);
         HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h_, WM_GETFONT, 0, 0)));
         SetBkMode(dc, TRANSPARENT);
         const int n = TabCtrl_GetItemCount(h_), current = TabCtrl_GetCurSel(h_);
@@ -10524,9 +10711,9 @@ private:
             const bool selected = i == current, hot = PtInRect(&r, pointer);
             if (selected) InflateRect(&r, px(2), px(2));
             FillRect(dc, &r,
-                     theme_brush(selected ? theme_color::card
-                                 : hot    ? theme_color::hover
-                                          : surface));
+                     selected ? theme_brush(theme_color::card)
+                     : hot    ? theme_brush(theme_color::hover)
+                              : surface);
             FrameRect(dc, &r, theme_brush(theme_color::border));
             if (selected)
             {
@@ -14830,6 +15017,7 @@ public:
         trace::install_message_hooks();
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
         set_control_style(look.controls, look.density);
+        set_content_surface(look.content_surface);
         g_app_row_height = look.row_height;
         // Per-monitor DPI awareness (v2) where the system has it.
         using fn_t = BOOL(WINAPI*)(HANDLE);
@@ -15727,6 +15915,47 @@ private:
 };
 
 }  // namespace
+
+HBRUSH tab_body_brush_under(HWND control)
+{
+    return tab_body_under(control);
+}
+
+}  // namespace rap::win32
+
+// Private test seams: whether `control`'s tab body answer is cached, and
+// whether tab control `tab`'s body colour is.
+extern "C" __declspec(dllexport) int rapport_win32_tab_body_cached(HWND control)
+{
+    return rap::win32::tab_body_answers_now().count(control) ? 1 : 0;
+}
+// One lookup of `control`'s tab body, as a ground asks: 1 found, 0 not.
+extern "C" __declspec(dllexport) int rapport_win32_tab_body_lookup(HWND control)
+{
+    return rap::win32::tab_body_under(control) ? 1 : 0;
+}
+extern "C" __declspec(dllexport) int rapport_win32_tab_body_known(HWND tab)
+{
+    return rap::win32::tab_bodies().count(tab) ? 1 : 0;
+}
+// And a call from inside a tab control's WM_NCDESTROY, once it's forgotten
+// and before the rest of its teardown (what a subclass below rapport's sees).
+extern "C" __declspec(dllexport) void rapport_win32_set_tab_dying_hook(void (*hook)(HWND, void*), void* data)
+{
+    rap::win32::g_tab_dying_hook_for_tests = hook;
+    rap::win32::g_tab_dying_hook_data = data;
+}
+// The same inside a control's WM_NCDESTROY (one whose ground was looked up),
+// once its answer's dropped and before the rest of its teardown.
+extern "C" __declspec(dllexport) void rapport_win32_set_ground_dying_hook(void (*hook)(HWND, void*), void* data)
+{
+    rap::win32::g_ground_dying_hook_for_tests = hook;
+    rap::win32::g_ground_dying_hook_data = data;
+}
+
+namespace rap::win32
+{
+
 }  // namespace rap::win32
 
 RAPPORT_BACKEND_ENTRY(win32, rap::win32::win32_backend)

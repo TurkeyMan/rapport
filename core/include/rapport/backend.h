@@ -26,7 +26,8 @@ namespace rap
 // 89: tabs::set_page_visible and page_visible; spec::tabs visible and
 //     hide_single_tab.
 // 90: tabs::set_page_icon and set_page_title; spec::tabs icons.
-inline constexpr int abi_version = 90;
+// 91: look_options::content_surface.
+inline constexpr int abi_version = 91;
 
 // For backends' tabs (rap::tabs::set_page_visible): the page made current
 // when page `from` is hidden, the nearest visible after it, else before it;
@@ -75,6 +76,23 @@ enum class control_style
     automatic,
     native,
     fluent,
+};
+
+// Windows: what a base surface window's content (window_spec::base_surface,
+// below its toolbar band if it has one) sits on. layer is WinUI's layer,
+// as WinUI's apps put their controls on one, never on bare white:
+// LayerFillColorDefault over WinUI's base background, #F9F9F9 in light and
+// #282828 in dark. Controls' grounds and tab pages follow it; lists, trees,
+// text views and canvases keep their own backgrounds. plain is the base
+// colour, Win32's (COLOR_WINDOW; Explorer's dark #191919). automatic
+// follows the control style: layer where controls are fluent, plain where
+// they're native. High contrast is always the system colours. GTK and Qt
+// ignore it.
+enum class content_surface
+{
+    automatic,
+    layer,
+    plain,
 };
 
 // WinUI's densities, where controls are drawn in its look: standard (a text
@@ -285,6 +303,10 @@ struct look_options
     // own least); on Qt the text size enters only through the line-and-2
     // least (Qt has no text size apart from the app's font).
     float row_height = 0;
+    // Windows: a base surface window's content on WinUI's layer or the
+    // plain base colour (content_surface). Last, so an initialiser that
+    // lists the members before it still compiles.
+    rap::content_surface content_surface = rap::content_surface::automatic;
 };
 
 // Backend entry point. Returns nullptr if the ABI doesn't match or the
