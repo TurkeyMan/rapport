@@ -43,6 +43,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -335,7 +336,7 @@ fixture* make(const std::string& name, std::vector<std::string> ids, const std::
     w.tabs(tabs_spec(f, ids, group));
     f.win = g_ui->create(std::move(w));  // never shown
     pump();
-    f.top = FindWindowW(nullptr, std::wstring(name.begin(), name.end()).c_str());
+    f.top = test_window(std::wstring(name.begin(), name.end()).c_str());
     HWND caption = strip_of(f.top);
     f.caption = caption != nullptr;
     f.strip = caption ? caption : tab_control_of(f.top);

@@ -28,6 +28,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <dxgi.h>
@@ -291,7 +292,7 @@ int main(int argc, char** argv)
             .tabs(document_tabs{{{"a", "Alpha", {}, {}}, {"b", "Beta", {}, {}}}}.current("a")));
     win->show();
     pump(50);
-    HWND top = FindWindowW(nullptr, L"Caption glass");
+    HWND top = test_window(L"Caption glass");
     HWND strip = top ? FindWindowExW(top, nullptr, L"rapportCaptionTabs", nullptr) : nullptr;
     HWND edit = top ? FindWindowExW(top, nullptr, L"Edit", nullptr) : nullptr;
     expect(top && strip && edit, "the window, its tabs in the caption, its text field");

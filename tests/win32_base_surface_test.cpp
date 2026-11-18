@@ -10,6 +10,7 @@
 // print whose clip leaves out its body's centre too.
 #include <rapport/rapport.h>
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <cstdio>
@@ -247,7 +248,7 @@ int main(int argc, char** argv)
         }}.stretch(),
     }}}.base_surface().size(480_px, 720_px));
     win->show();
-    HWND root = FindWindowW(nullptr, L"Rapport base surface");
+    HWND root = test_window(L"Rapport base surface");
     if (!root) return 2;
     // On the desktop (a CI machine's is small, and pixels off it can't be
     // read), or at RAPPORT_TEST_AT=x,y (away from someone's work); in front.
