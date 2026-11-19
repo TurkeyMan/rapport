@@ -385,8 +385,10 @@ struct http_options
     // status. Only for a hop that may be followed at all: one to an
     // unsupported URL, or past the redirect limit, fails as ever without a
     // call. Unset: every one followed, as ever.
-    //  follow: as without it. Credentials still go only while the hops stay
-    //    at the first request's origin; this can't send them elsewhere.
+    //  follow: as without it. Authorization and Cookie still go only while
+    //    the hops stay at the first request's origin; this can't send them
+    //    elsewhere. Proxy-Authorization (the proxy's, not the origin's) goes
+    //    on to any origin, as ever.
     //  follow_without_credentials: Authorization, Cookie and
     //    Proxy-Authorization stay off this hop and every later one, back at
     //    the first origin too (a host shared by tenants: dev.azure.com/orgA
