@@ -394,6 +394,46 @@ void hidden_from_start(rap::ui& ui, bool sidebar)
     expect(changes == 0, kind + "no on_changed from any of it, " + str(changes));
     t->set_current(0);
     expect(t->current() == 0 && n.shown() == 0 && lazy_label != nullptr, kind + "A made current: built, shown");
+
+    // #110: the option at runtime (set_hide_single_tab). The strip's
+    // changes counted as GTK has them (show-tabs; the list's visible).
+    int toggled = 0;
+    g_signal_connect(
+        n.nb ? n.nb : n.list, n.nb ? "notify::show-tabs" : "notify::visible",
+        G_CALLBACK(+[](GObject*, GParamSpec*, gpointer c) { ++*static_cast<int*>(c); }), &toggled);
+    const std::string live =
+        sidebar ? "sidebar, set_hide_single_tab (#110): " : "strip, set_hide_single_tab (#110): ";
+    // Two pages visible: off and on again, the strip stays.
+    expect(t->hide_single_tab(), live + "on from the build");
+    t->set_hide_single_tab(false);
+    expect(!t->hide_single_tab() && strip_shown() && toggled == 0,
+           live + "off, two pages visible: the strip stays, untouched, " + str(toggled));
+    t->set_hide_single_tab(true);
+    expect(t->hide_single_tab() && strip_shown() && toggled == 0,
+           live + "on, two pages visible: the strip stays, untouched, " + str(toggled));
+    // One page visible (A hidden, C current), the option on: no strip.
+    t->set_page_visible(0, false);
+    expect(!strip_shown() && t->current() == 2, live + "A hidden: no strip, C current");
+    // Off: back, measured with it.
+    t->set_hide_single_tab(false);
+    const int off = across(whole) - whole_margins;
+    expect(!t->hide_single_tab() && strip_shown() && n.headers() == "C",
+           live + "off, one page visible: the strip back with its header, " + n.headers());
+    expect(off > alone, live + "off: the strip measured, " + str(off) + " > " + str(alone));
+    toggled = 0;
+    t->set_hide_single_tab(false);
+    expect(strip_shown() && toggled == 0, live + "off again: untouched, " + str(toggled));
+    // On: gone, measured as its page again.
+    t->set_hide_single_tab(true);
+    expect(t->hide_single_tab() && !strip_shown(), live + "on, one page visible: no strip");
+    expect(across(whole) - whole_margins == alone, live + "on: measured as its page, " +
+                                                       str(across(whole) - whole_margins) +
+                                                       " for " + str(alone));
+    toggled = 0;
+    t->set_hide_single_tab(true);
+    expect(!strip_shown() && toggled == 0, live + "on again: untouched, " + str(toggled));
+    expect(changes == 0 && t->current() == 2,
+           live + "no on_changed, " + str(changes) + ", C still current, " + str(t->current()));
 }
 
 void spin();

@@ -737,6 +737,7 @@ public:
     }
     // With at most one page visible, no strip (or sidebar list): the page
     // fills the area. The strip is back once a second page is visible.
+    // (rap::tabs::set_hide_single_tab changes it later.)
     tabs& hide_single_tab(bool on = true)
     {
         s().hide_single_tab = on;

@@ -27,7 +27,8 @@ namespace rap
 //     hide_single_tab.
 // 90: tabs::set_page_icon and set_page_title; spec::tabs icons.
 // 91: look_options::content_surface.
-inline constexpr int abi_version = 91;
+// 92: tabs::set_hide_single_tab and hide_single_tab.
+inline constexpr int abi_version = 92;
 
 // For backends' tabs (rap::tabs::set_page_visible): the page made current
 // when page `from` is hidden, the nearest visible after it, else before it;

@@ -2216,13 +2216,13 @@ public:
     // Its pages hidden from the start (spec::tabs::visible) and its strip
     // (hide_single_tab): the first visible page current, the others' tabs
     // hidden, before anything is shown or a lazy page built.
-    void init(const std::vector<bool>& visible, bool hide_single_tab)
+    void init(const std::vector<bool>& visible, bool hide_single)
     {
         quiet_scope q(quiet_);
         const int n = tabs()->count();
         visible_.assign(size_t(n), true);
         for (int i = 0; i < n && size_t(i) < visible.size(); ++i) visible_[size_t(i)] = visible[size_t(i)];
-        hide_single_ = hide_single_tab;
+        hide_single_ = hide_single;
         const int first = first_visible_page(visible_, n);
         if (first >= 0) tabs()->setCurrentIndex(first);
         for (int i = 0; i < n; ++i)
@@ -2303,6 +2303,15 @@ public:
     {
         return page >= 0 && size_t(page) < visible_.size() && visible_[size_t(page)];
     }
+    // The strip as the option now has it: the same value, or one that
+    // leaves the strip as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (hide_single_ == on) return;
+        hide_single_ = on;
+        update_strip(false);
+    }
+    bool hide_single_tab() const override { return hide_single_; }
     void set_lazy(lazy_pages pages)
     {
         lazy_ = std::move(pages);
@@ -2503,13 +2512,13 @@ public:
     }
     // As tabs_impl's: the first visible page current, the others' rows
     // hidden, and the list (hide_single_tab).
-    void init(const std::vector<bool>& visible, bool hide_single_tab)
+    void init(const std::vector<bool>& visible, bool hide_single)
     {
         quiet_scope q(quiet_);
         const int n = list_->count();
         visible_.assign(size_t(n), true);
         for (int i = 0; i < n && size_t(i) < visible.size(); ++i) visible_[size_t(i)] = visible[size_t(i)];
-        hide_single_ = hide_single_tab;
+        hide_single_ = hide_single;
         const int first = first_visible_page(visible_, n);
         if (first >= 0) list_->setCurrentRow(first);
         for (int i = 0; i < n; ++i)
@@ -2579,6 +2588,18 @@ public:
     {
         return page >= 0 && size_t(page) < visible_.size() && visible_[size_t(page)];
     }
+    // The list as the option now has it: the same value, or one that
+    // leaves the list as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (hide_single_ == on) return;
+        const bool was = tabs_strip_shown(visible_, list_->count(), hide_single_);
+        hide_single_ = on;
+        if (tabs_strip_shown(visible_, list_->count(), hide_single_) == was) return;
+        update_strip();
+        relayout();
+    }
+    bool hide_single_tab() const override { return hide_single_; }
     void set_lazy(lazy_pages pages)
     {
         lazy_ = std::move(pages);
