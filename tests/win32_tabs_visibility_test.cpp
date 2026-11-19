@@ -10,6 +10,8 @@
 // set at runtime too (#110: set_hide_single_tab), never shown and shown.
 // And #92: a canvas of a fixed width and height as a tab page's, a sidebar
 // page's and a stack page's whole content, measured at that size.
+// And #112: a strip's tabs as wide as their content in the fluent look, at
+// the control's own minimum in the native one (--native).
 // And #101: a page's icon and title, from the start and at runtime (set,
 // swapped, removed; kept while hidden; the same again nothing; out of range
 // ignored), strip and sidebar, and a strip in dark mode.
@@ -1278,7 +1280,7 @@ void single_tab_live(rap::ui& ui, bool sidebar)
                                      .on_changed([&](int) { ++changes; })
                                      .bind(t)}});
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
     const std::vector<HWND> lists = top ? all_of(top, WC_LISTVIEWW) : std::vector<HWND>{};
     expect(t && h && lists.size() == 3,
@@ -1371,6 +1373,112 @@ void single_tab_live(rap::ui& ui, bool sidebar)
            kind + "no on_changed, " + str(changes) + ", A still current, " + str(t->current()));
     RemoveWindowSubclass(h, count_moves, 0x111);
     RemoveWindowSubclass(h, count_writes, 0x110);
+}
+
+// #112: a strip's tab widths. Fluent (Windows 11, the look automatic): each
+// tab as wide as its content, every title's tab its text and the same
+// padding, PR's well under the control's own minimum, and an icon's tab
+// wider by it; native (--native, or before Windows 11): PR's at the
+// control's own minimum, as ever. That minimum read from a bare tab
+// control of the strip's font and styles. Again after a larger font (as a
+// new DPI brings).
+DWORD windows_build()
+{
+    using fn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    auto get =
+        ntdll
+            ? reinterpret_cast<fn>(reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion")))
+            : nullptr;
+    OSVERSIONINFOW v{};
+    v.dwOSVersionInfoSize = sizeof v;
+    return get && get(&v) == 0 ? v.dwBuildNumber : 0;
+}
+// The control's own minimum tab width, for `like`'s font and styles: a bare
+// tab control's one short tab.
+long native_minimum(HWND like)
+{
+    const DWORD style = DWORD(GetWindowLongPtrW(like, GWL_STYLE)) & ~WS_VISIBLE;
+    const DWORD ex = DWORD(GetWindowLongPtrW(like, GWL_EXSTYLE));
+    HWND h = CreateWindowExW(ex, WC_TABCONTROLW, L"", style, 0, 0, 400, 200, GetParent(like),
+                             nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!h) return -1;
+    SendMessageW(h, WM_SETFONT, SendMessageW(like, WM_GETFONT, 0, 0), FALSE);
+    TCITEMW item{};
+    item.mask = TCIF_TEXT;
+    item.pszText = const_cast<wchar_t*>(L"I");
+    TabCtrl_InsertItem(h, 0, &item);
+    RECT r{};
+    const long w = TabCtrl_GetItemRect(h, 0, &r) ? r.right - r.left : -1;
+    DestroyWindow(h);
+    return w;
+}
+// `text`'s width in `h`'s font.
+long text_width(HWND h, const wchar_t* text)
+{
+    HDC dc = GetDC(h);
+    HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)));
+    SIZE s{};
+    GetTextExtentPoint32W(dc, text, int(wcslen(text)), &s);
+    SelectObject(dc, old);
+    ReleaseDC(h, dc);
+    return s.cx;
+}
+void tab_widths(rap::ui& ui, bool fluent)
+{
+    using namespace rap::layout;
+    const std::string kind =
+        std::string("tab widths (#112), ") + (fluent ? "fluent: " : "native: ");
+    const std::wstring title = L"Tab widths";
+    rap::tabs* t = nullptr;
+    auto win = ui.create(window{narrow(title),
+                                {tabs{{"Commit", label{"c"}},
+                                      {"PR", label{"p"}},
+                                      page{"Build", label{"b"}}.icon(solid(red)),
+                                      {"Artifacts", label{"a"}}}
+                                     .bind(t)}});
+    pump();
+    HWND top = test_window(title.c_str());
+    HWND h = top ? one_of(top, WC_TABCONTROLW) : nullptr;
+    expect(t && h, kind + "the window, never shown, and its tab control");
+    if (!t || !h) return;
+    auto check = [&](const std::string& when)
+    {
+        const long native = native_minimum(h);
+        // What each tab adds to its title's text.
+        const long commit = header_width(h, false, 0) - text_width(h, L"Commit"),
+                   pr = header_width(h, false, 1) - text_width(h, L"PR"),
+                   build = header_width(h, false, 2) - text_width(h, L"Build"),
+                   artifacts = header_width(h, false, 3) - text_width(h, L"Artifacts");
+        const long pr_width = header_width(h, false, 1);
+        const std::string widths = " (tabs " + str(header_width(h, false, 0)) + " " +
+                                   str(pr_width) + " " + str(header_width(h, false, 2)) + " " +
+                                   str(header_width(h, false, 3)) + ", the control's minimum " +
+                                   str(native) + ")";
+        if (fluent)
+        {
+            expect(
+                pr == commit && pr == artifacts && pr_width < native,
+                kind + when +
+                    "each tab its text and the same padding, PR's under the control's minimum, " +
+                    str(commit) + " " + str(pr) + " " + str(artifacts) + widths);
+            expect(build > pr, kind + when + "Build's tab wider by its icon, " + str(build) +
+                                   " over " + str(pr) + widths);
+        }
+        else
+            expect(pr_width == native, kind + when + "PR's tab at the control's minimum" + widths);
+    };
+    check("");
+    // A larger font, as a new DPI brings (the backend's WM_SETFONT hook).
+    HFONT large =
+        CreateFontW(-24, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
+    HFONT was = reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0));
+    SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(large), TRUE);
+    pump();
+    check("a larger font: ");
+    SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(was), TRUE);
+    pump();
+    DeleteObject(large);
 }
 
 }  // namespace
@@ -1539,11 +1647,20 @@ void icon_column_repaint(rap::ui& ui)
 int main(int argc, char** argv)
 {
     rap::load_options options{.backend = "win32"};
+    if (argc > 1 && std::string(argv[1]) == "--native")
+        options.look.controls = rap::control_style::native;
     auto ui = rap::ui::load(argc, argv, options);
     if (!ui)
     {
         std::printf("no win32 backend: %s\n", ui.error().c_str());
         return 77;
+    }
+    // --native: the native look's tab widths (#112), alone.
+    if (argc > 1 && std::string(argv[1]) == "--native")
+    {
+        tab_widths(**ui, false);
+        std::printf(fails ? "%d failed\n" : "all passed\n", fails);
+        return fails ? 1 : 0;
     }
     if (argc > 1 && std::string(argv[1]) == "--shown")
     {
@@ -1564,6 +1681,7 @@ int main(int argc, char** argv)
     for (const bool sidebar : {false, true}) page_icons(**ui, sidebar);
     page_icons_dark(**ui);
     for (const bool sidebar : {false, true}) path_icon_slot(**ui, sidebar);
+    tab_widths(**ui, windows_build() >= 22000);  // the look automatic: fluent on Windows 11
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
