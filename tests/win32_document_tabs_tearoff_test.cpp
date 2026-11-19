@@ -191,7 +191,6 @@ struct told_receive
     rap::window* source = nullptr;
 };
 struct fixture;
-std::vector<std::unique_ptr<fixture>> fixtures;
 rap::ui* g_ui = nullptr;
 bool g_menu_bar = false;  // stage 1 (under a menu bar), or the caption's strip
 HWND g_hook_window = nullptr;  // a window kept to the end, for the test hooks
@@ -264,6 +263,9 @@ struct fixture
         return p;
     }
 };
+// After the type: a vector of unique_ptr to an incomplete type can't be
+// destroyed (MSVC 14.52 instantiates its destructor at the definition).
+std::vector<std::unique_ptr<fixture>> fixtures;
 
 fixture* make(const std::string& name, std::vector<std::string> ids, const std::string& group);
 

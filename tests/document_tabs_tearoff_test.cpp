@@ -92,7 +92,6 @@ struct told_receive
 };
 
 struct fixture;
-std::vector<std::unique_ptr<fixture>> fixtures;
 rap::ui* g_ui = nullptr;
 
 struct fixture
@@ -109,6 +108,9 @@ struct fixture
     bool close_on_detach = false, close_on_receive = false;
     fixture* made = nullptr;
 };
+// After the type: a vector of unique_ptr to an incomplete type can't be
+// destroyed (MSVC 14.52 instantiates its destructor at the definition).
+std::vector<std::unique_ptr<fixture>> fixtures;
 
 fixture* make(const std::string& name, std::vector<std::string> ids, const std::string& group);
 
