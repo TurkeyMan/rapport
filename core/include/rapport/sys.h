@@ -351,6 +351,14 @@ struct http_response
     std::string error;     // why there's no response, or why the body was cut short
 };
 
+// What to do with a redirect (http_options::on_redirect).
+enum class redirect_action
+{
+    follow,                     // as without the callback
+    follow_without_credentials, // and send no credentials, from this hop on
+    stop,                       // don't: the 3xx itself is the response
+};
+
 struct http_options
 {
     // Authorization, Accept, User-Agent, ... Authorization and Cookie go only
@@ -372,6 +380,24 @@ struct http_options
     // As the body arrives: bytes so far, and of how many (the Content-Length,
     // when it's given and the body isn't compressed on the way).
     std::function<void(std::uint64_t received, std::optional<std::uint64_t> total)> progress;
+    // Each redirect, before it's followed: where from (the URL that answered
+    // with it), where to (absolute, as it would be requested) and its
+    // status. Only for a hop that may be followed at all: one to an
+    // unsupported URL, or past the redirect limit, fails as ever without a
+    // call. Unset: every one followed, as ever.
+    //  follow: as without it. Credentials still go only while the hops stay
+    //    at the first request's origin; this can't send them elsewhere.
+    //  follow_without_credentials: Authorization, Cookie and
+    //    Proxy-Authorization stay off this hop and every later one, back at
+    //    the first origin too (a host shared by tenants: dev.azure.com/orgA
+    //    to /orgB).
+    //  stop: the 3xx is the response (its status, headers with Location, and
+    //    body), not an error.
+    // Called on the thread that called http_request (a worker's, as the
+    // request blocks), before the next hop's sent: it mustn't wait on the UI
+    // thread if that's waiting for the request. An exception from it fails
+    // the request (http_response::error), the hop not sent.
+    std::function<redirect_action(std::string_view from_url, std::string_view to_url, int status)> on_redirect;
 };
 
 // An HTTP(S) request, blocking: for a worker thread. TLS, certificates and
