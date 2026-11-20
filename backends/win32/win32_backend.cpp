@@ -877,8 +877,56 @@ BOOL CALLBACK collect_pane_frame(HWND h, LPARAM lp)
     return TRUE;
 }
 
+// `parent`'s children printed into `dc` (at `parent`'s client origin, clipped
+// to its client area) as they show on screen: the bottom of the z-order
+// first, so one above covers one below, each clipped to itself, then its own
+// children inside its client area, likewise. WM_PRINT's PRF_CHILDREN goes
+// the other way, top first: a tab control (at the bottom, its pages above
+// it, WS_CLIPSIBLINGS on screen) printed last covered its pages with its
+// body (#119); a group box and what's in it, the same. One cut off entirely
+// (out of the clip) isn't printed, nor its children.
+void print_children(HWND parent, HDC dc)
+{
+    HWND first = GetWindow(parent, GW_CHILD);
+    for (HWND c = first ? GetWindow(first, GW_HWNDLAST) : nullptr; c; c = GetWindow(c, GW_HWNDPREV))
+    {
+        if (!(GetWindowLongPtrW(c, GWL_STYLE) & WS_VISIBLE)) continue;
+        RECT w;
+        GetWindowRect(c, &w);
+        POINT at{w.left, w.top};
+        ScreenToClient(parent, &at);
+        const int saved = SaveDC(dc);
+        OffsetViewportOrgEx(dc, at.x, at.y, nullptr);
+        if (IntersectClipRect(dc, 0, 0, w.right - w.left, w.bottom - w.top) != NULLREGION)
+        {
+            SendMessageW(c, WM_PRINT, reinterpret_cast<WPARAM>(dc),
+                         PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND);
+            POINT client{0, 0};
+            ClientToScreen(c, &client);
+            RECT inside;
+            GetClientRect(c, &inside);
+            OffsetViewportOrgEx(dc, client.x - w.left, client.y - w.top, nullptr);
+            if (IntersectClipRect(dc, 0, 0, inside.right, inside.bottom) != NULLREGION)
+                print_children(c, dc);
+        }
+        RestoreDC(dc, saved);
+    }
+}
+
+// A pane's panel and its controls printed into `dc`, at its client origin:
+// what paint_pane copies to the screen.
+void print_pane(HWND panel, HDC dc)
+{
+    g_printing_pane = panel;
+    SendMessageW(panel, WM_PRINT, reinterpret_cast<WPARAM>(dc),
+                 PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND);
+    print_children(panel, dc);
+    g_printing_pane = nullptr;
+}
+
 // A scroll pane's panel and everything on it drawn off screen (WM_PRINT: its
-// background, then its controls in turn, into the one bitmap), then put on
+// background, then its controls in turn, bottom of the z-order first, into
+// the one bitmap: print_children), then put on
 // screen in one go: its controls, moved and sized by a layout pass without
 // painting (see moves_in_one_pass), otherwise showed landing one at a time.
 // It's its WM_PAINT, which comes when nothing else is waiting: dragging a
@@ -921,13 +969,10 @@ bool paint_pane(HWND panel)
     if (old && old != HGDI_ERROR && !frames.failed &&
         (frames.windows.empty() || ExtSelectClipRgn(screen, frames.shown, RGN_DIFF) != ERROR))
     {
-        g_printing_pane = panel;
         {
             trace::scope timing(trace::phase::pane_print, uintptr_t(panel));
-            SendMessageW(panel, WM_PRINT, reinterpret_cast<WPARAM>(mem),
-                         PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND | PRF_CHILDREN);
+            print_pane(panel, mem);
         }
-        g_printing_pane = nullptr;
         {
             trace::scope timing(trace::phase::pane_blit, uintptr_t(panel));
             // Not over the controls' frames (clipped out above): printed, a
@@ -16273,6 +16318,14 @@ HBRUSH tab_body_brush_under(HWND control)
 }
 
 }  // namespace rap::win32
+
+// Private test seam (#119): a scroll pane's panel printed into `dc` as
+// paint_pane draws it off screen, so a never-shown window's pane copy can be
+// read. Inert unless called.
+extern "C" __declspec(dllexport) void rapport_win32_print_pane(HWND panel, HDC dc)
+{
+    rap::win32::print_pane(panel, dc);
+}
 
 // Private test seams: whether `control`'s tab body answer is cached, and
 // whether tab control `tab`'s body colour is.
