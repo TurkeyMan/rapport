@@ -6,19 +6,19 @@
 // never-shown window: each label's pixels in the pane's copy are the label's
 // own (printed alone), its text and not only its background. And a
 // control's own children printed too (a list's header).
-#include "win32_test_windows.h"
-#include <algorithm>
-#include <commctrl.h>
-#include <cstdio>
 #include <rapport/rapport.h>
+#include <windows.h>
+// After windows.h, which they need.
+#include "win32_test_windows.h"
+#include <commctrl.h>
+
+#include <algorithm>
+#include <cstdio>
 #include <string>
 #include <vector>
-#include <windows.h>
 
 #ifdef _MSC_VER
-#pragma comment(                                                                                   \
-    linker,                                                                                        \
-    "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #endif
 
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
