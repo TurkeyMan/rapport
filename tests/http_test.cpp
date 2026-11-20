@@ -10,7 +10,11 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <map>
+#include <mutex>
+#include <stdexcept>
 #include <string>
+#include <vector>
 #include <string_view>
 #include <thread>
 
@@ -417,6 +421,274 @@ void requests()
     std::filesystem::remove(secret);
 }
 
+// http_options::on_redirect: asked about each hop, in order; stop keeps the
+// 3xx; follow_without_credentials keeps them off that hop and every later
+// one, back at the first origin too; follow can't send them across origins;
+// unset, as ever; an exception fails the request, the hop not sent.
+void redirect_decisions()
+{
+    std::mutex m;
+    std::map<std::string, std::string> seen;  // path -> the credentials it came with
+    const auto record = [&](std::string_view path, std::string_view headers)
+    {
+        std::string had;
+        for (const char* h : {"Authorization", "Cookie", "Proxy-Authorization"})
+            if (headers.find("\r\n" + std::string(h) + ": ") != std::string_view::npos) had += std::string(had.empty() ? "" : " ") + h;
+        std::lock_guard lock(m);
+        seen[std::string(path)] = had.empty() ? "none" : had;
+    };
+    const auto had = [&](const std::string& path)
+    {
+        std::lock_guard lock(m);
+        const auto it = seen.find(path);
+        return it == seen.end() ? std::string("not asked") : it->second;
+    };
+    const auto forget = [&]
+    {
+        std::lock_guard lock(m);
+        seen.clear();
+    };
+    server other(
+        [&](std::string_view path, std::string_view headers)
+        {
+            record(path, headers);
+            return response("200 OK", {}, "other");
+        });
+    server s(
+        [&](std::string_view path, std::string_view headers) -> std::string
+        {
+            record(path, headers);
+            // /hop1 -> /hop2 -> /final, 302 then 307.
+            if (path == "/hop1") return response("302 Found", "/hop2", "");
+            if (path == "/hop2") return response("307 Temporary Redirect", "/final", "");
+            if (path == "/final") return response("200 OK", {}, "final");
+            // A tenant's URL to another's, on the same host, and back.
+            if (path == "/orgA/start") return response("302 Found", "/orgB/next", "");
+            if (path == "/orgB/next") return response("302 Found", "/orgA/end", "");
+            if (path == "/orgA/end") return response("200 OK", {}, "end");
+            if (path == "/stop") return response("302 Found", "/final", "moved along");
+            if (path == "/across") return response("302 Found", other.url("/landing"), "");
+            return response("404 Not Found", {}, "");
+        });
+    if (!s || !other)
+    {
+        check(false, "on_redirect: servers on the loopback");
+        return;
+    }
+    if (auto probe = rap::sys::http_get(s.url("/final")); probe.error.find("libcurl") != std::string::npos)
+    {
+        std::printf("skip on_redirect: %s\n", probe.error.c_str());
+        return;
+    }
+    const rap::sys::http_headers credentials{
+        {"Authorization", "Bearer test"}, {"Cookie", "session=1"}, {"Proxy-Authorization", "Basic cHJveHk="}};
+    using rap::sys::redirect_action;
+
+    // Each hop, in order: from, to (absolute), status.
+    {
+        std::vector<std::string> calls;
+        rap::sys::http_options o;
+        o.on_redirect = [&](std::string_view from, std::string_view to, int status)
+        {
+            calls.push_back(std::string(from) + " -> " + std::string(to) + " " + std::to_string(status));
+            return redirect_action::follow;
+        };
+        const auto r = rap::sys::http_get(s.url("/hop1"), o);
+        const std::vector<std::string> want{s.url("/hop1") + " -> " + s.url("/hop2") + " 302",
+                                            s.url("/hop2") + " -> " + s.url("/final") + " 307"};
+        if (calls != want)
+            for (const auto& c : calls) std::printf("     called: %s\n", c.c_str());
+        check(calls == want && r.status == 200 && r.body == "final",
+              "on_redirect: asked about each hop in order, with from, to and status");
+    }
+
+    // stop: the 3xx is the response, Location and body, no error; the hop
+    // not requested.
+    {
+        forget();
+        rap::sys::http_options o;
+        o.on_redirect = [](std::string_view, std::string_view, int) { return redirect_action::stop; };
+        const auto r = rap::sys::http_get(s.url("/stop"), o);
+        const std::string* where = nullptr;
+        for (const auto& [n, v] : r.headers)
+            if (n == "Location") where = &v;
+        if (r.status != 302)
+            std::printf("     status %d, error [%s], body [%s]\n", r.status, r.error.c_str(), r.body.c_str());
+        check(r.status == 302 && r.error.empty() && where && *where == "/final" && r.body == "moved along" &&
+                  r.url == s.url("/stop") && had("/final") == "not asked",
+              "on_redirect: stop returns the 3xx with its Location and body, not followed");
+    }
+
+    // follow_without_credentials to another tenant: none there, nor back at
+    // the first one after it.
+    {
+        forget();
+        rap::sys::http_options o{.headers = credentials};
+        o.on_redirect = [](std::string_view, std::string_view to, int)
+        { return to.find("/orgB/") != std::string_view::npos ? redirect_action::follow_without_credentials
+                                                              : redirect_action::follow; };
+        const auto r = rap::sys::http_get(s.url("/orgA/start"), o);
+        std::printf("     orgA/start %s, orgB/next %s, orgA/end %s\n", had("/orgA/start").c_str(),
+                    had("/orgB/next").c_str(), had("/orgA/end").c_str());
+        check(r.status == 200 && had("/orgA/start") == "Authorization Cookie Proxy-Authorization" &&
+                  had("/orgB/next") == "none",
+              "on_redirect: follow_without_credentials sends none on that hop (Authorization, Cookie, "
+              "Proxy-Authorization)");
+        check(had("/orgA/end") == "none", "on_redirect: nor on a later hop back to the first origin");
+    }
+
+    // follow on a hop to another origin: still none there.
+    {
+        forget();
+        rap::sys::http_options o{.headers = credentials};
+        o.on_redirect = [](std::string_view, std::string_view, int) { return redirect_action::follow; };
+        const auto r = rap::sys::http_get(s.url("/across"), o);
+        // (Proxy-Authorization is the proxy's, which the origin rule leaves
+        // as ever: only follow_without_credentials drops it.)
+        const std::string there = had("/landing");
+        if (there != "Proxy-Authorization") std::printf("     /landing had: %s\n", there.c_str());
+        check(r.status == 200 && r.body == "other" && there == "Proxy-Authorization",
+              "on_redirect: follow on a hop to another origin still sends no Authorization or Cookie");
+    }
+
+    // Unset: as ever (same origin, credentials kept).
+    {
+        forget();
+        const auto r = rap::sys::http_get(s.url("/orgA/start"), {.headers = credentials});
+        check(r.status == 200 && had("/orgB/next") == "Authorization Cookie Proxy-Authorization" &&
+                  had("/orgA/end") == "Authorization Cookie Proxy-Authorization",
+              "on_redirect unset: as before, credentials on same-origin hops");
+    }
+
+    // An exception: the request fails, the hop not sent.
+    {
+        forget();
+        rap::sys::http_options o{.headers = credentials};
+        o.on_redirect = [](std::string_view, std::string_view, int) -> redirect_action
+        { throw std::runtime_error("no"); };
+        const auto r = rap::sys::http_get(s.url("/orgA/start"), o);
+        if (r.error.empty()) std::printf("     status %d, body [%s]\n", r.status, r.body.c_str());
+        check(!r.error.empty() && r.status == 0 && had("/orgB/next") == "not asked",
+              ("on_redirect: an exception fails the request, the hop not sent (" + r.error + ")").c_str());
+    }
+}
+
+// on_redirect's to_url is the URL the hop is sent to, on either transport:
+// dot segments out ("/orgA/../orgB/secret" is "/orgB/secret", which is
+// what the server is asked for), so a policy on its path sees the path that
+// goes; a Location of a fragment alone, or empty, is the same path and
+// query again (not the directory); a query alone, the path with it.
+void redirect_targets()
+{
+    std::mutex m;
+    std::map<std::string, std::string> seen;  // path -> the credentials it came with
+    std::string self;                         // the server's own URL, for an absolute Location
+    const auto had = [&](const std::string& path)
+    {
+        std::lock_guard lock(m);
+        const auto it = seen.find(path);
+        return it == seen.end() ? std::string("not asked") : it->second;
+    };
+    server s(
+        [&](std::string_view path, std::string_view headers) -> std::string
+        {
+            {
+                std::lock_guard lock(m);
+                seen[std::string(path)] =
+                    headers.find("\r\nAuthorization: ") != std::string_view::npos ? "Authorization"
+                                                                                  : "none";
+            }
+            if (path == "/orgA/dots") return response("302 Found", "/orgA/../orgB/secret", "");
+            if (path == "/orgA/rel/dots") return response("302 Found", "../../orgB/./secret", "");
+            if (path == "/orgA/abs")
+            {
+                std::lock_guard lock(m);
+                return response("302 Found", self + "/orgA/../orgB/secret", "");
+            }
+            if (path == "/orgB/secret") return response("200 OK", {}, "secret");
+            if (path == "/page/here?q=1") return response("302 Found", "#top", "");
+            if (path == "/page/empty?q=2")
+                return "HTTP/1.1 302 Found\r\nConnection: close\r\nLocation: \r\nContent-Length: "
+                       "0\r\n\r\n";
+            if (path == "/page/query?q=3") return response("302 Found", "?r=4", "");
+            return response("404 Not Found", {}, "");
+        });
+    if (!s)
+    {
+        check(false, "redirect targets: a server on the loopback");
+        return;
+    }
+    {
+        std::lock_guard lock(m);
+        self = s.url("");
+    }
+    if (auto probe = rap::sys::http_get(s.url("/orgB/secret"));
+        probe.error.find("libcurl") != std::string::npos)
+    {
+        std::printf("skip redirect targets: %s\n", probe.error.c_str());
+        return;
+    }
+    using rap::sys::redirect_action;
+
+    // A policy on the path: credentials only on to /orgA/.
+    for (const char* from : {"/orgA/dots", "/orgA/rel/dots", "/orgA/abs"})
+    {
+        {
+            std::lock_guard lock(m);
+            seen.clear();
+        }
+        std::vector<std::string> told;
+        rap::sys::http_options o{.headers = {{"Authorization", "Bearer orgA"}}};
+        o.on_redirect = [&](std::string_view, std::string_view to, int)
+        {
+            told.emplace_back(to);
+            return to.find("/orgA/") != std::string_view::npos
+                       ? redirect_action::follow
+                       : redirect_action::follow_without_credentials;
+        };
+        const auto r = rap::sys::http_get(s.url(from), o);
+        const std::string to = told.empty() ? "(not asked)" : told.front();
+        check(told.size() == 1 && to == s.url("/orgB/secret") && r.status == 200 &&
+                  r.body == "secret",
+              (std::string("redirect targets: ") + from +
+               "'s dot segments out, the URL that's sent: " + to)
+                  .c_str());
+        check(had("/orgB/secret") == "none" && r.url == s.url("/orgB/secret"),
+              (std::string("redirect targets: ") + from +
+               ": a policy on the path keeps credentials off /orgB/, " + had("/orgB/secret"))
+                  .c_str());
+    }
+
+    // Asked only: what each Location resolves to, stopped there.
+    const auto target = [&](const std::string& from)
+    {
+        std::string to = "(not asked)";
+        rap::sys::http_options o;
+        o.on_redirect = [&](std::string_view, std::string_view t, int)
+        {
+            to = std::string(t);
+            return redirect_action::stop;
+        };
+        rap::sys::http_get(s.url(from), o);
+        return to;
+    };
+    const struct
+    {
+        const char* from;
+        std::string want;
+        const char* what;
+    } cases[] = {
+        {"/page/here?q=1", s.url("/page/here?q=1"), "a fragment alone: the same path and query"},
+        {"/page/empty?q=2", s.url("/page/empty?q=2"), "an empty Location: the same path and query"},
+        {"/page/query?q=3", s.url("/page/query?r=4"), "a query alone: the same path with it"},
+    };
+    for (const auto& c : cases)
+    {
+        const std::string to = target(c.from);
+        check(to == c.want, (std::string("redirect targets: ") + c.what + ", " + to).c_str());
+    }
+}
+
 }  // namespace
 
 int main()
@@ -427,6 +699,8 @@ int main()
 #endif
     origins();
     requests();
+    redirect_decisions();
+    redirect_targets();
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

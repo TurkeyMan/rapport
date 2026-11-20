@@ -69,20 +69,108 @@ bool has_scheme(std::string_view ref)
     return end != std::string_view::npos && ref[end] == ':';
 }
 
-// A Location against the URL it came from.
+// A URI reference's parts (RFC 3986 3): each part with its delimiter, so
+// they join back as they were; an absent part is empty, a present but
+// empty one isn't ("?" is a query, empty).
+struct uri_parts
+{
+    std::string scheme;     // "https:"
+    std::string authority;  // "//host:port"
+    std::string path;       // "/a/b"
+    std::string query;      // "?q"
+
+    std::string str() const { return scheme + authority + path + query; }
+};
+uri_parts split_uri(std::string_view s)
+{
+    uri_parts u;
+    s = s.substr(0, s.find('#'));  // a fragment isn't sent: neither transport has it
+    if (has_scheme(s))
+    {
+        const size_t colon = s.find(':');
+        u.scheme = std::string(s.substr(0, colon + 1));
+        s.remove_prefix(colon + 1);
+    }
+    if (s.starts_with("//"))
+    {
+        const size_t end = s.find_first_of("/?", 2);
+        u.authority = std::string(s.substr(0, end));
+        s.remove_prefix(end == std::string_view::npos ? s.size() : end);
+    }
+    const size_t q = s.find('?');
+    u.path = std::string(s.substr(0, q));
+    if (q != std::string_view::npos) u.query = std::string(s.substr(q));
+    return u;
+}
+// A path without its "." and ".." segments (RFC 3986 5.2.4), as libcurl
+// takes them out before it sends one: "/orgA/../orgB/x" is "/orgB/x".
+std::string without_dot_segments(std::string in)
+{
+    std::string out;
+    const auto pop = [&]
+    {
+        const size_t slash = out.rfind('/');
+        out.erase(slash == std::string::npos ? 0 : slash);
+    };
+    while (!in.empty())
+    {
+        if (in.starts_with("../"))
+            in.erase(0, 3);
+        else if (in.starts_with("./") || in.starts_with("/./"))
+            in.erase(0, 2);
+        else if (in == "/.")
+            in = "/";
+        else if (in.starts_with("/../"))
+            in.erase(0, 3), pop();
+        else if (in == "/..")
+            in = "/", pop();
+        else if (in == "." || in == "..")
+            in.clear();
+        else
+        {
+            const size_t end = in.find('/', in.front() == '/' ? 1 : 0);
+            out += in.substr(0, end);
+            in.erase(0, end == std::string::npos ? in.size() : end);
+        }
+    }
+    return out;
+}
+// A Location against the URL it came from (RFC 3986 5.2.2): the URL the
+// next hop is sent to, as both transports send it. Its path's dot segments
+// taken out, an empty one with a host "/", no fragment. A reference with no
+// path (an empty one, a fragment alone) is the base's own path and query;
+// a query alone, the base's path with it.
 std::string resolve(const std::string& base, const std::string& location)
 {
-    if (has_scheme(location)) return location;
-    const size_t colon = base.find("://");
-    if (colon == std::string::npos) return location;
-    if (location.starts_with("//")) return base.substr(0, colon + 1) + location;
-    const size_t path = base.find_first_of("/?#", colon + 3);
-    const std::string root = base.substr(0, path);
-    if (location.starts_with('/')) return root + location;
-    std::string rest = path == std::string::npos ? "/" : base.substr(path);
-    rest = rest.substr(0, rest.find_first_of("?#"));
-    if (location.starts_with('?')) return root + rest + location;
-    return root + rest.substr(0, rest.rfind('/') + 1) + location;
+    const uri_parts b = split_uri(base), r = split_uri(location);
+    if (b.scheme.empty() || b.authority.empty()) return location;  // no base to resolve against
+    uri_parts t;
+    if (!r.scheme.empty())
+        t = r, t.path = without_dot_segments(r.path);
+    else
+    {
+        t.scheme = b.scheme;
+        if (!r.authority.empty())
+            t.authority = r.authority, t.path = without_dot_segments(r.path), t.query = r.query;
+        else
+        {
+            t.authority = b.authority;
+            if (r.path.empty())
+                t.path = b.path, t.query = r.query.empty() ? b.query : r.query;
+            else
+            {
+                // Relative to the base's directory: up to its last '/' (an
+                // empty base path is "/").
+                const std::string dir = r.path.front() == '/' ? std::string()
+                                        : b.path.empty()      ? std::string("/")
+                                                         : b.path.substr(0, b.path.rfind('/') + 1);
+                t.path = without_dot_segments(dir + r.path);
+                t.query = r.query;
+            }
+        }
+    }
+    if (!t.authority.empty() && t.path.empty()) t.path = "/";
+    return t.str();
 }
 
 // Spaces after the authority as %20: servers send "Location: /a b" unescaped,
@@ -103,6 +191,7 @@ struct hop
     std::string method, url;
     bool with_body = true;    // the request's body goes too
     bool credentials = true;  // Authorization and Cookie go too
+    bool proxy_credentials = true;  // Proxy-Authorization too (on_redirect can drop it)
 };
 
 bool is_redirect(int status)
@@ -129,7 +218,8 @@ http_headers headers_for(const hop& h, const http_headers& all)
 {
     http_headers out;
     for (const auto& [name, value] : all)
-        if (h.credentials || !(iequals(name, "Authorization") || iequals(name, "Cookie")))
+        if ((h.credentials || !(iequals(name, "Authorization") || iequals(name, "Cookie"))) &&
+            (h.proxy_credentials || !iequals(name, "Proxy-Authorization")))
             out.emplace_back(name, value);
     return out;
 }
@@ -171,19 +261,60 @@ public:
     }
     bool late() const { return !o_.stall.count() && std::chrono::steady_clock::now() >= deadline_; }
 
-    // A response came: true, and the next hop current, if it's a redirect
-    // to follow (`location` as sent, or absolute; its spaces escaped).
-    bool follow(int status, const std::string* location)
+    // A response's headers are in: whether it's a redirect to follow
+    // (`location` resolved as resolve() has it, the URL sent; its spaces
+    // escaped), decided before
+    // any of its body (kept if it's not followed). on_redirect is asked
+    // about one the chain would follow; one it refuses (an unsupported URL,
+    // past the limit) is followed, to fail as ever at refused(). An
+    // exception from on_redirect: not followed, and error() says why.
+    bool decide(int status, const std::string* location)
     {
+        next_.reset();
+        error_.clear();
         if (!is_redirect(status) || !location) return false;
-        ++redirects_;
-        hop_ = redirected(hop_, status, spaces_escaped(resolve(hop_.url, *location)), first_);
+        hop next = redirected(hop_, status, spaces_escaped(resolve(hop_.url, *location)), first_);
+        if (o_.on_redirect && url_origin(next.url) && redirects_ + 1 <= max_redirects)
+        {
+            redirect_action act = redirect_action::follow;
+            try
+            {
+                act = o_.on_redirect(hop_.url, next.url, status);
+            }
+            catch (const std::exception& e)
+            {
+                error_ = std::string("redirect refused: on_redirect failed: ") + e.what();
+                return false;
+            }
+            catch (...)
+            {
+                error_ = "redirect refused: on_redirect failed";
+                return false;
+            }
+            if (act == redirect_action::stop) return false;
+            // Only stricter: nothing restores what the origin rule took.
+            if (act == redirect_action::follow_without_credentials)
+                next.credentials = false, next.proxy_credentials = false;
+        }
+        next_ = std::move(next);
         return true;
+    }
+    // Why the response decide() saw can't be had ("": it can).
+    const std::string& error() const { return error_; }
+    // The redirect decide() chose to follow made the current hop.
+    void follow()
+    {
+        if (!next_) return;
+        ++redirects_;
+        hop_ = std::move(*next_);
+        next_.reset();
     }
 
 private:
     const http_options& o_;
     hop hop_;
+    std::optional<hop> next_;
+    std::string error_;
     std::optional<origin> first_;
     std::chrono::steady_clock::time_point deadline_;
     int redirects_ = 0;
@@ -662,7 +793,12 @@ http_response http_request(std::string_view method, const std::string& url, std:
             }
         }
         r.url = h.url;
-        if (!hops.follow(int(status), header(r.headers, "Location"))) break;
+        if (!hops.decide(int(status), header(r.headers, "Location")))
+        {
+            if (!hops.error().empty()) return {.error = hops.error()};
+            break;  // this response is the one: its body read below
+        }
+        hops.follow();
     }
 
     // Undone chunking and decompression are WinHTTP's. A read that's done is
@@ -778,7 +914,10 @@ struct transfer
     const http_options& o;
     const curl_api& c;
     CURL* e;
+    chain& hops;
     int status = 0;
+    bool decided = false;   // the headers in, whether to follow decided
+    bool following = false; // a redirect to follow: its body dropped
     bool started = false;
     bool connected = false;  // through TLS: the stall time runs from then
     std::chrono::steady_clock::time_point last_data = std::chrono::steady_clock::now();
@@ -791,7 +930,7 @@ size_t on_body(char* data, size_t size, size_t count, void* p)
     const size_t n = size * count;
     t.last_data = std::chrono::steady_clock::now();
     t.connected = true;
-    if (is_redirect(t.status) && header(t.in.r.headers, "Location")) return n;  // followed below
+    if (t.following) return n;  // a redirect followed below: its body dropped
     if (!t.started) t.in.start(), t.started = true;
     return t.in.take(data, n) ? n : 0;  // 0 stops the transfer
 }
@@ -801,7 +940,20 @@ size_t on_header(char* data, size_t size, size_t count, void* p)
     auto& t = *static_cast<transfer*>(p);
     const std::string_view line(data, size * count);
     if (line.starts_with("HTTP/"))
+    {
         if (const size_t sp = line.find(' '); sp != std::string_view::npos) t.status = std::atoi(line.data() + sp + 1);
+        t.decided = t.following = false;
+    }
+    // The blank line ending a final response's headers (not a 1xx's): the
+    // chain decides now whether it's followed, before its body. An
+    // on_redirect that failed ends the transfer (0), the request with it.
+    if ((line == "\r\n" || line == "\n") && t.status >= 200 && !t.decided)
+    {
+        t.decided = true;
+        t.following = t.hops.decide(t.status, header(t.in.r.headers, "Location"));
+        if (!t.hops.error().empty()) return 0;
+        return size * count;
+    }
     add_header_line(line, t.in.r.headers);
     return size * count;
 }
@@ -878,7 +1030,7 @@ http_response http_request(std::string_view method, const std::string& url, std:
         const long left = long(hops.left().count());
         c.easy_setopt(e, opt_connecttimeout_ms, left);
         if (!o.stall.count()) c.easy_setopt(e, opt_timeout_ms, left);
-        transfer t{in, o, c, e};
+        transfer t{in, o, c, e, hops};
         c.easy_setopt(e, opt_writedata, &t);
         c.easy_setopt(e, opt_headerdata, &t);
         c.easy_setopt(e, opt_xferinfodata, &t);
@@ -909,10 +1061,13 @@ http_response http_request(std::string_view method, const std::string& url, std:
         c.easy_setopt(e, opt_httpheader, static_cast<curl_slist*>(nullptr));
         c.slist_free_all(list);
         r.url = h.url;
-        const char* next = nullptr;
-        if (rc != 0 || c.easy_getinfo(e, info_redirect_url, &next) != 0 || !next) break;
-        const std::string to = next;  // resolved by libcurl
-        if (!hops.follow(t.status, &to)) break;
+        if (!hops.error().empty())
+        {
+            c.easy_cleanup(e);
+            return {.error = hops.error()};
+        }
+        if (rc != 0 || !t.following) break;
+        hops.follow();
     }
     long status = 0;
     c.easy_getinfo(e, info_response_code, &status);
