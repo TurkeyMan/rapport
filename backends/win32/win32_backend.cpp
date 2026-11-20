@@ -9267,6 +9267,16 @@ struct page_items
     }
 };
 
+// A strip's tabs as wide as their content (#112): in the fluent look, as
+// WinUI's are, a short title's tab no wider than its text (and icon, if it
+// has one) and the padding. The native look keeps the control's own
+// minimum (54 px at 96 DPI, from its font), the classic padding. Set once:
+// the control keeps it through a new font (a new DPI's).
+void fit_tabs_to_content(HWND h)
+{
+    if (fluent_controls()) TabCtrl_SetMinTabWidth(h, 0);
+}
+
 class tabs_impl : public leaf<rap::tabs>
 {
 public:
@@ -9275,6 +9285,7 @@ public:
     {
         adopt(create_control(win, parent, WC_TABCONTROLW, L"", WS_CLIPSIBLINGS | WS_TABSTOP));
         SetWindowSubclass(h_, dark_tabs_proc, 1, 0);
+        fit_tabs_to_content(h_);
         items_.count = int(s.titles.size());
         items_.on = s.visible;
         items_.hide_single = s.hide_single_tab;
