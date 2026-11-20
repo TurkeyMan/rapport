@@ -396,6 +396,68 @@ void run_hidden_from_start(rap::ui& ui)
         t->set_current(0);
         expect(t->current() == 0 && lazy_label != nullptr, kind + "A made current: built");
         expect(changes == 0, kind + "no on_changed for set_current (#98), " + str(changes));
+
+        // #110: the option at runtime (set_hide_single_tab). The strip's
+        // changes counted as GTK has them (show-tabs; the list's visible).
+        int toggled = 0;
+        g_signal_connect(
+            sidebar ? list : nb, sidebar ? "notify::visible" : "notify::show-tabs",
+            G_CALLBACK(+[](GObject*, GParamSpec*, gpointer n) { ++*static_cast<int*>(n); }),
+            &toggled);
+        const std::string live = sidebar ? "sidebar, set_hide_single_tab (#110): "
+                                         : "strip, set_hide_single_tab (#110): ";
+        auto measured = [&]
+        {
+            GtkRequisition r = natural(outer);
+            r.width -= mx, r.height -= my;
+            return r;
+        };
+        // Two pages visible: off and on again, the strip stays.
+        expect(t->hide_single_tab(), live + "on from the build");
+        t->set_hide_single_tab(false);
+        settle();
+        expect(!t->hide_single_tab() && strip() && toggled == 0,
+               live + "off, two pages visible: the strip stays, untouched, " + str(toggled));
+        t->set_hide_single_tab(true);
+        settle();
+        expect(t->hide_single_tab() && strip() && toggled == 0,
+               live + "on, two pages visible: the strip stays, untouched, " + str(toggled));
+        // One page visible (A hidden, C current), the option on: no strip.
+        t->set_page_visible(0, false);
+        settle();
+        expect(!strip() && t->current() == 2, live + "A hidden: no strip, C current");
+        toggled = 0;
+        // Off: back, measured with it.
+        t->set_hide_single_tab(false);
+        settle();
+        const GtkRequisition off = measured();
+        expect(!t->hide_single_tab() && strip() && shown() == "C",
+               live + "off, one page visible: the strip back with its tab, " + shown());
+        if (sidebar)
+            expect(off.width > single.width, live + "off: measured with the list, wider, " +
+                                                 str(single.width) + " to " + str(off.width));
+        else
+            expect(off.height > single.height, live + "off: measured with the tabs, taller, " +
+                                                   str(single.height) + " to " + str(off.height));
+        // The same value again: nothing.
+        toggled = 0;
+        t->set_hide_single_tab(false);
+        settle();
+        expect(strip() && toggled == 0, live + "off again: untouched, " + str(toggled));
+        // On: gone, measured as its page again.
+        t->set_hide_single_tab(true);
+        settle();
+        const GtkRequisition on = measured();
+        expect(t->hide_single_tab() && !strip(), live + "on, one page visible: no strip");
+        expect(on.width == single.width && on.height == single.height,
+               live + "on: measured as its page, " + str(on.width) + "x" + str(on.height) +
+                   " for " + str(single.width) + "x" + str(single.height));
+        toggled = 0;
+        t->set_hide_single_tab(true);
+        settle();
+        expect(!strip() && toggled == 0, live + "on again: untouched, " + str(toggled));
+        expect(changes == 0 && t->current() == 2,
+               live + "no on_changed, " + str(changes) + ", C still current, " + str(t->current()));
     }
 }
 

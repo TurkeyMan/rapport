@@ -9420,6 +9420,17 @@ public:
         settled_ = current();
     }
     bool page_visible(int page) const override { return items_.shown(page); }
+    // The option, live: laid out again (and the control shown or hidden
+    // there) only when the strip comes or goes; the same value, or one with
+    // two pages or more visible, touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (items_.hide_single == on) return;
+        const bool was = items_.strip();
+        items_.hide_single = on;
+        if (items_.strip() != was) win_.relayout_at_once();
+    }
+    bool hide_single_tab() const override { return items_.hide_single; }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
     LRESULT notify(NMHDR* n, bool& handled) override
     {
@@ -9759,6 +9770,17 @@ public:
         win_.relayout_at_once();  // (the last thing)
     }
     bool page_visible(int page) const override { return items_.shown(page); }
+    // The option, live: laid out again (and the control shown or hidden
+    // there) only when the strip comes or goes; the same value, or one with
+    // two pages or more visible, touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (items_.hide_single == on) return;
+        const bool was = items_.strip();
+        items_.hide_single = on;
+        if (items_.strip() != was) win_.relayout_at_once();
+    }
+    bool hide_single_tab() const override { return items_.hide_single; }
     void ensure_built(int i)
     {
         if (i < 0 || size_t(i) >= lazy.size() || !lazy[size_t(i)]) return;

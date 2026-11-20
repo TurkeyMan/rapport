@@ -381,7 +381,16 @@ public:
     {
         return page >= 0 && page < pages && (size_t(page) >= visible.size() || visible[size_t(page)]);
     }
-    bool strip_shown() const { return tabs_strip_shown(visible, pages, hide_single_tab); }
+    bool strip_shown() const { return tabs_strip_shown(visible, pages, hide_single); }
+    // The option, live: the same value again, nothing (no line printed).
+    void set_hide_single_tab(bool on) override
+    {
+        if (hide_single == on) return;
+        hide_single = on;
+        std::printf("tabs: hide single tab %s, current %d, strip %s\n", on ? "on" : "off", current_,
+                    strip_shown() ? "shown" : "hidden");
+    }
+    bool hide_single_tab() const override { return hide_single; }
     // The first current page: the first visible, built if it's lazy.
     void start()
     {
@@ -391,7 +400,7 @@ public:
 
     int pages = 0;
     std::vector<bool> visible;  // per page; empty: all
-    bool hide_single_tab = false;
+    bool hide_single = false;   // spec::tabs::hide_single_tab
     // Lazy pages: built (and printed) when first made current.
     std::vector<std::function<node()>> lazy;
     std::function<void(const node&, size_t)> build_page;
@@ -715,7 +724,7 @@ private:
         tabs->visible = s.visible;
         tabs->titles = s.titles;
         tabs->icons = s.icons;
-        tabs->hide_single_tab = s.hide_single_tab;
+        tabs->hide_single = s.hide_single_tab;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             const bool hidden = i < s.visible.size() && !s.visible[i];

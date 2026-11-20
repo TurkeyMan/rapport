@@ -226,6 +226,65 @@ void run_visibility(rap::ui& ui, bool sidebar)
     }
 }
 
+// A widget shown or hidden (to its parent), counted: #110's "untouched".
+struct shown_count : QObject
+{
+    int n = 0;
+    bool eventFilter(QObject*, QEvent* e) override
+    {
+        if (e->type() == QEvent::ShowToParent || e->type() == QEvent::HideToParent) ++n;
+        return false;
+    }
+};
+
+// #110: set_hide_single_tab on tabs as run_hidden leaves them (C alone
+// visible, the option on, `alone` its measure then): off, the strip (or
+// list, `strip`) back and measured; on, gone and measured alone again; the
+// same value again untouched; with two pages visible the strip stays either
+// way. No on_changed, C current throughout. `grew(w, alone)` says whether
+// measure `w` takes the strip.
+void hide_single_live(rap::tabs* t, QWidget* strip, QWidget* outer, const QSize& alone,
+                      const QSize& alone_min, const std::function<bool(QSize, QSize)>& grew,
+                      const std::string& kind, int& changes)
+{
+    const std::string live = kind + "set_hide_single_tab (#110): ";
+    shown_count seen;
+    strip->installEventFilter(&seen);
+    expect(t->hide_single_tab() && strip->isHidden(), live + "on from the build, no strip");
+    t->set_hide_single_tab(false);
+    expect(!t->hide_single_tab() && !strip->isHidden(), live + "off, one page: the strip back");
+    expect(grew(outer->sizeHint(), alone) && grew(outer->minimumSizeHint(), alone_min),
+           live + "off: measured with the strip, " + str(outer->sizeHint()) + " over " +
+               str(alone) + ", least " + str(outer->minimumSizeHint()) + " over " + str(alone_min));
+    seen.n = 0;
+    t->set_hide_single_tab(false);
+    expect(!strip->isHidden() && seen.n == 0,
+           live + "off again: untouched, " + std::to_string(seen.n));
+    t->set_hide_single_tab(true);
+    expect(t->hide_single_tab() && strip->isHidden(), live + "on, one page: no strip");
+    expect(outer->sizeHint() == alone && outer->minimumSizeHint() == alone_min,
+           live + "on: measured alone again, " + str(outer->sizeHint()) + ", least " +
+               str(outer->minimumSizeHint()));
+    seen.n = 0;
+    t->set_hide_single_tab(true);
+    expect(strip->isHidden() && seen.n == 0,
+           live + "on again: untouched, " + std::to_string(seen.n));
+    // Two pages visible: the strip either way.
+    t->set_page_visible(1, true);
+    expect(!strip->isHidden(), live + "B shown: the strip back");
+    seen.n = 0;
+    t->set_hide_single_tab(false);
+    t->set_hide_single_tab(true);
+    expect(!strip->isHidden() && seen.n == 0 && t->hide_single_tab(),
+           live + "two pages visible, off and on: the strip stays, untouched, " +
+               std::to_string(seen.n));
+    t->set_page_visible(1, false);
+    expect(strip->isHidden(), live + "B hidden again: the option on, no strip");
+    expect(changes == 0 && t->current() == 2, live + "no on_changed, " + std::to_string(changes) +
+                                                  ", C current, " + std::to_string(t->current()));
+    strip->removeEventFilter(&seen);
+}
+
 // Pages hidden from the start, and hide_single_tab.
 void run_hidden(rap::ui& ui, bool sidebar)
 {
@@ -281,6 +340,9 @@ void run_hidden(rap::ui& ui, bool sidebar)
         t->set_page_visible(1, false);
         expect(bar->isHidden() && tw->sizeHint() == alone && tw->minimumSizeHint() == alone_min,
                kind + "hidden again: no strip, measured alone again, " + str(tw->sizeHint()));
+        hide_single_live(
+            t, bar, tw, alone, alone_min, [](QSize w, QSize a) { return w.height() > a.height(); },
+            kind, changes);
     }
     else
     {
@@ -309,6 +371,9 @@ void run_hidden(rap::ui& ui, bool sidebar)
         t->set_page_visible(1, false);
         expect(list->isHidden() && box->sizeHint() == alone && box->minimumSizeHint() == alone_min,
                kind + "hidden again: no list, measured alone again, " + str(box->sizeHint()));
+        hide_single_live(
+            t, list, box, alone, alone_min, [](QSize w, QSize a) { return w.width() > a.width(); },
+            kind, changes);
     }
     t->set_page_visible(0, true);
     expect(t->current() == 2 && lazy_label == nullptr, kind + "A shown: C stays current, A still unbuilt");

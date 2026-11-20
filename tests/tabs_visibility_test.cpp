@@ -111,6 +111,16 @@ int main(int argc, char** argv)
                kind + "hidden from the start: A and B hidden, C not");
         expect(t->current() == 2, kind + "hidden from the start: C current, " + std::to_string(t->current()));
         expect(lazy_label == nullptr, kind + "hidden from the start: the lazy A unbuilt");
+        // #110: the option read back, set at runtime; current() stays.
+        expect(t->hide_single_tab(), kind + "hide_single_tab on from the build");
+        t->set_hide_single_tab(false);
+        expect(!t->hide_single_tab() && t->current() == 2,
+               kind + "set_hide_single_tab(false): off, C current");
+        t->set_hide_single_tab(false);
+        expect(!t->hide_single_tab(), kind + "set_hide_single_tab(false) again: off");
+        t->set_hide_single_tab(true);
+        expect(t->hide_single_tab() && t->current() == 2,
+               kind + "set_hide_single_tab(true): on, C current");
         t->set_page_visible(0, true);
         expect(t->current() == 2 && lazy_label == nullptr, kind + "A shown: C stays current, A still unbuilt");
         t->set_current(0);

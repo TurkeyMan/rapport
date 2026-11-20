@@ -6,7 +6,8 @@
 // again back at its place, set_current on a hidden page ignored, pages hidden
 // from the start never shown (a lazy one unbuilt), a sidebar's natural height
 // its visible rows', and hide_single_tab: no strip or list with one page
-// visible, the page filling the area and the natural size without them.
+// visible, the page filling the area and the natural size without them;
+// set at runtime too (#110: set_hide_single_tab), never shown and shown.
 // And #92: a canvas of a fixed width and height as a tab page's, a sidebar
 // page's and a stack page's whole content, measured at that size.
 // And #101: a page's icon and title, from the start and at runtime (set,
@@ -1244,6 +1245,133 @@ void page_icons_dark(rap::ui& ui)
     pump();
 }
 
+// #110: hide_single_tab at runtime (set_hide_single_tab). Pages A, B (hidden
+// from the start), C (hidden): one visible, the option off. On: no strip
+// (or list), the page filling the area, the natural size without it; off:
+// back, as large as before; the same value again: no native write, no move,
+// no relayout. With B shown (two visible): either way the strip stays, and
+// only the option changes (B hidden again: the strip goes, as the option
+// says). No on_changed throughout, and current() stays.
+UINT g_moved = 0;  // WM_WINDOWPOSCHANGED on the control: moved, sized, shown or hidden
+LRESULT CALLBACK count_moves(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg == WM_WINDOWPOSCHANGED) ++g_moved;
+    return DefSubclassProc(h, msg, wp, lp);
+}
+void single_tab_live(rap::ui& ui, bool sidebar)
+{
+    using namespace rap::layout;
+    using namespace rap::literals;
+    const std::string kind =
+        sidebar ? "sidebar, set_hide_single_tab (#110): " : "strip, set_hide_single_tab (#110): ";
+    const std::string what = sidebar ? "list" : "strip";
+    const std::wstring title = sidebar ? L"Single live sidebar" : L"Single live strip";
+    const std::vector<rap::column> cols{{"Name", 120_px}};
+    rap::tabs* t = nullptr;
+    int changes = 0;
+    auto win = ui.create(window{narrow(title),
+                                {tabs{{"A", list{cols, &g_model}},
+                                      page{"B", list{cols, &g_model}}.visible(false),
+                                      page{"C", list{cols, &g_model}}.visible(false)}
+                                     .sidebar(sidebar)
+                                     .on_changed([&](int) { ++changes; })
+                                     .bind(t)}});
+    pump();
+    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
+    const std::vector<HWND> lists = top ? all_of(top, WC_LISTVIEWW) : std::vector<HWND>{};
+    expect(t && h && lists.size() == 3,
+           kind + "the window, never shown, its control and three lists");
+    if (!t || !h || lists.size() != 3) return;
+    SetWindowSubclass(h, count_writes, 0x110, 0);
+    SetWindowSubclass(h, count_moves, 0x111, 0);
+    HWND a = lists[0];
+    RECT client{};
+    GetClientRect(top, &client);
+    expect(!t->hide_single_tab() && shown(h),
+           kind + "off from the start: the " + what + " shown with one tab");
+    const SIZE with = least(top);
+    const RECT beside = rect_in(top, a);
+
+    // On: gone, the page filling the area, the natural size without it.
+    unsigned before = layouts();
+    t->set_hide_single_tab(true);
+    pump();
+    RECT r = rect_in(top, a);
+    const SIZE without = least(top);
+    expect(t->hide_single_tab() && !shown(h), kind + "on, one page visible: no " + what);
+    expect(laid_out(layouts() - before), kind + "on: laid out, " + str(long(layouts() - before)));
+    expect(r.left == r.top && client.right - r.right == r.left && client.bottom - r.bottom == r.top,
+           kind + "on: the page fills the area, " + str(r.left) + "," + str(r.top) + " " +
+               str(r.right) + "," + str(r.bottom) + " in " + str(client.right) + "x" +
+               str(client.bottom));
+    if (sidebar)
+        expect(without.cx + 50 < with.cx, kind + "on: natural width without the list " +
+                                              str(without.cx) + ", with " + str(with.cx));
+    else
+        expect(without.cy + 10 < with.cy, kind + "on: natural height without the strip " +
+                                              str(without.cy) + ", with " + str(with.cy));
+
+    // The same value again: nothing.
+    g_writes.clear();
+    g_moved = 0;
+    before = layouts();
+    t->set_hide_single_tab(true);
+    pump();
+    expect(g_writes.empty() && g_moved == 0 && layouts() == before,
+           kind + "on again: no write," + writes() + ", no move, " + str(long(g_moved)) +
+               ", no relayout, " + str(long(layouts() - before)));
+
+    // Off: back, the page where it was, as large as before.
+    before = layouts();
+    t->set_hide_single_tab(false);
+    pump();
+    r = rect_in(top, a);
+    const SIZE back = least(top);
+    expect(!t->hide_single_tab() && shown(h) && headers(h, sidebar) == "A",
+           kind + "off: the " + what + " back with its one tab, " + headers(h, sidebar));
+    expect(laid_out(layouts() - before), kind + "off: laid out, " + str(long(layouts() - before)));
+    expect(EqualRect(&r, &beside) && back.cx == with.cx && back.cy == with.cy,
+           kind + "off: the page where it was, the natural size " + str(back.cx) + "x" +
+               str(back.cy) + " as " + str(with.cx) + "x" + str(with.cy));
+    g_writes.clear();
+    g_moved = 0;
+    before = layouts();
+    t->set_hide_single_tab(false);
+    pump();
+    expect(g_writes.empty() && g_moved == 0 && layouts() == before,
+           kind + "off again: no write," + writes() + ", no move, " + str(long(g_moved)) +
+               ", no relayout, " + str(long(layouts() - before)));
+
+    // Two pages visible: the strip either way; only the option changes.
+    t->set_page_visible(1, true);
+    pump();
+    const SIZE two = least(top);
+    g_writes.clear();
+    g_moved = 0;
+    before = layouts();
+    t->set_hide_single_tab(true);
+    pump();
+    expect(t->hide_single_tab() && shown(h) && headers(h, sidebar) == "AB",
+           kind + "on, two pages visible: the " + what + " stays, " + headers(h, sidebar));
+    expect(g_writes.empty() && g_moved == 0 && layouts() == before && least(top).cx == two.cx &&
+               least(top).cy == two.cy,
+           kind + "on, two pages visible: no write," + writes() + ", no move, " +
+               str(long(g_moved)) + ", no relayout, " + str(long(layouts() - before)));
+    // B hidden again: the option (on) has the strip go.
+    t->set_page_visible(1, false);
+    pump();
+    expect(!shown(h) && least(top).cy == without.cy && least(top).cx == without.cx,
+           kind + "B hidden again: the option on, no " + what);
+    t->set_hide_single_tab(false);
+    pump();
+    expect(shown(h), kind + "off: the " + what + " back");
+    expect(changes == 0 && t->current() == 0,
+           kind + "no on_changed, " + str(changes) + ", A still current, " + str(t->current()));
+    RemoveWindowSubclass(h, count_moves, 0x111);
+    RemoveWindowSubclass(h, count_writes, 0x110);
+}
+
 }  // namespace
 
 // --shown: on a shown window (RAPPORT_NO_ACTIVATE: it takes no focus), a
@@ -1292,6 +1420,23 @@ void shown_window(rap::ui& ui, bool sidebar)
     expect(sidebar ? (two.cx > one.cx || two.cy > one.cy) : two.cy > one.cy,
            kind + "hide_single_tab, a second page shown: the least size takes the strip, " + str(one.cx) + "x" +
                str(one.cy) + " to " + str(two.cx) + "x" + str(two.cy));
+    // #110: one page again; the option off at runtime: the strip back, and
+    // the least size takes it at once; on again: as with one page.
+    single->set_page_visible(1, false);
+    pump();
+    const SIZE alone = least(top);
+    single->set_hide_single_tab(false);
+    pump();
+    const SIZE off = least(top);
+    expect(sidebar ? (off.cx > alone.cx || off.cy > alone.cy) : off.cy > alone.cy,
+           kind + "set_hide_single_tab(false), one page: the least size takes the strip, " +
+               str(alone.cx) + "x" + str(alone.cy) + " to " + str(off.cx) + "x" + str(off.cy));
+    single->set_hide_single_tab(true);
+    pump();
+    const SIZE on = least(top);
+    expect(on.cx == alone.cx && on.cy == alone.cy,
+           kind + "set_hide_single_tab(true): the least size as without the strip, " + str(on.cx) +
+               "x" + str(on.cy) + " (" + str(alone.cx) + "x" + str(alone.cy) + ")");
 }
 
 // #101, shown (where a window keeps what's left to paint): the same title,
@@ -1413,6 +1558,7 @@ int main(int argc, char** argv)
     for (const bool sidebar : {false, true}) reentrant(**ui, sidebar);
     sidebar_rows(**ui);
     for (const bool sidebar : {false, true}) single_tab(**ui, sidebar);
+    for (const bool sidebar : {false, true}) single_tab_live(**ui, sidebar);
     for (int kind = 0; kind < 3; ++kind) fixed_canvas(**ui, kind);
     for (const bool sidebar : {false, true}) page_icons(**ui, sidebar);
     page_icons_dark(**ui);

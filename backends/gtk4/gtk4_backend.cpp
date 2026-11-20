@@ -2898,6 +2898,16 @@ public:
         settled_ = current();
     }
     bool page_visible(int page) const override { return shown_.at(page); }
+    // The strip as the option now has it: the same value, or one that
+    // leaves the strip as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (shown_.hide_single == on) return;
+        const bool was = shown_.strip();
+        shown_.hide_single = on;
+        if (shown_.strip() != was) strip();
+    }
+    bool hide_single_tab() const override { return shown_.hide_single; }
 
     // Each page's tab label (a heading), as built.
     void set_headings(std::vector<tab_heading> h) { headings_ = std::move(h); }
@@ -3028,6 +3038,16 @@ public:
         settled_ = current();
     }
     bool page_visible(int page) const override { return shown_.at(page); }
+    // The strip as the option now has it: the same value, or one that
+    // leaves the strip as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (shown_.hide_single == on) return;
+        const bool was = shown_.strip();
+        shown_.hide_single = on;
+        if (shown_.strip() != was) strip();
+    }
+    bool hide_single_tab() const override { return shown_.hide_single; }
 
     // Each page's row's heading, as built.
     void set_headings(std::vector<tab_heading> h) { headings_ = std::move(h); }

@@ -1034,6 +1034,14 @@ public:
     // on_changed. (layout::page::icon sets one from the start.)
     virtual void set_page_icon(int page, const icon& icon) = 0;
     virtual void set_page_title(int page, const std::string& title) = 0;
+    // layout::tabs::hide_single_tab, live: on, with at most one page
+    // visible, the strip (or the sidebar's list) goes and the page fills
+    // the area; off, it's back with its one tab. With two pages or more
+    // visible the strip shows either way, and only the option changes. The
+    // natural and minimum sizes follow. The same value again: nothing.
+    // Neither fires on_changed, and current() stays.
+    virtual void set_hide_single_tab(bool on) = 0;
+    virtual bool hide_single_tab() const = 0;
 };
 
 class window;

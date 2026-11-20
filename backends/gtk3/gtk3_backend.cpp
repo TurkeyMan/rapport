@@ -2534,6 +2534,16 @@ public:
         settled_ = current();
     }
     bool page_visible(int page) const override { return state_.shown(page); }
+    // The strip as the option now has it: the same value, or one that
+    // leaves the strip as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (state_.hide_single_tab == on) return;
+        const bool was = state_.strip();
+        state_.hide_single_tab = on;
+        if (state_.strip() != was) update_strip();
+    }
+    bool hide_single_tab() const override { return state_.hide_single_tab; }
 
     // On the page's header, hidden or not (a hidden page's keeps them for
     // when it's shown again); out of range, nothing. No on_changed.
@@ -2684,6 +2694,16 @@ public:
         settled_ = current();
     }
     bool page_visible(int page) const override { return state_.shown(page); }
+    // The strip as the option now has it: the same value, or one that
+    // leaves the strip as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (state_.hide_single_tab == on) return;
+        const bool was = state_.strip();
+        state_.hide_single_tab = on;
+        if (state_.strip() != was) update_strip();
+    }
+    bool hide_single_tab() const override { return state_.hide_single_tab; }
 
     // On the page's header, hidden or not (a hidden page's keeps them for
     // when it's shown again); out of range, nothing. No on_changed.
