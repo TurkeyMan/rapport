@@ -381,8 +381,12 @@ struct http_options
     // when it's given and the body isn't compressed on the way).
     std::function<void(std::uint64_t received, std::optional<std::uint64_t> total)> progress;
     // Each redirect, before it's followed: where from (the URL that answered
-    // with it), where to (absolute, as it would be requested) and its
-    // status. Only for a hop that may be followed at all: one to an
+    // with it), where to and its status. Where to is the URL the next hop is
+    // sent to, the same on every transport: absolute, its path's "." and
+    // ".." segments taken out ("/orgA/../orgB/x" is "/orgB/x", as it goes
+    // on the wire), no fragment; a Location of a fragment alone, or empty,
+    // the same path and query again. (Percent-escapes are as sent: "%2e%2e"
+    // isn't a "..".) Only for a hop that may be followed at all: one to an
     // unsupported URL, or past the redirect limit, fails as ever without a
     // call. Unset: every one followed, as ever.
     //  follow: as without it. Authorization and Cookie still go only while
