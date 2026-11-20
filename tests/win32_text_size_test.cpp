@@ -36,6 +36,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <richedit.h>
 
 #include <cmath>
@@ -102,7 +103,7 @@ int px(float logical, UINT dpi)
 
 HWND top_of(const char* title)
 {
-    return FindWindowW(nullptr, std::wstring(title, title + std::strlen(title)).c_str());
+    return test_window(std::wstring(title, title + std::strlen(title)).c_str());
 }
 
 HWND child_of(HWND top, const wchar_t* cls, const wchar_t* text = nullptr)

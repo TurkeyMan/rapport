@@ -2,6 +2,7 @@
 #include <rapport/rapport.h>
 
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -85,7 +86,7 @@ int main(int argc, char** argv)
             (*ui)->quit(dev ? 1 : 77);
             return;
         }
-        HWND h = pane_canvas(FindWindowW(nullptr, L"Rapport pane readback loss"));
+        HWND h = pane_canvas(test_window(L"Rapport pane readback loss"));
         if (!h) return;
         if (!dev)
         {

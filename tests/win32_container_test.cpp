@@ -1,5 +1,6 @@
 #include <rapport/rapport.h>
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <commctrl.h>
 #include <cstdio>
 
@@ -64,7 +65,7 @@ int main(int argc, char** argv)
             .enabled(false).tooltip("outer").handle(outer)}}});
     late->set_visible(true);
     win->show();
-    HWND root = FindWindowW(nullptr, L"Rapport container properties");
+    HWND root = test_window(L"Rapport container properties");
     HWND tip = static_cast<HWND>(GetPropW(root, L"rapport-tooltip"));
     const auto button_hwnd = [&](const wchar_t* text) { return FindWindowExW(root, nullptr, L"Button", text); };
     HWND parent = button_hwnd(L"parent"), ah = button_hwnd(L"a"), bh = button_hwnd(L"b"),

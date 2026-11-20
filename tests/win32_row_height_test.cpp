@@ -24,6 +24,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 
@@ -269,7 +270,7 @@ void sidebar_fits(rap::ui& ui)
                                       {"Advanced", label{"four"}}}
                                      .sidebar()}});
     pump();
-    HWND top = FindWindowW(nullptr, L"Row height sidebar");
+    HWND top = test_window(L"Row height sidebar");
     const std::vector<HWND> boxes = top ? all_of(top, L"ListBox") : std::vector<HWND>{};
     expect(boxes.size() == 1, "a sidebar in a window of its natural size");
     if (boxes.size() != 1) return;
@@ -299,7 +300,7 @@ int run_app_large(rap::ui& ui)
                                       {"Fonts", label{"three"}}}
                                      .sidebar()}});
     pump();
-    HWND top = FindWindowW(nullptr, L"Row height large");
+    HWND top = test_window(L"Row height large");
     const std::vector<HWND> boxes = top ? all_of(top, L"ListBox") : std::vector<HWND>{};
     expect(boxes.size() == 1, "a sidebar in a window of its natural size, 192 dpi, 225% text");
     if (boxes.size() == 1)
@@ -343,7 +344,7 @@ int run_app(rap::ui& ui)
                      tabs{{"One", label{"one"}}, {"Two", label{"two"}}}.sidebar().stretch()}}}
             .size(1300_px, 500_px));
     pump();
-    HWND top = FindWindowW(nullptr, L"Row height app");
+    HWND top = test_window(L"Row height app");
     expect(top != nullptr, "the window, never shown");
     if (!top) return 1;
     const UINT dpi = GetDpiForWindow(top);
@@ -405,7 +406,7 @@ int main(int argc, char** argv)
                          .stretch()}}}
             .size(1100_px, 600_px));
     pump();
-    HWND top = FindWindowW(nullptr, L"Row height");
+    HWND top = test_window(L"Row height");
     expect(top != nullptr, "the window, never shown");
     if (!top) return 1;
     const std::vector<HWND> lists = all_of(top, WC_LISTVIEWW), trees = all_of(top, WC_TREEVIEWW);

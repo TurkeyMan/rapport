@@ -28,6 +28,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <commctrl.h>
 
 #include <algorithm>
@@ -239,28 +240,10 @@ DWORD tab_body(HWND tab, bool beside = false)
     return p.at((body.left + body.right) / 2, (body.top + body.bottom) / 2);
 }
 
-// This thread's top-level window titled `title` (never another process's:
-// the variants run side by side under ctest -j, their windows titled alike).
+// This thread's top-level window titled `title` (win32_test_windows.h).
 HWND top_of(const wchar_t* title)
 {
-    struct find
-    {
-        const wchar_t* title;
-        HWND found = nullptr;
-    } f{title};
-    EnumThreadWindows(
-        GetCurrentThreadId(),
-        [](HWND h, LPARAM p) -> BOOL
-        {
-            auto* f = reinterpret_cast<find*>(p);
-            wchar_t text[128]{};
-            GetWindowTextW(h, text, 128);
-            if (std::wcscmp(text, f->title)) return TRUE;
-            f->found = h;
-            return FALSE;
-        },
-        reinterpret_cast<LPARAM>(&f));
-    return f.found;
+    return test_window(title);
 }
 std::vector<HWND> children_of(HWND top, const wchar_t* cls)
 {
@@ -349,7 +332,7 @@ int main(int argc, char** argv)
         if (windows_build() < 22000 || high_contrast())
         {
             std::printf("skipped: no fluent controls here\n");
-            return 0;
+            return 77;  // a skip (SKIP_RETURN_CODE), not a pass
         }
         using namespace rap::layout;
         auto w = (*ui)->create(window{"Content surface, mirrored", {vbox{

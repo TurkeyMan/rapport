@@ -9,6 +9,7 @@
 #include <rapport/rapport.h>
 #define NOMINMAX
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <cstdio>
@@ -111,7 +112,7 @@ int main(int argc, char** argv)
     rows model;
     // Never shown: nothing reaches the screen.
     auto win = (*ui)->create(window{"Common controls 6", {vbox{list{{{"Name", {}, true}}, &model}, entry{}}}});
-    HWND root = FindWindowW(nullptr, L"Common controls 6");
+    HWND root = test_window(L"Common controls 6");
     if (!root) return 2;
     expect(!IsWindowVisible(root), "the test window is never shown");
 

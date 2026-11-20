@@ -9,6 +9,7 @@
 // window without one has them in its caption: win32-caption-tabs).
 #include <rapport/rapport.h>
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which it needs.
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -153,7 +154,7 @@ void check(rap::ui& ui, bool base_surface, DWORD want, int x, int y)
             .menu_bar(menus)
             .tabs(document_tabs{{{"a", "Alpha", {}, {}}, {"b", "Beta", {}, {}}}}.current("a")));
     win->show();
-    HWND root = FindWindowW(nullptr, std::wstring(title, title + std::strlen(title)).c_str());
+    HWND root = test_window(std::wstring(title, title + std::strlen(title)).c_str());
     HWND strip = root ? strip_of(root) : nullptr;
     if (!strip)
     {

@@ -14,6 +14,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 
@@ -270,7 +271,7 @@ int main(int argc, char** argv)
                      text_view{"Text"}.bind(tv).stretch()}}}
             .size(1200_px, 700_px));
     pump();
-    HWND top = FindWindowW(nullptr, L"Setters no-op");
+    HWND top = test_window(L"Setters no-op");
     expect(top && !IsWindowVisible(top), "the window, never shown");
     expect(lbl && btn && chk && ent && dd && cmb && spn && sld && prg && dp && clr && mb && tb && strip_tb && tv &&
                lst && tr && tbs && spl,
@@ -548,7 +549,7 @@ int main(int argc, char** argv)
                                               .stretch()}}
                                       .size(800_px, 300_px));
         pump();
-        HWND top2 = FindWindowW(nullptr, L"Setters no-op splitter");
+        HWND top2 = test_window(L"Setters no-op splitter");
         expect(top2 && !IsWindowVisible(top2) && fresh, "the splitter window, never shown");
         if (top2 && fresh)
         {

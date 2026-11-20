@@ -23,6 +23,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 
@@ -226,7 +227,7 @@ void visibility(rap::ui& ui, bool sidebar)
                                      .on_changed([&](int) { ++changes; })
                                      .bind(t)}});
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
     expect(t && h, kind + "the window, never shown, and its " + (sidebar ? "list" : "tab control"));
     if (!t || !h) return;
@@ -325,7 +326,7 @@ void set_current_quiet(rap::ui& ui, bool sidebar)
                                      .on_changed([&](int i) { changes.push_back(i); })
                                      .bind(t)}});
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
     expect(t && h, kind + "the window, never shown, and its " + (sidebar ? "list" : "tab control"));
     if (!t || !h) return;
@@ -465,7 +466,7 @@ void reentrant(rap::ui& ui, bool sidebar)
                                          .bind(t)}});
         pump();
         const std::wstring wtitle(title.begin(), title.end());
-        HWND top = FindWindowW(nullptr, wtitle.c_str());
+        HWND top = test_window(wtitle.c_str());
         HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
         expect(t && h, kind + "the window, never shown, and its " + (sidebar ? "list" : "tab control"));
         if (!t || !h) return;
@@ -600,7 +601,7 @@ void hidden_from_start(rap::ui& ui, bool sidebar)
                     .sidebar(sidebar)
                     .bind(t)}});
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
     expect(t && h, kind + "the window and its control");
     if (!t || !h) return;
@@ -635,7 +636,7 @@ void sidebar_rows(rap::ui& ui)
                                      .sidebar()
                                      .bind(t)}});
     pump();
-    HWND top = FindWindowW(nullptr, L"Sidebar rows");
+    HWND top = test_window(L"Sidebar rows");
     HWND box = top ? one_of(top, L"ListBox") : nullptr;
     expect(t && box, "sidebar rows: the window and its list");
     if (!t || !box) return;
@@ -668,7 +669,7 @@ void single_tab(rap::ui& ui, bool sidebar)
                                      .hide_single_tab()
                                      .bind(t)}});
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
     const std::vector<HWND> lists = top ? all_of(top, WC_LISTVIEWW) : std::vector<HWND>{};
     expect(t && h && lists.size() == 3, kind + "the window, its control and three lists");
@@ -742,7 +743,7 @@ void fixed_canvas(rap::ui& ui, int kind)
                                : rap::node(tabs{{"One", canvas_node}, {"Two", label{"two"}}}.sidebar(kind == 1));
     auto win = ui.create(window{narrow(title), {root}});
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     expect(top != nullptr, std::string("#92, ") + names[kind] + ": the window");
     if (!top) return;
     const UINT dpi = GetDpiForWindow(top);
@@ -965,7 +966,7 @@ void page_icons(rap::ui& ui, bool sidebar)
                                      .on_changed([&](int) { ++changes; })
                                      .bind(t)}});
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
     expect(t && h, kind + "the window, never shown, and its " + (sidebar ? "list" : "tab control"));
     if (!t || !h) return;
@@ -1167,7 +1168,7 @@ void path_icon_slot(rap::ui& ui, bool sidebar)
                                      .sidebar(sidebar)
                                      .bind(t)}});
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
     expect(t && h, kind + "the window and its control");
     if (!t || !h) return;
@@ -1226,7 +1227,7 @@ void page_icons_dark(rap::ui& ui)
                                       {"C", label{"page c"}}}
                                      .bind(t)}});
     pump();
-    HWND top = FindWindowW(nullptr, L"Icons dark");
+    HWND top = test_window(L"Icons dark");
     HWND h = top ? one_of(top, WC_TABCONTROLW) : nullptr;
     expect(t && h, kind + "the window and its tab control");
     if (!t || !h) return;
@@ -1399,7 +1400,7 @@ void shown_window(rap::ui& ui, bool sidebar)
                          .bind(single)}}});
     win->show();
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     expect(top && t && single, kind + "the window, shown");
     if (!top || !t || !single) return;
     const SIZE before = least(top);
@@ -1456,7 +1457,7 @@ void page_icons_shown(rap::ui& ui, bool sidebar)
                                      .bind(t)}});
     win->show();
     pump();
-    HWND top = FindWindowW(nullptr, title.c_str());
+    HWND top = test_window(title.c_str());
     HWND h = top ? one_of(top, sidebar ? L"ListBox" : WC_TABCONTROLW) : nullptr;
     expect(t && h, kind + "the window, shown, and its " + (sidebar ? "list" : "tab control"));
     if (!t || !h) return;
@@ -1503,7 +1504,7 @@ void icon_column_repaint(rap::ui& ui)
                                      .bind(t)}});
     win->show();
     pump();
-    HWND top = FindWindowW(nullptr, L"Icon column sidebar");
+    HWND top = test_window(L"Icon column sidebar");
     HWND h = top ? one_of(top, L"ListBox") : nullptr;
     expect(t && h, kind + "the window, shown, and its list");
     if (!t || !h) return;
