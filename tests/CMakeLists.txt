@@ -832,6 +832,19 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-setters-noop PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
     # Tab page visibility and hide_single_tab (strips and sidebars), and a
     # fixed-size canvas as a page's or a stack's content (#92). Never shown.
+    # A scroll pane's off-screen copy: tab pages and a group box's contents
+    # printed over, not under, their tab control and box (#119). Never shown.
+    add_executable(rapport-win32-pane-print-test win32_pane_print_test.cpp)
+    target_link_libraries(rapport-win32-pane-print-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-pane-print-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-pane-print-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-pane-print-test rapport_win32)
+    add_test(NAME win32-pane-print COMMAND rapport-win32-pane-print-test)
+    set_tests_properties(win32-pane-print PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     add_executable(rapport-win32-tabs-visibility-test win32_tabs_visibility_test.cpp)
     target_link_libraries(rapport-win32-tabs-visibility-test PRIVATE rapport::rapport user32 gdi32 comctl32)
     if(RAPPORT_STATIC)
