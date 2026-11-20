@@ -606,8 +606,8 @@ if(TARGET rapport_win32)
     # pass.
     if(MSVC)
         add_executable(rapport-win32-caption-glass-test win32_caption_glass_test.cpp)
-        target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::rapport user32 gdi32 dwmapi d3d11 dxgi
-                                                                       windowsapp)
+        target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi
+                                                                       d3d11 dxgi windowsapp)
         target_compile_options(rapport-win32-caption-glass-test PRIVATE /bigobj)
         if(RAPPORT_STATIC)
             target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::backend_win32)
@@ -970,6 +970,18 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-splitter-sizes-test rapport_win32)
     add_test(NAME win32-splitter-sizes COMMAND rapport-win32-splitter-sizes-test)
     set_tests_properties(win32-splitter-sizes PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+
+    # sizes() in a pane's on_resize, on_moved only for a drag, a canvas's
+    # size() after set_sizes, a drag at teardown (#90); never shown.
+    add_executable(rapport-win32-splitter-callbacks-test win32_splitter_callbacks_test.cpp)
+    target_link_libraries(rapport-win32-splitter-callbacks-test PRIVATE rapport::rapport user32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-splitter-callbacks-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-splitter-callbacks-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-splitter-callbacks-test rapport_win32)
+    add_test(NAME win32-splitter-callbacks COMMAND rapport-win32-splitter-callbacks-test)
+    set_tests_properties(win32-splitter-callbacks PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 
     add_executable(rapport-win32-thin-divider-test win32_thin_divider_test.cpp)
     target_link_libraries(rapport-win32-thin-divider-test PRIVATE rapport::rapport user32 gdi32)

@@ -98,6 +98,11 @@ void set_dpi_for_tests(UINT dpi);
 // For tests: the layout pass counter (g_layout_pass), which every relayout
 // request moves on: a setter given the value it has asks none (#88).
 unsigned layout_requests_for_tests();
+// For tests: the deepest a window's layouts have been nested (1: never
+// within another; `reset` starts again), and how many passes the last
+// layout_now made (more than 1: layouts asked for within it, run after).
+unsigned layout_depth_max_for_tests(bool reset = false);
+unsigned layout_passes_for_tests();
 // The system message font at `dpi` (cached; owned by the cache), in
 // Segoe UI Variable where it's Segoe UI and that's installed.
 HFONT ui_font(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f);
@@ -358,6 +363,7 @@ void want_icon(const icon& icon, int logical, UINT dpi);
 // measurement from the same pass is reused. Without it a nested layout
 // re-measures each leaf once per level, twice over.
 inline unsigned g_layout_pass = 1;
+
 
 struct band_density;  // win32_band_field.h
 

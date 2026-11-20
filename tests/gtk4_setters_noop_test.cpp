@@ -40,14 +40,20 @@ void pump(int ms = 150)
 }
 
 // What happened in the window: properties notified, layout and paint phases.
+// GtkText's scroll-offset isn't counted (#103): GtkText sets it itself as
+// it's allocated, after a layout of Broadway's own that lands in the window
+// measured, whatever was set; a setter that writes anything notifies the
+// property it writes (placeholder-text, text...), which is.
 struct counts
 {
     int notify = 0, layout = 0, paint = 0;
+    int scroll_offset = 0;  // GtkText's own, not counted
     int any() const { return notify + layout + paint; }
     std::string str() const
     {
         return std::to_string(notify) + " notifies, " + std::to_string(layout) + " layouts, " +
-               std::to_string(paint) + " paints";
+               std::to_string(paint) + " paints" +
+               (scroll_offset ? " (and " + std::to_string(scroll_offset) + " GtkText::scroll-offset, not counted)" : "");
     }
 };
 counts g_counts;
@@ -82,6 +88,11 @@ void watch_tree(GtkWidget* w)
     g_signal_connect(w, "notify",
                      G_CALLBACK(+[](GObject* o, GParamSpec* spec, gpointer)
                                 {
+                                    if (GTK_IS_TEXT(o) && !std::strcmp(spec->name, "scroll-offset"))
+                                    {
+                                        ++g_counts.scroll_offset;
+                                        return;
+                                    }
                                     ++g_counts.notify;
                                     g_last_notify = std::string(G_OBJECT_TYPE_NAME(o)) + "::" + spec->name;
                                 }),

@@ -198,6 +198,13 @@ jobs:
         if: always()
         run: Get-ChildItem build/Testing/Temporary -Filter 'LastTest*.log' | Select-String -Pattern "seams found|a lone entry|gone with its window|asking destroyed:|the tab destroyed:|tab bodies forgotten:|a dying tab:|a dying entry:|a nested scan:" | ForEach-Object { $_.Line }
 
+      # win32-splitter-callbacks' nested layout checks, through the backend's
+      # layout seams (linked in, or found in rapport_win32.dll): that they
+      # ran in this job (under ASan in the asan one), from ctest's log.
+      - name: Nested layout checks
+        if: always()
+        run: Get-ChildItem build/Testing/Temporary -Filter 'LastTest*.log' | Select-String -Pattern "layout seams found|deep|passes in one go|posted, until|it settles|a pane resizing the window" | ForEach-Object { $_.Line }
+
       - name: Shell extension
         working-directory: build/bin/Release
         run: |
