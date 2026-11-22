@@ -1030,6 +1030,22 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-list-stretch PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 endif()
 
+# A fullscreen window's canvas kept composed (#121): its swap chain's alpha
+# premultiplied while fullscreen, ignored again after; never shown. Skips
+# (77) without a GPU device.
+if(TARGET rapport_win32)
+    add_executable(rapport-win32-fullscreen-composed-test win32_fullscreen_composed_test.cpp)
+    target_link_libraries(rapport-win32-fullscreen-composed-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-fullscreen-composed-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-fullscreen-composed-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-fullscreen-composed-test rapport_win32)
+    add_test(NAME win32-fullscreen-composed COMMAND rapport-win32-fullscreen-composed-test)
+    set_tests_properties(win32-fullscreen-composed PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
+                         ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+endif()
+
 # UI Automation for drawn elements: a caption tab strip's, through an
 # in-process UIA client on a thread of its own. The provider is compiled in
 # directly, as nothing of rapport's uses it yet; its window is shown without
