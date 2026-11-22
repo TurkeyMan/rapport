@@ -1056,6 +1056,20 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-scroll-layout-depth PROPERTIES
         ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
 
+    # What reads or acts on laid-out geometry sees the layout as it'll be
+    # (#108): a list's scroll_to/row_offset/set_row_offset, a tree's select, a
+    # splitter's sizes(), a layout to come or within one.
+    add_executable(rapport-win32-layout-current-test win32_layout_current_test.cpp)
+    target_link_libraries(rapport-win32-layout-current-test PRIVATE rapport::rapport user32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-layout-current-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-layout-current-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-layout-current-test rapport_win32)
+    add_test(NAME win32-layout-current COMMAND rapport-win32-layout-current-test)
+    set_tests_properties(win32-layout-current PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     # A window dropped from its own canvas's on_resize (#108).
     add_executable(rapport-win32-canvas-destroy-test win32_canvas_destroy_test.cpp)
     target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::rapport user32)

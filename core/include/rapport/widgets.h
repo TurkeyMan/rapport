@@ -698,7 +698,11 @@ public:
     virtual void set_items(std::vector<tree_item>) = 0;
     virtual std::optional<std::string> selected() const = 0;
     // Selects `id`, opening its ancestors and scrolling it into view; an id
-    // that isn't there clears the selection.
+    // that isn't there clears the selection. Into view as the tree will be
+    // laid out: a layout still to come (the window's content just changed)
+    // is made first; within a layout, it's scrolled once that's done.
+    // Implemented on Win32. GTK 3 and Qt 6 still read the layout as it was
+    // (#108 follow-up: issuecomment-7081451394); GTK 4 unconfirmed.
     virtual void select(const std::string& id) = 0;
     virtual void set_expanded(const std::string& id, bool) = 0;
 
@@ -879,6 +883,13 @@ public:
     virtual std::optional<size_t> current() const = 0;
     virtual void select(const std::vector<size_t>& rows) = 0;
     virtual void set_current(size_t row) = 0;
+    // These three work on the list as it will be laid out, not as it was: a
+    // layout still to come (the window's content just changed, a label above
+    // it grown, say) is made first. Within a layout (a callback it runs),
+    // scroll_to and set_row_offset are made once it's done, the latest one
+    // asked for only, and row_offset reads as laid out so far.
+    // Implemented on Win32. GTK 3 and Qt 6 still read the layout as it was
+    // (#108 follow-up: issuecomment-7081451394); GTK 4 unconfirmed.
     virtual void scroll_to(size_t row, scroll_align = scroll_align::nearest) = 0;
     // Where a row sits in the view: its top in logical px below the top of
     // the rows area (under any header); nullopt while it isn't in view, or
@@ -990,7 +1001,15 @@ public:
     // layout. set_sizes() restores them (sizes of 0 are left alone); called
     // before the window first shows, it replaces the stretch-based layout.
     // On Windows, read from a pane's own size callback (a canvas's
-    // on_resize), they're the sizes being laid out.
+    // on_resize), they're the sizes being laid out. Otherwise they're as the
+    // splitter will be laid out: a layout still to come (a label above it
+    // grown, say) is made first. The one exception: while set_sizes() waits
+    // for its layout, sizes() is what it asked for (0: the size now), so a
+    // restore then a save, before the window first shows or lays out,
+    // round-trips what was saved; laid out first, a size the window can't
+    // hold yet would be clamped, and saved layouts would drift.
+    // Implemented on Win32. GTK 3 and Qt 6 still read the layout as it was
+    // (#108 follow-up: issuecomment-7081451394); GTK 4 unconfirmed.
     virtual std::vector<float> sizes() const = 0;
     virtual void set_sizes(const std::vector<float>&) = 0;
     // A divider dragged by the user, once the drag ends; not layout, the
