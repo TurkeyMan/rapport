@@ -16743,6 +16743,15 @@ unsigned layout_passes_for_tests()
 {
     return g_layout_passes;
 }
+// A copy of the backend's way onto its message window, as a path icon
+// finder holds one: outliving the backend safely (nullptr: no backend).
+void* post_handle_for_tests()
+{
+    const std::shared_ptr<post_gate> gate = g_post_gate;
+    if (!gate) return nullptr;
+    return new std::function<void(std::function<void()>)>([gate](std::function<void()> f)
+                                                          { gate->post(std::move(f)); });
+}
 void set_teardown_hook_for_tests(void (*hook)(void*), void* data)
 {
     g_teardown_hook_for_tests = hook;
@@ -16797,6 +16806,14 @@ extern "C" __declspec(dllexport) void rapport_win32_set_teardown_hook(void (*hoo
                                                                       void* data)
 {
     rap::win32::set_teardown_hook_for_tests(hook, data);
+}
+// Private test seam, as those above: a new copy of the backend's internal
+// way of posting (what its path icon finders hold), as a heap
+// std::function<void(std::function<void()>)>* the caller deletes; nullptr
+// with no backend. Safe to call through after the backend's gone.
+extern "C" __declspec(dllexport) void* rapport_win32_post_handle()
+{
+    return rap::win32::post_handle_for_tests();
 }
 extern "C" __declspec(dllexport) void rapport_win32_layout_limits(int reset, unsigned* passes_max,
                                                                   unsigned* cap_hits)

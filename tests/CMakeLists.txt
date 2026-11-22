@@ -1073,7 +1073,7 @@ if(TARGET rapport_win32)
     # ui::post's functions destroyed, never leaked: past the queue's limit,
     # and still queued when the backend's torn down (#108). No windows.
     add_executable(rapport-win32-post-teardown-test win32_post_teardown_test.cpp)
-    target_link_libraries(rapport-win32-post-teardown-test PRIVATE rapport::rapport user32)
+    target_link_libraries(rapport-win32-post-teardown-test PRIVATE rapport::rapport user32 advapi32)
     if(RAPPORT_STATIC)
         target_link_libraries(rapport-win32-post-teardown-test PRIVATE rapport::backend_win32)
         target_compile_definitions(rapport-win32-post-teardown-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)

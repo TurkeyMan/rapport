@@ -217,14 +217,18 @@ public:
     // Light, dark, or the desktop's again, live in every window; before the
     // first window is shown, so it never shows in the other one.
     virtual void set_color_scheme(color_scheme) = 0;
-    // Runs the function on the UI thread, later; callable from any thread.
-    // One that can't be delivered (the backend being torn down, or the
-    // thread's queue full) is destroyed without being run, on the calling
-    // thread, usually a worker: so captures that own UI objects (a widget's
-    // shared_ptr) need the backend alive, and posted from the UI thread.
-    // Torn down, the backend destroys every post still queued, on the UI
-    // thread, without running it. Implemented on Win32 and the null backend;
-    // GTK's idle sources and Qt's queued calls not yet checked (#108).
+    // Runs the function on the UI thread, later. Callable from any thread
+    // while the backend is alive: the caller keeps it alive for the whole
+    // call, and destroying the backend while another thread is inside post()
+    // is the caller's bug. (Rapport's own producers, its background workers,
+    // hold a shared handle that outlives it safely.) One that can't be
+    // delivered (the thread's queue full, or the backend being torn down) is
+    // destroyed without being run, on the calling thread, usually a worker:
+    // so captures that own UI objects (a widget's shared_ptr) need the
+    // backend alive, and posted from the UI thread. Torn down, the backend
+    // destroys every post still queued, on the UI thread, without running
+    // it. Implemented on Win32 and the null backend; GTK's idle sources and
+    // Qt's queued calls not yet checked (#108).
     virtual void post(std::function<void()>) = 0;
 
     // Native dialogs (xdg-desktop-portal where available). Async.

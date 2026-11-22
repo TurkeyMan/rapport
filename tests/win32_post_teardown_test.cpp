@@ -1,17 +1,20 @@
 // ui::post's functions are destroyed, never leaked (backend.h, post). Each
 // posted function captures a tracker that counts its own destruction, and
 // whether it ran.
-// - Posted past the thread's queue limit (10000 messages, Windows'
-//   default, the UI thread not pumping meanwhile): the ones that couldn't
-//   be delivered are destroyed there and then, without running; once
-//   pumped, every one is either run or destroyed so.
+// - Posted past the thread's queue limit (USERPostMessageLimit, read from
+//   the registry, 10000 by default; the UI thread not pumping meanwhile):
+//   the ones that couldn't be delivered are destroyed there and then,
+//   without running; once pumped, every one is either run or destroyed so.
 // - Posted, then the backend torn down before they ran (the ui destroyed,
 //   nothing pumped): every one destroyed, none run.
 // - Posted from another thread during the teardown, after what was queued
 //   is taken out and before the message window goes (a worker held at a
 //   barrier until then, through the backend's private seam
-//   rapport_win32_set_teardown_hook): destroyed, not run, not left in the
-//   queue to be dropped with the window.
+//   rapport_win32_set_teardown_hook), through a copy of the backend's own
+//   way of posting (rapport_win32_post_handle, as its path icon finders
+//   hold one: the backend itself mustn't be called into as it's destroyed):
+//   destroyed, not run, not left in the queue to be dropped with the
+//   window.
 // Never shown; no windows.
 #include <rapport/rapport.h>
 #include <windows.h>
@@ -28,6 +31,7 @@
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
 RAPPORT_BUILTIN_BACKEND(win32);
 extern "C" void rapport_win32_set_teardown_hook(void (*)(void*), void*);
+extern "C" void* rapport_win32_post_handle();
 #endif
 
 namespace
@@ -76,7 +80,13 @@ int main(int argc, char** argv)
         }
         // Past the queue's limit, nothing pumped.
         destroyed = ran = 0;
-        constexpr int posts = 10500;
+        // 500 past the thread's queue limit (USERPostMessageLimit, 10000
+        // unless set otherwise).
+        DWORD limit = 10000, size = sizeof limit;
+        RegGetValueW(HKEY_LOCAL_MACHINE,
+                     L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows",
+                     L"USERPostMessageLimit", RRF_RT_REG_DWORD, nullptr, &limit, &size);
+        const int posts = int(limit) + 500;
         for (int i = 0; i < posts; ++i) (*ui)->post(job());
         const int at_once = destroyed;
         expect(at_once > 0 && ran == 0, "posts past the queue's limit: those not delivered destroyed at once, not run (" +
@@ -103,17 +113,30 @@ int main(int argc, char** argv)
         auto ui = rap::ui::load(argc, argv, {.backend = "win32"});
         if (!ui) return 77;
         void (*set_hook)(void (*)(void*), void*) = nullptr;
+        void* (*post_handle)() = nullptr;
 #ifdef RAPPORT_TEST_BUILTIN_WIN32
         set_hook = rapport_win32_set_teardown_hook;
+        post_handle = rapport_win32_post_handle;
 #else
         if (HMODULE m = GetModuleHandleW(L"rapport_win32.dll"))
+        {
             set_hook = reinterpret_cast<void (*)(void (*)(void*), void*)>(
                 GetProcAddress(m, "rapport_win32_set_teardown_hook"));
+            post_handle =
+                reinterpret_cast<void* (*)()>(GetProcAddress(m, "rapport_win32_post_handle"));
+        }
 #endif
-        expect(set_hook != nullptr, "the backend's rapport_win32_set_teardown_hook seam");
-        if (!set_hook) return 1;
+        expect(set_hook && post_handle,
+               "the backend's rapport_win32_set_teardown_hook and rapport_win32_post_handle seams");
+        if (!set_hook || !post_handle) return 1;
         destroyed = ran = 0;
-        rap::backend* backend = &(*ui)->backend();
+        // The worker's way of posting: a copy of the backend's own, as its
+        // path icon finders hold one, which outlives the backend (not the
+        // backend itself, which mustn't be called into as it's destroyed).
+        using post_fn = std::function<void(std::function<void()>)>;
+        std::unique_ptr<post_fn> handle(static_cast<post_fn*>(post_handle()));
+        expect(handle != nullptr, "a copy of the backend's way of posting");
+        if (!handle) return 1;
         // The worker, held until the teardown's taken what was queued out.
         struct barrier
         {
@@ -127,7 +150,7 @@ int main(int argc, char** argv)
                 std::unique_lock lock(b.m);
                 b.cv.wait(lock, [&] { return b.go; });
                 lock.unlock();
-                backend->post(job());  // the backend's being torn down: its post
+                (*handle)(job());  // the backend's being torn down: a copied handle's post
                 lock.lock();
                 b.done = true;
                 b.cv.notify_all();
