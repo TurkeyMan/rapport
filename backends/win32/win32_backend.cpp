@@ -1571,6 +1571,9 @@ public:
     // A relayout_at_once's visibility, taken before it turns drawing off
     // (WM_SETREDRAW FALSE clears WS_VISIBLE): -1, none under way.
     int at_once_visible = -1;
+    // Its canvases' swap chains kept composed by the DWM (see
+    // gpu_target::compose): while the window's fullscreen.
+    virtual bool keep_composed() const { return false; }
     float scale() const { return scale_of(hwnd()); }
     UINT dpi() const { return dpi_of(hwnd()); }
     int px(float logical) const { return int(std::lround(logical * scale())); }
@@ -12356,6 +12359,14 @@ private:
 // (window::resize), it then shows whole as the window does, and in the
 // moment before, the window still the old size, what the new frame doesn't
 // cover is the old one rather than a cleared band.
+//
+// In a fullscreen window (compose) the swap chain's alpha is premultiplied:
+// one that covers the monitor, opaque, is otherwise taken out of the DWM's
+// composition (direct or independent flip, or an overlay plane), and the
+// display then follows the canvas's presents, which stop when nothing
+// changes; some panels flicker as they do (#121). With per-pixel alpha it
+// stays a visual the DWM blends with what's under it. What's shown is still
+// opaque: the buffer's cleared to opaque black before the frame's drawn in.
 class gpu_target
 {
 public:
@@ -12367,19 +12378,11 @@ public:
         target_->SetRoot(nullptr);
         dev_->dcomp->Commit();
     }
-    static std::unique_ptr<gpu_target> make(std::shared_ptr<gpu_shared> dev, HWND h, UINT w, UINT hgt)
+    static std::unique_ptr<gpu_target> make(std::shared_ptr<gpu_shared> dev, HWND h, UINT w, UINT hgt, bool composed)
     {
         auto t = std::unique_ptr<gpu_target>(new gpu_target(std::move(dev)));
-        DXGI_SWAP_CHAIN_DESC1 desc{};
-        desc.Width = w;
-        desc.Height = hgt;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        desc.BufferCount = 2;
-        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-        if (FAILED(t->dev_->dxgi->CreateSwapChainForComposition(t->dev_->d3d.get(), &desc, nullptr, t->swap_.put())) ||
+        t->composed_ = composed;
+        if (!t->make_swap(w, hgt, t->swap_) ||
             FAILED(t->dev_->dcomp->CreateTargetForHwnd(h, TRUE, t->target_.put())) ||
             FAILED(t->dev_->dcomp->CreateVisual(t->visual_.put())) ||
             FAILED(t->visual_->SetContent(t->swap_.get())) ||
@@ -12391,6 +12394,27 @@ public:
         return t;
     }
     const std::shared_ptr<gpu_shared>& device() const { return dev_; }
+    DXGI_ALPHA_MODE alpha_mode() const
+    {
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        return SUCCEEDED(swap_->GetDesc1(&desc)) ? desc.AlphaMode : DXGI_ALPHA_MODE_UNSPECIFIED;
+    }
+    // Kept composed or not (see above): a new swap chain when that changes,
+    // once per change, shown with the next frame (the kept frame's kept).
+    // False when the device is lost.
+    bool compose(bool on)
+    {
+        if (on == composed_) return true;
+        composed_ = on;
+        com<IDXGISwapChain1> next;
+        if (!make_swap(w_, h_, next)) return false;
+        dc_->SetTarget(nullptr);
+        back_.reset();
+        if (FAILED(visual_->SetContent(next.get()))) return false;
+        swap_ = std::move(next);
+        committed_ = false;  // in the window with its first frame (end)
+        return bind();
+    }
     // Drawing for a canvas of w x h: the buffers grow to hold it, and never
     // shrink (what's past the canvas is the last frame's, cut off by the
     // window). The drawing is cut to w x h.
@@ -12422,6 +12446,8 @@ public:
         dc_->BeginDraw();
         dc_->SetDpi(96, 96);
         dc_->SetTransform(D2D1::Matrix3x2F::Identity());
+        // Opaque whatever the kept frame's alpha holds: the DWM blends this one.
+        if (composed_) dc_->Clear(D2D1::ColorF(0, 0, 0, 1));
         dc_->DrawBitmap(kept_.get(), D2D1::RectF(0, 0, float(w_), float(h_)), 1, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
                         nullptr, nullptr);
         if (dc_->EndDraw() == D2DERR_RECREATE_TARGET) return false;
@@ -12441,13 +12467,27 @@ private:
         : dev_(std::move(dev))
     {
     }
+    bool make_swap(UINT w, UINT h, com<IDXGISwapChain1>& swap)
+    {
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        desc.Width = w;
+        desc.Height = h;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = 2;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        desc.AlphaMode = composed_ ? DXGI_ALPHA_MODE_PREMULTIPLIED : DXGI_ALPHA_MODE_IGNORE;
+        return SUCCEEDED(dev_->dxgi->CreateSwapChainForComposition(dev_->d3d.get(), &desc, nullptr, swap.put()));
+    }
     bool bind()
     {
         com<IDXGISurface> surface;
         com<ID2D1Bitmap1> bitmap;
         const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
             D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                              composed_ ? D2D1_ALPHA_MODE_PREMULTIPLIED : D2D1_ALPHA_MODE_IGNORE));
         if (FAILED(swap_->GetBuffer(0, __uuidof(IDXGISurface), reinterpret_cast<void**>(surface.put()))) ||
             FAILED(dc_->CreateBitmapFromDxgiSurface(surface.get(), &props, bitmap.put())))
             return false;
@@ -12480,6 +12520,7 @@ private:
     com<ID2D1Bitmap1> kept_;  // the frame, kept between frames
     UINT w_ = 0, h_ = 0;
     bool committed_ = false;
+    bool composed_ = false;  // premultiplied alpha: kept composed (fullscreen)
 };
 
 class canvas_impl : public leaf<rap::canvas>
@@ -12520,6 +12561,8 @@ public:
     }
 
     void invalidate() override { InvalidateRect(h_, nullptr, FALSE); }
+    // Its swap chain's DXGI_ALPHA_MODE, or -1 while it's on the CPU (tests).
+    int swap_alpha_mode() const { return gpu_ ? int(gpu_->alpha_mode()) : -1; }
     size_f size() const override
     {
         if (!win_.flush_layout()) return {};  // the window went (gone with it)
@@ -12908,7 +12951,7 @@ private:
         const std::shared_ptr<gpu_shared> dev = gpu::device(painted_);
         if (gpu_ && gpu_->device() != dev) gpu_.reset();  // lost, by another canvas
         if (gpu_frame_ && gpu_frame_->device != dev) drop_gpu_frame();
-        if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h)))
+        if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h, win_.keep_composed())))
             drop_cpu();
         if (gpu_)
         {
@@ -12922,7 +12965,7 @@ private:
                                                       reinterpret_cast<void**>(context4.put()))))
                     context4->Wait(gpu_frame_->fence.get(), gpu_frame_->fence_value);
             }
-            if (ID2D1DeviceContext* dc = gpu_->begin(w, h))
+            if (ID2D1DeviceContext* dc = gpu_->compose(win_.keep_composed()) ? gpu_->begin(w, h) : nullptr)
             {
                 draw(dc, dev->key, dc);
                 if (gpu_->end())
@@ -14102,6 +14145,7 @@ public:
                 (mi.rcWork.bottom - mi.rcWork.top) / s};
     }
     bool fullscreen() const override { return fullscreen_; }
+    bool keep_composed() const override { return fullscreen_; }
     // Snapped (Aero Snap) shows as a size other than the restored one.
     bool maximized() const override
     {
@@ -14142,6 +14186,9 @@ public:
                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
                                       SWP_FRAMECHANGED);
         }
+        // Every canvas drawn again, its swap chain switched (keep_composed)
+        // as it is: one the move didn't resize too.
+        RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
         if (on_fullscreen_) on_fullscreen_(on);
     }
     void on_fullscreen_changed(std::function<void(bool)> f) override { on_fullscreen_ = std::move(f); }
@@ -16328,6 +16375,14 @@ unsigned layout_passes_for_tests()
 {
     return g_layout_passes;
 }
+int canvas_alpha_mode_for_tests(HWND canvas)
+{
+    wchar_t cls[32]{};
+    GetClassNameW(canvas, cls, 32);
+    if (std::wcscmp(cls, L"rapportCanvas")) return -2;
+    auto* c = reinterpret_cast<canvas_impl*>(GetWindowLongPtrW(canvas, GWLP_USERDATA));
+    return c ? c->swap_alpha_mode() : -2;
+}
 
 }  // namespace rap::win32
 
@@ -16344,6 +16399,12 @@ extern "C" __declspec(dllexport) unsigned rapport_win32_layout_depth_max(int res
 extern "C" __declspec(dllexport) unsigned rapport_win32_layout_passes()
 {
     return rap::win32::layout_passes_for_tests();
+}
+// Private test seam, as those above: a canvas window's swap chain's
+// DXGI_ALPHA_MODE, -1 while it draws on the CPU, -2 if it's not a canvas.
+extern "C" __declspec(dllexport) int rapport_win32_canvas_alpha_mode(HWND canvas)
+{
+    return rap::win32::canvas_alpha_mode_for_tests(canvas);
 }
 // Private test seam, as those above and rapport_win32_trace_splitter_bar
 // (exported in every build, for tests only, no app's to call): a call as
