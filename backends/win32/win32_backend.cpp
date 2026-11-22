@@ -1743,16 +1743,37 @@ bool g_canvases_quiet = false;
 // can).
 void (*g_resize_quiet_hook_for_tests)(void*) = nullptr;
 
-// The window whose controls are being placed (place_all), while they are:
-// a control's place can run app code (a canvas tells its on_resize of the
-// size it's placed at, ahead or when it's there already), which may destroy
-// the window, its controls with it (#108). Each container stops after a
-// child's place that did: nothing more of it, nor of what placed it.
+// The window whose controls are being placed, while they are: a control's
+// place can run app code (a canvas tells its on_resize of the size it's
+// placed at, ahead or when it's there already), which may destroy the
+// window, its controls with it (#108). Each container stops after a child's
+// place that did: nothing more of it, nor of what placed it.
 const std::weak_ptr<bool>* g_placing = nullptr;
 bool placing_stopped()
 {
     return g_placing && g_placing->expired();
 }
+// Taken by each way into placing a window's controls that can run app code
+// as it does (its layout, place_all; a scroll pane's host sized, its
+// content placed and moved there and then): that window
+// the one placed until it ends, the one before it (an outer placing, of
+// this window or another) then again.
+class placing_scope
+{
+public:
+    explicit placing_scope(win_context& w)
+        : alive_(w.layout_alive)
+        , was_(std::exchange(g_placing, &alive_))
+    {
+    }
+    ~placing_scope() { g_placing = was_; }
+    placing_scope(const placing_scope&) = delete;
+    placing_scope& operator=(const placing_scope&) = delete;
+
+private:
+    std::weak_ptr<bool> alive_;
+    const std::weak_ptr<bool>* was_;
+};
 void* g_resize_quiet_hook_data = nullptr;
 
 void move_control(HWND h, int x, int y, int w, int hgt)
@@ -11651,6 +11672,8 @@ private:
             return;
         }
         layout_scope inside(win_);  // round the moves' delivery too
+        // (No placing_scope: the moves are batched, so a canvas hears of its
+        // size as they're delivered, once place is done, not inside it.)
         moves_in_one_pass batch(win_.hwnd());
         place(rect_);
     }
@@ -11838,6 +11861,7 @@ private:
         case WM_SIZE:
         {
             trace::scope timing(trace::phase::window_size, uintptr_t(host_));
+            placing_scope placing(win_);  // sized by a window's layout or not
             layout_content();
             return 0;
         }
@@ -12653,7 +12677,10 @@ public:
             return;
         }
         ahead_.reset();
-        leaf::place(r);
+        const std::shared_ptr<bool> alive = alive_;
+        leaf::place(
+            r);  // moved now (outside a layout's batch), its WM_SIZE tells the app, which may drop it
+        if (!*alive) return;
         if (placed_at(h_, r.left, r.top, r.right - r.left, r.bottom - r.top)) sized();  // not moved after all
     }
     float device_scale() const override { return win_.scale(); }
@@ -13767,12 +13794,7 @@ public:
         sync_band_toolbar();
         RECT r = client();
         const int m = margin();
-        const std::weak_ptr<bool> alive = layout_alive;
-        struct placing
-        {
-            const std::weak_ptr<bool>* was;
-            ~placing() { g_placing = was; }
-        } now{std::exchange(g_placing, &alive)};
+        placing_scope placing(*this);
         moves_in_one_pass batch(hwnd_, ahead_.has_value() && !grow_ahead_);
         // The document tabs across the top, edge to edge; the content, with
         // its margins, under them. In the caption, the strip stops at the
