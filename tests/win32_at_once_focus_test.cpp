@@ -7,7 +7,8 @@
 // comes in (its canvas first sized), lands. And a focus() within a layout
 // is made once it's done (its shows wait for its moves): into a stack
 // coming in with the page, shown by then; the latest one asked for only,
-// each from its own place among what waits for the layout.
+// each from its own place among what waits for the layout, a stack's own
+// move of the focus into its new page among them.
 //
 // It activates its window and moves the focus: only on a CI runner
 // (GITHUB_ACTIONS=true, RAPPORT_TEST_SEND_INPUT=1); else skipped (77).
@@ -322,6 +323,74 @@ int main(int argc, char** argv)
                                         : start->has_focus() ? "A's field has it"
                                                              : "elsewhere") +
                                        ")");
+        win.reset();
+        pump();
+    }
+    // The stack's own move of the focus into its new page (show(), with the
+    // focus in its old one) is a focus request as an explicit one is: the
+    // latest of them is made, of either kind. show() within a layout, then
+    // a field's focus() made there and then before what waits is run: the
+    // field keeps it. And a field's focus() put off, then show() in the
+    // same layout: the stack's move, the later one. (That one held before
+    // too, both run in their order; it's here as the other half.)
+    for (const bool show_first : {true, false})
+    {
+        const std::string what =
+            show_first ? "the stack's show() within a switch, a field's focus() after it"
+                       : "a field's focus() within a switch, then the stack's show()";
+        std::unique_ptr<rap::window> win;
+        rap::tabs* pages = nullptr;
+        rap::entry *in_a = nullptr, *in_b = nullptr, *field = nullptr;
+        rap::stack* stk = nullptr;
+        std::function<void()> on_two;
+        win = (*ui)->create(window{
+            "Stack move",
+            {vbox{stack{{"a", vbox{entry{}.bind(in_a)}}, {"b", vbox{entry{}.bind(in_b)}}}.bind(stk),
+                  tabs{{"One", vbox{label{"First"}}},
+                       {"Two", vbox{canvas{}
+                                        .on_resize(
+                                            [&](rap::size_f)
+                                            {
+                                                if (auto f = std::exchange(on_two, nullptr)) f();
+                                            })
+                                        .height(60_px),
+                                    entry{}.bind(field)}}}
+                      .bind(pages)
+                      .stretch()}
+                 .stretch()}}.size(360_px, 340_px));
+        HWND top = win ? FindWindowW(nullptr, L"Stack move") : nullptr;
+        expect(top && pages && in_a && in_b && field && stk,
+               what + ": the window and its controls");
+        if (!top || !pages || !in_a || !in_b || !field || !stk) return 1;
+        win->present();
+        pump();
+        expect(GetForegroundWindow() == top, what + ": the window active");
+        in_a->focus();  // in the stack's page "a": its show() moves the focus into "b"
+        pump();
+        expect(in_a->has_focus(), what + ": the focus in the stack's page \"a\"");
+        if (show_first)
+            on_two = [&] { stk->show("b"); };
+        else
+            on_two = [&]
+            {
+                field->focus();
+                stk->show("b");
+            };
+        pages->set_current(1);
+        if (show_first) field->focus();  // there and then, before what the switch put off is run
+        expect(!on_two, what + ": called within the switch (the page's canvas sized)");
+        pump();
+        const auto where = [&]
+        {
+            return std::string(field->has_focus()  ? "the field has it"
+                               : in_b->has_focus() ? "the stack's page \"b\" has it"
+                               : in_a->has_focus() ? "the stack's page \"a\" has it"
+                                                   : "elsewhere");
+        };
+        if (show_first)
+            expect(field->has_focus(), what + ": the field keeps it, the later (" + where() + ")");
+        else
+            expect(in_b->has_focus(), what + ": the stack's move, the later (" + where() + ")");
         win.reset();
         pump();
     }
