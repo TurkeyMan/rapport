@@ -103,6 +103,8 @@ unsigned layout_requests_for_tests();
 // layout_now made (more than 1: layouts asked for within it, run after).
 unsigned layout_depth_max_for_tests(bool reset = false);
 unsigned layout_passes_for_tests();
+void layout_limits_for_tests(bool reset, unsigned* passes_max, unsigned* cap_hits);
+void scroll_loop_stats_for_tests(bool reset, unsigned* deepest, unsigned* layouts_in_standalone);
 // The system message font at `dpi` (cached; owned by the cache), in
 // Segoe UI Variable where it's Segoe UI and that's installed.
 HFONT ui_font(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f);

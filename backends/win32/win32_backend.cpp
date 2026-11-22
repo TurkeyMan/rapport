@@ -1660,6 +1660,17 @@ public:
 
 unsigned g_layout_depth_max = 0;
 unsigned g_layout_passes = 0;
+// For tests (layout seams, below): the most passes any layout_now made, and
+// how many reached max_layout_passes (the rest posted), since last reset.
+unsigned g_layout_passes_max = 0, g_layout_cap_hits = 0;
+// Window layouts under way on this thread (layout_scopes, any window's);
+// scroll panes' content loops under way, and the deepest they've nested;
+// those of them begun outside any window layout; and the window layouts
+// begun while one of those was under way (a window laid out within a
+// scroll loop no window layout holds: what the single-entry rule rules
+// out). For tests too.
+unsigned g_layout_scopes = 0, g_scroll_loops = 0, g_scroll_loops_max = 0,
+         g_standalone_scroll_loops = 0, g_layouts_in_standalone_scroll_loop = 0;
 // A window's layout under way (its own, a splitter's drag in it), round the
 // moves it makes and the sizes they deliver. `settles`: the outermost lays
 // the window out again if a layout was asked for meanwhile (layout_now runs
@@ -1672,9 +1683,12 @@ struct layout_scope
         , alive_(w.layout_alive)
     {
         g_layout_depth_max = std::max(g_layout_depth_max, ++w_.in_layout);
+        if (g_standalone_scroll_loops) ++g_layouts_in_standalone_scroll_loop;
+        ++g_layout_scopes;
     }
     ~layout_scope()
     {
+        --g_layout_scopes;
         if (alive_.expired()) return;  // the window went with what it delivered
         if (--w_.in_layout == 0 && settles_ && (w_.layout_dirty || !w_.after_layout.empty())) w_.layout_settled();
     }
@@ -11856,6 +11870,22 @@ private:
         }
         laying_out_ = true;
         laid_out_ = true;
+        // Counted for tests (scroll_loop_stats_for_tests): this loop under
+        // way, and whether a window layout holds it.
+        struct counted
+        {
+            bool standalone = g_layout_scopes == 0;
+            counted()
+            {
+                g_scroll_loops_max = std::max(g_scroll_loops_max, ++g_scroll_loops);
+                if (standalone) ++g_standalone_scroll_loops;
+            }
+            ~counted()
+            {
+                --g_scroll_loops;
+                if (standalone) --g_standalone_scroll_loops;
+            }
+        } loop;
         // (A bar that shows only while the other is hidden could flip for
         // ever: three goes, and the last one stands.)
         for (int tries = 0; tries < 3; ++tries)
@@ -13815,6 +13845,7 @@ public:
             if (!layout_dirty || !root) break;
             if (pass == max_layout_passes)
             {
+                ++g_layout_cap_hits;
                 layout_dirty = false;
 #ifndef NDEBUG
                 OutputDebugStringW(L"rapport: a window asked for its layout again every pass; posted\n");
@@ -13824,6 +13855,7 @@ public:
             }
         }
         g_layout_passes = pass;
+        g_layout_passes_max = std::max(g_layout_passes_max, pass);
         if (redraw_all)
             redraw_now(hwnd_, nullptr, nullptr, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         // The toolbar band's controls on glass, once they're where they
@@ -16602,6 +16634,18 @@ unsigned layout_passes_for_tests()
 {
     return g_layout_passes;
 }
+void layout_limits_for_tests(bool reset, unsigned* passes_max, unsigned* cap_hits)
+{
+    if (passes_max) *passes_max = g_layout_passes_max;
+    if (cap_hits) *cap_hits = g_layout_cap_hits;
+    if (reset) g_layout_passes_max = g_layout_cap_hits = 0;
+}
+void scroll_loop_stats_for_tests(bool reset, unsigned* deepest, unsigned* layouts_in_standalone)
+{
+    if (deepest) *deepest = g_scroll_loops_max;
+    if (layouts_in_standalone) *layouts_in_standalone = g_layouts_in_standalone_scroll_loop;
+    if (reset) g_scroll_loops_max = g_layouts_in_standalone_scroll_loop = 0;
+}
 int canvas_alpha_mode_for_tests(HWND canvas)
 {
     wchar_t cls[32]{};
@@ -16626,6 +16670,20 @@ extern "C" __declspec(dllexport) unsigned rapport_win32_layout_depth_max(int res
 extern "C" __declspec(dllexport) unsigned rapport_win32_layout_passes()
 {
     return rap::win32::layout_passes_for_tests();
+}
+// Private test seams, as those above: the most passes any layout_now made
+// and how many hit max_layout_passes; the deepest scroll panes' content
+// loops nested, and how many window layouts began within one begun outside
+// any window layout. Each since the last call with `reset` nonzero.
+extern "C" __declspec(dllexport) void rapport_win32_layout_limits(int reset, unsigned* passes_max,
+                                                                  unsigned* cap_hits)
+{
+    rap::win32::layout_limits_for_tests(reset != 0, passes_max, cap_hits);
+}
+extern "C" __declspec(dllexport) void rapport_win32_scroll_loop_stats(
+    int reset, unsigned* deepest, unsigned* layouts_in_standalone)
+{
+    rap::win32::scroll_loop_stats_for_tests(reset != 0, deepest, layouts_in_standalone);
 }
 // Private test seam, as those above: a canvas window's swap chain's
 // DXGI_ALPHA_MODE, -1 while it draws on the CPU, -2 if it's not a canvas.
