@@ -7,16 +7,19 @@
 // - every layout_now's passes stay below the limit (max_layout_passes, 8),
 //   none reaching it, across the whole case (rapport_win32_layout_limits:
 //   the most any made, and how many hit it), not only the last's;
-// - the scroll pane's content loop doesn't nest (rapport_win32_scroll_loop
-//   _stats: deepest 1), and no window layout begins within a loop begun
-//   outside any window layout (none).
-// Every way into the scroll's loop app code has now is within a window
-// layout (place_all, a splitter's drag, a DPI or theme change's relayout).
-// A new one that ran a window's layout within the loop shows in the last.
-// So it's seen to: the one standalone way in there is, the scroll's host
-// resized directly from outside any layout (which app code can't do, it
-// has no handle to the host), with the canvas resizing the window, must
-// count there. Shown without activating.
+// - no scroll pane's content loop nests within its own (rapport_win32
+//   _scroll_loop_stats: the deepest any one pane's went, 1), and no layout
+//   of a window begins within a loop of that window begun outside any
+//   layout of it (none).
+// Every way into the scroll's loop app code has now is within a layout of
+// its window (place_all, a splitter's drag, a DPI or theme change's
+// relayout). A new one that ran the window's layout within the loop shows
+// in the last. So it's seen to, per window, both ways: the one standalone
+// way in there is, the scroll's host resized directly from outside any
+// layout (which app code can't do, it has no handle to the host), its
+// canvas resizing its window, counts there, even while another window's
+// layout is under way; and its canvas resizing only another window doesn't.
+// Shown without activating.
 #include <rapport/rapport.h>
 #include <windows.h>
 
@@ -219,6 +222,104 @@ int main(int argc, char** argv)
                        std::to_string(in_standalone) + ")");
         ask = nullptr;
         win.reset();
+        pump();
+    }
+    // Per window, both ways (the single-entry rule is a window's own): two
+    // windows, A (a canvas, no scroll) and B (a canvas in a scroll pane).
+    // - A in the middle of its layout (from its canvas's on_resize) when B's
+    //   host is resized directly: B's loop is still standalone for B (no
+    //   layout of B holds it), and B laid out within it (its canvas resizing
+    //   B) counts. A's layout under way doesn't hide it.
+    // - B's host resized directly, its loop laying out only A (B's canvas
+    //   resizing A): that's another window's layout, not one within B's own
+    //   loop, so it doesn't count.
+    for (const bool b_lays_out_b : {true, false})
+    {
+        const std::string what =
+            b_lays_out_b ? "A mid-layout, B's host resized directly, B laid out within B's loop"
+                         : "B's host resized directly, B's loop laying out only A";
+        std::unique_ptr<rap::window> a, b;
+        std::function<void()> on_a, on_b;  // once each, from the canvases' on_resize
+        a = (*ui)->create(window{
+            "Scroll depth A",
+            {canvas{}
+                 .on_resize(
+                     [&](rap::size_f)
+                     {
+                         if (auto f = std::exchange(on_a, nullptr)) f();
+                     })
+                 .stretch()}}.size(240_px, 160_px));
+        b = (*ui)->create(window{
+            "Scroll depth B",
+            {scroll{vbox{canvas{}
+                             .on_resize(
+                                 [&](rap::size_f)
+                                 {
+                                     if (auto f = std::exchange(on_b, nullptr)) f();
+                                 })
+                             .height(400_px)
+                             .stretch(),
+                         label{"Below"}}}
+                 .stretch()}}.size(300_px, 200_px));
+        HWND top_a = a ? FindWindowW(nullptr, L"Scroll depth A") : nullptr;
+        HWND top_b = b ? FindWindowW(nullptr, L"Scroll depth B") : nullptr;
+        const HWND canvas_b = top_b ? find_class(top_b, L"rapportCanvas") : nullptr;
+        const HWND host_b = canvas_b ? GetParent(GetParent(canvas_b)) : nullptr;
+        expect(top_a && top_b && host_b, what + ": the two windows and B's scroll host");
+        if (!top_a || !top_b || !host_b) return 1;
+        pump();
+        bool b_called = false, a_called = false;
+        const auto resize_b_host = [&]
+        {
+            RECT hr{};
+            GetClientRect(host_b, &hr);
+            SetWindowPos(host_b, nullptr, 0, 0, hr.right + 40, hr.bottom + 30,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        };
+        if (b_lays_out_b)
+        {
+            on_b = [&]
+            {
+                b_called = true;
+                b->resize({360, 260});  // a layout of B, within B's standalone loop
+            };
+            on_a = [&]
+            {
+                a_called = true;
+                resize_b_host();  // within A's layout
+            };
+        }
+        else
+            on_b = [&]
+            {
+                b_called = true;
+                a->resize({280, 200});  // a layout of A only
+            };
+        depth_max(1);
+        limits(1, nullptr, nullptr);
+        scroll_loops(1, nullptr, nullptr);
+        if (b_lays_out_b)
+            SetWindowPos(top_a, nullptr, 0, 0, 300, 220,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);  // A's layout
+        else
+            resize_b_host();
+        pump();
+        unsigned loops_deepest = 0, in_standalone = 0;
+        scroll_loops(0, &loops_deepest, &in_standalone);
+        expect(b_called && (!b_lays_out_b || a_called), what + ": the callbacks run");
+        expect(loops_deepest == 1, what + ": no scroll pane's loop within its own (deepest " +
+                                       std::to_string(loops_deepest) + ")");
+        if (b_lays_out_b)
+            expect(in_standalone > 0, what +
+                                          ": counted, B laid out within B's loop no layout of B "
+                                          "holds, A's under way or not (" +
+                                          std::to_string(in_standalone) + ")");
+        else
+            expect(in_standalone == 0,
+                   what + ": not counted, A's layout isn't one within B's own loop (" +
+                       std::to_string(in_standalone) + ")");
+        a.reset();
+        b.reset();
         pump();
     }
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
