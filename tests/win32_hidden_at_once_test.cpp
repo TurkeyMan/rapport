@@ -5,7 +5,9 @@
 // (close()), switched, then shown again, it's grown to the same size as
 // it's shown, whether the relayout the switch posted ran before the show or
 // not. By grow_to_content's own rules: never shrunk (a window larger than
-// its content stays so), and a maximised one is left as it is.
+// its content stays so), and a maximised one is left as it is. Switched
+// from a callback within a layout of its own, then shown later or from
+// that callback itself: grown on the content as it is then.
 //
 // Shown without activating (RAPPORT_NO_ACTIVATE). With `maximised`, the
 // maximised case alone (win32-hidden-at-once-maximised): it maximises its
@@ -19,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -186,6 +189,84 @@ int main(int argc, char** argv)
         }
         win.reset();
         pump();
+    }
+    // Shown from within that layout's callback itself, after switching (not
+    // the maximised run): the grow it owes is measured on the content as it
+    // is then, not on what was measured before the switch (the at-once's own
+    // re-pass, which measures anew, hasn't run yet). A stack already built,
+    // measuring only its shown page, so nothing on the way (a lazy page's
+    // build) measures anew for it.
+    if (!maximised_only)
+    {
+        const auto make = [&](rap::stack*& stk, std::function<void()>& in_layout)
+        {
+            return (*ui)->create(window{
+                "Hidden stack",
+                {vbox{
+                    canvas{}
+                        .on_resize(
+                            [&in_layout](rap::size_f)
+                            {
+                                if (auto f = std::exchange(in_layout, nullptr)) f();
+                            })
+                        .stretch(),
+                    stack{{"small", label{"Small"}}, {"big", canvas{}.width(520_px).height(420_px)}}
+                        .homogeneous(false)
+                        .bind(stk)}}}.size(260_px, 180_px));
+        };
+        // The size it grows to, shown.
+        RECT grown_stack{};
+        {
+            rap::stack* stk = nullptr;
+            std::function<void()> in_layout;
+            auto win = make(stk, in_layout);
+            HWND top = win ? FindWindowW(nullptr, L"Hidden stack") : nullptr;
+            expect(top && stk, "a stack, shown: the window and its stack");
+            if (!top || !stk) return 1;
+            win->show();
+            pump();
+            RECT before;
+            GetWindowRect(top, &before);
+            stk->show("big");
+            pump();
+            GetWindowRect(top, &grown_stack);
+            expect(grown_stack.right - grown_stack.left > before.right - before.left,
+                   "a stack, shown: grown to its larger page, " + size_str(before) + " to " +
+                       size_str(grown_stack));
+            win.reset();
+            pump();
+        }
+        {
+            const std::string what =
+                "hidden, a stack switched and the window shown from a callback within its layout";
+            rap::stack* stk = nullptr;
+            std::function<void()> in_layout;
+            auto win = make(stk, in_layout);
+            HWND top = win ? FindWindowW(nullptr, L"Hidden stack") : nullptr;
+            expect(top && stk, what + ": the window and its stack");
+            if (!top || !stk) return 1;
+            win->show();
+            pump();
+            win->close();
+            pump();
+            in_layout = [&]
+            {
+                stk->show("big");
+                win->show();
+            };
+            win->resize({300, 220});  // its layout (hidden): the canvas sized, the callback run
+            expect(!in_layout, what + ": the callback run within the layout");
+            pump();
+            RECT after;
+            GetWindowRect(top, &after);
+            expect(IsWindowVisible(top) != FALSE, what + ": shown");
+            expect(after.right - after.left == grown_stack.right - grown_stack.left &&
+                       after.bottom - after.top == grown_stack.bottom - grown_stack.top,
+                   what + ": grown as it is shown, " + size_str(after) + ", shown " +
+                       size_str(grown_stack));
+            win.reset();
+            pump();
+        }
     }
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;

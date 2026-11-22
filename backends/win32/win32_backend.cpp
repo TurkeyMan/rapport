@@ -14103,6 +14103,11 @@ public:
             // Content changed while it was hidden (relayout_at_once): grown
             // to it, by grow_to_content's own rules (never shrunk; not
             // maximised or minimised), before it shows, so it doesn't jump.
+            // Measured anew first: shown from a callback within a layout of
+            // its own, the at-once's re-pass that would (at_once_pending_)
+            // hasn't run yet, and what's cached is from before the change.
+            // (Its resize there marks that layout to pass again, #106.)
+            ++g_layout_pass;
             const std::weak_ptr<bool> alive = layout_alive;
             grow_to_content();
             if (alive.expired()) return;
