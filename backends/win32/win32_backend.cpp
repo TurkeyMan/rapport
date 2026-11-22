@@ -1618,33 +1618,28 @@ public:
     // within a layout of the window's, once it's done (#108). A layout's
     // shows wait for its moves, so a control coming in with it (a stack's
     // page, with the tab page it's on) isn't shown yet, and a stack finds
-    // no Tab stop in it. Only the latest one asked for is made: a later
-    // one, within the layout or after it (before the one put off is), takes
-    // its place; and none whose `target` has gone.
+    // no Tab stop in it. Only the latest one asked for is made: each takes
+    // the next generation (focus_generation_), and one put off is made by
+    // its own continuation, in its place among what waits for the layout,
+    // only while it's still the latest (no later one, put off or made
+    // there and then); and not if its `target` has gone.
     void focus_now_or_after(std::weak_ptr<bool> target, std::function<void()> f)
     {
+        const unsigned generation = ++focus_generation_;
         if (!in_layout)
         {
-            // Newer than one put off by a layout not drained yet (its
-            // continuation posted): that one's not made after it.
-            focus_after_ = {};
             f();
             return;
         }
-        const bool queued = bool(focus_after_);
-        focus_after_ = [target = std::move(target), f = std::move(f)]
-        {
-            if (!target.expired()) f();
-        };
-        if (queued) return;  // the continuation below makes it
         after_layout_or_now(
-            [this, alive = std::weak_ptr<bool>(layout_alive)]
+            [this, generation, alive = std::weak_ptr<bool>(layout_alive),
+             target = std::move(target), f = std::move(f)]
             {
-                if (alive.expired()) return;
-                if (auto f = std::exchange(focus_after_, {})) f();
+                if (alive.expired() || generation != focus_generation_ || target.expired()) return;
+                f();
             });
     }
-    std::function<void()> focus_after_;  // the latest focus() within a layout, to make after it
+    unsigned focus_generation_ = 0;  // the latest focus()'s (focus_now_or_after)
     // A relayout_at_once's visibility, taken before it turns drawing off
     // (WM_SETREDRAW FALSE clears WS_VISIBLE): -1, none under way.
     int at_once_visible = -1;

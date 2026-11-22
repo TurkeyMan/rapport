@@ -6,7 +6,8 @@
 // strip, that button current), each from app code run as a tab's page
 // comes in (its canvas first sized), lands. And a focus() within a layout
 // is made once it's done (its shows wait for its moves): into a stack
-// coming in with the page, shown by then; the latest one asked for only.
+// coming in with the page, shown by then; the latest one asked for only,
+// each from its own place among what waits for the layout.
 //
 // It activates its window and moves the focus: only on a CI runner
 // (GITHUB_ACTIONS=true, RAPPORT_TEST_SEND_INPUT=1); else skipped (77).
@@ -256,6 +257,71 @@ int main(int argc, char** argv)
                    what + ": the focus in the stack's page, shown by then (" +
                        (start->has_focus() ? "still on the first page's field" : "elsewhere") +
                        ")");
+        win.reset();
+        pump();
+    }
+    // Each focus() put off is made by its own continuation, in its place
+    // among what waits for the layouts, and only while it's the latest: A
+    // put off by one layout, then B made there and then (A's not made),
+    // then, in a later layout before what waits is run, the stack's own
+    // move of the focus into its new page (show(), the focus in its old
+    // one: queued after the layout), then C put off. C lands last, after
+    // the stack's move; made by A's continuation, ahead of that, it was
+    // undone by it.
+    {
+        const std::string what =
+            "A put off, B made, the stack's move then C put off by a later layout";
+        std::unique_ptr<rap::window> win;
+        rap::tabs* pages = nullptr;
+        rap::entry *start = nullptr, *in_a = nullptr, *in_b = nullptr, *field = nullptr;
+        rap::stack* stk = nullptr;
+        std::function<void()> on_two,
+            on_three;  // once each, from those pages' canvases' first sizes
+        const auto sized_once = [](std::function<void()>& f)
+        {
+            return [&f](rap::size_f)
+            {
+                if (auto g = std::exchange(f, nullptr)) g();
+            };
+        };
+        win = (*ui)->create(window{
+            "Focus order",
+            {vbox{stack{{"a", vbox{entry{}.bind(in_a)}}, {"b", vbox{entry{}.bind(in_b)}}}.bind(stk),
+                  tabs{{"One", vbox{entry{}.bind(start)}},
+                       {"Two", vbox{canvas{}.on_resize(sized_once(on_two)).height(60_px)}},
+                       {"Three", vbox{canvas{}.on_resize(sized_once(on_three)).height(60_px),
+                                      entry{}.bind(field)}}}
+                      .bind(pages)
+                      .stretch()}
+                 .stretch()}}.size(360_px, 340_px));
+        HWND top = win ? FindWindowW(nullptr, L"Focus order") : nullptr;
+        expect(top && pages && start && in_a && in_b && field && stk,
+               what + ": the window and its controls");
+        if (!top || !pages || !start || !in_a || !in_b || !field || !stk) return 1;
+        win->present();
+        pump();
+        expect(GetForegroundWindow() == top, what + ": the window active");
+        start->focus();
+        pump();
+        on_two = [&] { start->focus(); };  // A: put off
+        on_three = [&]
+        {
+            stk->show("b");  // the stack's move of the focus, queued after this layout
+            field->focus();  // C: put off, after it
+        };
+        // No pumping between: what the layouts put off waits (its run
+        // posted) until the end.
+        pages->set_current(1);  // A
+        in_a->focus();          // B, there and then: the focus in the stack's page "a"
+        expect(in_a->has_focus(), what + ": B made there and then");
+        pages->set_current(2);  // the stack's move, then C
+        expect(!on_two && !on_three, what + ": both pages' canvases sized within their switches");
+        pump();
+        expect(field->has_focus(), what + ": C has the focus, after the stack's move (" +
+                                       (in_b->has_focus()    ? "the stack's page \"b\" has it"
+                                        : start->has_focus() ? "A's field has it"
+                                                             : "elsewhere") +
+                                       ")");
         win.reset();
         pump();
     }
