@@ -992,6 +992,18 @@ if(TARGET rapport_win32)
     add_test(NAME win32-splitter-sizes COMMAND rapport-win32-splitter-sizes-test)
     set_tests_properties(win32-splitter-sizes PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 
+    # A window dropped from its own canvas's on_resize (#108).
+    add_executable(rapport-win32-canvas-destroy-test win32_canvas_destroy_test.cpp)
+    target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-canvas-destroy-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-canvas-destroy-test rapport_win32)
+    add_test(NAME win32-canvas-destroy COMMAND rapport-win32-canvas-destroy-test)
+    set_tests_properties(win32-canvas-destroy PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     # sizes() in a pane's on_resize, on_moved only for a drag, a canvas's
     # size() after set_sizes, a drag at teardown (#90); never shown.
     add_executable(rapport-win32-splitter-callbacks-test win32_splitter_callbacks_test.cpp)

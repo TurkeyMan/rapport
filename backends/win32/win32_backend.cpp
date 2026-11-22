@@ -12977,13 +12977,26 @@ private:
         return {r.right, r.bottom};
     }
     // The app hears of a size once, whether ahead of the window or as it comes.
+    // Its on_resize may drop the window, and this canvas with it (#108):
+    // then nothing more of it. The handler's a copy, which outlives the
+    // canvas's own while it runs.
     void sized()
     {
         const SIZE px = pixels();
         if (px.cx == told_.cx && px.cy == told_.cy) return;
         told_ = px;
-        if (resize_) resize_(size());
-        if (frame_target_) frame_target_(target());
+        const std::shared_ptr<bool> alive = alive_;
+        if (resize_)
+        {
+            const auto resize = resize_;
+            resize(size());
+            if (!*alive) return;
+        }
+        if (frame_target_)
+        {
+            const auto tell = frame_target_;  // which may drop it too
+            tell(target());
+        }
     }
 
     // On the GPU's device when there is one (see gpu), on the CPU until then.
