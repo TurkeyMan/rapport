@@ -1004,6 +1004,19 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-at-once-visibility PROPERTIES
         ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
 
+    # focus() within a relayout_at_once (#108): activates its window and
+    # moves the focus, so only on a CI runner (RAPPORT_TEST_SEND_INPUT=1),
+    # else skipped.
+    add_executable(rapport-win32-at-once-focus-test win32_at_once_focus_test.cpp)
+    target_link_libraries(rapport-win32-at-once-focus-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-at-once-focus-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-at-once-focus-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-at-once-focus-test rapport_win32)
+    add_test(NAME win32-at-once-focus COMMAND rapport-win32-at-once-focus-test)
+    set_tests_properties(win32-at-once-focus PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
+
     # A window dropped from its own canvas's on_resize (#108).
     add_executable(rapport-win32-canvas-destroy-test win32_canvas_destroy_test.cpp)
     target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::rapport user32)

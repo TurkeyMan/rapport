@@ -1,8 +1,10 @@
-// A shown window's decisions made while a relayout_at_once has its drawing
-// off (#108): WM_SETREDRAW FALSE clears its WS_VISIBLE, so IsWindowVisible
-// reads it, and every control in it, as hidden. What's decided in that
-// time is decided as for the window shown. Shown without activating
-// (RAPPORT_NO_ACTIVATE).
+// Two of a shown window's decisions made while a relayout_at_once has its
+// drawing off (#108), which clears its WS_VISIBLE (IsWindowVisible reads it
+// as hidden then): move() keeps it inside the work area by its visible
+// frame (the frame's inset), as it does outside the switch; and present()
+// doesn't show it again, which would turn its drawing back on. Shown
+// without activating (RAPPORT_NO_ACTIVATE). focus() within the switch, which
+// activates, is win32-at-once-focus's (CI runners only).
 #include <rapport/rapport.h>
 #include <windows.h>
 
@@ -110,6 +112,44 @@ int main(int argc, char** argv)
         expect(EqualRect(&plain, &during) != FALSE,
                "move() within a relayout_at_once puts it where it puts it shown: " + rect_str(during) + ", shown " +
                    rect_str(plain));
+    }
+    // present(): the window's shown already, so not shown again, which
+    // would turn its drawing back on halfway through the switch (ShowWindow
+    // sets WS_VISIBLE).
+    {
+        std::unique_ptr<rap::window> win;
+        rap::tabs* pages = nullptr;
+        std::function<void()> in_layout;
+        win = (*ui)->create(window{
+            "At-once present",
+            {tabs{{"One", label{"First"}},
+                  {"Two", vbox{canvas{}
+                                   .on_resize(
+                                       [&](rap::size_f)
+                                       {
+                                           if (auto f = std::exchange(in_layout, nullptr)) f();
+                                       })
+                                   .stretch()}}}
+                 .bind(pages)
+                 .stretch()}}.size(320_px, 240_px));
+        HWND top = win ? FindWindowW(nullptr, L"At-once present") : nullptr;
+        expect(top && pages, "present: the window and its tabs");
+        if (!top || !pages) return 1;
+        win->show();
+        pump();
+        bool drawing_back_on = true;
+        in_layout = [&]
+        {
+            win->present();
+            drawing_back_on = IsWindowVisible(top) != FALSE;  // WS_VISIBLE: drawing on again
+        };
+        pages->set_current(1);
+        pump();
+        expect(!in_layout, "present: the second page's canvas sized within the switch");
+        expect(
+            !drawing_back_on,
+            "present() within a relayout_at_once leaves its drawing off until the switch is done");
+        expect(IsWindowVisible(top) != FALSE, "present: shown after the switch");
     }
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
