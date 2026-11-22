@@ -577,12 +577,16 @@ void redirect_decisions()
 // dot segments out ("/orgA/../orgB/secret" is "/orgB/secret", which is
 // what the server is asked for), so a policy on its path sees the path that
 // goes; a Location of a fragment alone, or empty, is the same path and
-// query again (not the directory); a query alone, the path with it.
+// query again (not the directory); a query alone, the path with it. The
+// first URL's dot segments out too, so from_url and an inherited path are
+// what's sent. And a hop without credentials goes without the URL's
+// userinfo, which libcurl would send as Basic credentials.
 void redirect_targets()
 {
     std::mutex m;
     std::map<std::string, std::string> seen;  // path -> the credentials it came with
     std::string self;                         // the server's own URL, for an absolute Location
+    std::string elsewhere;                    // another origin's, with userinfo
     const auto had = [&](const std::string& path)
     {
         std::lock_guard lock(m);
@@ -611,7 +615,23 @@ void redirect_targets()
                 return "HTTP/1.1 302 Found\r\nConnection: close\r\nLocation: \r\nContent-Length: "
                        "0\r\n\r\n";
             if (path == "/page/query?q=3") return response("302 Found", "?r=4", "");
+            if (path == "/cred/start") return response("302 Found", "/cred/next", "");
+            if (path == "/cred/next") return response("200 OK", {}, "next");
+            if (path == "/cred/across")
+            {
+                std::lock_guard lock(m);
+                return response("302 Found", elsewhere, "");
+            }
             return response("404 Not Found", {}, "");
+        });
+    server other(
+        [&](std::string_view path, std::string_view headers)
+        {
+            std::lock_guard lock(m);
+            seen["other" + std::string(path)] =
+                headers.find("\r\nAuthorization: ") != std::string_view::npos ? "Authorization"
+                                                                              : "none";
+            return response("200 OK", {}, "other");
         });
     if (!s)
     {
@@ -621,6 +641,7 @@ void redirect_targets()
     {
         std::lock_guard lock(m);
         self = s.url("");
+        elsewhere = other.url("/landing").insert(7, "user:secret@");
     }
     if (auto probe = rap::sys::http_get(s.url("/orgB/secret"));
         probe.error.find("libcurl") != std::string::npos)
@@ -659,14 +680,17 @@ void redirect_targets()
                   .c_str());
     }
 
-    // Asked only: what each Location resolves to, stopped there.
+    // Asked only: what each Location resolves to, stopped there; and where
+    // from, the URL that answered.
+    std::string answered;
     const auto target = [&](const std::string& from)
     {
         std::string to = "(not asked)";
+        answered = "(not asked)";
         rap::sys::http_options o;
-        o.on_redirect = [&](std::string_view, std::string_view t, int)
+        o.on_redirect = [&](std::string_view f, std::string_view t, int)
         {
-            to = std::string(t);
+            answered = std::string(f), to = std::string(t);
             return redirect_action::stop;
         };
         rap::sys::http_get(s.url(from), o);
@@ -681,11 +705,68 @@ void redirect_targets()
         {"/page/here?q=1", s.url("/page/here?q=1"), "a fragment alone: the same path and query"},
         {"/page/empty?q=2", s.url("/page/empty?q=2"), "an empty Location: the same path and query"},
         {"/page/query?q=3", s.url("/page/query?r=4"), "a query alone: the same path with it"},
+        // The first URL's dot segments out, so the path these inherit is the
+        // one sent, not /orgA/...
+        {"/orgA/../page/here?q=1", s.url("/page/here?q=1"),
+         "a fragment alone after a first URL with dots: the path sent"},
+        {"/orgA/../page/empty?q=2", s.url("/page/empty?q=2"),
+         "an empty Location after a first URL with dots: the path sent"},
+        {"/orgA/./../page/query?q=3", s.url("/page/query?r=4"),
+         "a query alone after a first URL with dots: the path sent"},
     };
     for (const auto& c : cases)
     {
         const std::string to = target(c.from);
         check(to == c.want, (std::string("redirect targets: ") + c.what + ", " + to).c_str());
+        // The first URL as sent: from its /page/ on.
+        const std::string sent =
+            s.url(std::string(c.from).substr(std::string(c.from).find("/page/")));
+        check(answered == sent, (std::string("redirect targets: ") + c.what +
+                                 ", where from is the URL sent: " + answered)
+                                    .c_str());
+    }
+
+    // Userinfo in the URL: off a hop without credentials (on libcurl it'd
+    // be Basic credentials), both a relative one at the same origin that
+    // on_redirect takes credentials off, and one to another origin.
+    if (!other)
+    {
+        check(false, "redirect targets: a second server on the loopback");
+        return;
+    }
+    {
+        {
+            std::lock_guard lock(m);
+            seen.clear();
+        }
+        rap::sys::http_options o;
+        o.on_redirect = [](std::string_view, std::string_view, int)
+        { return redirect_action::follow_without_credentials; };
+        const auto r = rap::sys::http_get(s.url("/cred/start").insert(7, "user:secret@"), o);
+        check(r.status == 200 && r.body == "next" && had("/cred/next") == "none" &&
+                  r.url == s.url("/cred/next"),
+              ("redirect targets: follow_without_credentials drops the URL's userinfo, " +
+               had("/cred/next") + " to " + r.url)
+                  .c_str());
+    }
+    {
+        {
+            std::lock_guard lock(m);
+            seen.clear();
+        }
+        std::string to = "(not asked)";
+        rap::sys::http_options o;
+        o.on_redirect = [&](std::string_view, std::string_view t, int)
+        {
+            to = std::string(t);
+            return redirect_action::follow;
+        };
+        const auto r = rap::sys::http_get(s.url("/cred/across"), o);
+        check(r.status == 200 && r.body == "other" && had("other/landing") == "none" &&
+                  to == other.url("/landing") && r.url == other.url("/landing"),
+              ("redirect targets: to another origin, its userinfo dropped, " +
+               had("other/landing") + ", told " + to)
+                  .c_str());
     }
 }
 

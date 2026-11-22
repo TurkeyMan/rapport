@@ -155,7 +155,7 @@ std::string resolve(const std::string& base, const std::string& location)
         else
         {
             t.authority = b.authority;
-            if (r.path.empty())
+            if (r.path.empty())  // the base as sent (as_sent): its dot segments already out
                 t.path = b.path, t.query = r.query.empty() ? b.query : r.query;
             else
             {
@@ -171,6 +171,30 @@ std::string resolve(const std::string& base, const std::string& location)
     }
     if (!t.authority.empty() && t.path.empty()) t.path = "/";
     return t.str();
+}
+
+// A URL as it's sent: its path's dot segments taken out, an empty one with a
+// host "/", no fragment ("http://h/a/../b#f" is "http://h/b"). The first
+// request's URL so, as libcurl sends it, and as on_redirect is told it.
+std::string as_sent(const std::string& url)
+{
+    uri_parts u = split_uri(url);
+    if (u.scheme.empty() || u.authority.empty()) return url;  // not one to send; refused as ever
+    u.path = without_dot_segments(u.path);
+    if (u.path.empty()) u.path = "/";
+    return u.str();
+}
+
+// A URL without its userinfo ("http://user:pw@host/" is "http://host/"):
+// libcurl sends that as Basic credentials, so a hop that sends none goes
+// without it.
+std::string without_userinfo(const std::string& url)
+{
+    uri_parts u = split_uri(url);
+    if (u.scheme.empty() || u.authority.empty()) return url;
+    if (const size_t at = u.authority.rfind('@'); at != std::string::npos)
+        u.authority.erase(2, at - 1);
+    return u.str();
 }
 
 // Spaces after the authority as %20: servers send "Location: /a b" unescaped,
@@ -201,7 +225,7 @@ bool is_redirect(int status)
 
 // Where a redirect leads: 307 and 308 as they were, 303 (and 301 or 302
 // after a POST) as a GET without the body; credentials only while still at
-// the first request's origin.
+// the first request's origin (and without them, no userinfo in the URL).
 hop redirected(const hop& from, int status, const std::string& to,
                const std::optional<origin>& first_origin)
 {
@@ -210,6 +234,7 @@ hop redirected(const hop& from, int status, const std::string& to,
     if ((status == 303 && from.method != "HEAD") || ((status == 301 || status == 302) && from.method == "POST"))
         next.method = "GET", next.with_body = false;
     next.credentials = from.credentials && first_origin && url_origin(to) == first_origin;
+    if (!next.credentials) next.url = without_userinfo(next.url);
     return next;
 }
 
@@ -233,7 +258,7 @@ class chain
 public:
     chain(std::string_view method, const std::string& url, const http_options& o)
         : o_(o)
-        , hop_{std::string(method), url}
+        , hop_{std::string(method), as_sent(url)}
         , first_(url_origin(url))
         , deadline_(std::chrono::steady_clock::now() + o.timeout)
     {
@@ -294,7 +319,8 @@ public:
             if (act == redirect_action::stop) return false;
             // Only stricter: nothing restores what the origin rule took.
             if (act == redirect_action::follow_without_credentials)
-                next.credentials = false, next.proxy_credentials = false;
+                next.credentials = false, next.proxy_credentials = false,
+                next.url = without_userinfo(next.url);
         }
         next_ = std::move(next);
         return true;

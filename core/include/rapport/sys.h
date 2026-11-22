@@ -381,22 +381,24 @@ struct http_options
     // when it's given and the body isn't compressed on the way).
     std::function<void(std::uint64_t received, std::optional<std::uint64_t> total)> progress;
     // Each redirect, before it's followed: where from (the URL that answered
-    // with it), where to and its status. Where to is the URL the next hop is
-    // sent to, the same on every transport: absolute, its path's "." and
-    // ".." segments taken out ("/orgA/../orgB/x" is "/orgB/x", as it goes
-    // on the wire), no fragment; a Location of a fragment alone, or empty,
-    // the same path and query again. (Percent-escapes are as sent: "%2e%2e"
-    // isn't a "..".) Only for a hop that may be followed at all: one to an
-    // unsupported URL, or past the redirect limit, fails as ever without a
-    // call. Unset: every one followed, as ever.
+    // with it), where to and its status. Both are URLs as they're sent, the
+    // same on every transport: absolute, their paths' "." and ".." segments
+    // taken out ("/orgA/../orgB/x" is "/orgB/x", as it goes on the wire,
+    // the first request's URL too), no fragment; a Location of a fragment
+    // alone, or empty, the same path and query again. (Percent-escapes are
+    // as sent: "%2e%2e" isn't a "..".) Only for a hop that may be followed
+    // at all: one to an unsupported URL, or past the redirect limit, fails
+    // as ever without a call. Unset: every one followed, as ever.
     //  follow: as without it. Authorization and Cookie still go only while
     //    the hops stay at the first request's origin; this can't send them
-    //    elsewhere. Proxy-Authorization (the proxy's, not the origin's) goes
-    //    on to any origin, as ever.
-    //  follow_without_credentials: Authorization, Cookie and
-    //    Proxy-Authorization stay off this hop and every later one, back at
-    //    the first origin too (a host shared by tenants: dev.azure.com/orgA
-    //    to /orgB).
+    //    elsewhere. Nor the URL's userinfo ("http://user:pw@host/", which
+    //    libcurl sends as credentials): a hop to another origin goes, and
+    //    is told, without it. Proxy-Authorization (the proxy's, not the
+    //    origin's) goes on to any origin, as ever.
+    //  follow_without_credentials: Authorization, Cookie,
+    //    Proxy-Authorization and the URL's userinfo (to_url as told, less
+    //    that) stay off this hop and every later one, back at the first
+    //    origin too (a host shared by tenants: dev.azure.com/orgA to /orgB).
     //  stop: the 3xx is the response (its status, headers with Location, and
     //    body), not an error.
     // Called on the thread that called http_request (a worker's, as the
