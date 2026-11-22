@@ -2238,7 +2238,10 @@ public:
     }
 
     // GtkPaned reports a drag no differently from layout, so a drag is a
-    // press and release on a divider with the position changed in between.
+    // press and release on a divider with the position moved by the drag
+    // in between: a position change made while the pointer moves with the
+    // button down (the paned dragging it, in that motion's handling), not
+    // one of rapport's own (set_sizes, a divider still being placed: #105).
     // A press that bubbles up from a pane (one its widget didn't take, held
     // while the window relaid them out) is no drag (#30).
     void on_moved(std::function<void()> f) override
@@ -2253,6 +2256,7 @@ public:
                 +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
                 {
                     auto* self = static_cast<splitter_impl*>(p);
+                    self->dragged_ = false;
                     if (rap::gtk_split::press_on_handle(self->w_, e))
                         self->pressed_ = self->sizes();
                     else
@@ -2261,11 +2265,26 @@ public:
                 },
                 this);
             connect(
+                w, "notify::position",
+                +[](GObject* paned, GParamSpec*, gpointer p)
+                {
+                    auto* self = static_cast<splitter_impl*>(p);
+                    if (self->pressed_.empty() || g_object_get_data(paned, "rapport-own-position"))
+                        return;
+                    GdkEvent* e = gtk_get_current_event();
+                    if (e && (e->type == GDK_MOTION_NOTIFY || e->type == GDK_TOUCH_UPDATE))
+                        self->dragged_ = true;
+                    if (e) gdk_event_free(e);
+                },
+                this);
+            connect(
                 w, "button-release-event",
                 +[](GtkWidget*, GdkEventButton*, gpointer p) -> gboolean
                 {
                     auto* self = static_cast<splitter_impl*>(p);
-                    if (!self->pressed_.empty() && self->sizes() != self->pressed_ && self->moved_)
+                    const bool dragged = std::exchange(self->dragged_, false);
+                    if (dragged && !self->pressed_.empty() && self->sizes() != self->pressed_ &&
+                        self->moved_)
                         self->moved_();
                     self->pressed_.clear();
                     return false;
@@ -2308,6 +2327,7 @@ public:
 private:
     std::function<void()> moved_;
     std::vector<float> pressed_;  // the sizes when a button went down on it
+    bool dragged_ = false;        // the press's drag has moved a divider since
 };
 
 // A layout::tabs' pages: which are visible (set_page_visible) and whether
@@ -6391,7 +6411,7 @@ private:
         for (size_t i = 0; i < split.paneds.size(); ++i)
         {
             int size = split.stretch[i] > 0 ? avail * split.stretch[i] / stretch_sum : natural[i];
-            gtk_paned_set_position(split.paneds[i], size);
+            set_own_position(split.paneds[i], size);  // the first layout, not a drag
         }
     }
 

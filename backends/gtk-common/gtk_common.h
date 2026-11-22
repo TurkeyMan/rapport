@@ -1721,6 +1721,16 @@ inline std::vector<float> split_sizes(GtkWidget* first)
     }
 }
 
+// A divider moved by rapport itself, not by the user's drag: marked
+// "rapport-own-position" while it's set, so the splitter's position watch
+// doesn't take the move for the drag's (#105).
+inline void set_own_position(GtkPaned* p, int position)
+{
+    g_object_set_data(G_OBJECT(p), "rapport-own-position", GINT_TO_POINTER(1));
+    gtk_paned_set_position(p, position);
+    g_object_set_data(G_OBJECT(p), "rapport-own-position", nullptr);
+}
+
 // A divider at `position`. GtkPaned clamps a position to its current
 // length, so one asked for before the window has grown to fit (a pane
 // opening and the window widening for it, a layout restored before the
@@ -1728,7 +1738,7 @@ inline std::vector<float> split_sizes(GtkWidget* first)
 // the paned grows, until it fits.
 inline void place_divider(GtkPaned* p, int position)
 {
-    gtk_paned_set_position(p, position);
+    set_own_position(p, position);
     int max_pos = 0;
     g_object_get(p, "max-position", &max_pos, nullptr);
     // G_MAXINT: not laid out with both panes yet (one was hidden), so not
@@ -1752,7 +1762,7 @@ inline void place_divider(GtkPaned* p, int position)
                            int max_pos = 0;
                            g_object_get(obj, "max-position", &max_pos, nullptr);
                            if (max_pos == G_MAXINT) return;
-                           gtk_paned_set_position(GTK_PANED(obj), std::min(*want, max_pos));
+                           set_own_position(GTK_PANED(obj), std::min(*want, max_pos));
                            if (max_pos >= *want) *want = -1;  // there: the user's from here on
                        }),
             nullptr);
