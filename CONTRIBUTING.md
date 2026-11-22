@@ -28,6 +28,10 @@ RAPPORT_BACKEND=gtk3 build/bin/rapport-gallery
 cmake -S . -B build-static -G Ninja -DRAPPORT_STATIC=ON && cmake --build build-static
 ```
 
+With MSVC, a plugin build needs the shared C++ runtime (`/MD`, the default): std:: types cross
+between the app, the core and the backend DLLs, so they must all use one runtime. The static
+runtime (`/MT`) is for `RAPPORT_STATIC` builds only, and configure refuses it otherwise (#136).
+
 `RAPPORT_SNAPSHOT=out.png` saves the first window a program shows and quits,
 which makes checking a layout on each backend quick.
 `RAPPORT_THEME=light|dark` forces a colour scheme, and `RAPPORT_DENSITY=compact`

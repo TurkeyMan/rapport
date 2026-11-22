@@ -96,8 +96,9 @@ jobs:
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-quiet-test-gtk4
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-quiet-test-qt6
 
-  # MSVC with the static runtime, as the apps ship: as plugins and statically
-  # linked. The examples must run, and the shell extension must load into
+  # MSVC as plugins, with the shared runtime a plugin build needs (std:: types
+  # cross its DLLs, #136), and statically linked with the static runtime, as
+  # the apps ship. The examples must run, and the shell extension must load into
   # Explorer's way of calling it and need nothing but Windows. Server 2022 is
   # build 20348, below Windows 11's 22000, so what's gated on Windows 11 runs
   # only on Server 2025 (build 26100). The asan job is Server 2025's plugin
@@ -112,11 +113,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { link: plugins, flags: '',                    os: windows-2022, tag: '' }
-          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2022, tag: '' }
-          - { link: plugins, flags: '',                    os: windows-2025, tag: ' (build 26100)' }
-          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2025, tag: ' (build 26100)' }
-          - { link: asan,    flags: '-DRAPPORT_ASAN=ON',   os: windows-2025, tag: ' (build 26100)' }
+          - { link: plugins, flags: '',                    os: windows-2022, tag: '',               runtime: MultiThreadedDLL }
+          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2022, tag: '',               runtime: MultiThreaded }
+          - { link: plugins, flags: '',                    os: windows-2025, tag: ' (build 26100)', runtime: MultiThreadedDLL }
+          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2025, tag: ' (build 26100)', runtime: MultiThreaded }
+          - { link: asan,    flags: '-DRAPPORT_ASAN=ON',   os: windows-2025, tag: ' (build 26100)', runtime: MultiThreadedDLL }
     steps:
       - uses: actions/checkout@v4
 
@@ -132,8 +133,20 @@ jobs:
           # picks the newest there.
           $gen = if ('${{ matrix.os }}' -eq 'windows-2022') { @('-G', 'Visual Studio 17 2022') } else { @() }
           cmake -S . -B build @gen -A x64 `
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" ${{ matrix.flags }}
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=${{ matrix.runtime }}" ${{ matrix.flags }}
           cmake --build build --config Release --parallel
+
+      # A plugin build with the static runtime is refused at configure (#136).
+      - name: Plugins refuse the static runtime
+        if: matrix.link == 'plugins'
+        run: |
+          $gen = if ('${{ matrix.os }}' -eq 'windows-2022') { @('-G', 'Visual Studio 17 2022') } else { @() }
+          $out = cmake -S . -B build-mt @gen -A x64 "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Remove-Item -Recurse -Force build-mt -ErrorAction SilentlyContinue
+          if ($code -eq 0) { $out; throw 'a plugin build configured with /MT' }
+          if ($out -notmatch 'needs the shared C\+\+') { $out; throw 'configure failed, but not on the runtime' }
+          'refused, as it should be'
 
       - name: Gallery snapshot
         working-directory: build/bin/Release
@@ -213,11 +226,14 @@ jobs:
 
       # Our own DLLs beside them (the plugin build's core and backends) are
       # fine; any runtime isn't. The shell extension may need nothing at all.
+      # (A plugin build imports the shared runtime's DLLs, as it must: #136.)
       - name: Imports
         if: matrix.link != 'asan'
         run: |
-          python ci/check-imports.py --allow-beside (Get-ChildItem build/bin/Release/*.exe, build/bin/Release/*.dll)
-          if ($LASTEXITCODE) { throw 'a runtime DLL is imported' }
+          if ('${{ matrix.link }}' -eq 'static') {
+            python ci/check-imports.py --allow-beside (Get-ChildItem build/bin/Release/*.exe, build/bin/Release/*.dll)
+            if ($LASTEXITCODE) { throw 'a runtime DLL is imported' }
+          }
           python ci/check-imports.py build/bin/Release/rapport-shell-example.dll
           if ($LASTEXITCODE) { throw 'the shell extension imports a DLL Explorer won''t find' }
 
