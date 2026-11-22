@@ -1043,6 +1043,19 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-show-again PROPERTIES
         ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
 
+    # A scroll pane's content loop under the single-entry layout rule (#108):
+    # a scrolled canvas asking for layouts; deepest 1, passes below the limit.
+    add_executable(rapport-win32-scroll-layout-depth-test win32_scroll_layout_depth_test.cpp)
+    target_link_libraries(rapport-win32-scroll-layout-depth-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-scroll-layout-depth-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-scroll-layout-depth-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-scroll-layout-depth-test rapport_win32)
+    add_test(NAME win32-scroll-layout-depth COMMAND rapport-win32-scroll-layout-depth-test)
+    set_tests_properties(win32-scroll-layout-depth PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     # A window dropped from its own canvas's on_resize (#108).
     add_executable(rapport-win32-canvas-destroy-test win32_canvas_destroy_test.cpp)
     target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::rapport user32)
