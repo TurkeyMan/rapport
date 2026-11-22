@@ -11469,8 +11469,17 @@ public:
     float divider() const override { return float(bar()) / win_.scale(); }
     // The sizes the panes were laid out at, as GTK's and Qt's report them,
     // so a pane that takes what the window gains is seen to grow (#29).
+    // As they'll be laid out (#108): a layout to come made first, as
+    // canvas::size() does; but while a set_sizes() waits for its layout,
+    // what it asked for (widgets.h: a restore then a save round-trips);
+    // within a layout (a pane's own size callback), the sizes being laid out.
     std::vector<float> sizes() const override
     {
+        if (!asked_ && !win_.in_layout)
+        {
+            const std::weak_ptr<bool> me = alive_;
+            if (!win_.flush_layout() || me.expired()) return {};
+        }
         std::vector<float> out;
         for (long s : current()) out.push_back(std::max(0L, s) / win_.scale());
         return out;
