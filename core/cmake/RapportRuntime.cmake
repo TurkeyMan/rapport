@@ -10,7 +10,8 @@
 # unless it imports the shared runtime. That holds however its flags were set
 # (generator expressions, an interface library's options, a parent's override
 # after add_subdirectory). And the linker refuses objects built for different
-# runtimes in one module (LNK2038).
+# runtimes in one module: LNK2038 where they have CRT headers, and a default
+# library conflict (LNK4098, made an error here) where they don't.
 #
 # Before that, configure stops early, with a clearer message, for the
 # documented ways of asking for the static runtime: the target's runtime, as
@@ -36,6 +37,13 @@ function(rapport_require_shared_runtime target)
         message(FATAL_ERROR "rapport: no dumpbin beside ${CMAKE_LINKER} or ${CMAKE_CXX_COMPILER}, "
                             "to check that ${target} imports the shared C++ runtime (#136). Set "
                             "RAPPORT_DUMPBIN to the toolset's dumpbin.exe.")
+    endif()
+    # A default library conflict (LNK4098: an object, or a third-party
+    # static library, built for the static runtime with no CRT headers to
+    # trip LNK2038) is an error here: the linker could otherwise take CRT
+    # pieces from either runtime. link.exe's own option; lld-link's differs.
+    if(NOT CMAKE_LINKER MATCHES "lld")
+        target_link_options(${target} PRIVATE /WX:4098)
     endif()
     get_property(script GLOBAL PROPERTY rapport_check_runtime_script)
     if(NOT script)

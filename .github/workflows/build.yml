@@ -170,7 +170,8 @@ jobs:
             @{ case = 'genex'; expect = "doesn't import the\s+shared C\+\+" },
             @{ case = 'interface'; expect = "doesn't import the\s+shared C\+\+" },
             @{ case = 'parent'; expect = "doesn't import the\s+shared C\+\+" },
-            @{ case = 'mixed'; expect = 'LNK2038' })
+            @{ case = 'mixed'; expect = 'LNK2038' },
+            @{ case = 'headerless'; expect = 'LNK1218' })
           foreach ($p in $probes) {
             $out = (cmake -S ci/runtime-probe -B build-probe @gen -A x64 "-DRAPPORT_PROBE_CASE=$($p.case)" 2>&1 | Out-String)
             if ($LASTEXITCODE) { $out; throw "probe $($p.case): didn't configure" }
