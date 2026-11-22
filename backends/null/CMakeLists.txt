@@ -10,6 +10,7 @@ if(RAPPORT_STATIC)
     add_library(rapport_null STATIC null_backend.cpp)
 else()
     add_library(rapport_null MODULE null_backend.cpp)
+    rapport_require_shared_runtime(rapport_null)  # with MSVC, the shared C++ runtime (#136)
 endif()
 add_library(rapport::backend_null ALIAS rapport_null)
 # Linked into one executable, a backend needs the core after it on the link

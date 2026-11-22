@@ -91,6 +91,8 @@ if(TARGET rapport_shell)
     target_include_directories(rapport-explorer-view-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../shell/src/win32)
     find_package(Threads REQUIRED)
     target_link_libraries(rapport-explorer-view-test PRIVATE rapport::shell Threads::Threads)
+    # The shell libraries' static runtime, whatever the build's (#136).
+    rapport_shell_static_runtime(rapport-explorer-view-test)
 endif()
 
 # Lists driven by synthesized input through the real backends, loaded as

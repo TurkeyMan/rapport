@@ -7,6 +7,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 include(cmake/RapportShaders.cmake)
+include(cmake/RapportRuntime.cmake)
 
 # Where the core library and its backends (<dir>/rapport) install, under the
 # prefix. A system rapport uses the libdir. An app that ships its own copy
@@ -43,6 +44,9 @@ add_library(rapport ${rapport_library_type}
     src/image.cpp
     src/i18n.cpp
     src/gpu.cpp)
+if(NOT RAPPORT_STATIC)
+    rapport_require_shared_runtime(rapport)  # with MSVC, the shared C++ runtime (#136)
+endif()
 add_library(rapport::rapport ALIAS rapport)
 if(RAPPORT_TESTS)
     target_compile_definitions(rapport PRIVATE RAPPORT_TEST_READBACK)
@@ -100,13 +104,15 @@ install(EXPORT rapportTargets NAMESPACE rapport::
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/rapportConfig.cmake
     "include(\${CMAKE_CURRENT_LIST_DIR}/rapportTargets.cmake)\n"
     "include(\${CMAKE_CURRENT_LIST_DIR}/RapportShaders.cmake)\n"
+    "include(\${CMAKE_CURRENT_LIST_DIR}/RapportRuntime.cmake)\n"
     "if(NOT TARGET rapport::headers)\n"
     "    add_library(rapport::headers ALIAS rapport::rapport_headers)\n"
     "endif()\n"
     "set(RAPPORT_PLUGIN_DIR \"${RAPPORT_INSTALL_LIBDIR}/rapport\")\n")
 write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/rapportConfigVersion.cmake
     COMPATIBILITY ExactVersion)
-install(FILES cmake/RapportShaders.cmake cmake/RapportShaderEmbed.cmake
+install(FILES cmake/RapportShaders.cmake cmake/RapportShaderEmbed.cmake cmake/RapportRuntime.cmake
+              cmake/RapportCheckRuntime.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rapport COMPONENT dev)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/rapportConfig.cmake
               ${CMAKE_CURRENT_BINARY_DIR}/rapportConfigVersion.cmake

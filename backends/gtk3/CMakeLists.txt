@@ -24,6 +24,7 @@ if(RAPPORT_STATIC)
     add_library(rapport_gtk3 STATIC gtk3_backend.cpp)
 else()
     add_library(rapport_gtk3 MODULE gtk3_backend.cpp)
+    rapport_require_shared_runtime(rapport_gtk3)  # with MSVC, the shared C++ runtime (#136)
 endif()
 add_library(rapport::backend_gtk3 ALIAS rapport_gtk3)
 # Linked into one executable, a backend needs the core after it on the link

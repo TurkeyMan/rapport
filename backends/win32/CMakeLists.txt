@@ -15,6 +15,7 @@ if(RAPPORT_STATIC)
     add_library(rapport_win32 STATIC ${sources})
 else()
     add_library(rapport_win32 MODULE ${sources})
+    rapport_require_shared_runtime(rapport_win32)  # with MSVC, the shared C++ runtime (#136)
 endif()
 add_library(rapport::backend_win32 ALIAS rapport_win32)
 # The toolbar band's metrics, its text fields (win32_band_field.h) and its
