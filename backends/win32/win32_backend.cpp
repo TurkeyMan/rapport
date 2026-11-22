@@ -16743,14 +16743,45 @@ unsigned layout_passes_for_tests()
 {
     return g_layout_passes;
 }
-// A copy of the backend's way onto its message window, as a path icon
-// finder holds one: outliving the backend safely (nullptr: no backend).
-void* post_handle_for_tests()
+// A producer of the backend's own kind, as a path icon finder is: it holds
+// the backend's way onto its message window, which outlives the backend
+// (nullptr: no backend). Only C types cross the seam: what's posted is the
+// caller's fn and ctx, wrapped here, and the producer is freed here too.
+struct post_producer
 {
-    const std::shared_ptr<post_gate> gate = g_post_gate;
-    if (!gate) return nullptr;
-    return new std::function<void(std::function<void()>)>([gate](std::function<void()> f)
-                                                          { gate->post(std::move(f)); });
+    std::shared_ptr<post_gate> gate;
+};
+void* post_producer_acquire_for_tests()
+{
+    std::shared_ptr<post_gate> gate = g_post_gate;
+    return gate ? new post_producer{std::move(gate)} : nullptr;
+}
+// fn(ctx) on the UI thread once delivered; drop(ctx), never fn, if the post
+// is destroyed undelivered (refused at once, or still queued at teardown).
+void post_producer_post_for_tests(void* producer, void (*fn)(void*), void (*drop)(void*), void* ctx)
+{
+    struct c_post
+    {
+        void (*fn)(void*);
+        void (*drop)(void*);
+        void* ctx;
+        bool ran = false;
+        ~c_post()
+        {
+            if (!ran && drop) drop(ctx);
+        }
+    };
+    auto p = std::make_shared<c_post>(fn, drop, ctx);
+    static_cast<post_producer*>(producer)->gate->post(
+        [p]
+        {
+            p->ran = true;
+            if (p->fn) p->fn(p->ctx);
+        });
+}
+void post_producer_release_for_tests(void* producer)
+{
+    delete static_cast<post_producer*>(producer);
 }
 void set_teardown_hook_for_tests(void (*hook)(void*), void* data)
 {
@@ -16807,13 +16838,27 @@ extern "C" __declspec(dllexport) void rapport_win32_set_teardown_hook(void (*hoo
 {
     rap::win32::set_teardown_hook_for_tests(hook, data);
 }
-// Private test seam, as those above: a new copy of the backend's internal
-// way of posting (what its path icon finders hold), as a heap
-// std::function<void(std::function<void()>)>* the caller deletes; nullptr
-// with no backend. Safe to call through after the backend's gone.
-extern "C" __declspec(dllexport) void* rapport_win32_post_handle()
+// Private test seams, as those above: a producer posting to the backend as
+// its own path icon finders do, outliving it; only C types cross. acquire
+// gives an opaque producer (nullptr with no backend), safe to post through
+// after the backend's gone; post has fn(ctx) run on the UI thread once
+// delivered, or drop(ctx), never fn, if the post is destroyed undelivered;
+// release frees the producer. Allocated and freed on the backend's side
+// alone; the backend's module is never unloaded once loaded (ui::load).
+extern "C" __declspec(dllexport) void* rapport_win32_post_producer_acquire()
 {
-    return rap::win32::post_handle_for_tests();
+    return rap::win32::post_producer_acquire_for_tests();
+}
+extern "C" __declspec(dllexport) void rapport_win32_post_producer_post(void* producer,
+                                                                       void (*fn)(void*),
+                                                                       void (*drop)(void*),
+                                                                       void* ctx)
+{
+    rap::win32::post_producer_post_for_tests(producer, fn, drop, ctx);
+}
+extern "C" __declspec(dllexport) void rapport_win32_post_producer_release(void* producer)
+{
+    rap::win32::post_producer_release_for_tests(producer);
 }
 extern "C" __declspec(dllexport) void rapport_win32_layout_limits(int reset, unsigned* passes_max,
                                                                   unsigned* cap_hits)
