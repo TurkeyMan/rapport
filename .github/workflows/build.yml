@@ -136,10 +136,11 @@ jobs:
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=${{ matrix.runtime }}" ${{ matrix.flags }}
           cmake --build build --config Release --parallel
 
-      # A shared rapport library with the static runtime is refused at
-      # configure, however it's asked for (#136): the variable, an expression
+      # A shared rapport library with the static runtime is refused (#136).
+      # At configure, for the documented ways: the variable, an expression
       # that's static in some configurations, the core configured alone, the
-      # flags, and a target's own property set after it's made.
+      # flags, and a target's own property set after it's made. Then, for the
+      # rest, by the post-build import check every build runs.
       - name: Plugins refuse the static runtime
         if: matrix.link == 'plugins'
         run: |
@@ -161,9 +162,34 @@ jobs:
             if ($out -notmatch 'needs the shared C\+\+') { $out; throw "$($c.name): configure failed, but not on the runtime" }
             "$($c.name): refused, as it should be"
           }
+          # Ways configure can't see, built (ci/runtime-probe): refused by
+          # the post-build import check, or the linker for a mixed module.
+          # "none" builds.
+          $probes = @(
+            @{ case = 'none'; expect = '' },
+            @{ case = 'genex'; expect = "doesn't import the\s+shared C\+\+" },
+            @{ case = 'interface'; expect = "doesn't import the\s+shared C\+\+" },
+            @{ case = 'parent'; expect = "doesn't import the\s+shared C\+\+" },
+            @{ case = 'mixed'; expect = 'LNK2038' })
+          foreach ($p in $probes) {
+            $out = (cmake -S ci/runtime-probe -B build-probe @gen -A x64 "-DRAPPORT_PROBE_CASE=$($p.case)" 2>&1 | Out-String)
+            if ($LASTEXITCODE) { $out; throw "probe $($p.case): didn't configure" }
+            $out = (cmake --build build-probe --config Release 2>&1 | Out-String)
+            $code = $LASTEXITCODE
+            Remove-Item -Recurse -Force build-probe -ErrorAction SilentlyContinue
+            if (-not $p.expect) {
+              if ($code) { $out; throw "probe $($p.case): a shared-runtime library didn't build" }
+              "probe $($p.case): built, as it should"
+              continue
+            }
+            if ($code -eq 0) { $out; throw "probe $($p.case): built with the static runtime" }
+            if ($out -notmatch $p.expect) { $out; throw "probe $($p.case): the build failed, but not on the runtime" }
+            "probe $($p.case): refused, as it should be"
+          }
           exit 0  # cmake's failing exit code isn't the step's
 
-      # What was built uses the shared runtime, whatever got past configure.
+      # The post-build check covers the core and the backends; this covers a
+      # program built against them too, from outside the build.
       - name: Plugins import the shared runtime
         if: matrix.link != 'static'
         working-directory: build/bin/Release

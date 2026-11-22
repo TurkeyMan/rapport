@@ -30,7 +30,11 @@ cmake -S . -B build-static -G Ninja -DRAPPORT_STATIC=ON && cmake --build build-s
 
 With MSVC, a plugin build needs the shared C++ runtime (`/MD`, the default): std:: types cross
 between the app, the core and the backend DLLs, so they must all use one runtime. The static
-runtime (`/MT`) is for `RAPPORT_STATIC` builds only, and configure refuses it otherwise (#136).
+runtime (`/MT`) is for `RAPPORT_STATIC` builds only (#136). What guarantees it is the build: once
+the core and each backend are linked, a post-build step checks with the toolset's `dumpbin` that
+they import the shared runtime, and fails the build if not. Configure also stops early, with a
+clearer message, for the usual ways of asking for `/MT` (`CMAKE_MSVC_RUNTIME_LIBRARY`, a target's
+`MSVC_RUNTIME_LIBRARY`, `/MT` in the flags).
 
 `RAPPORT_SNAPSHOT=out.png` saves the first window a program shows and quits,
 which makes checking a layout on each backend quick.

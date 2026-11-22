@@ -112,6 +112,7 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/rapportConfig.cmake
 write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/rapportConfigVersion.cmake
     COMPATIBILITY ExactVersion)
 install(FILES cmake/RapportShaders.cmake cmake/RapportShaderEmbed.cmake cmake/RapportRuntime.cmake
+              cmake/RapportCheckRuntime.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rapport COMPONENT dev)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/rapportConfig.cmake
               ${CMAKE_CURRENT_BINARY_DIR}/rapportConfigVersion.cmake
