@@ -5370,7 +5370,8 @@ public:
                 pane_sizes::now_or_after(self, self->alive_,
                                          [self, size, alive = std::weak_ptr<bool>(self->alive_)]
                                          {
-                                             if (self->resize_) self->resize_(size);
+                                             // A copy: on_resize may destroy the canvas, and it with it.
+                                             if (auto f = self->resize_) f(size);
                                              // on_resize may have destroyed it (its window, say).
                                              const std::shared_ptr<bool> still = alive.lock();
                                              if (still && *still) self->target_changed();
@@ -5824,7 +5825,7 @@ public:
         std::erase(recent(), win_);
         for (auto& part : parts) part->disconnect();
         disconnect();
-        gtk_window_destroy(GTK_WINDOW(win_));
+        destroy_once_placed(win_);  // GTK's, once its layout is done
     }
 
     void set_title(const std::string& t) override

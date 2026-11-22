@@ -48,6 +48,7 @@ struct seen
 
 int main(int argc, char** argv)
 {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     auto ui = rap::ui::load(argc, argv);
     if (!ui)
     {
@@ -77,9 +78,14 @@ int main(int argc, char** argv)
                     calls.push_back({i, s.w, split->sizes()});
                     if (i == 0 && then)
                     {
+                        // Last: it may destroy the window, and this
+                        // callback with it.
                         auto f = std::move(then);
                         then = nullptr;
+                        int& d = depth;
                         f();
+                        --d;
+                        return;
                     }
                     --depth;
                 })

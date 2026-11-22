@@ -1769,6 +1769,37 @@ inline void watch()
 }
 }  // namespace paneds
 
+// A window destroyed by its own pane told its size (pane_sizes.h) is still
+// being laid out by GTK, which goes on with it once the callback returns:
+// what of it is GTK's goes once that's done, rapport's at once (its signals
+// taken off first).
+inline void destroy_once_placed(GtkWidget* window)
+{
+#if GTK_MAJOR_VERSION >= 4
+    auto destroy = +[](GtkWidget* w) { gtk_window_destroy(GTK_WINDOW(w)); };
+#else
+    auto destroy = +[](GtkWidget* w) { gtk_widget_destroy(w); };
+#endif
+    if (!::rap::pane_sizes::placing && !::rap::pane_sizes::delivering)
+    {
+        destroy(window);
+        return;
+    }
+    g_object_ref(window);
+    g_idle_add_full(
+        G_PRIORITY_HIGH_IDLE,
+        +[](gpointer p) -> gboolean
+        {
+#if GTK_MAJOR_VERSION >= 4
+            gtk_window_destroy(GTK_WINDOW(p));
+#else
+            gtk_widget_destroy(GTK_WIDGET(p));
+#endif
+            return G_SOURCE_REMOVE;
+        },
+        window, g_object_unref);
+}
+
 // A divider moved by rapport itself, not by the user's drag: marked
 // "rapport-own-position" while it's set, so the splitter's position watch
 // doesn't take the move for the drag's (#105).

@@ -3662,7 +3662,8 @@ public:
         pane_sizes::now_or_after(this, alive_,
                                  [this, alive = std::weak_ptr<bool>(alive_)]
                                  {
-                                     if (resize_) resize_(size());
+                                     // A copy: on_resize may destroy the canvas, and it with it.
+                                     if (auto f = resize_) f(size());
                                      // on_resize may have destroyed it (its window, say).
                                      const std::shared_ptr<bool> still = alive.lock();
                                      if (still && *still && frame_target_) frame_target_(target());
