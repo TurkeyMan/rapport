@@ -215,7 +215,8 @@ struct hop
     std::string method, url;
     bool with_body = true;    // the request's body goes too
     bool credentials = true;  // Authorization and Cookie go too
-    bool proxy_credentials = true;  // Proxy-Authorization too (on_redirect can drop it)
+    bool proxy_credentials =
+        true;  // the caller's Proxy-Authorization too (on_redirect can drop it)
 };
 
 bool is_redirect(int status)
@@ -697,6 +698,8 @@ http_response http_request(std::string_view method, const std::string& url, std:
 {
     using clock = std::chrono::steady_clock;
     http_response r;
+    // The system's or automatic proxy: its credentials, as libcurl's from
+    // http_proxy, the machine's, go to the proxy on every hop (sys.h).
     handle session(WinHttpOpen(L"rapport", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC));
     if (!session)

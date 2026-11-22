@@ -12,11 +12,12 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
-#include <vector>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -770,6 +771,152 @@ void redirect_targets()
     }
 }
 
+#ifndef _WIN32
+// Through a proxy with credentials of its own, from the environment
+// (http_proxy's user:pw, which libcurl sends as Proxy-Authorization): the
+// machine's way to the network, not the request's. They go to the proxy on
+// every hop, follow_without_credentials or not (else the next hop is a 407),
+// and no origin's ever sent them (a proxy keeps Proxy-Authorization). What
+// follow_without_credentials drops is the caller's: Authorization, and a
+// Proxy-Authorization header given in the options (sent when the
+// configuration has no proxy credentials; libcurl sends those in its
+// place). Two origins that resolve nowhere (.invalid), so a hop that went
+// around the proxy fails.
+void proxied_redirects()
+{
+    struct seen_hop
+    {
+        std::string url, proxy_auth, auth;
+    };
+    std::mutex m;
+    std::vector<seen_hop> seen;
+    const auto value = [](std::string_view headers, std::string_view name)
+    {
+        const std::string key = "\r\n" + std::string(name) + ": ";
+        const size_t at = headers.find(key);
+        if (at == std::string_view::npos) return std::string("none");
+        const size_t from = at + key.size();
+        return std::string(headers.substr(from, headers.find("\r\n", from) - from));
+    };
+    // What reaches the proxy; an origin is sent all of it but
+    // Proxy-Authorization, which is the proxy's.
+    server proxy(
+        [&](std::string_view url, std::string_view headers)
+        {
+            {
+                std::lock_guard lock(m);
+                seen.push_back({std::string(url), value(headers, "Proxy-Authorization"),
+                                value(headers, "Authorization")});
+            }
+            if (url == "http://a.invalid/start")
+                return response("302 Found", "http://b.invalid/end", "");
+            if (url == "http://a.invalid/here") return response("302 Found", "/there", "");
+            if (url == "http://b.invalid/end" || url == "http://a.invalid/there")
+                return response("200 OK", {}, "through the proxy");
+            return response("404 Not Found", {}, "");
+        });
+    if (!proxy)
+    {
+        check(false, "proxied redirects: a proxy on the loopback");
+        return;
+    }
+    // This process's environment only, put back after.
+    const auto saved = [](const char* name)
+    {
+        const char* v = std::getenv(name);
+        return v ? std::optional<std::string>(v) : std::nullopt;
+    };
+    const auto put_back = [](const char* name, const std::optional<std::string>& v)
+    {
+        if (v)
+            setenv(name, v->c_str(), 1);
+        else
+            unsetenv(name);
+    };
+    const auto http_proxy = saved("http_proxy"), no_proxy = saved("no_proxy"),
+               no_proxy_upper = saved("NO_PROXY");
+    setenv("http_proxy", proxy.url("").insert(7, "proxyuser:proxypw@").c_str(), 1);
+    unsetenv("no_proxy");
+    unsetenv("NO_PROXY");
+
+    const std::string env_auth = "Basic cHJveHl1c2VyOnByb3h5cHc=";  // proxyuser:proxypw
+    using rap::sys::redirect_action;
+    const auto run = [&](const std::string& from, redirect_action act, bool caller_proxy_auth)
+    {
+        {
+            std::lock_guard lock(m);
+            seen.clear();
+        }
+        rap::sys::http_options o{.headers = {{"Authorization", "Bearer origin"}}};
+        if (caller_proxy_auth) o.headers.emplace_back("Proxy-Authorization", "Bearer caller");
+        o.on_redirect = [act](std::string_view, std::string_view, int) { return act; };
+        const auto r = rap::sys::http_get(from, o);
+        std::lock_guard lock(m);
+        std::string hops;
+        for (const auto& h : seen)
+            hops += " [" + h.url + " proxy: " + h.proxy_auth + ", origin: " + h.auth + "]";
+        return std::pair(r.status == 200 && r.body == "through the proxy" && seen.size() == 2,
+                         hops);
+    };
+    const auto hop = [&](size_t i) -> seen_hop
+    {
+        std::lock_guard lock(m);
+        return i < seen.size() ? seen[i] : seen_hop{"(none)", "(none)", "(none)"};
+    };
+
+    if (auto probe = rap::sys::http_get("http://a.invalid/there");
+        probe.error.find("libcurl") != std::string::npos)
+        std::printf("skip proxied redirects: %s\n", probe.error.c_str());
+    else
+    {
+        // Another origin, followed: the proxy's own on both hops;
+        // Authorization only to the first origin.
+        auto [ok, hops] = run("http://a.invalid/start", redirect_action::follow, false);
+        check(ok && hop(0).proxy_auth == env_auth && hop(1).proxy_auth == env_auth,
+              ("proxied redirects: to another origin, the environment's proxy credentials on both "
+               "hops," +
+               hops)
+                  .c_str());
+        check(hop(0).auth == "Bearer origin" && hop(1).auth == "none",
+              ("proxied redirects: to another origin, Authorization only to the first," + hops)
+                  .c_str());
+
+        // follow_without_credentials at the same origin: the proxy's own still
+        // go; Authorization doesn't.
+        std::tie(ok, hops) =
+            run("http://a.invalid/here", redirect_action::follow_without_credentials, false);
+        check(ok && hop(0).proxy_auth == env_auth && hop(1).proxy_auth == env_auth,
+              ("proxied redirects: follow_without_credentials keeps the environment's proxy "
+               "credentials," +
+               hops)
+                  .c_str());
+        check(
+            hop(0).auth == "Bearer origin" && hop(1).auth == "none",
+            ("proxied redirects: follow_without_credentials drops Authorization," + hops).c_str());
+
+        // The caller's own Proxy-Authorization, to a proxy with no
+        // credentials configured (libcurl sends the configuration's in its
+        // place when there are some): dropped by follow_without_credentials;
+        // followed, it goes on.
+        setenv("http_proxy", proxy.url("").c_str(), 1);
+        std::tie(ok, hops) =
+            run("http://a.invalid/here", redirect_action::follow_without_credentials, true);
+        check(ok && hop(0).proxy_auth == "Bearer caller" && hop(1).proxy_auth == "none",
+              ("proxied redirects: follow_without_credentials drops the caller's "
+               "Proxy-Authorization," +
+               hops)
+                  .c_str());
+        std::tie(ok, hops) = run("http://a.invalid/start", redirect_action::follow, true);
+        check(ok && hop(0).proxy_auth == "Bearer caller" && hop(1).proxy_auth == "Bearer caller",
+              ("proxied redirects: followed, the caller's Proxy-Authorization goes on," + hops)
+                  .c_str());
+    }
+    put_back("http_proxy", http_proxy);
+    put_back("no_proxy", no_proxy);
+    put_back("NO_PROXY", no_proxy_upper);
+}
+#endif
+
 }  // namespace
 
 int main()
@@ -782,6 +929,9 @@ int main()
     requests();
     redirect_decisions();
     redirect_targets();
+#ifndef _WIN32
+    proxied_redirects();
+#endif
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

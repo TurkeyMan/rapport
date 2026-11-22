@@ -354,9 +354,9 @@ struct http_response
 // What to do with a redirect (http_options::on_redirect).
 enum class redirect_action
 {
-    follow,                     // as without the callback
-    follow_without_credentials, // and send no credentials, from this hop on
-    stop,                       // don't: the 3xx itself is the response
+    follow,                      // as without the callback
+    follow_without_credentials,  // and none of the request's credentials, from this hop on
+    stop,                        // don't: the 3xx itself is the response
 };
 
 struct http_options
@@ -389,16 +389,27 @@ struct http_options
     // as sent: "%2e%2e" isn't a "..".) Only for a hop that may be followed
     // at all: one to an unsupported URL, or past the redirect limit, fails
     // as ever without a call. Unset: every one followed, as ever.
-    //  follow: as without it. Authorization and Cookie still go only while
-    //    the hops stay at the first request's origin; this can't send them
-    //    elsewhere. Nor the URL's userinfo ("http://user:pw@host/", which
-    //    libcurl sends as credentials): a hop to another origin goes, and
-    //    is told, without it. Proxy-Authorization (the proxy's, not the
+    // The request's credentials are what the caller gives it: Authorization,
+    // Cookie and Proxy-Authorization in `headers`, and the URL's userinfo
+    // ("http://user:pw@host/", which libcurl sends as credentials). Those
+    // of the proxy configuration (the environment's http_proxy or
+    // https_proxy, user:pw in its URL, on libcurl; the system's or
+    // automatic proxy settings on WinHTTP) aren't the request's but the
+    // machine's way to the network: they go to the proxy on every hop,
+    // whatever this returns (without them a hop behind an authenticating
+    // proxy is a 407), and never to an origin. (On libcurl they're sent in
+    // place of a Proxy-Authorization in `headers`.)
+    //  follow: as without it. Authorization, Cookie and the URL's userinfo
+    //    still go only while the hops stay at the first request's origin;
+    //    this can't send them elsewhere (to_url is told without the
+    //    userinfo). The caller's Proxy-Authorization (the proxy's, not the
     //    origin's) goes on to any origin, as ever.
-    //  follow_without_credentials: Authorization, Cookie,
-    //    Proxy-Authorization and the URL's userinfo (to_url as told, less
-    //    that) stay off this hop and every later one, back at the first
-    //    origin too (a host shared by tenants: dev.azure.com/orgA to /orgB).
+    //  follow_without_credentials: the request's credentials (Authorization,
+    //    Cookie, the caller's Proxy-Authorization and the URL's userinfo;
+    //    to_url as told, less that) stay off this hop and every later one,
+    //    back at the first origin too (a host shared by tenants:
+    //    dev.azure.com/orgA to /orgB). The proxy configuration's still go
+    //    to the proxy.
     //  stop: the 3xx is the response (its status, headers with Location, and
     //    body), not an error.
     // Called on the thread that called http_request (a worker's, as the
