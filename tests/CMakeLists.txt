@@ -992,6 +992,18 @@ if(TARGET rapport_win32)
     add_test(NAME win32-splitter-sizes COMMAND rapport-win32-splitter-sizes-test)
     set_tests_properties(win32-splitter-sizes PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 
+    # A shown window's decisions while a relayout_at_once has drawing off (#108).
+    add_executable(rapport-win32-at-once-visibility-test win32_at_once_visibility_test.cpp)
+    target_link_libraries(rapport-win32-at-once-visibility-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-at-once-visibility-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-at-once-visibility-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-at-once-visibility-test rapport_win32)
+    add_test(NAME win32-at-once-visibility COMMAND rapport-win32-at-once-visibility-test)
+    set_tests_properties(win32-at-once-visibility PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     # A window dropped from its own canvas's on_resize (#108).
     add_executable(rapport-win32-canvas-destroy-test win32_canvas_destroy_test.cpp)
     target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::rapport user32)
