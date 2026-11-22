@@ -1742,6 +1742,38 @@ bool g_canvases_quiet = false;
 // ends (a test destroys the window there: no app callback of a quiet canvas
 // can).
 void (*g_resize_quiet_hook_for_tests)(void*) = nullptr;
+
+// The window whose controls are being placed, while they are: a control's
+// place can run app code (a canvas tells its on_resize of the size it's
+// placed at, ahead or when it's there already), which may destroy the
+// window, its controls with it (#108). Each container stops after a child's
+// place that did: nothing more of it, nor of what placed it.
+const std::weak_ptr<bool>* g_placing = nullptr;
+bool placing_stopped()
+{
+    return g_placing && g_placing->expired();
+}
+// Taken by each way into placing a window's controls that can run app code
+// as it does (its layout, place_all; a scroll pane's host sized, its
+// content placed and moved there and then): that window
+// the one placed until it ends, the one before it (an outer placing, of
+// this window or another) then again.
+class placing_scope
+{
+public:
+    explicit placing_scope(win_context& w)
+        : alive_(w.layout_alive)
+        , was_(std::exchange(g_placing, &alive_))
+    {
+    }
+    ~placing_scope() { g_placing = was_; }
+    placing_scope(const placing_scope&) = delete;
+    placing_scope& operator=(const placing_scope&) = delete;
+
+private:
+    std::weak_ptr<bool> alive_;
+    const std::weak_ptr<bool>* was_;
+};
 void* g_resize_quiet_hook_data = nullptr;
 
 void move_control(HWND h, int x, int y, int w, int hgt)
@@ -2223,6 +2255,7 @@ public:
                           ? RECT{pos, cross_pos, pos + sizes[i], cross_pos + cross_size}
                           : RECT{cross_pos, pos, cross_pos + cross_size, pos + sizes[i]};
             c->place(cr);
+            if (placing_stopped()) return;
             pos += sizes[i] + spacing();
         }
     }
@@ -2453,6 +2486,7 @@ public:
             if (row.label) row_h = std::max(row_h, row.label->natural().cy);
             long fw = row.field->expands_in_form() || row.field->stretch ? r.right - fx : std::min(f.cx, r.right - fx);
             row.field->place({fx, y + (row_h - f.cy) / 2, fx + fw, y + (row_h - f.cy) / 2 + f.cy});
+            if (placing_stopped()) return;
             if (row.label)
             {
                 const SIZE l = row.label->natural();
@@ -9567,7 +9601,11 @@ public:
             InflateRect(&in, -pad(), -pad());
         }
         for (size_t i = 0; i < pages.size(); ++i)
-            if (items_.shown(int(i))) pages[i]->place(in);
+            if (items_.shown(int(i)))
+            {
+                pages[i]->place(in);
+                if (placing_stopped()) return;
+            }
     }
     void show_all(bool shown) override
     {
@@ -9914,7 +9952,11 @@ public:
             in.left += lw + gap();
         }
         for (size_t i = 0; i < pages.size(); ++i)
-            if (items_.shown(int(i))) pages[i]->place(in);
+            if (items_.shown(int(i)))
+            {
+                pages[i]->place(in);
+                if (placing_stopped()) return;
+            }
     }
     void show_all(bool shown) override
     {
@@ -11426,6 +11468,7 @@ public:
             const long s = std::max(0L, sz[i]);
             panes[i]->place(dir_ == orientation::horizontal ? RECT{pos, r.top, pos + s, r.bottom}
                                                             : RECT{r.left, pos, r.right, pos + s});
+            if (placing_stopped()) return;
             pos += s;
             if (k + 1 < shown.size() && b < bars_.size())
             {
@@ -11629,6 +11672,8 @@ private:
             return;
         }
         layout_scope inside(win_);  // round the moves' delivery too
+        // (No placing_scope: the moves are batched, so a canvas hears of its
+        // size as they're delivered, once place is done, not inside it.)
         moves_in_one_pass batch(win_.hwnd());
         place(rect_);
     }
@@ -11702,6 +11747,7 @@ public:
         // Resizing the host lays the content out (WM_SIZE, below): not again.
         laid_out_ = false;
         move_pane_window(host_, r.left, r.top, r.right - r.left, r.bottom - r.top);
+        if (placing_stopped()) return;  // its WM_SIZE laid the content out
         if (!laid_out_) layout_content();
     }
     // In a layout pass the host and its panel move with their pixels (not
@@ -11750,7 +11796,9 @@ private:
         for (int tries = 0; tries < 3; ++tries)
         {
             again_ = false;
-            if (lay_out_once(tries == 2) && !again_) break;
+            const bool held = lay_out_once(tries == 2);
+            if (placing_stopped()) return;
+            if (held && !again_) break;
         }
         laying_out_ = false;
     }
@@ -11781,6 +11829,7 @@ private:
         if (!last && (now.right != client.right || now.bottom != client.bottom)) return false;
         move_pane_window(panel_, -x_, -y_, w, h);
         content->place({0, 0, w, h});
+        if (placing_stopped()) return true;
         content_w_ = w, content_h_ = h;
         return true;
     }
@@ -11812,6 +11861,7 @@ private:
         case WM_SIZE:
         {
             trace::scope timing(trace::phase::window_size, uintptr_t(host_));
+            placing_scope placing(win_);  // sized by a window's layout or not
             layout_content();
             return 0;
         }
@@ -12627,7 +12677,10 @@ public:
             return;
         }
         ahead_.reset();
-        leaf::place(r);
+        const std::shared_ptr<bool> alive = alive_;
+        leaf::place(
+            r);  // moved now (outside a layout's batch), its WM_SIZE tells the app, which may drop it
+        if (!*alive) return;
         if (placed_at(h_, r.left, r.top, r.right - r.left, r.bottom - r.top)) sized();  // not moved after all
     }
     float device_scale() const override { return win_.scale(); }
@@ -12977,13 +13030,26 @@ private:
         return {r.right, r.bottom};
     }
     // The app hears of a size once, whether ahead of the window or as it comes.
+    // Its on_resize may drop the window, and this canvas with it (#108):
+    // then nothing more of it. The handler's a copy, which outlives the
+    // canvas's own while it runs.
     void sized()
     {
         const SIZE px = pixels();
         if (px.cx == told_.cx && px.cy == told_.cy) return;
         told_ = px;
-        if (resize_) resize_(size());
-        if (frame_target_) frame_target_(target());
+        const std::shared_ptr<bool> alive = alive_;
+        if (resize_)
+        {
+            const auto resize = resize_;
+            resize(size());
+            if (!*alive) return;
+        }
+        if (frame_target_)
+        {
+            const auto tell = frame_target_;  // which may drop it too
+            tell(target());
+        }
     }
 
     // On the GPU's device when there is one (see gpu), on the CPU until then.
@@ -13728,6 +13794,7 @@ public:
         sync_band_toolbar();
         RECT r = client();
         const int m = margin();
+        placing_scope placing(*this);
         moves_in_one_pass batch(hwnd_, ahead_.has_value() && !grow_ahead_);
         // The document tabs across the top, edge to edge; the content, with
         // its margins, under them. In the caption, the strip stops at the
@@ -13751,6 +13818,7 @@ public:
                 }
                 doc_tabs->set_frame(caption_, caption_ && !IsZoomed(hwnd_) ? caption_resize_band(hwnd_) : 0);
                 doc_tabs->place(strip);
+                if (placing_stopped()) return;
                 r.top += h;
             }
         }
@@ -13758,6 +13826,7 @@ public:
         InflateRect(&r, -m, -m);
         root->show_all(true);
         root->place(r);
+        if (placing_stopped()) return;
         place_band(content_top, r);
     }
 
