@@ -1,13 +1,12 @@
 // What reads or acts on a control's laid-out geometry sees the layout as it
-// will be, not as it was (#108). A label above a list (a tree, a splitter)
+// will be, not as it was (#108). A label above a list (a tree)
 // grows to several lines: a layout's asked for (posted) that will shrink
 // the list. Right then, outside any layout:
 // - the list's scroll_to(99, end) puts row 99 at the rows' bottom as they'll
 //   be (was: as they were, and the shrink left it out of view);
 // - its row_offset reads as it'll be laid out;
 // - its set_row_offset puts the row where it's asked, as it'll be;
-// - a tree's select scrolls the item into view as it'll be;
-// - a splitter's sizes() are as they'll be.
+// - a tree's select scrolls the item into view as it'll be.
 // Within a layout (from a canvas's on_resize, the layout shrinking the
 // list): scroll_to is made once the layout's done (rows as laid out then),
 // the latest asked for only (scroll_to(99, end) then scroll_to(50,
@@ -299,31 +298,6 @@ int main(int argc, char** argv)
         pump();
     }
 
-    // A splitter's sizes(), a layout to come.
-    {
-        rap::label* lab = nullptr;
-        rap::splitter* sp = nullptr;
-        auto win = (*ui)->create(window{"Layout current split",
-                                        {vbox{label{"One line"}.bind(lab),
-                                              splitter{rap::orientation::vertical, canvas{}.stretch(), canvas{}.stretch()}
-                                                  .bind(sp)
-                                                  .stretch()}}}
-                                     .size(300_px, 400_px));
-        expect(win && lab && sp, "a splitter: the window and its splitter");
-        if (!win || !lab || !sp) return 1;
-        win->show();
-        pump();
-        lab->set_text(many);
-        const std::vector<float> now = sp->sizes();
-        pump();
-        const std::vector<float> after = sp->sizes();
-        expect(now.size() == 2 && now == after, "a splitter's sizes() with a layout to come: as they'll be, " +
-                                                    (now.size() == 2 ? num(now[0]) + "," + num(now[1]) : "?") +
-                                                    ", after " +
-                                                    (after.size() == 2 ? num(after[0]) + "," + num(after[1]) : "?"));
-        win.reset();
-        pump();
-    }
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

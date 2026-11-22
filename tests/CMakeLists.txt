@@ -1058,7 +1058,7 @@ if(TARGET rapport_win32)
 
     # What reads or acts on laid-out geometry sees the layout as it'll be
     # (#108): a list's scroll_to/row_offset/set_row_offset, a tree's select, a
-    # splitter's sizes(), a layout to come or within one.
+    # layout to come or within one.
     add_executable(rapport-win32-layout-current-test win32_layout_current_test.cpp)
     target_link_libraries(rapport-win32-layout-current-test PRIVATE rapport::rapport user32 comctl32)
     if(RAPPORT_STATIC)
