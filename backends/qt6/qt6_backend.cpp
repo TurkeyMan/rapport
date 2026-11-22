@@ -7,6 +7,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "../common/pane_sizes.h"
 #include "../common/window_chords.h"
 #include "qt_painter.h"
 #include "rapport/backend.h"
@@ -78,6 +79,7 @@
 #include <QScrollBar>
 #include <QSlider>
 #include <QSplitter>
+#include <QSplitterHandle>
 #include <QStackedWidget>
 #include <QStyleHints>
 #include <QStyledItemDelegate>
@@ -1823,6 +1825,38 @@ private:
 
 // -- containers ---------------------------------------------------------------
 
+// rapport's QSplitter: whatever it does with an event (a resize, a layout
+// request, a pane shown or added) or its handles do (a drag), it places its
+// panes within it, so what they're told of their sizes waits until all are
+// placed (pane_sizes.h, #105). rapport's own setSizes calls are bracketed
+// where they're made.
+class placing_handle : public QSplitterHandle
+{
+public:
+    using QSplitterHandle::QSplitterHandle;
+
+protected:
+    bool event(QEvent* e) override
+    {
+        pane_sizes::placing_scope scope;
+        return QSplitterHandle::event(e);
+    }
+};
+
+class placing_splitter : public QSplitter
+{
+public:
+    using QSplitter::QSplitter;
+
+protected:
+    bool event(QEvent* e) override
+    {
+        pane_sizes::placing_scope scope;
+        return QSplitter::event(e);
+    }
+    QSplitterHandle* createHandle() override { return new placing_handle(orientation(), this); }
+};
+
 // Splitter panes: the first layout follows stretch factors (panes without
 // stretch at their natural size), or the sizes given before it; after
 // that, spare space goes to the stretching panes only.
@@ -1943,6 +1977,7 @@ private:
         if (avail <= 0 || stretch_sum == 0) return;
         for (int i = 0; i < n && size_t(i) < stretch_.size(); ++i)
             if (stretch_[size_t(i)] > 0) sizes[i] = avail * stretch_[size_t(i)] / stretch_sum;
+        pane_sizes::placing_scope scope;
         splitter()->setSizes(sizes);
     }
 
@@ -1967,7 +2002,11 @@ private:
         else
             wanted_.reset();
         // The sizes it has already: no relayout (#88).
-        if (sizes != splitter()->sizes()) splitter()->setSizes(sizes);
+        if (sizes != splitter()->sizes())
+        {
+            pane_sizes::placing_scope scope;
+            splitter()->setSizes(sizes);
+        }
     }
 
     std::vector<int> stretch_;
@@ -3619,8 +3658,15 @@ public:
     void resized()
     {
         if (!laid_out_) return;
-        if (resize_) resize_(size());
-        if (frame_target_) frame_target_(target());
+        // Told once a splitter it's in has placed all its panes.
+        pane_sizes::now_or_after(this, alive_,
+                                 [this, alive = std::weak_ptr<bool>(alive_)]
+                                 {
+                                     if (resize_) resize_(size());
+                                     // on_resize may have destroyed it (its window, say).
+                                     const std::shared_ptr<bool> still = alive.lock();
+                                     if (still && *still && frame_target_) frame_target_(target());
+                                 });
     }
     // Shown, so laid out: its size is real from now on.
     void shown()
@@ -6012,7 +6058,8 @@ private:
 
     QWidget* make(const node& n, const spec::splitter& s, orientation)
     {
-        auto* sp = new QSplitter(s.dir == orientation::vertical ? Qt::Vertical : Qt::Horizontal);
+        auto* sp =
+            new placing_splitter(s.dir == orientation::vertical ? Qt::Vertical : Qt::Horizontal);
         sp->setChildrenCollapsible(false);
         // Thin: a 1 px handle, which QSplitter keeps 5 px to drag (it
         // widens the handle's grab area over the panes).

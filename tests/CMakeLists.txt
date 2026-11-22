@@ -1371,6 +1371,14 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
     endif()
 endif()
 
+# A splitter's sizes(), read from a pane's on_resize, are the sizes being
+# laid out, every pane's (#105). One program for any backend, as plugins:
+# GTK on Broadway, Qt offscreen (RAPPORT_BACKEND).
+if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
+    add_executable(rapport-splitter-sizes-in-resize-test splitter_sizes_in_resize_test.cpp)
+    target_link_libraries(rapport-splitter-sizes-in-resize-test PRIVATE rapport::rapport)
+endif()
+
 # A toolbar's buttons from the keyboard: one Tab stop, the arrows, Home,
 # End, Space and Enter, focus() and has_focus() per button. Shown and
 # focused, so only on a CI runner (RAPPORT_TEST_SEND_INPUT); else skipped.

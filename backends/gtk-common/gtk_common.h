@@ -3,6 +3,7 @@
 // Each backend includes this after its own <gtk/gtk.h>.
 #pragma once
 
+#include "pane_sizes.h"
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
 #include "split_handle.h"
@@ -1721,6 +1722,53 @@ inline std::vector<float> split_sizes(GtkWidget* first)
     }
 }
 
+// -- a splitter's panes told their sizes once all are placed -----------------
+//
+// pane_sizes.h: what a splitter's panes are told waits while it's placing
+// them (#105). GtkPaned's class struct is private in GTK 4, so there's no
+// subclass to bracket that in: its size_allocate is wrapped, once, and only
+// brackets the paneds of rapport's splitters (marked "rapport-split-chain");
+// any other is allocated as it was.
+namespace paneds
+{
+using ::rap::pane_sizes::placing_scope;
+
+#if GTK_MAJOR_VERSION >= 4
+inline void (*paned_allocate)(GtkWidget*, int, int, int) = nullptr;
+inline void bracketed(GtkWidget* w, int width, int height, int baseline)
+{
+    if (!g_object_get_data(G_OBJECT(w), "rapport-split-chain"))
+    {
+        paned_allocate(w, width, height, baseline);
+        return;
+    }
+    placing_scope scope;
+    paned_allocate(w, width, height, baseline);
+}
+#else
+inline void (*paned_allocate)(GtkWidget*, GtkAllocation*) = nullptr;
+inline void bracketed(GtkWidget* w, GtkAllocation* a)
+{
+    if (!g_object_get_data(G_OBJECT(w), "rapport-split-chain"))
+    {
+        paned_allocate(w, a);
+        return;
+    }
+    placing_scope scope;
+    paned_allocate(w, a);
+}
+#endif
+
+// Once, before rapport's first splitter.
+inline void watch()
+{
+    if (paned_allocate) return;
+    auto* klass = GTK_WIDGET_CLASS(g_type_class_ref(GTK_TYPE_PANED));  // kept for good
+    paned_allocate = klass->size_allocate;
+    klass->size_allocate = bracketed;
+}
+}  // namespace paneds
+
 // A divider moved by rapport itself, not by the user's drag: marked
 // "rapport-own-position" while it's set, so the splitter's position watch
 // doesn't take the move for the drag's (#105).
@@ -1781,6 +1829,18 @@ inline void set_split_sizes(GtkWidget* first, const std::vector<float>& s)
         if (s[i] > 0) place_divider(GTK_PANED(w), int(s[i]));
         w = next_in_split(w);
     }
+    // Asked from a pane told its size (pane_sizes.h), the window's layout is
+    // still under way, and GTK lets a resize asked within it go: laid out
+    // again once it's done.
+    if (::rap::pane_sizes::delivering)
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer p) -> gboolean
+            {
+                gtk_widget_queue_resize(GTK_WIDGET(p));
+                return G_SOURCE_REMOVE;
+            },
+            g_object_ref(first), g_object_unref);
 }
 
 inline void queue_draw_tree(GtkWidget* w)

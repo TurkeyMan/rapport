@@ -5164,8 +5164,16 @@ public:
                 auto* self = static_cast<canvas_impl*>(p);
                 self->allocated_ = true;
                 self->scale_ = device_scale_of(self->w_);
-                if (self->resize_) self->resize_({float(a->width), float(a->height)});
-                self->target_changed();
+                // Told once a splitter it's in has placed all its panes.
+                const size_f size{float(a->width), float(a->height)};
+                pane_sizes::now_or_after(self, self->alive_,
+                                         [self, size, alive = std::weak_ptr<bool>(self->alive_)]
+                                         {
+                                             if (self->resize_) self->resize_(size);
+                                             // on_resize may have destroyed it (its window, say).
+                                             const std::shared_ptr<bool> still = alive.lock();
+                                             if (still && *still) self->target_changed();
+                                         });
             },
             this);
         connect(
@@ -6428,6 +6436,7 @@ private:
         // keep their size when the window grows.
         const bool rest_stretch = std::any_of(s.panes.begin() + std::ptrdiff_t(from + 1), s.panes.end(),
                                              [](auto& p) { return p.common.stretch > 0; });
+        paneds::watch();  // its panes told their sizes once all are placed (#105)
         GtkWidget* paned = gtk_paned_new(gtk_orientation(s.dir));
         auto* p = GTK_PANED(paned);
         // Thin: the theme's narrow handle, a line (Adwaita's 1 px), which
