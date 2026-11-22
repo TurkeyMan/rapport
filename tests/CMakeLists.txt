@@ -1017,6 +1017,23 @@ if(TARGET rapport_win32)
     add_test(NAME win32-at-once-focus COMMAND rapport-win32-at-once-focus-test)
     set_tests_properties(win32-at-once-focus PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
 
+    # A relayout_at_once while its window is hidden, then shown (#108): grown
+    # as it would have been shown.
+    add_executable(rapport-win32-hidden-at-once-test win32_hidden_at_once_test.cpp)
+    target_link_libraries(rapport-win32-hidden-at-once-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-hidden-at-once-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-hidden-at-once-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-hidden-at-once-test rapport_win32)
+    add_test(NAME win32-hidden-at-once COMMAND rapport-win32-hidden-at-once-test)
+    set_tests_properties(win32-hidden-at-once PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
+    # Maximised: activates, and shows it as an app does (no RAPPORT_NO_ACTIVATE),
+    # so only on a CI runner.
+    add_test(NAME win32-hidden-at-once-maximised COMMAND rapport-win32-hidden-at-once-test maximised)
+    set_tests_properties(win32-hidden-at-once-maximised PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
+
     # A window dropped from its own canvas's on_resize (#108).
     add_executable(rapport-win32-canvas-destroy-test win32_canvas_destroy_test.cpp)
     target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::rapport user32)

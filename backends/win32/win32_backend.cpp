@@ -13698,6 +13698,10 @@ public:
         }
         if (!IsWindowVisible(hwnd_))
         {
+            // Grown to its content when it's next shown, as it would have
+            // been now if it showed (#108): a window comes back the same
+            // whether it was shown or not when its content changed.
+            grow_owed_ = true;
             relayout();
             return true;
         }
@@ -13708,6 +13712,7 @@ public:
         const int was_visible = std::exchange(at_once_visible, 1);  // shown: past the check above
         const std::weak_ptr<bool> alive = layout_alive;
         SendMessageW(hwnd_, WM_SETREDRAW, FALSE, 0);
+        grow_owed_ = false;  // grown now
         grow_to_content();
         if (alive.expired()) return false;
         layout_now();
@@ -13743,6 +13748,8 @@ public:
     bool drain_posted_ = false;     // wm_rapport_after_layout on its way
     bool at_once_pending_ = false;  // a relayout_at_once asked for within a layout
     bool at_once_grow_ = false;     // and the window shown then: grown to its content
+    bool grow_owed_ =
+        false;  // a relayout_at_once while hidden: grown to its content when next shown
     // `drain`: run what waited for the layout (after_layout) after it, here;
     // only from where nothing of the window's is touched after (a message's
     // handler, a scope's end). Otherwise it's posted (wm_rapport_after_layout).
@@ -13775,6 +13782,7 @@ public:
                     ++g_layout_pass;
                     if (std::exchange(at_once_grow_, false))
                     {
+                        grow_owed_ = false;  // grown now
                         grow_to_content();
                         redraw_all = true;
                     }
@@ -14051,6 +14059,7 @@ public:
         if (!shown_once_)
         {
             shown_once_ = true;
+            grow_owed_ = false;  // its first size is measured from its content as it is
             // First size: one set by resize() before showing (a restored
             // size) as it is; otherwise the spec's, but never smaller than
             // the content.
@@ -14087,6 +14096,17 @@ public:
             const std::weak_ptr<bool> alive = layout_alive;
             layout_now();
             if (alive.expired()) return;  // destroyed by what its sizes' delivery ran
+        }
+        else if (std::exchange(grow_owed_, false))
+        {
+            // Content changed while it was hidden (relayout_at_once): grown
+            // to it, by grow_to_content's own rules (never shrunk; not
+            // maximised or minimised), before it shows, so it doesn't jump.
+            const std::weak_ptr<bool> alive = layout_alive;
+            grow_to_content();
+            if (alive.expired()) return;
+            layout_now();
+            if (alive.expired()) return;
         }
         if (dialog_ && parent && modal_spec_)
         {
