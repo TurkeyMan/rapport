@@ -395,6 +395,55 @@ int main(int argc, char** argv)
         note(describe(pointer_now()) + ", before the pair");
     }
 
+    // The field's clear button draws its face whole and opaque in one write
+    // (#86): its own drawing (the WM_DRAWITEM its WM_PAINT sends the edit)
+    // into a 32-bit bitmap at alpha 0, as the window's surface holds what GDI
+    // writes, comes out with every pixel at alpha 255. Drawn in parts
+    // straight onto the surface (its fill at alpha 0, then its glyph), a
+    // frame the compositor took before the band made it opaque (after the
+    // message) showed the button as a hole on the band's glass, or without
+    // its glyph. (Not WM_PRINTCLIENT: the band's printing makes a printed
+    // copy opaque itself, whatever the button drew.)
+    if (HWND clear = edit ? FindWindowExW(edit, nullptr, L"Button", nullptr) : nullptr)
+    {
+        RECT bc;
+        GetClientRect(clear, &bc);
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof bi.bmiHeader, bc.right, -bc.bottom, 1, 32, BI_RGB};
+        void* bits = nullptr;
+        HDC screen = GetDC(nullptr);
+        HDC mem = CreateCompatibleDC(screen);
+        HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        ReleaseDC(nullptr, screen);
+        if (mem && bmp && bits && bc.right > 0 && bc.bottom > 0)
+        {
+            HGDIOBJ old = SelectObject(mem, bmp);
+            std::memset(bits, 0, size_t(bc.right) * bc.bottom * 4);
+            DRAWITEMSTRUCT d{};
+            d.CtlType = ODT_BUTTON;
+            d.CtlID = UINT(GetDlgCtrlID(clear));
+            d.itemAction = ODA_DRAWENTIRE;
+            d.hwndItem = clear;
+            d.hDC = mem;
+            d.rcItem = bc;
+            SendMessageW(edit, WM_DRAWITEM, WPARAM(d.CtlID), reinterpret_cast<LPARAM>(&d));
+            GdiFlush();
+            int below = 0;
+            const auto* px = static_cast<const uint32_t*>(bits);
+            for (int i = 0; i < bc.right * bc.bottom; ++i) below += (px[i] >> 24) != 255;
+            expect(below == 0,
+                   "the field's clear button drawn whole and opaque, in one write: " + str(below) +
+                       " of " + str(bc.right * bc.bottom) + " pixels below alpha 255");
+            SelectObject(mem, old);
+        }
+        else
+            expect(false, "the field's clear button drawn into a 32-bit bitmap");
+        if (bmp) DeleteObject(bmp);
+        if (mem) DeleteDC(mem);
+    }
+    else
+        expect(false, "the field's clear button");
+
     capturer cap;
     if (!cap.make()) return skip("no Direct3D 11 device to capture with");
     // The window's client area in the frame: from the extended frame bounds.

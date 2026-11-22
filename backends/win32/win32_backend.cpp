@@ -3259,22 +3259,44 @@ public:
         GetWindowRect(h_, &r);
         show_popup_menu(h_, menu_(), POINT{r.left, r.bottom}, h_);
     }
+    // Its face drawn whole off the screen, then written in one go at alpha
+    // 255 (#86): straight onto the screen, its fill (GDI, alpha 0) and then
+    // its glyph (Direct2D) each reached the window's surface on their own,
+    // and on the toolbar band's glass, where the compositor reads alpha, a
+    // frame composed before the band made it opaque (win32_band_glass.cpp,
+    // after the message) showed the button as a hole, or without its glyph.
+    // Opaque is what it is in the end, on glass or not.
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
-        RECT r = d->rcItem;
-        const bool pressed = d->itemState & ODS_SELECTED;
-        const bool disabled = d->itemState & ODS_DISABLED;
+        BP_PAINTPARAMS params{sizeof params, 0, nullptr, nullptr};
+        HDC mem = nullptr;
+        HPAINTBUFFER buffer =
+            BeginBufferedPaint(d->hDC, &d->rcItem, BPBF_TOPDOWNDIB, &params, &mem);
+        draw_face(buffer ? mem : d->hDC, d->rcItem, d->itemState & ODS_SELECTED,
+                  d->itemState & ODS_DISABLED);
+        if (buffer)
+        {
+            BufferedPaintSetAlpha(buffer, nullptr, 255);
+            EndBufferedPaint(buffer, TRUE);
+        }
+        return true;
+    }
+    HWND hwnd() const { return h_; }
+
+private:
+    void draw_face(HDC dc, RECT r, bool pressed, bool disabled)
+    {
         // In a band field (win32_band_field.h): on its fill, WinUI's.
         color fill, ink;
         if (band_field_button_colors(GetParent(h_), pressed, checked_ || hot_, fill, ink))
         {
             HBRUSH b = CreateSolidBrush(color_ref(fill));
-            FillRect(d->hDC, &r, b);
+            FillRect(dc, &r, b);
             DeleteObject(b);
-            draw_glyph(d->hDC, r, ink);
-            return true;
+            draw_glyph(dc, r, ink);
+            return;
         }
-        FillRect(d->hDC, &r, theme_brush(theme_color::base));
+        FillRect(dc, &r, theme_brush(theme_color::base));
         if (pressed || checked_ || hot_)
         {
             const color tint = theme_color_of(theme_color::highlight);
@@ -3285,16 +3307,13 @@ public:
                 RGB(mix(face.r, tint.r), mix(face.g, tint.g), mix(face.b, tint.b)));
             RECT in = r;
             InflateRect(&in, -win_.px(1), -win_.px(1));
-            FillRect(d->hDC, &in, b);
+            FillRect(dc, &in, b);
             DeleteObject(b);
         }
-        draw_glyph(d->hDC, r,
-                   disabled ? theme_color_of(theme_color::placeholder_text) : theme_color_of(theme_color::text));
-        return true;
+        draw_glyph(dc, r,
+                   disabled ? theme_color_of(theme_color::placeholder_text)
+                            : theme_color_of(theme_color::text));
     }
-    HWND hwnd() const { return h_; }
-
-private:
     // The icon centred in `r` (left of centre for a menu's arrow), and the
     // arrow after it.
     void draw_glyph(HDC dc, RECT r, color ink)
@@ -3328,6 +3347,8 @@ private:
                                        DWORD_PTR data)
     {
         auto* self = reinterpret_cast<edit_button*>(data);
+        // Not erased first: its face fills it all (draw_item), in one write.
+        if (msg == WM_ERASEBKGND) return 1;
         if (msg == WM_MOUSEMOVE && !self->hot_)
         {
             self->hot_ = true;
