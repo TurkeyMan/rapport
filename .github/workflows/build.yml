@@ -167,9 +167,10 @@ jobs:
           # "none" builds.
           $probes = @(
             @{ case = 'none'; expect = '' },
-            @{ case = 'genex'; expect = "doesn't import the\s+shared C\+\+" },
-            @{ case = 'interface'; expect = "doesn't import the\s+shared C\+\+" },
-            @{ case = 'parent'; expect = "doesn't import the\s+shared C\+\+" },
+            # (msbuild wraps the message anywhere: any whitespace between words.)
+            @{ case = 'genex'; expect = "doesn't\s+import\s+the\s+shared\s+C\+\+" },
+            @{ case = 'interface'; expect = "doesn't\s+import\s+the\s+shared\s+C\+\+" },
+            @{ case = 'parent'; expect = "doesn't\s+import\s+the\s+shared\s+C\+\+" },
             @{ case = 'mixed'; expect = 'LNK2038' },
             @{ case = 'headerless'; expect = 'LNK1218' })
           foreach ($p in $probes) {
