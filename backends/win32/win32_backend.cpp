@@ -104,15 +104,42 @@ namespace
 
 constexpr UINT wm_rapport_post = WM_APP + 1;
 
-// The backend's message window, which runs what's posted to it
-// (wm_rapport_post) on the UI thread.
-HWND g_messages = nullptr;
+// The way onto the backend's message window, which runs what's posted to
+// it (wm_rapport_post) on the UI thread, from any thread (backend.h, post).
+// Closed as the backend's torn down, before what's queued is taken out and
+// destroyed: a post either reaches the queue before then (and is destroyed
+// with the rest) or finds it closed and is destroyed by its caller; none
+// lands between, to be dropped with the window. Shared by whatever posts
+// (a path icon finder's thread may outlive the backend).
+struct post_gate
+{
+    std::mutex m;
+    HWND to = nullptr;  // nullptr: closed
+    void post(std::function<void()> f)
+    {
+        auto* job = new std::function<void()>(std::move(f));
+        {
+            std::lock_guard lock(m);
+            if (to && PostMessageW(to, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job))) return;
+        }
+        delete job;  // closed, or not delivered (the queue full): not run
+    }
+    void close()
+    {
+        std::lock_guard lock(m);
+        to = nullptr;
+    }
+};
+// The backend's, while it's up (set and cleared on the UI thread).
+std::shared_ptr<post_gate> g_post_gate;
 void post_to_ui(std::function<void()> f)
 {
-    auto* job = new std::function<void()>(std::move(f));
-    if (!g_messages || !PostMessageW(g_messages, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job)))
-        delete job;
+    if (const std::shared_ptr<post_gate> gate = g_post_gate) gate->post(std::move(f));
 }
+// For tests: called as the backend's torn down, after what was queued is
+// taken out, before its message window goes.
+void (*g_teardown_hook_for_tests)(void*) = nullptr;
+void* g_teardown_hook_data = nullptr;
 
 BOOL traced_set_window_pos(HWND h, HWND after, int x, int y, int w, int height, UINT flags)
 {
@@ -15783,16 +15810,13 @@ public:
         wc.lpszClassName = L"rapportMessages";
         RegisterClassExW(&wc);
         messages_ = make_window(0, L"rapportMessages", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance(), this);
-        g_messages = messages_;
+        gate_ = std::make_shared<post_gate>();
+        gate_->to = messages_;
+        g_post_gate = gate_;
         // Paths' own icons are found in the background (win32_shell_icons.h):
         // each found is told here, on this thread, and what paints them
         // (from what was found, never asking) paints again.
-        set_path_icon_post(
-            [messages = messages_](std::function<void()> f)
-            {
-                auto* job = new std::function<void()>(std::move(f));
-                if (!PostMessageW(messages, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job))) delete job;
-            });
+        set_path_icon_post([gate = gate_](std::function<void()> f) { gate->post(std::move(f)); });
         path_repaint_ = add_path_icon_listener(
             [](const std::string&, int)
             {
@@ -15816,13 +15840,16 @@ public:
         remove_path_icon_listener(path_repaint_);
         g_frames = nullptr;
         frames_.reset();
-        g_messages = nullptr;
-        // What's still posted to it, destroyed here, on this (the UI) thread,
-        // not run (backend.h, post): left in the queue, a message for a window
-        // that's gone is dropped, its function never destroyed.
+        g_post_gate.reset();
+        // No more posts onto it (post_gate), then what's still posted to it
+        // destroyed here, on this (the UI) thread, not run (backend.h, post):
+        // left in the queue, a message for a window that's gone is dropped,
+        // its function never destroyed.
+        gate_->close();
         MSG m;
         while (PeekMessageW(&m, messages_, wm_rapport_post, wm_rapport_post, PM_REMOVE))
             delete reinterpret_cast<std::function<void()>*>(m.lParam);
+        if (g_teardown_hook_for_tests) g_teardown_hook_for_tests(g_teardown_hook_data);
         DestroyWindow(messages_);
     }
 
@@ -15932,12 +15959,9 @@ public:
             0);
         PostQuitMessage(code);
     }
-    // Not delivered (the queue full): destroyed here, not run (backend.h).
-    void post(std::function<void()> f) override
-    {
-        auto* job = new std::function<void()>(std::move(f));
-        if (!PostMessageW(messages_, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job))) delete job;
-    }
+    // Not delivered (the queue full, the backend torn down): destroyed here,
+    // not run (backend.h, post_gate).
+    void post(std::function<void()> f) override { gate_->post(std::move(f)); }
 
     void message(rap::window* parent, const message_spec& m, std::function<void(dialog_role)> done) override
     {
@@ -16649,6 +16673,7 @@ private:
         bool repeat;
     };
     HWND messages_ = nullptr;
+    std::shared_ptr<post_gate> gate_;  // the way onto messages_ (post)
     size_t path_repaint_ = 0;
     std::unique_ptr<frame_clock> frames_;
     std::map<UINT_PTR, timer_entry> timers_;
@@ -16718,6 +16743,11 @@ unsigned layout_passes_for_tests()
 {
     return g_layout_passes;
 }
+void set_teardown_hook_for_tests(void (*hook)(void*), void* data)
+{
+    g_teardown_hook_for_tests = hook;
+    g_teardown_hook_data = data;
+}
 void layout_limits_for_tests(bool reset, unsigned* passes_max, unsigned* cap_hits)
 {
     if (passes_max) *passes_max = g_layout_passes_max;
@@ -16760,6 +16790,14 @@ extern "C" __declspec(dllexport) unsigned rapport_win32_layout_passes()
 // content loop nested, and how many layouts of a window began within a
 // scroll loop of that window begun outside any layout of it. Each since the
 // last call with `reset` nonzero.
+// Private test seam, as those above: `hook` called as a backend's torn
+// down, after what was posted to it and still queued is taken out, before
+// its message window goes (nullptr: none). Nothing calls it but tests.
+extern "C" __declspec(dllexport) void rapport_win32_set_teardown_hook(void (*hook)(void*),
+                                                                      void* data)
+{
+    rap::win32::set_teardown_hook_for_tests(hook, data);
+}
 extern "C" __declspec(dllexport) void rapport_win32_layout_limits(int reset, unsigned* passes_max,
                                                                   unsigned* cap_hits)
 {

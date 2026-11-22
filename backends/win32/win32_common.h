@@ -104,6 +104,7 @@ unsigned layout_requests_for_tests();
 unsigned layout_depth_max_for_tests(bool reset = false);
 unsigned layout_passes_for_tests();
 void layout_limits_for_tests(bool reset, unsigned* passes_max, unsigned* cap_hits);
+void set_teardown_hook_for_tests(void (*hook)(void*), void* data);
 void scroll_loop_stats_for_tests(bool reset, unsigned* deepest, unsigned* layouts_in_standalone);
 // The system message font at `dpi` (cached; owned by the cache), in
 // Segoe UI Variable where it's Segoe UI and that's installed.
