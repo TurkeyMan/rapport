@@ -15817,6 +15817,12 @@ public:
         g_frames = nullptr;
         frames_.reset();
         g_messages = nullptr;
+        // What's still posted to it, destroyed here, on this (the UI) thread,
+        // not run (backend.h, post): left in the queue, a message for a window
+        // that's gone is dropped, its function never destroyed.
+        MSG m;
+        while (PeekMessageW(&m, messages_, wm_rapport_post, wm_rapport_post, PM_REMOVE))
+            delete reinterpret_cast<std::function<void()>*>(m.lParam);
         DestroyWindow(messages_);
     }
 
@@ -15926,9 +15932,11 @@ public:
             0);
         PostQuitMessage(code);
     }
+    // Not delivered (the queue full): destroyed here, not run (backend.h).
     void post(std::function<void()> f) override
     {
-        PostMessageW(messages_, wm_rapport_post, 0, reinterpret_cast<LPARAM>(new std::function<void()>(std::move(f))));
+        auto* job = new std::function<void()>(std::move(f));
+        if (!PostMessageW(messages_, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job))) delete job;
     }
 
     void message(rap::window* parent, const message_spec& m, std::function<void(dialog_role)> done) override

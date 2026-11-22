@@ -1070,6 +1070,18 @@ if(TARGET rapport_win32)
     set_tests_properties(win32-layout-current PROPERTIES
         ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
 
+    # ui::post's functions destroyed, never leaked: past the queue's limit,
+    # and still queued when the backend's torn down (#108). No windows.
+    add_executable(rapport-win32-post-teardown-test win32_post_teardown_test.cpp)
+    target_link_libraries(rapport-win32-post-teardown-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-post-teardown-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-post-teardown-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-post-teardown-test rapport_win32)
+    add_test(NAME win32-post-teardown COMMAND rapport-win32-post-teardown-test)
+    set_tests_properties(win32-post-teardown PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     # A window dropped from its own canvas's on_resize (#108).
     add_executable(rapport-win32-canvas-destroy-test win32_canvas_destroy_test.cpp)
     target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::rapport user32)
