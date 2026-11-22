@@ -2084,11 +2084,46 @@ protected:
         handlers()[h] = this;
     }
     int px(float v) const { return win_.px(v); }
+    // What reads the control's laid-out geometry sees the layout as it will
+    // be, not as it was (#108): a layout asked for and still to come (a
+    // posted relayout, say) is made first, there and then, as
+    // canvas::size() does. Within a layout of the window, where none can be,
+    // it's as laid out so far. False if the control, or its window, went
+    // with that layout.
+    bool layout_current() const
+    {
+        if (win_.in_layout) return true;
+        const std::weak_ptr<bool> me = focus_token_;
+        return win_.flush_layout() && !me.expired();
+    }
+    // What acts on it (a scroll to a row): likewise after a layout to come,
+    // made first; within a layout, made once it's done (after_layout_or_now),
+    // the latest one asked for only (by generation: a later one, there and
+    // then or put off, leaves an earlier one undone), and not if the control
+    // or its window has gone.
+    void with_layout(std::function<void()> f)
+    {
+        const unsigned generation = ++view_generation_;
+        if (!win_.in_layout)
+        {
+            if (layout_current()) f();
+            return;
+        }
+        win_.after_layout_or_now(
+            [this, generation, me = std::weak_ptr<bool>(focus_token_),
+             alive = std::weak_ptr<bool>(win_.layout_alive), f = std::move(f)]
+            {
+                if (alive.expired() || me.expired() || generation != view_generation_) return;
+                f();
+            });
+    }
 
     win_context& win_;
     HWND h_ = nullptr;
-    // Gone with it: a focus() put off until a layout's done (focus_now_or_after).
+    // Gone with it: a focus() or a view's request put off until a layout's
+    // done (focus_now_or_after, with_layout).
     std::shared_ptr<bool> focus_token_ = std::make_shared<bool>(true);
+    unsigned view_generation_ = 0;  // the latest with_layout's
 };
 
 // A deferred box's content (layout::deferred), built once: when the window
@@ -5034,12 +5069,21 @@ public:
         const HTREEITEM h = TreeView_GetSelection(h_);
         return h ? std::optional<std::string>(id_of(h)) : std::nullopt;
     }
+    // Selected now; scrolled into view on the rows as they'll be laid out
+    // (with_layout, #108): selecting scrolls too, on the rows as they are.
     void select(const std::string& id) override
     {
         if (selected() == std::optional<std::string>(id)) return;  // (#88)
-        lazy_tree::tracker::batch b(lazy_);
-        quiet q(*this);
-        if (!select_quietly(id)) TreeView_SelectItem(h_, nullptr);
+        {
+            lazy_tree::tracker::batch b(lazy_);
+            quiet q(*this);
+            if (!select_quietly(id)) TreeView_SelectItem(h_, nullptr);
+        }
+        with_layout(
+            [this]
+            {
+                if (HTREEITEM sel = TreeView_GetSelection(h_)) TreeView_EnsureVisible(h_, sel);
+            });
     }
     void set_expanded(const std::string& id, bool open) override
     {
@@ -7528,7 +7572,12 @@ public:
         if (current() == std::optional<size_t>(row)) return;  // (#88)
         ListView_SetItemState(h_, int(row), LVIS_FOCUSED, LVIS_FOCUSED);
     }
+    // On the list's rows as they'll be laid out (with_layout, #108).
     void scroll_to(size_t row, scroll_align align) override
+    {
+        with_layout([this, row, align] { scroll_to_now(row, align); });
+    }
+    void scroll_to_now(size_t row, scroll_align align)
     {
         if (int(row) >= ListView_GetItemCount(h_)) return;
         ListView_EnsureVisible(h_, int(row), FALSE);
@@ -7538,11 +7587,13 @@ public:
         const int at = align == scroll_align::start ? 0
                        : align == scroll_align::end ? shown - h
                                                     : (shown - h) / 2;
-        set_row_offset(row, float(at) / win_.scale());
+        set_row_offset_now(row, float(at) / win_.scale());
     }
-    // In logical px below the header: the rows area.
+    // In logical px below the header: the rows area. As laid out after a
+    // layout to come (layout_current); within a layout, as laid out so far.
     std::optional<float> row_offset(size_t row) const override
     {
+        if (!layout_current()) return std::nullopt;
         if (int(row) >= ListView_GetItemCount(h_)) return std::nullopt;
         RECT r{};
         if (!ListView_GetItemRect(h_, int(row), &r, LVIR_BOUNDS)) return std::nullopt;
@@ -7550,8 +7601,13 @@ public:
         if (r.bottom <= header_px() || y >= rows_area_px()) return std::nullopt;
         return float(y) / win_.scale();
     }
-    // ListView_Scroll scrolls report views by whole rows: the nearest.
+    // ListView_Scroll scrolls report views by whole rows: the nearest. On the
+    // rows as they'll be laid out (with_layout).
     void set_row_offset(size_t row, float offset) override
+    {
+        with_layout([this, row, offset] { set_row_offset_now(row, offset); });
+    }
+    void set_row_offset_now(size_t row, float offset)
     {
         if (int(row) >= ListView_GetItemCount(h_)) return;
         ListView_EnsureVisible(h_, int(row), FALSE);
@@ -11413,8 +11469,16 @@ public:
     float divider() const override { return float(bar()) / win_.scale(); }
     // The sizes the panes were laid out at, as GTK's and Qt's report them,
     // so a pane that takes what the window gains is seen to grow (#29).
+    // As they'll be laid out (#108): a layout to come made first, as
+    // canvas::size() does; within a layout (a pane's own size callback), the
+    // sizes being laid out.
     std::vector<float> sizes() const override
     {
+        if (!win_.in_layout)
+        {
+            const std::weak_ptr<bool> me = alive_;
+            if (!win_.flush_layout() || me.expired()) return {};
+        }
         std::vector<float> out;
         for (long s : current()) out.push_back(std::max(0L, s) / win_.scale());
         return out;
