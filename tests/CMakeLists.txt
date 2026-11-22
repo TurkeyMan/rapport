@@ -844,6 +844,10 @@ if(TARGET rapport_win32)
     add_test(NAME win32-pane-print COMMAND rapport-win32-pane-print-test)
     set_tests_properties(win32-pane-print PROPERTIES
         ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+    # Mirrored (WS_EX_LAYOUTRTL): the controls placed by their rects mapped whole.
+    add_test(NAME win32-pane-print-rtl COMMAND rapport-win32-pane-print-test rtl)
+    set_tests_properties(win32-pane-print-rtl PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
 
     add_executable(rapport-win32-tabs-visibility-test win32_tabs_visibility_test.cpp)
     target_link_libraries(rapport-win32-tabs-visibility-test PRIVATE rapport::rapport user32 gdi32 comctl32)

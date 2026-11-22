@@ -5,7 +5,10 @@
 // rapport_win32_print_pane, which prints a panel as paint_pane does, on a
 // never-shown window: each label's pixels in the pane's copy are the label's
 // own (printed alone), its text and not only its background. And a
-// control's own children printed too (a list's header).
+// control's own children printed too (a list's header). With `rtl`, every
+// window mirrored (WS_EX_LAYOUTRTL, as an RTL locale's): each still where
+// it is, its rect mapped whole (a corner's screen left is a mirrored
+// parent's client right).
 #include <rapport/rapport.h>
 #include <windows.h>
 // After windows.h, which they need.
@@ -73,25 +76,27 @@ HWND find_static(HWND top, const wchar_t* text)
     return f.found;
 }
 
-// A bitmap to print into, and its pixels read back.
+// A bitmap to print into, and its pixels read back: made as paint_pane makes
+// its own, compatible with the DC of the window it's for (a mirrored one's
+// mirrored too), its pixels read in that window's client coordinates.
 struct canvas
 {
     int w, h;
     HDC dc = nullptr;
     HBITMAP bm = nullptr;
     HGDIOBJ old = nullptr;
-    canvas(int w_, int h_)
+    canvas(HWND like, int w_, int h_)
         : w(w_)
         , h(h_)
     {
-        HDC screen = GetDC(nullptr);
+        HDC screen = GetDC(like);
         dc = CreateCompatibleDC(screen);
         BITMAPINFO bi{};
         bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB};
         void* bits = nullptr;
         bm = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
         old = SelectObject(dc, bm);
-        ReleaseDC(nullptr, screen);
+        ReleaseDC(like, screen);
         // A colour no theme paints, so what's left unprinted shows.
         RECT all{0, 0, w, h};
         HBRUSH magenta = CreateSolidBrush(RGB(255, 0, 255));
@@ -135,14 +140,14 @@ void check_control(HWND panel, HWND label, const std::string& what, void (*print
     MapWindowPoints(nullptr, panel, reinterpret_cast<POINT*>(&lr), 2);
     const int w = lr.right - lr.left, h = lr.bottom - lr.top;
     // The label alone, as it prints itself.
-    canvas alone(w, h);
+    canvas alone(label, w, h);
     SendMessageW(label, WM_PRINT, reinterpret_cast<WPARAM>(alone.dc),
                  PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND);
     const std::vector<COLORREF> own = alone.area({0, 0, w, h});
     expect(colours(own) > 1,
            what + ": printed alone, its text shows (" + std::to_string(colours(own)) + " colours)");
     // The pane's copy.
-    canvas pane(pc.right, pc.bottom);
+    canvas pane(panel, pc.right, pc.bottom);
     print_pane(panel, pane.dc);
     const std::vector<COLORREF> copied = pane.area(lr);
     size_t differ = 0;
@@ -156,6 +161,8 @@ void check_control(HWND panel, HWND label, const std::string& what, void (*print
 
 int main(int argc, char** argv)
 {
+    const bool rtl = argc > 1 && std::string(argv[1]) == "rtl";
+    if (rtl) SetProcessDefaultLayout(LAYOUT_RTL);
     rap::load_options options{.backend = "win32"};
     auto ui = rap::ui::load(argc, argv, options);
     if (!ui)
@@ -199,6 +206,9 @@ int main(int argc, char** argv)
     expect(panel && GetPropW(panel, L"rapport-pane"),
            "the tab page's label is on a scroll pane's panel");
     if (!panel) return 1;
+    if (rtl)
+        expect((GetWindowLongPtrW(panel, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) != 0,
+               "mirrored: the pane's panel is laid out right to left");
     check_control(panel, find_static(top, L"On the pane's tab"),
                   "a tab page's label on a scroll pane", print_pane);
     check_control(panel, find_static(top, L"In the pane's group"),

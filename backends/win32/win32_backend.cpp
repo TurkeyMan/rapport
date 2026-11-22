@@ -884,28 +884,29 @@ BOOL CALLBACK collect_pane_frame(HWND h, LPARAM lp)
 // the other way, top first: a tab control (at the bottom, its pages above
 // it, WS_CLIPSIBLINGS on screen) printed last covered its pages with its
 // body (#119); a group box and what's in it, the same. One cut off entirely
-// (out of the clip) isn't printed, nor its children.
+// (out of the clip) isn't printed, nor its children. Placed by its rect
+// mapped whole (map_rect): in a mirrored parent a point's screen left is
+// its client right, so ClientToScreen and ScreenToClient on a corner put
+// it out by its width. One whose rect can't be mapped isn't printed.
 void print_children(HWND parent, HDC dc)
 {
     HWND first = GetWindow(parent, GW_CHILD);
     for (HWND c = first ? GetWindow(first, GW_HWNDLAST) : nullptr; c; c = GetWindow(c, GW_HWNDPREV))
     {
         if (!(GetWindowLongPtrW(c, GWL_STYLE) & WS_VISIBLE)) continue;
-        RECT w;
+        // Its window and its client area, in `parent`'s client coordinates.
+        RECT w, inside, client;
         GetWindowRect(c, &w);
-        POINT at{w.left, w.top};
-        ScreenToClient(parent, &at);
+        GetClientRect(c, &inside);
+        client = inside;
+        if (!map_rect(nullptr, parent, w) || !map_rect(c, parent, client)) continue;
         const int saved = SaveDC(dc);
-        OffsetViewportOrgEx(dc, at.x, at.y, nullptr);
+        OffsetViewportOrgEx(dc, w.left, w.top, nullptr);
         if (IntersectClipRect(dc, 0, 0, w.right - w.left, w.bottom - w.top) != NULLREGION)
         {
             SendMessageW(c, WM_PRINT, reinterpret_cast<WPARAM>(dc),
                          PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND);
-            POINT client{0, 0};
-            ClientToScreen(c, &client);
-            RECT inside;
-            GetClientRect(c, &inside);
-            OffsetViewportOrgEx(dc, client.x - w.left, client.y - w.top, nullptr);
+            OffsetViewportOrgEx(dc, client.left - w.left, client.top - w.top, nullptr);
             if (IntersectClipRect(dc, 0, 0, inside.right, inside.bottom) != NULLREGION)
                 print_children(c, dc);
         }
