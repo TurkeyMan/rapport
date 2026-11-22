@@ -89,22 +89,27 @@ int main(int argc, char** argv)
         rap::stack* stk = nullptr;
         rap::tool_button* tool = nullptr;
         std::function<void()> in_layout;  // once, from the second page's canvas's first size
-        win = (*ui)->create(
-            window{"At-once focus",
-                   {tabs{{"One", vbox{entry{}.bind(start)}},
-                         {"Two", vbox{canvas{}
-                                          .on_resize(
-                                              [&](rap::size_f)
-                                              {
-                                                  if (auto f = std::exchange(in_layout, nullptr)) f();
-                                              })
-                                          .height(60_px),
-                                      entry{}.bind(field),
-                                      stack{{"a", vbox{entry{}.bind(in_stack)}}}.bind(stk),
-                                      toolbar{tool_button{rap::icon::named("go-up"), "Up"}.bind(tool)}}}}
-                        .bind(pages)
-                        .stretch()}}
-                .size(360_px, 300_px));
+        win = (*ui)->create(window{
+            "At-once focus",
+            // The stack above the tabs, its page shown all along: one
+            // coming in with the tab's page isn't shown yet as the
+            // page's canvas is sized (a layout's shows wait for its
+            // moves), and has no Tab stop to take the focus then.
+            {vbox{stack{{"a", vbox{entry{}.bind(in_stack)}}}.bind(stk),
+                  tabs{{"One", vbox{entry{}.bind(start)}},
+                       {"Two",
+                        vbox{canvas{}
+                                 .on_resize(
+                                     [&](rap::size_f)
+                                     {
+                                         if (auto f = std::exchange(in_layout, nullptr)) f();
+                                     })
+                                 .height(60_px),
+                             entry{}.bind(field),
+                             toolbar{tool_button{rap::icon::named("go-up"), "Up"}.bind(tool)}}}}
+                      .bind(pages)
+                      .stretch()}
+                 .stretch()}}.size(360_px, 340_px));
         HWND top = win ? FindWindowW(nullptr, L"At-once focus") : nullptr;
         expect(top && pages && start && field && stk && in_stack && tool, what + ": the window and its controls");
         if (!top || !pages || !start || !field || !stk || !in_stack || !tool) return 1;
