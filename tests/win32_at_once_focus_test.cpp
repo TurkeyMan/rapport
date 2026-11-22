@@ -182,13 +182,17 @@ int main(int argc, char** argv)
         stack_alone,
         field_then_stack,
         stack_then_field,
+        stack_then_field_after,  // the field's after the switch returns, before what it put off is made
     };
-    for (const order o : {order::stack_alone, order::field_then_stack, order::stack_then_field})
+    for (const order o : {order::stack_alone, order::field_then_stack, order::stack_then_field,
+                          order::stack_then_field_after})
     {
         const std::string what = o == order::stack_alone ? "a stack coming in, its focus()"
                                  : o == order::field_then_stack
                                      ? "a field's focus() then the stack's"
-                                     : "the stack's focus() then a field's";
+                                 : o == order::stack_then_field
+                                     ? "the stack's focus() then a field's"
+                                     : "the stack's focus() within the switch, a field's after it";
         std::unique_ptr<rap::window> win;
         rap::tabs* pages = nullptr;
         rap::entry *start = nullptr, *field = nullptr, *in_stack = nullptr;
@@ -229,11 +233,16 @@ int main(int argc, char** argv)
         };
         g_focused.clear();
         HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, see_focus, nullptr, GetCurrentThreadId());
+        expect(hook != nullptr, what + ": the WM_SETFOCUS hook on this thread");
+        if (!hook) return 1;
         pages->set_current(1);
+        // Made outside any layout, before what the switch put off is: the
+        // later one, so the one that stays.
+        if (o == order::stack_then_field_after) field->focus();
         pump();
         if (hook) UnhookWindowsHookEx(hook);
         expect(!in_layout, what + ": called within the switch (the page's canvas sized)");
-        if (o == order::stack_then_field)
+        if (o == order::stack_then_field || o == order::stack_then_field_after)
         {
             expect(field->has_focus(), what + ": the field has the focus, the latest asked for");
             size_t to_stack = 0;

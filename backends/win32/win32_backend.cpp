@@ -1618,12 +1618,16 @@ public:
     // within a layout of the window's, once it's done (#108). A layout's
     // shows wait for its moves, so a control coming in with it (a stack's
     // page, with the tab page it's on) isn't shown yet, and a stack finds
-    // no Tab stop in it. Only the latest one asked for within the layout is
-    // made; none whose `target` has gone.
+    // no Tab stop in it. Only the latest one asked for is made: a later
+    // one, within the layout or after it (before the one put off is), takes
+    // its place; and none whose `target` has gone.
     void focus_now_or_after(std::weak_ptr<bool> target, std::function<void()> f)
     {
         if (!in_layout)
         {
+            // Newer than one put off by a layout not drained yet (its
+            // continuation posted): that one's not made after it.
+            focus_after_ = {};
             f();
             return;
         }
