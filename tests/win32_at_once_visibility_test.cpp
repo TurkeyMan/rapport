@@ -1,9 +1,10 @@
-// A shown window's decisions made while a relayout_at_once has its drawing
-// off (#108): WM_SETREDRAW FALSE clears its WS_VISIBLE, so IsWindowVisible
-// reads it, and every control in it, as hidden. What's decided in that
-// time is decided as for the window shown: where move() puts it, and
-// present() not showing it again. Shown without activating
-// (RAPPORT_NO_ACTIVATE); focus(), which activates, is win32-at-once-focus's.
+// Two of a shown window's decisions made while a relayout_at_once has its
+// drawing off (#108), which clears its WS_VISIBLE (IsWindowVisible reads it
+// as hidden then): move() keeps it inside the work area by its visible
+// frame (the frame's inset), as it does outside the switch; and present()
+// doesn't show it again, which would turn its drawing back on. Shown
+// without activating (RAPPORT_NO_ACTIVATE). focus() within the switch, which
+// activates, is win32-at-once-focus's (CI runners only).
 #include <rapport/rapport.h>
 #include <windows.h>
 
