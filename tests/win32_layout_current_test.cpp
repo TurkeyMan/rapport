@@ -14,7 +14,9 @@
 // the latest asked for only (scroll_to(99, end) then scroll_to(50,
 // nearest): from where it was, 50 goes to the bottom; made in turn, from
 // 99, it'd go to the top), and one made there and then after it (outside
-// the layout, before what was put off is run) is the one that stays.
+// the layout, before what was put off is run) is the one that stays. And a
+// call that makes a layout to come first, a newer one asked for within that
+// layout: the newer one's made, not the call's own after it.
 // Shown without activating.
 #include <rapport/rapport.h>
 #include <windows.h>
@@ -26,6 +28,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _MSC_VER
@@ -272,6 +275,49 @@ int main(int argc, char** argv)
         pump();
     }
 
+    // Outside a layout, a layout to come made first by the call itself, and
+    // within that layout a newer one asked for (a canvas between the label
+    // and the list, sized as the label grows, its on_resize asking for row
+    // 50): the newer one's the one made, the older one (row 99, the call that
+    // made the layout) not after it.
+    {
+        rap::label* lab = nullptr;
+        rap::list* lst = nullptr;
+        std::function<void()> in_layout;
+        auto win =
+            (*ui)->create(window{"Layout current flush",
+                                 {vbox{label{"One line"}.bind(lab),
+                                       canvas{}
+                                           .on_resize(
+                                               [&](rap::size_f)
+                                               {
+                                                   if (auto f = std::exchange(in_layout, nullptr))
+                                                       f();
+                                               })
+                                           .stretch(),
+                                       list{{{"Name", {}, true}}, &model}.bind(lst).stretch()}}}
+                              .size(300_px, 500_px));
+        expect(win && lab && lst,
+               "a newer one within the layout a call makes: the window and its list");
+        if (!win || !lab || !lst) return 1;
+        win->show();
+        pump();
+        lst->scroll_to(0, rap::scroll_align::start);
+        pump();
+        lab->set_text(many);  // a layout to come: the canvas and the list shrink
+        in_layout = [&] { lst->scroll_to(50, rap::scroll_align::nearest); };  // the newer one
+        lst->scroll_to(
+            99, rap::scroll_align::end);  // makes the layout first, the canvas asking within it
+        pump();
+        expect(!in_layout,
+               "a newer one within the layout a call makes: the canvas's on_resize asked");
+        const auto at50 = lst->row_offset(50), at99 = lst->row_offset(99);
+        expect(at50 && !at99,
+               "a newer one within the layout a call makes: the newer made, row 50 in view (" +
+                   num(at50) + "), not the call's own after it (row 99: " + num(at99) + ")");
+        win.reset();
+        pump();
+    }
     // A tree's select, a layout to come.
     {
         std::vector<rap::tree_item> items;

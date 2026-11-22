@@ -2106,7 +2106,8 @@ protected:
         const unsigned generation = ++view_generation_;
         if (!win_.in_layout)
         {
-            if (layout_current()) f();
+            // (The layout made first may ask for a newer one: then not this.)
+            if (layout_current() && generation == view_generation_) f();
             return;
         }
         win_.after_layout_or_now(
