@@ -23,6 +23,7 @@ if(RAPPORT_STATIC)
     add_library(rapport_qt6 STATIC qt6_backend.cpp)
 else()
     add_library(rapport_qt6 MODULE qt6_backend.cpp)
+    rapport_require_shared_runtime(rapport_qt6)  # with MSVC, the shared C++ runtime (#136)
 endif()
 add_library(rapport::backend_qt6 ALIAS rapport_qt6)
 # Linked into one executable, a backend needs the core after it on the link

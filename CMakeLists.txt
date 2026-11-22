@@ -29,34 +29,6 @@ option(RAPPORT_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 # backends as dlopened plugins.
 option(RAPPORT_STATIC "Build static libraries instead of a shared core and plugins" OFF)
 option(RAPPORT_TESTS "Build the core's tests" ${PROJECT_IS_TOP_LEVEL})
-# A plugin build passes std:: types (std::function, std::string,
-# std::vector, ...) between the app, the core and each backend DLL, one
-# module freeing what another allocated: with MSVC they must all share the
-# one C++ runtime DLL (/MD). The static runtime (/MT) is for RAPPORT_STATIC,
-# one executable with one runtime in it (#136). The shell extension
-# libraries set their own static runtime: they never link the core.
-if(MSVC AND NOT RAPPORT_STATIC)
-    if(DEFINED CMAKE_MSVC_RUNTIME_LIBRARY AND NOT CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL")
-        message(FATAL_ERROR "rapport: a plugin build (RAPPORT_STATIC=OFF) needs the shared C++ "
-                            "runtime, but CMAKE_MSVC_RUNTIME_LIBRARY is "
-                            "'${CMAKE_MSVC_RUNTIME_LIBRARY}'. std:: types cross the plugin DLLs, "
-                            "so each must use the same runtime DLL: use MultiThreaded"
-                            "$<$<CONFIG:Debug>:Debug>DLL, or -DRAPPORT_STATIC=ON for the static "
-                            "runtime.")
-    endif()
-    foreach(flags CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
-                  CMAKE_CXX_FLAGS_RELWITHDEBINFO CMAKE_CXX_FLAGS_MINSIZEREL)
-        if("${${flags}}" MATCHES "(^| )[/-]MTd?( |$)")
-            message(FATAL_ERROR "rapport: a plugin build (RAPPORT_STATIC=OFF) needs the shared C++ "
-                                "runtime, but ${flags} has /MT. std:: types cross the plugin "
-                                "DLLs, so each must use the same runtime DLL: drop it, or use "
-                                "-DRAPPORT_STATIC=ON for the static runtime.")
-        endif()
-    endforeach()
-    if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
-        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-    endif()
-endif()
 # AddressSanitizer through everything built here (CI's asan jobs): a read or
 # write of freed memory fails the program that did it. GCC and Clang
 # -fsanitize=address; MSVC /fsanitize=address, whose runtime DLL (beside

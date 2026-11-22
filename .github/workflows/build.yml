@@ -136,18 +136,40 @@ jobs:
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=${{ matrix.runtime }}" ${{ matrix.flags }}
           cmake --build build --config Release --parallel
 
-      # A plugin build with the static runtime is refused at configure (#136).
+      # A shared rapport library with the static runtime is refused at
+      # configure, however it's asked for (#136): the variable, an expression
+      # that's static in some configurations, the core configured alone, the
+      # flags, and a target's own property set after it's made.
       - name: Plugins refuse the static runtime
         if: matrix.link == 'plugins'
         run: |
           $gen = if ('${{ matrix.os }}' -eq 'windows-2022') { @('-G', 'Visual Studio 17 2022') } else { @() }
-          $out = cmake -S . -B build-mt @gen -A x64 "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Remove-Item -Recurse -Force build-mt -ErrorAction SilentlyContinue
-          if ($code -eq 0) { $out; throw 'a plugin build configured with /MT' }
-          if ($out -notmatch 'needs the shared C\+\+') { $out; throw 'configure failed, but not on the runtime' }
-          'refused, as it should be'
+          'cmake_language(DEFER CALL set_target_properties rapport_win32 PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)' |
+            Set-Content override.cmake
+          $override = ($PWD.Path -replace '\\', '/') + '/override.cmake'
+          $cases = @(
+            @{ name = 'MultiThreaded'; src = '.'; args = @('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded') },
+            @{ name = 'an expression with DLL, static in Release'; src = '.'; args = @('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:DebugDLL>') },
+            @{ name = 'the core alone'; src = 'core'; args = @('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded') },
+            @{ name = '/MT in the flags'; src = '.'; args = @('-DCMAKE_CXX_FLAGS_RELEASE=/O2 /MT /DNDEBUG') },
+            @{ name = "a backend's own property"; src = '.'; args = @("-DCMAKE_PROJECT_rapport-win32_INCLUDE=$override") })
+          foreach ($c in $cases) {
+            $out = cmake -S $c.src -B build-mt @gen -A x64 -DRAPPORT_EXAMPLES=OFF -DRAPPORT_TESTS=OFF @($c.args) 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Remove-Item -Recurse -Force build-mt -ErrorAction SilentlyContinue
+            if ($code -eq 0) { $out; throw "$($c.name): a shared rapport library configured with the static runtime" }
+            if ($out -notmatch 'needs the shared C\+\+') { $out; throw "$($c.name): configure failed, but not on the runtime" }
+            "$($c.name): refused, as it should be"
+          }
           exit 0  # cmake's failing exit code isn't the step's
+
+      # What was built uses the shared runtime, whatever got past configure.
+      - name: Plugins import the shared runtime
+        if: matrix.link != 'static'
+        working-directory: build/bin/Release
+        run: |
+          python $env:GITHUB_WORKSPACE/ci/check-imports.py --shared-crt rapport.dll rapport_win32.dll rapport_null.dll rapport-win32-post-teardown-test.exe
+          if ($LASTEXITCODE) { throw 'a plugin build module without the shared runtime' }
 
       - name: Gallery snapshot
         working-directory: build/bin/Release
