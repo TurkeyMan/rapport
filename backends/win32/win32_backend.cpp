@@ -2017,7 +2017,7 @@ public:
     void focus() override
     {
         HWND root = GetAncestor(h_, GA_ROOT);
-        if (IsWindowVisible(root))
+        if (win_.shown())  // (not IsWindowVisible: a relayout_at_once's drawing off hides it from that)
             SetFocus(h_);
         else
             SetPropW(root, L"rapport-focus", h_);
@@ -6328,7 +6328,7 @@ public:
     {
         if (usable(id - 1)) current_ = id - 1;
         HWND root = GetAncestor(h_, GA_ROOT);
-        if (!IsWindowVisible(root))
+        if (!win_.shown())
             SetPropW(root, L"rapport-focus", h_);
         else if (GetFocus() == h_)
             show_current();
@@ -12077,8 +12077,7 @@ public:
     {
         auto* p = pages_.shown_entry();
         if (!p) return;
-        HWND root = GetAncestor(p->page->host, GA_ROOT);
-        focus_page(*p->page, IsWindowVisible(root) ? focus_at::window : focus_at::pending);
+        focus_page(*p->page, win_.shown() ? focus_at::window : focus_at::pending);
     }
     bool has_focus() const override
     {
@@ -14075,7 +14074,7 @@ public:
     }
     void present() override
     {
-        if (!IsWindowVisible(hwnd_)) show();
+        if (!shown()) show();  // (shown already within a relayout_at_once, its drawing off)
         const bool quiet = std::getenv("RAPPORT_SNAPSHOT") != nullptr || std::getenv("RAPPORT_NO_ACTIVATE") != nullptr;
         // Minimised: back to its size before, maximised if it was.
         // SW_SHOWNOACTIVATE restores as SW_RESTORE does, without the focus.
