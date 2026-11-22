@@ -127,6 +127,19 @@ void expect_colour(const pixels& from, RECT r, DWORD want, const char* what)
     ++failures;
 }
 
+// Some of `r` not `background`: a label's text drawn, not only its
+// background (a page covered by its tab's body has no text at all, #119).
+void expect_text(const pixels& from, RECT r, DWORD background, const char* what)
+{
+    IntersectRect(&r, &r, &from.area);
+    size_t ink = 0;
+    for (int y = r.top; y < r.bottom; ++y)
+        for (int x = r.left; x < r.right; ++x) ink += from.at(x, y) != background;
+    if (ink >= 10) return;
+    std::fprintf(stderr, "failed: %s has no text (%zu pixels not %06lx)\n", what, ink, background);
+    ++failures;
+}
+
 // The shown window of class `cls` with text `text` (any, if null), after
 // skipping `skip` of them.
 HWND find(HWND root, const wchar_t* cls, const wchar_t* text, int skip = 0)
@@ -364,6 +377,7 @@ int main(int argc, char** argv)
     const DWORD page = base || dark ? surface : commonest(shot, body);
     expect_colour(shot, body, page, "a tab page");
     expect_colour(shot, rect_of(on_tab), page, "a label on a tab page");
+    expect_text(shot, rect_of(on_tab), page, "a label on a tab page");
     expect_colour(shot, rect_of(tab_check), page, "a check box on a tab page");
     expect_colour(shot, rect_of(tab_slider), page, "a slider on a tab page");
 
@@ -390,6 +404,7 @@ int main(int argc, char** argv)
     const DWORD pane_page = base || dark ? surface : commonest(shot, pane_body);
     expect_colour(shot, pane_body, pane_page, "a tab page on a scroll pane");
     expect_colour(shot, rect_of(on_pane_tab), pane_page, "a label on a tab page on a scroll pane");
+    expect_text(shot, rect_of(on_pane_tab), pane_page, "a label on a tab page on a scroll pane");
 
     // Each printed: whole, and through a clip of a strip down the body's
     // left that leaves out its centre (where its colour is read).
