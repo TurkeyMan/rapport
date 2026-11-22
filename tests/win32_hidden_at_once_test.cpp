@@ -21,6 +21,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 
 #ifdef _MSC_VER
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -85,29 +86,44 @@ int main(int argc, char** argv)
 
     enum class how
     {
-        shown,              // switched while shown: the size the others must come back at
-        hidden_run_first,   // hidden, switched, the posted relayout run, then shown
-        hidden_shown_first, // hidden, switched, shown before the posted relayout's run
-        larger,             // already larger than the page: hidden, switched, shown, not shrunk
-        maximised,          // maximised, hidden, switched, shown: as it was
+        shown,               // switched while shown: the size the others must come back at
+        hidden_run_first,    // hidden, switched, the posted relayout run, then shown
+        hidden_shown_first,  // hidden, switched, shown before the posted relayout's run
+        hidden_nested,  // hidden, switched from within a layout of its own (a callback), then shown
+        larger,         // already larger than the page: hidden, switched, shown, not shrunk
+        maximised,      // maximised, hidden, switched, shown: as it was
     };
     RECT grown{};
-    for (const how h : {how::shown, how::hidden_run_first, how::hidden_shown_first, how::larger, how::maximised})
+    for (const how h : {how::shown, how::hidden_run_first, how::hidden_shown_first,
+                        how::hidden_nested, how::larger, how::maximised})
     {
-        const std::string what = h == how::shown                ? "switched while shown"
-                                 : h == how::hidden_run_first   ? "hidden, switched, its relayout run, then shown"
-                                 : h == how::hidden_shown_first ? "hidden, switched, shown before its relayout ran"
-                                 : h == how::larger             ? "larger than the page, hidden, switched, shown"
-                                                                : "maximised, hidden, switched, shown";
+        const std::string what =
+            h == how::shown                ? "switched while shown"
+            : h == how::hidden_run_first   ? "hidden, switched, its relayout run, then shown"
+            : h == how::hidden_shown_first ? "hidden, switched, shown before its relayout ran"
+            : h == how::hidden_nested
+                ? "hidden, switched from a canvas's on_resize in its layout, then shown"
+            : h == how::larger ? "larger than the page, hidden, switched, shown"
+                               : "maximised, hidden, switched, shown";
         if ((h == how::maximised) != maximised_only) continue;  // that case on its own run
         rap::tabs* pages = nullptr;
-        auto win = (*ui)->create(
-            window{"Hidden at once",
-                   {tabs{{"One", label{"Small"}},
-                         {"Two", lazy{[] { return rap::node(canvas{}.width(520_px).height(420_px)); }}}}
-                        .bind(pages)
-                        .stretch()}}
-                .size(h == how::larger ? 800_px : 260_px, h == how::larger ? 640_px : 180_px));
+        bool switch_in_layout = false;  // once, from the first page's canvas as it's sized
+        auto win = (*ui)->create(window{
+            "Hidden at once",
+            {tabs{{"One",
+                   vbox{label{"Small"}, canvas{}
+                                            .on_resize(
+                                                [&](rap::size_f)
+                                                {
+                                                    if (!std::exchange(switch_in_layout, false))
+                                                        return;
+                                                    pages->set_current(1);  // within this layout
+                                                })
+                                            .stretch()}},
+                  {"Two", lazy{[] { return rap::node(canvas{}.width(520_px).height(420_px)); }}}}
+                 .bind(pages)
+                 .stretch()}}.size(h == how::larger ? 800_px : 260_px,
+                                   h == how::larger ? 640_px : 180_px));
         HWND top = win ? FindWindowW(nullptr, L"Hidden at once") : nullptr;
         expect(top && pages, what + ": the window and its tabs");
         if (!top || !pages) return 1;
@@ -128,7 +144,17 @@ int main(int argc, char** argv)
             win->close();
             pump();
             expect(!IsWindowVisible(top), what + ": hidden");
-            pages->set_current(1);
+            if (h == how::hidden_nested)
+            {
+                // Its layout (resized while hidden), the first page's canvas
+                // sized in it, which switches: an at-once within a layout.
+                switch_in_layout = true;
+                win->resize({300, 220});
+                expect(!switch_in_layout && pages->current() == 1,
+                       what + ": switched from the canvas's on_resize, within the layout");
+            }
+            else
+                pages->set_current(1);
             if (h != how::hidden_shown_first) pump();
             win->show();
         }
@@ -146,6 +172,7 @@ int main(int argc, char** argv)
             break;
         case how::hidden_run_first:
         case how::hidden_shown_first:
+        case how::hidden_nested:
             expect(after.right - after.left == grown.right - grown.left &&
                        after.bottom - after.top == grown.bottom - grown.top,
                    what + ": grown as it is shown, " + size_str(after) + ", shown " + size_str(grown));

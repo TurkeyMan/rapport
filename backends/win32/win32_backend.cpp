@@ -13693,6 +13693,7 @@ public:
             // before it turned drawing off (WM_SETREDRAW FALSE hides it).
             at_once_pending_ = true;
             at_once_grow_ = at_once_grow_ || shown();
+            if (!shown()) grow_owed_ = true;  // hidden: grown when it's next shown, as below
             layout_dirty = true;
             return true;
         }
