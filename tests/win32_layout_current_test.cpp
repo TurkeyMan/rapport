@@ -278,8 +278,12 @@ int main(int argc, char** argv)
     // Outside a layout, a layout to come made first by the call itself, and
     // within that layout a newer one asked for (a canvas between the label
     // and the list, sized as the label grows, its on_resize asking for row
-    // 50): the newer one's the one made, the older one (row 99, the call that
-    // made the layout) not after it.
+    // 50): the newer one wins across the flush. That holds because
+    // flush_layout doesn't drain what the layout put off (layout_now's drain
+    // is posted): the newer one, put off within the layout, runs at that
+    // drain, after the older one (row 99, the call that made the layout) has
+    // acted. Were the flush ever to drain there and then, this fails, and the
+    // older one would have to check it's still the latest after the flush.
     {
         rap::label* lab = nullptr;
         rap::list* lst = nullptr;
