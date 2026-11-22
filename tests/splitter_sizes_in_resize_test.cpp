@@ -104,10 +104,31 @@ int main(int argc, char** argv)
     // its own the size it's told; the last delivery's are where the layout
     // ended. An on_resize's set_sizes (the call at `set_at`) asks for a new
     // layout: sizes() is what it asked for until that's laid out
-    // (splitter::sizes), so the rest of that delivery doesn't count.
+    // (splitter::sizes), so the calls after it don't count until one reads
+    // a layout as placed, its sizes adding up to the splitter's length (GTK
+    // may place a chain's later paneds before its first: a pass that reads
+    // the first's asked size with the others' placed ones).
     auto check = [&](const std::string& what, size_t set_at = size_t(-1))
     {
         const std::vector<float> final = split->sizes();
+        auto total = [](const std::vector<float>& v)
+        {
+            float t = 0;
+            for (float f : v) t += f;
+            return t;
+        };
+        std::vector<seen> asked_until_laid_out;  // the calls set aside
+        if (set_at < calls.size())
+        {
+            size_t resume = set_at + 1;
+            while (resume < calls.size() &&
+                   std::abs(total(calls[resume].sizes) - total(final)) >= 2)
+                ++resume;
+            asked_until_laid_out.assign(calls.begin() + std::ptrdiff_t(set_at + 1),
+                                        calls.begin() + std::ptrdiff_t(resume));
+            calls.erase(calls.begin() + std::ptrdiff_t(set_at + 1),
+                        calls.begin() + std::ptrdiff_t(resume));
+        }
         auto near = [](const std::vector<float>& a, const std::vector<float>& b)
         {
             if (a.size() != b.size()) return false;
@@ -128,8 +149,11 @@ int main(int argc, char** argv)
             // One delivery: up to a pane told again.
             size_t end = i;
             std::vector<bool> told(3, false);
-            while (end < calls.size() && !told[calls[end].pane]) told[calls[end++].pane] = true;
-            const size_t counted = set_at >= i && set_at < end ? set_at + 1 : end;
+            // (The call that set sizes ends its delivery: those after it
+            // that were set aside were the rest.)
+            while (end < calls.size() && !told[calls[end].pane] && (end == i || end - 1 != set_at))
+                told[calls[end++].pane] = true;
+            const size_t counted = end;
             for (size_t k = i; k < counted; ++k)
             {
                 const seen& c = calls[k];
@@ -143,7 +167,12 @@ int main(int argc, char** argv)
             i = end;
         }
         if (std::getenv("RAPPORT_TEST_VERBOSE"))
+        {
             for (const seen& c : calls) std::printf("     %s\n", said(c).c_str());
+            for (const seen& c : asked_until_laid_out)
+                std::printf("     (set aside, before the asked sizes were laid out: %s)\n",
+                            said(c).c_str());
+        }
         expect(!calls.empty(), what + ": the panes were told their sizes (" +
                                    std::to_string(calls.size()) + " on_resize calls, " +
                                    std::to_string(deliveries) + " layouts)");
