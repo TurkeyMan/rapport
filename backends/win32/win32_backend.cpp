@@ -1617,6 +1617,13 @@ public:
     // A relayout_at_once's visibility, taken before it turns drawing off
     // (WM_SETREDRAW FALSE clears WS_VISIBLE): -1, none under way.
     int at_once_visible = -1;
+    // Whether the window shows: as it did before a relayout_at_once turned
+    // its drawing off, while that's under way (IsWindowVisible reads it as
+    // hidden then); otherwise IsWindowVisible.
+    bool shown() const
+    {
+        return at_once_visible >= 0 ? at_once_visible != 0 : IsWindowVisible(hwnd()) != FALSE;
+    }
     // Its canvases' swap chains kept composed by the DWM (see
     // gpu_target::compose): while the window's fullscreen.
     virtual bool keep_composed() const { return false; }
@@ -13643,8 +13650,7 @@ public:
             // shown, as decided now, or as the at-once under way decided
             // before it turned drawing off (WM_SETREDRAW FALSE hides it).
             at_once_pending_ = true;
-            at_once_grow_ = at_once_grow_ ||
-                            (at_once_visible >= 0 ? at_once_visible != 0 : IsWindowVisible(hwnd_) != FALSE);
+            at_once_grow_ = at_once_grow_ || shown();
             layout_dirty = true;
             return true;
         }
@@ -14238,7 +14244,9 @@ public:
         static dwm_get_fn dwm_get = reinterpret_cast<dwm_get_fn>(
             reinterpret_cast<void*>(GetProcAddress(LoadLibraryW(L"dwmapi.dll"), "DwmGetWindowAttribute")));
         if (dwm_get && GetWindowRect(hwnd_, &outer) &&
-            SUCCEEDED(dwm_get(hwnd_, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, &visible, sizeof visible)) && IsWindowVisible(hwnd_))
+            SUCCEEDED(
+                dwm_get(hwnd_, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, &visible, sizeof visible)) &&
+            shown())  // (a relayout_at_once's drawing off hides it from IsWindowVisible, not the screen)
             inset = RECT{visible.left - outer.left, visible.top - outer.top, outer.right - visible.right, outer.bottom - visible.bottom};
         const RECT& work = mi.rcWork;
         const auto fit = [](int pos, int size, int lo, int hi, int before, int after)
