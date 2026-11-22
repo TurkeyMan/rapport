@@ -1614,6 +1614,32 @@ public:
         else
             f();
     }
+    // A focus() (a control's, a stack's, a toolbar button's): now, or,
+    // within a layout of the window's, once it's done (#108). A layout's
+    // shows wait for its moves, so a control coming in with it (a stack's
+    // page, with the tab page it's on) isn't shown yet, and a stack finds
+    // no Tab stop in it. Only the latest one asked for is made: each takes
+    // the next generation (focus_generation_), and one put off is made by
+    // its own continuation, in its place among what waits for the layout,
+    // only while it's still the latest (no later one, put off or made
+    // there and then); and not if its `target` has gone.
+    void focus_now_or_after(std::weak_ptr<bool> target, std::function<void()> f)
+    {
+        const unsigned generation = ++focus_generation_;
+        if (!in_layout)
+        {
+            f();
+            return;
+        }
+        after_layout_or_now(
+            [this, generation, alive = std::weak_ptr<bool>(layout_alive),
+             target = std::move(target), f = std::move(f)]
+            {
+                if (alive.expired() || generation != focus_generation_ || target.expired()) return;
+                f();
+            });
+    }
+    unsigned focus_generation_ = 0;  // the latest focus()'s (focus_now_or_after)
     // A relayout_at_once's visibility, taken before it turns drawing off
     // (WM_SETREDRAW FALSE clears WS_VISIBLE): -1, none under way.
     int at_once_visible = -1;
@@ -2016,11 +2042,16 @@ public:
     }
     void focus() override
     {
-        HWND root = GetAncestor(h_, GA_ROOT);
-        if (win_.shown())  // (not IsWindowVisible: a relayout_at_once's drawing off hides it from that)
-            SetFocus(h_);
-        else
-            SetPropW(root, L"rapport-focus", h_);
+        win_.focus_now_or_after(focus_token_,
+                                [this]
+                                {
+                                    HWND root = GetAncestor(h_, GA_ROOT);
+                                    // (not IsWindowVisible: a relayout_at_once's drawing off hides it from that)
+                                    if (win_.shown())
+                                        SetFocus(h_);
+                                    else
+                                        SetPropW(root, L"rapport-focus", h_);
+                                });
     }
 
     void place(RECT r) override
@@ -2041,6 +2072,8 @@ protected:
 
     win_context& win_;
     HWND h_ = nullptr;
+    // Gone with it: a focus() put off until a layout's done (focus_now_or_after).
+    std::shared_ptr<bool> focus_token_ = std::make_shared<bool>(true);
 };
 
 // A deferred box's content (layout::deferred), built once: when the window
@@ -6326,14 +6359,18 @@ public:
     // shows, if it hasn't).
     void focus_button(int id)
     {
-        if (usable(id - 1)) current_ = id - 1;
-        HWND root = GetAncestor(h_, GA_ROOT);
-        if (!win_.shown())
-            SetPropW(root, L"rapport-focus", h_);
-        else if (GetFocus() == h_)
-            show_current();
-        else
-            SetFocus(h_);
+        win_.focus_now_or_after(focus_token_,
+                                [this, id]
+                                {
+                                    if (usable(id - 1)) current_ = id - 1;
+                                    HWND root = GetAncestor(h_, GA_ROOT);
+                                    if (!win_.shown())
+                                        SetPropW(root, L"rapport-focus", h_);
+                                    else if (GetFocus() == h_)
+                                        show_current();
+                                    else
+                                        SetFocus(h_);
+                                });
     }
     bool button_has_focus(int id) const { return GetFocus() == h_ && current_ == id - 1; }
     // The keys it moves and presses with, while it has the focus: its own,
@@ -12075,9 +12112,14 @@ public:
     }
     void focus() override
     {
-        auto* p = pages_.shown_entry();
-        if (!p) return;
-        focus_page(*p->page, win_.shown() ? focus_at::window : focus_at::pending);
+        win_.focus_now_or_after(alive_,
+                                [this]
+                                {
+                                    auto* p = pages_.shown_entry();
+                                    if (!p) return;
+                                    focus_page(*p->page,
+                                               win_.shown() ? focus_at::window : focus_at::pending);
+                                });
     }
     bool has_focus() const override
     {
