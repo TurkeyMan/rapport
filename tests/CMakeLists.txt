@@ -847,6 +847,10 @@ if(TARGET rapport_win32)
     add_test(NAME win32-tabs-visibility-shown COMMAND rapport-win32-tabs-visibility-test --shown)
     set_tests_properties(win32-tabs-visibility-shown PROPERTIES
         ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+    # The native look's tab widths (#112): the control's own minimum.
+    add_test(NAME win32-tabs-visibility-native COMMAND rapport-win32-tabs-visibility-test --native)
+    set_tests_properties(win32-tabs-visibility-native PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
 
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build
