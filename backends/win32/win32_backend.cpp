@@ -14057,6 +14057,7 @@ public:
     void show() override
     {
         finished_ = false;
+        const bool shown_before = shown_once_;
         if (!shown_once_)
         {
             shown_once_ = true;
@@ -14126,7 +14127,13 @@ public:
         // compositor's opening animation starts from the window complete,
         // not from a frame its contents fill in a moment later. (Cloaking it
         // until painted showed it complete too, but without the animation.)
-        ShowWindow(hwnd_, snapshot ? SW_SHOWNOACTIVATE : SW_SHOW);
+        // Shown before, it comes back as it was (maximised, minimised or
+        // restored): SW_SHOWNA, as SW_SHOW does with the focus left alone.
+        // SW_SHOWNOACTIVATE restores, so a maximised window hidden (close())
+        // and shown again came back restored under RAPPORT_NO_ACTIVATE, which
+        // should change only the activation. The first time, it's restored
+        // anyway, where it's been put above.
+        ShowWindow(hwnd_, !snapshot ? SW_SHOW : shown_before ? SW_SHOWNA : SW_SHOWNOACTIVATE);
         if (!painted_once_)
         {
             painted_once_ = true;

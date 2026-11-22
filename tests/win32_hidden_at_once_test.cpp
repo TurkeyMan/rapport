@@ -9,12 +9,10 @@
 // from a callback within a layout of its own, then shown later or from
 // that callback itself: grown on the content as it is then.
 //
-// Shown without activating (RAPPORT_NO_ACTIVATE). With `maximised`, the
-// maximised case alone (win32-hidden-at-once-maximised): it maximises its
-// window, which activates it, and shows it as an app does, so it runs
-// without RAPPORT_NO_ACTIVATE (whose SW_SHOWNOACTIVATE brings a hidden
-// maximised window back restored, whatever's owed); only on a CI runner
-// (GITHUB_ACTIONS=true, RAPPORT_TEST_SEND_INPUT=1), else skipped (77).
+// Shown without activating (RAPPORT_NO_ACTIVATE). The maximised case
+// maximises its window, which activates it: only on a CI runner
+// (GITHUB_ACTIONS=true, RAPPORT_TEST_SEND_INPUT=1), else skipped (that case
+// alone).
 #include <rapport/rapport.h>
 #include <windows.h>
 
@@ -69,15 +67,8 @@ std::string size_str(const RECT& r)
 int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    const bool maximised_only = argc > 1 && std::strcmp(argv[1], "maximised") == 0;
-    if (maximised_only &&
-        !(env_is("GITHUB_ACTIONS", "true") && env_is("RAPPORT_TEST_SEND_INPUT", "1")))
-    {
-        std::printf(
-            "skipped: maximising activates the window: only on a CI runner (GITHUB_ACTIONS=true, "
-            "RAPPORT_TEST_SEND_INPUT=1)\n");
-        return 77;
-    }
+    const bool can_activate =
+        env_is("GITHUB_ACTIONS", "true") && env_is("RAPPORT_TEST_SEND_INPUT", "1");
     auto ui = rap::ui::load(argc, argv, {.backend = "win32"});
     if (!ui)
     {
@@ -108,7 +99,13 @@ int main(int argc, char** argv)
                 ? "hidden, switched from a canvas's on_resize in its layout, then shown"
             : h == how::larger ? "larger than the page, hidden, switched, shown"
                                : "maximised, hidden, switched, shown";
-        if ((h == how::maximised) != maximised_only) continue;  // that case on its own run
+        if (h == how::maximised && !can_activate)
+        {
+            std::printf("skipped: %s (maximising activates the window): only on a CI runner "
+                        "(GITHUB_ACTIONS=true, RAPPORT_TEST_SEND_INPUT=1)\n",
+                        what.c_str());
+            continue;
+        }
         rap::tabs* pages = nullptr;
         bool switch_in_layout = false;  // once, from the first page's canvas as it's sized
         auto win = (*ui)->create(window{
@@ -190,13 +187,11 @@ int main(int argc, char** argv)
         win.reset();
         pump();
     }
-    // Shown from within that layout's callback itself, after switching (not
-    // the maximised run): the grow it owes is measured on the content as it
-    // is then, not on what was measured before the switch (the at-once's own
-    // re-pass, which measures anew, hasn't run yet). A stack already built,
-    // measuring only its shown page, so nothing on the way (a lazy page's
-    // build) measures anew for it.
-    if (!maximised_only)
+    // Shown from within that layout's callback itself, after switching: the
+    // grow it owes is measured on the content as it is then, not on what was
+    // measured before the switch (the at-once's own re-pass, which measures
+    // anew, hasn't run yet). A stack already built, measuring only its shown
+    // page, so nothing on the way (a lazy page's build) measures anew for it.
     {
         const auto make = [&](rap::stack*& stk, std::function<void()>& in_layout)
         {
