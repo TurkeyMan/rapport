@@ -4,7 +4,9 @@
 // next activates, which it never does: the focus stayed where it was. A
 // control's focus(), a stack's (into its page), a toolbar button's (its
 // strip, that button current), each from app code run as a tab's page
-// comes in (its canvas first sized), lands there and then.
+// comes in (its canvas first sized), lands. And a focus() within a layout
+// is made once it's done (its shows wait for its moves): into a stack
+// coming in with the page, shown by then; the latest one asked for only.
 //
 // It activates its window and moves the focus: only on a CI runner
 // (GITHUB_ACTIONS=true, RAPPORT_TEST_SEND_INPUT=1); else skipped (77).
@@ -17,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #ifdef _MSC_VER
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -51,6 +54,35 @@ void pump()
         }
         Sleep(5);
     }
+}
+std::vector<HWND> g_focused;  // what took the focus (WM_SETFOCUS), in order
+LRESULT CALLBACK see_focus(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION)
+        if (const auto* m = reinterpret_cast<const CWPSTRUCT*>(lp); m->message == WM_SETFOCUS)
+            g_focused.push_back(m->hwnd);
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+HWND edit_with_text(HWND top, const wchar_t* text)
+{
+    struct find
+    {
+        const wchar_t* text;
+        HWND found = nullptr;
+    } f{text};
+    EnumChildWindows(
+        top,
+        [](HWND h, LPARAM p) -> BOOL
+        {
+            auto* f = reinterpret_cast<find*>(p);
+            wchar_t t[64]{};
+            GetWindowTextW(h, t, 64);
+            if (wcscmp(t, f->text)) return TRUE;
+            f->found = h;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&f));
+    return f.found;
 }
 }  // namespace
 
@@ -136,6 +168,85 @@ int main(int argc, char** argv)
                                                  : tool->has_focus();
         expect(landed, what + " within a relayout_at_once: the focus there, not left on the first page's field (" +
                            (start->has_focus() ? "still there" : "elsewhere") + ")");
+        win.reset();
+        pump();
+    }
+    // A stack coming in with the tab's page: its page isn't shown yet as
+    // the page's canvas is sized (a layout's shows wait for its moves), so a
+    // focus() then is made once the layout's done, into the page shown by
+    // then. Only the latest focus() asked for within the layout is made: an
+    // earlier one's control never takes the focus (WM_SETFOCUS, seen by a
+    // hook on this thread).
+    enum class order
+    {
+        stack_alone,
+        field_then_stack,
+        stack_then_field,
+    };
+    for (const order o : {order::stack_alone, order::field_then_stack, order::stack_then_field})
+    {
+        const std::string what = o == order::stack_alone ? "a stack coming in, its focus()"
+                                 : o == order::field_then_stack
+                                     ? "a field's focus() then the stack's"
+                                     : "the stack's focus() then a field's";
+        std::unique_ptr<rap::window> win;
+        rap::tabs* pages = nullptr;
+        rap::entry *start = nullptr, *field = nullptr, *in_stack = nullptr;
+        rap::stack* stk = nullptr;
+        std::function<void()> in_layout;
+        win = (*ui)->create(window{
+            "Deferred focus",
+            {tabs{{"One", vbox{entry{}.bind(start)}},
+                  {"Two",
+                   vbox{canvas{}
+                            .on_resize(
+                                [&](rap::size_f)
+                                {
+                                    if (auto f = std::exchange(in_layout, nullptr)) f();
+                                })
+                            .height(60_px),
+                        entry{}.bind(field), stack{{"a", vbox{entry{}.bind(in_stack)}}}.bind(stk)}}}
+                 .bind(pages)
+                 .stretch()}}.size(360_px, 300_px));
+        HWND top = win ? FindWindowW(nullptr, L"Deferred focus") : nullptr;
+        expect(top && pages && start && field && stk && in_stack,
+               what + ": the window and its controls");
+        if (!top || !pages || !start || !field || !stk || !in_stack) return 1;
+        in_stack->set_text("in the stack");
+        const HWND stack_edit = edit_with_text(top, L"in the stack");
+        expect(stack_edit != nullptr, what + ": the stack's field");
+        win->present();
+        pump();
+        expect(GetForegroundWindow() == top, what + ": the window active");
+        start->focus();
+        pump();
+        expect(start->has_focus(), what + ": the focus on the first page's field");
+        in_layout = [&]
+        {
+            if (o == order::field_then_stack) field->focus();
+            stk->focus();
+            if (o == order::stack_then_field) field->focus();
+        };
+        g_focused.clear();
+        HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, see_focus, nullptr, GetCurrentThreadId());
+        pages->set_current(1);
+        pump();
+        if (hook) UnhookWindowsHookEx(hook);
+        expect(!in_layout, what + ": called within the switch (the page's canvas sized)");
+        if (o == order::stack_then_field)
+        {
+            expect(field->has_focus(), what + ": the field has the focus, the latest asked for");
+            size_t to_stack = 0;
+            for (HWND h : g_focused) to_stack += h == stack_edit;
+            expect(to_stack == 0, what + ": the stack's field never took it (" +
+                                      std::to_string(to_stack) +
+                                      " WM_SETFOCUS), the earlier focus() not made");
+        }
+        else
+            expect(in_stack->has_focus() && stk->has_focus(),
+                   what + ": the focus in the stack's page, shown by then (" +
+                       (start->has_focus() ? "still on the first page's field" : "elsewhere") +
+                       ")");
         win.reset();
         pump();
     }
