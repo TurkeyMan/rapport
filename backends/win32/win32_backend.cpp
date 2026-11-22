@@ -12207,19 +12207,20 @@ private:
     {
         if (!win_.relayout_at_once() || !win_.flush_layout()) return;
         if (had == focus_at::none) return;
-        // Into the page once it's laid out (after a layout under way).
-        win_.after_layout_or_now(
-            [this, had, alive = std::weak_ptr<bool>(alive_)]
-            {
-                if (!alive.lock()) return;
-                HWND root = GetAncestor(parent_, GA_ROOT);
-                if (auto* p = pages_.shown_entry())
-                    focus_page(*p->page, had);
-                else if (had == focus_at::window)
-                    SetFocus(root);  // nowhere left in the stack
-                else
-                    RemovePropW(root, L"rapport-focus");
-            });
+        // Into the page once it's laid out (after a layout under way): a
+        // focus request as an explicit one is (focus_now_or_after), so the
+        // latest of them is made, of either kind (#108).
+        win_.focus_now_or_after(alive_,
+                                [this, had]
+                                {
+                                    HWND root = GetAncestor(parent_, GA_ROOT);
+                                    if (auto* p = pages_.shown_entry())
+                                        focus_page(*p->page, had);
+                                    else if (had == focus_at::window)
+                                        SetFocus(root);  // nowhere left in the stack
+                                    else
+                                        RemovePropW(root, L"rapport-focus");
+                                });
     }
     // Where the focus was in the page, else its first control.
     void focus_page(page_parts& p, focus_at how)
