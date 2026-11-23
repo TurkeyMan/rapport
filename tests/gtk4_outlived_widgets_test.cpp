@@ -16,9 +16,14 @@
 
 #include <gtk/gtk.h>
 
+#include <dlfcn.h>
+#include <link.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -45,7 +50,13 @@ void pump(int ms = 300)
 }
 
 int canvas_paints = 0, cell_paints = 0, expandings = 0, control_paints = 0, toggles = 0,
-    drag_begins = 0, badge_draws = 0, menu_builds = 0, actions_run = 0, tree_toggles = 0;
+    drag_begins = 0, badge_draws = 0, menu_builds = 0, actions_run = 0, tree_toggles = 0,
+    icon_draws = 0, tab_icon_draws = 0, after_ending = 0;
+
+// The app's drawing for a row's icon ends the list (its window destroyed)
+// when this is set; what it or the overlay draw after counts.
+std::unique_ptr<rap::window>* g_window = nullptr;
+bool g_end_in_draw = false, g_ended_by_draw = false;
 
 class painted_model : public rap::list_model
 {
@@ -70,12 +81,50 @@ public:
     rap::icon icon(size_t, size_t) const override
     {
         rap::icon i;
-        i.draw = [](rap::painter&, rap::size_f) { ++badge_draws; };
-        i.overlay = [](rap::painter&, rap::size_f) { ++badge_draws; };
+        i.draw = [](rap::painter&, rap::size_f)
+        {
+            if (g_ended_by_draw) ++after_ending;
+            ++badge_draws;
+            if (g_end_in_draw && g_window)
+            {
+                g_end_in_draw = false;
+                g_ended_by_draw = true;
+                g_window->reset();
+            }
+        };
+        i.overlay = [](rap::painter&, rap::size_f)
+        {
+            if (g_ended_by_draw) ++after_ending;
+            ++badge_draws;
+        };
         return i;
     }
 };
 iconed_model g_iconed;
+
+// A test seam of the backend's (`name`): in its module, loaded already
+// (`module`) by ui::load, or linked in.
+void* backend_seam(const char* module, const char* name)
+{
+    if (void* f = dlsym(RTLD_DEFAULT, name)) return f;
+    struct found
+    {
+        const char* module;
+        std::string path;
+    } f{module, {}};
+    dl_iterate_phdr(
+        +[](dl_phdr_info* info, size_t, void* p) -> int
+        {
+            auto* f = static_cast<found*>(p);
+            if (!info->dlpi_name || !std::strstr(info->dlpi_name, f->module)) return 0;
+            f->path = info->dlpi_name;
+            return 1;
+        },
+        &f);
+    if (f.path.empty()) return nullptr;
+    void* h = dlopen(f.path.c_str(), RTLD_NOW | RTLD_NOLOAD);  // (loaded already: only its handle)
+    return h ? dlsym(h, name) : nullptr;
+}
 
 // Every widget under `w` (itself too) of type `type`, in order.
 void all_of(GtkWidget* w, GType type, std::vector<GtkWidget*>& out)
@@ -119,12 +168,16 @@ int main(int argc, char** argv)
     rap::list* listed = nullptr;
     rap::tree* treed = nullptr;
     rap::tree_item folder{"Folder", "f", {{"Inside", "f/i"}}};
+    rap::icon drawn_icon, drawn_tab_icon;
+    drawn_icon.draw = [](rap::painter&, rap::size_f) { ++icon_draws; };
+    drawn_tab_icon.draw = [](rap::painter&, rap::size_f) { ++tab_icon_draws; };
     folder.check = rap::check_state::unchecked;
     auto win = (*ui)->create(window{
         "Outlived widgets",
         {vbox{canvas{}.on_paint([](rap::painter&, rap::size_f) { ++canvas_paints; }).stretch(),
               list{cols, &g_model}.checkboxes().bind(listed).stretch(),
-              list{text_cols, &g_iconed}.stretch(),
+              list{text_cols, &g_iconed}.stretch(), button{"Drawn"}.icon(drawn_icon),
+              tabs{page{"First", label{"one"}}.icon(drawn_tab_icon), page{"Second", label{"two"}}},
               menu_button{"Menu"}.on_menu(
                   []
                   {
@@ -136,6 +189,7 @@ int main(int argc, char** argv)
                   .on_toggled([](const std::string&) { ++tree_toggles; })
                   .bind(treed)
                   .stretch()}}}.size(400_px, 700_px));
+    g_window = &win;
     win->show();
     pump(600);
     if (!listed || !treed) return 2;
@@ -159,10 +213,13 @@ int main(int argc, char** argv)
 
     // Painted while the rapport objects are there: each draws.
     paint_now(content);
-    expect(canvas_paints > 0 && cell_paints > 0 && badge_draws > 0,
-           "before: the canvas, the list's painted cells and a row's badge draw (" +
+    expect(canvas_paints > 0 && cell_paints > 0 && badge_draws > 0 && icon_draws > 0 &&
+               tab_icon_draws > 0,
+           "before: the canvas, the list's painted cells, a row's badge, a button's icon and a "
+           "tab's icon draw (" +
                std::to_string(canvas_paints) + ", " + std::to_string(cell_paints) + ", " +
-               std::to_string(badge_draws) + ")");
+               std::to_string(badge_draws) + ", " + std::to_string(icon_draws) + ", " +
+               std::to_string(tab_icon_draws) + ")");
 
     // The menu button's menu built once, and its item's action there.
     std::vector<GtkWidget*> menu_buttons;
@@ -174,6 +231,14 @@ int main(int argc, char** argv)
     pump(100);
     gtk_menu_button_popdown(GTK_MENU_BUTTON(menu_button));
     const bool activated = gtk_widget_activate_action(menu_button, "mb.i0", nullptr);
+    // The item's action itself, held as GTK or an app may hold one.
+    using action_fn = void* (*)(void*, const char*);
+    auto* menu_action = reinterpret_cast<action_fn>(
+        backend_seam("rapport_gtk4", "rapport_gtk4_menu_action_for_tests"));
+    auto* held_action =
+        menu_action ? static_cast<GAction*>(menu_action(menu_button, "i0")) : nullptr;
+    expect(held_action != nullptr,
+           "the menu's first item's action, held (rapport_gtk4_menu_action_for_tests)");
     expect(menu_builds == 1 && activated && actions_run == 1,
            "before: the menu built as it opens (" + std::to_string(menu_builds) +
                "), its item's action run (" + std::to_string(actions_run) + ")");
@@ -208,7 +273,19 @@ int main(int argc, char** argv)
     g_object_unref(content);
     gtk_widget_set_visible(keeper, true);
     pump(300);
-    win.reset();
+    // Painted, the app's drawing for a row's icon ends the list (its window
+    // destroyed): neither that row's overlay nor anything after draws the
+    // app's.
+    g_end_in_draw = true;
+    for (int i = 0; i < 5 && !g_ended_by_draw; ++i)
+    {
+        paint_now(content);
+        pump(100);
+    }
+    expect(g_ended_by_draw, "a row's icon drawing ended the list (its window destroyed)");
+    expect(after_ending == 0, "after: not its overlay, nor any row's drawing after it (" +
+                                  std::to_string(after_ending) + ")");
+    win.reset();  // (gone already)
     pump(100);
 
     // A drawing area of the test's own beside them, so that what's drawn
@@ -219,7 +296,8 @@ int main(int argc, char** argv)
         GTK_DRAWING_AREA(control),
         +[](GtkDrawingArea*, cairo_t*, int, int, gpointer) { ++control_paints; }, nullptr, nullptr);
     gtk_box_append(GTK_BOX(content), control);
-    canvas_paints = cell_paints = expandings = control_paints = badge_draws = 0;
+    canvas_paints = cell_paints = expandings = control_paints = badge_draws = icon_draws =
+        tab_icon_draws = 0;
     for (int i = 0; i < 5 && !control_paints; ++i)
     {
         paint_now(content);
@@ -233,6 +311,10 @@ int main(int argc, char** argv)
            "after: the list's painted cells don't reach it (" + std::to_string(cell_paints) + ")");
     expect(badge_draws == 0, "after: a row's badge doesn't draw the app's icon (" +
                                  std::to_string(badge_draws) + ")");
+    expect(icon_draws == 0,
+           "after: a button's icon doesn't draw the app's (" + std::to_string(icon_draws) + ")");
+    expect(tab_icon_draws == 0,
+           "after: a tab's icon doesn't draw the app's (" + std::to_string(tab_icon_draws) + ")");
 
     // The menu button opened, its action asked for: neither reaches it.
     menu_builds = actions_run = 0;
@@ -240,11 +322,14 @@ int main(int argc, char** argv)
     pump(100);
     gtk_menu_button_popdown(GTK_MENU_BUTTON(menu_button));
     gtk_widget_activate_action(menu_button, "mb.i0", nullptr);
+    if (held_action) g_action_activate(held_action, nullptr);
     pump(50);
     expect(menu_builds == 0, "after: opening the menu button doesn't build its menu (" +
                                  std::to_string(menu_builds) + ")");
-    expect(actions_run == 0, "after: its item's action, asked for, doesn't run (" +
-                                 std::to_string(actions_run) + ")");
+    expect(actions_run == 0,
+           "after: its item's action, asked for or activated held, doesn't run (" +
+               std::to_string(actions_run) + ")");
+    if (held_action) g_object_unref(held_action);
 
     // The tree's row expanded: its child function asked.
     std::vector<GtkWidget*> views;

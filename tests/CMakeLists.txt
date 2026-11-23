@@ -202,7 +202,7 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         # Widgets that outlive their rapport objects call nothing of them:
         # draw funcs, a tree model's child function (#140).
         add_executable(rapport-outlived-widgets-test-gtk4 gtk4_outlived_widgets_test.cpp)
-        target_link_libraries(rapport-outlived-widgets-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4)
+        target_link_libraries(rapport-outlived-widgets-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4 ${CMAKE_DL_LIBS})
         add_dependencies(rapport-outlived-widgets-test-gtk4 rapport_gtk4)
         # An app's row height: the rows measured (as -gtk3's).
         add_executable(rapport-row-height-test-gtk4 gtk4_row_height_test.cpp)
