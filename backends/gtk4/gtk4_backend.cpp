@@ -278,11 +278,13 @@ private:
     std::function<void()> on_click_;
 };
 
-GtkWidget* icon_widget(const icon& icon, int size);
+// An icon's widget. `owner` is the rapport object it's for: an app's
+// drawing (icon::draw) is called only while that's there (#140).
+GtkWidget* icon_widget(const icon& icon, int size, std::weak_ptr<bool> owner);
 
 void label_impl::add_icon(const icon& icon)
 {
-    GtkWidget* img = icon_widget(icon, 16);
+    GtkWidget* img = icon_widget(icon, 16, life());
     if (!img) return;
     GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_box_append(GTK_BOX(box), img);
@@ -305,9 +307,9 @@ void label_impl::add_icon(const icon& icon)
 // A button's content: its text, or its icon (named or drawn), or the icon
 // before the text in a box, as GTK 3's image buttons show them (GTK 4's
 // button holds one child).
-GtkWidget* icon_and_text(const icon& icon, const std::string& text)
+GtkWidget* icon_and_text(const icon& icon, const std::string& text, std::weak_ptr<bool> owner)
 {
-    GtkWidget* img = icon ? icon_widget(icon, 16) : nullptr;
+    GtkWidget* img = icon ? icon_widget(icon, 16, std::move(owner)) : nullptr;
     if (!img)
     {
         GtkWidget* label = gtk_label_new_with_mnemonic(text.c_str());
@@ -354,7 +356,7 @@ public:
     void on_click(std::function<void()> f) override { click_ = std::move(f); }
 
 private:
-    void update() { gtk_button_set_child(GTK_BUTTON(w_), icon_and_text(icon_, text_)); }
+    void update() { gtk_button_set_child(GTK_BUTTON(w_), icon_and_text(icon_, text_, life())); }
 
     std::string text_;
     icon icon_;
@@ -423,7 +425,7 @@ void snap_to_device(cairo_t* cr, GtkWidget* w)
 // drawn icons follow scale and theme (the area takes its button's CSS
 // colour, greyed when insensitive); else the theme's image-missing, never
 // a blank. Null for no icon at all.
-GtkWidget* icon_widget(const icon& icon, int size)
+GtkWidget* icon_widget(const icon& icon, int size, std::weak_ptr<bool> owner)
 {
     GtkIconTheme* theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
     auto named = [&](const char* name)
@@ -454,7 +456,8 @@ GtkWidget* icon_widget(const icon& icon, int size)
                                });
         rap::icon rest = icon;
         rest.path.clear();
-        if (GtkWidget* child = g ? image(g) : icon_widget(rest, size)) gtk_box_append(GTK_BOX(box), child);
+        if (GtkWidget* child = g ? image(g) : icon_widget(rest, size, owner))
+            gtk_box_append(GTK_BOX(box), child);
         return box;
     }
     if (!icon.name.empty() && gtk_icon_theme_has_icon(theme, icon.name.c_str()))
@@ -470,15 +473,24 @@ GtkWidget* icon_widget(const icon& icon, int size)
     // Square and centred, however tall the toolbar row is.
     gtk_widget_set_halign(area, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(area, GTK_ALIGN_CENTER);
+    struct gated_draw
+    {
+        draw_fn draw;
+        std::weak_ptr<bool> owner;  // the app's drawing only while its rapport object's there
+    };
     gtk_drawing_area_set_draw_func(
         GTK_DRAWING_AREA(area),
         +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
         {
+            auto* g = static_cast<gated_draw*>(p);
+            const std::shared_ptr<bool> owner = g->owner.lock();
+            if (!owner || !*owner) return;
             snap_to_device(cr, GTK_WIDGET(a));
             cairo_painter painter(cr, GTK_WIDGET(a));
-            (*static_cast<draw_fn*>(p))(painter, {float(w), float(h)});
+            g->draw(painter, {float(w), float(h)});
         },
-        new draw_fn(std::move(draw)), +[](gpointer p) { delete static_cast<draw_fn*>(p); });
+        new gated_draw{std::move(draw), std::move(owner)},
+        +[](gpointer p) { delete static_cast<gated_draw*>(p); });
     return area;
 }
 
@@ -510,7 +522,8 @@ public:
     {
         if (icon_ && same_icon(*icon_, icon)) return;  // (#88)
         icon_ = icon;
-        if (GtkWidget* child = icon_widget(icon, 16)) gtk_button_set_child(GTK_BUTTON(w_), child);
+        if (GtkWidget* child = icon_widget(icon, 16, life()))
+            gtk_button_set_child(GTK_BUTTON(w_), child);
     }
     bool checked() const override
     {
@@ -932,7 +945,7 @@ private:
     // Its own child for the icon; the arrow stays, as for a text one.
     void show_icon()
     {
-        gtk_menu_button_set_child(GTK_MENU_BUTTON(w_), icon_and_text(icon_, text_));
+        gtk_menu_button_set_child(GTK_MENU_BUTTON(w_), icon_and_text(icon_, text_, life()));
         gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(w_), true);
     }
     std::string text_;
@@ -2929,6 +2942,9 @@ public:
         gtk_widget_set_visible(slot_, w != nullptr);
     }
 
+    // Its tabs going: the app's drawing for its icon is called no more.
+    void close() { *gate_ = false; }
+
 private:
     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
     static bool only_drawn(const icon& i)
@@ -2937,19 +2953,30 @@ private:
     }
     // As icon_widget's drawn icons: drawn whenever it paints, so it follows
     // scale and theme.
-    static void set_drawing(GtkWidget* area, draw_fn draw)
+    // The app's drawing only while the tabs it heads are there (gate_):
+    // the heading's widgets may outlive them (#140).
+    void set_drawing(GtkWidget* area, draw_fn draw)
     {
+        struct gated_draw
+        {
+            draw_fn draw;
+            std::weak_ptr<bool> gate;
+        };
         gtk_drawing_area_set_draw_func(
             GTK_DRAWING_AREA(area),
             +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
             {
+                auto* g = static_cast<gated_draw*>(p);
+                const std::shared_ptr<bool> open = g->gate.lock();
+                if (!open || !*open) return;
                 snap_to_device(cr, GTK_WIDGET(a));
                 cairo_painter painter(cr, GTK_WIDGET(a));
-                (*static_cast<draw_fn*>(p))(painter, {float(w), float(h)});
+                g->draw(painter, {float(w), float(h)});
             },
-            new draw_fn(std::move(draw)), +[](gpointer p) { delete static_cast<draw_fn*>(p); });
+            new gated_draw{std::move(draw), gate_},
+            +[](gpointer p) { delete static_cast<gated_draw*>(p); });
     }
-    static GtkWidget* make_icon(const icon& i)
+    GtkWidget* make_icon(const icon& i)
     {
         constexpr int size = 16;
         if (only_drawn(i))
@@ -2968,9 +2995,12 @@ private:
             gtk_image_set_pixel_size(GTK_IMAGE(img), size);
             return img;
         }
-        return icon_widget(i, size);
+        return icon_widget(i, size, gate_);
     }
 
+    // Open while the tabs it heads are there (a heading is made before them,
+    // and copied): closed by them as they go (close).
+    std::shared_ptr<bool> gate_ = std::make_shared<bool>(true);
     GtkWidget* box_;
     GtkWidget* slot_;
     GtkWidget* label_;
@@ -3099,6 +3129,12 @@ public:
         gtk_widget_set_hexpand(w, TRUE);
         gtk_widget_set_vexpand(w, TRUE);
         gtk_box_append(GTK_BOX(pages_[size_t(i)]), w);
+    }
+
+protected:
+    void on_disconnect() override
+    {
+        for (auto& h : headings_) h.close();  // their icons' drawing is the app's (#140)
     }
 
 private:
@@ -3247,6 +3283,12 @@ public:
         gtk_widget_set_hexpand(w, TRUE);
         gtk_widget_set_vexpand(w, TRUE);
         gtk_box_append(GTK_BOX(pages_[size_t(i)]), w);
+    }
+
+protected:
+    void on_disconnect() override
+    {
+        for (auto& h : headings_) h.close();  // their icons' drawing is the app's (#140)
     }
 
 private:
@@ -3775,7 +3817,7 @@ private:
             gtk_image_set_pixel_size(GTK_IMAGE(image), 16);
         }
         else
-            image = icon_widget(t.icon, 16);
+            image = icon_widget(t.icon, 16, life());
         if (image) gtk_box_append(GTK_BOX(box), image);
         GtkWidget* title = gtk_label_new(t.title.c_str());
         gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);

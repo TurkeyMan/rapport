@@ -1017,8 +1017,14 @@ public:
     {
         for (auto [obj, data] : conns_) g_signal_handlers_disconnect_by_data(obj, data);
         conns_.clear();
+        *life_ = false;
         on_disconnect();
     }
+
+    // True from its making till it's disconnected (and gone once it is):
+    // what it hands GTK beyond its signals that calls back into the app (an
+    // icon's drawing) runs only while it's true (#140).
+    const std::shared_ptr<bool>& life() const { return life_; }
 
 protected:
     template <class F>
@@ -1039,6 +1045,7 @@ protected:
 
 private:
     std::vector<std::pair<gpointer, gpointer>> conns_;
+    std::shared_ptr<bool> life_ = std::make_shared<bool>(true);
 };
 
 // One signal connection, owned by whichever parts list holds it, so it goes
