@@ -771,6 +771,9 @@ public:
         , group_(g_simple_action_group_new())
     {
         gtk_widget_insert_action_group(owner, prefix_.c_str(), G_ACTION_GROUP(group_));
+        // For the test seam (rapport_gtk4_menu_action_for_tests) alone.
+        g_object_set_data_full(G_OBJECT(owner), "rapport-menu-group", g_object_ref(group_),
+                               g_object_unref);
     }
     ~menu_actions()
     {
@@ -7794,6 +7797,18 @@ extern "C" RAPPORT_EXPORT const char* rapport_gtk4_fullscreen_requests_for_tests
     out = r.value_or(std::string());
     r = std::string();
     return out.c_str();
+}
+
+// Test seam (#140): the action `name` ("i0": a menu's first item's) of the
+// menu built for `owner` (a menu button), with a reference the caller
+// drops; nullptr if there's none. Held past the menu, as GTK or an app may
+// hold one, it must reach nothing gone.
+extern "C" RAPPORT_EXPORT void* rapport_gtk4_menu_action_for_tests(void* owner, const char* name)
+{
+    auto* group =
+        static_cast<GActionMap*>(g_object_get_data(G_OBJECT(owner), "rapport-menu-group"));
+    GAction* action = group ? g_action_map_lookup_action(group, name) : nullptr;
+    return action ? g_object_ref(action) : nullptr;
 }
 
 // Test seam (#88): `window` (a GtkWindow) notified as fullscreen or not,
