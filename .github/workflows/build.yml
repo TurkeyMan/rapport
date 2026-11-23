@@ -95,6 +95,20 @@ jobs:
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-quiet-test-gtk3
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-quiet-test-gtk4
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-quiet-test-qt6
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_BACKEND=gtk3 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-sizes-in-resize-test
+          QT_QPA_PLATFORM=offscreen RAPPORT_BACKEND=qt6 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-sizes-in-resize-test
+
+      # GTK 4 under Broadway lays a window out once and no more (no browser
+      # is there to take its frames), so what needs it laid out again runs
+      # on X11 in Xvfb, a display in the job's own container.
+      - name: GTK 4 on Xvfb
+        if: matrix.link != 'static'
+        run: |
+          apt-get install -y --no-install-recommends xvfb xauth
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          export G_DEBUG=fatal-criticals
+          xvfb-run -a env GDK_BACKEND=x11 RAPPORT_BACKEND=gtk4 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-sizes-in-resize-test
+          xvfb-run -a env GDK_BACKEND=x11 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-moved-test-gtk4
 
   # MSVC as plugins, with the shared runtime a plugin build needs (std:: types
   # cross its DLLs, #136), and statically linked with the static runtime, as

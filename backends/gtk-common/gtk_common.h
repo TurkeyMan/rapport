@@ -3,6 +3,7 @@
 // Each backend includes this after its own <gtk/gtk.h>.
 #pragma once
 
+#include "pane_sizes.h"
 #include "rapport/backend.h"
 #include "rapport/i18n.h"
 #include "split_handle.h"
@@ -1721,6 +1722,102 @@ inline std::vector<float> split_sizes(GtkWidget* first)
     }
 }
 
+// -- a splitter's panes told their sizes once all are placed -----------------
+//
+// pane_sizes.h: what a splitter's panes are told waits while it's placing
+// them (#105). GtkPaned's class struct is private in GTK 4, so there's no
+// subclass to bracket that in: its size_allocate is wrapped, once, and only
+// brackets the paneds of rapport's splitters (marked "rapport-split-chain");
+// any other is allocated as it was.
+//
+// What waited is told once GTK's layout is done, not inside it: GTK is still
+// allocating the window when the outermost paned's allocation ends, and a
+// callback may lay out again or destroy the window. That's at the end of
+// the frame clock's layout phase (after GTK's own handlers), before
+// anything paints; or, laid out outside it (GTK 3 lays a window out as it's
+// first shown), from an idle above the redraw's priority, so still before
+// paint. Whichever comes first tells it; the other finds nothing waiting.
+namespace paneds
+{
+inline bool flush_asked = false;  // the idle's on its way
+
+inline void flush()
+{
+    if (!::rap::pane_sizes::placing) ::rap::pane_sizes::deliver();
+}
+
+// The outermost of rapport's paneds placed: what waited is told once GTK's
+// layout is done.
+inline void placed(GtkWidget* paned)
+{
+    if (::rap::pane_sizes::queue.empty()) return;
+    if (GdkFrameClock* clock = gtk_widget_get_frame_clock(paned);
+        clock && !g_object_get_data(G_OBJECT(clock), "rapport-pane-sizes"))
+    {
+        g_object_set_data(G_OBJECT(clock), "rapport-pane-sizes", GINT_TO_POINTER(1));
+        g_signal_connect_after(clock, "layout",
+                               G_CALLBACK(+[](GdkFrameClock*, gpointer) { flush(); }), nullptr);
+    }
+    if (std::exchange(flush_asked, true)) return;
+    g_idle_add_full(
+        G_PRIORITY_HIGH_IDLE,  // above GDK_PRIORITY_REDRAW: before paint
+        +[](gpointer) -> gboolean
+        {
+            flush_asked = false;
+            flush();
+            return G_SOURCE_REMOVE;
+        },
+        nullptr, nullptr);
+}
+
+#if GTK_MAJOR_VERSION >= 4
+inline void (*paned_allocate)(GtkWidget*, int, int, int) = nullptr;
+inline void bracketed(GtkWidget* w, int width, int height, int baseline)
+{
+    if (!g_object_get_data(G_OBJECT(w), "rapport-split-chain"))
+    {
+        paned_allocate(w, width, height, baseline);
+        return;
+    }
+    ++::rap::pane_sizes::placing;
+    paned_allocate(w, width, height, baseline);
+    if (--::rap::pane_sizes::placing == 0) placed(w);
+}
+#else
+inline void (*paned_allocate)(GtkWidget*, GtkAllocation*) = nullptr;
+inline void bracketed(GtkWidget* w, GtkAllocation* a)
+{
+    if (!g_object_get_data(G_OBJECT(w), "rapport-split-chain"))
+    {
+        paned_allocate(w, a);
+        return;
+    }
+    ++::rap::pane_sizes::placing;
+    paned_allocate(w, a);
+    if (--::rap::pane_sizes::placing == 0) placed(w);
+}
+#endif
+
+// Once, before rapport's first splitter.
+inline void watch()
+{
+    if (paned_allocate) return;
+    auto* klass = GTK_WIDGET_CLASS(g_type_class_ref(GTK_TYPE_PANED));  // kept for good
+    paned_allocate = klass->size_allocate;
+    klass->size_allocate = bracketed;
+}
+}  // namespace paneds
+
+// A divider moved by rapport itself, not by the user's drag: marked
+// "rapport-own-position" while it's set, so the splitter's position watch
+// doesn't take the move for the drag's (#105).
+inline void set_own_position(GtkPaned* p, int position)
+{
+    g_object_set_data(G_OBJECT(p), "rapport-own-position", GINT_TO_POINTER(1));
+    gtk_paned_set_position(p, position);
+    g_object_set_data(G_OBJECT(p), "rapport-own-position", nullptr);
+}
+
 // A divider at `position`. GtkPaned clamps a position to its current
 // length, so one asked for before the window has grown to fit (a pane
 // opening and the window widening for it, a layout restored before the
@@ -1728,7 +1825,7 @@ inline std::vector<float> split_sizes(GtkWidget* first)
 // the paned grows, until it fits.
 inline void place_divider(GtkPaned* p, int position)
 {
-    gtk_paned_set_position(p, position);
+    set_own_position(p, position);
     int max_pos = 0;
     g_object_get(p, "max-position", &max_pos, nullptr);
     // G_MAXINT: not laid out with both panes yet (one was hidden), so not
@@ -1752,7 +1849,7 @@ inline void place_divider(GtkPaned* p, int position)
                            int max_pos = 0;
                            g_object_get(obj, "max-position", &max_pos, nullptr);
                            if (max_pos == G_MAXINT) return;
-                           gtk_paned_set_position(GTK_PANED(obj), std::min(*want, max_pos));
+                           set_own_position(GTK_PANED(obj), std::min(*want, max_pos));
                            if (max_pos >= *want) *want = -1;  // there: the user's from here on
                        }),
             nullptr);

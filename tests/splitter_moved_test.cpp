@@ -1,15 +1,17 @@
-// A splitter's on_moved fires for a drag of its divider and nothing else
-// (#30): a press elsewhere in the panes, held while the window relays them
-// out, isn't a drag. A splitter that is a pane of another, the last pane
-// included, is a splitter of its own: its divider, its sizes and its
-// on_moved are its, not the outer one's.
+// A splitter's on_moved fires for a drag of its divider and nothing else:
+// a press elsewhere in the panes, held while the window relays them out,
+// isn't a drag (#30), and nor is a press on a divider that's let go without
+// the pointer moving, the panes laid out again by set_sizes meanwhile
+// (#105). A splitter that is a pane of another, the last pane included, is
+// a splitter of its own: its divider, its sizes and its on_moved are its,
+// not the outer one's.
 //   rapport-splitter-moved-test-gtk3   (GDK_BACKEND=broadway, broadwayd running)
 //   rapport-splitter-moved-test-gtk4   (GDK_BACKEND=broadway, gtk4-broadwayd running)
-// GTK 3: presses go to the paned as it gets them, on its handle's window or
-// bubbled up from a pane, with the sizes changed between press and release.
-// GTK 4 can't synthesize a press, so its test is the hit test the backend
-// makes of one (split_handle.h), asked of what GTK picks at the handle's
-// middle, in a pane, and on another splitter's handle inside a pane.
+// GTK 3: real drags, a press, motions and a release put through GTK's event
+// handling on a divider's handle window, which the paned drags itself; and
+// presses straight to the paned, as from a pane. GTK 4 can't synthesize a
+// press, so its drags are the paned's own drag gesture's (drag-update,
+// drag-end), as the splitter watches them.
 #include <rapport/rapport.h>
 
 #include <gtk/gtk.h>
@@ -70,7 +72,8 @@ void paneds(GtkWidget* w, std::vector<GtkWidget*>& out)
 }
 
 #if GTK_MAJOR_VERSION < 4
-// A button press, then its release, as `paned` gets them: on `window`.
+// A button press, then its release, as `paned` gets them, straight to it
+// (not through GTK's event handling): on `window`.
 void click(GtkWidget* paned, GdkWindow* window, rap::splitter* split, std::vector<float> move_to)
 {
     for (GdkEventType type : {GDK_BUTTON_PRESS, GDK_BUTTON_RELEASE})
@@ -95,24 +98,102 @@ void click(GtkWidget* paned, GdkWindow* window, rap::splitter* split, std::vecto
     }
     pump(50);
 }
-#else
-// What GTK picks at the middle of `w`, in its window's coordinates.
-GtkWidget* pick_middle(GtkWidget* w)
+
+// A press, a motion or a release on `window` at (x, y) in it, put through
+// GTK's own event handling, as one from the pointer is.
+void deliver(GdkWindow* window, GdkEventType type, double x, double y)
 {
-    GtkNative* native = gtk_widget_get_native(w);
-    graphene_rect_t r;
-    if (!native || !gtk_widget_compute_bounds(w, GTK_WIDGET(native), &r)) return nullptr;
-    return gtk_widget_pick(GTK_WIDGET(native), r.origin.x + r.size.width / 2, r.origin.y + r.size.height / 2,
-                           GTK_PICK_DEFAULT);
+    GdkEvent* e = gdk_event_new(type);
+    int ox = 0, oy = 0;
+    gdk_window_get_origin(window, &ox, &oy);
+    if (type == GDK_MOTION_NOTIFY)
+    {
+        e->motion.window = GDK_WINDOW(g_object_ref(window));
+        e->motion.send_event = true;
+        e->motion.x = x;
+        e->motion.y = y;
+        e->motion.x_root = ox + x;
+        e->motion.y_root = oy + y;
+        e->motion.state = GDK_BUTTON1_MASK;
+    }
+    else
+    {
+        e->button.window = GDK_WINDOW(g_object_ref(window));
+        e->button.send_event = true;
+        e->button.button = GDK_BUTTON_PRIMARY;
+        e->button.x = x;
+        e->button.y = y;
+        e->button.x_root = ox + x;
+        e->button.y_root = oy + y;
+        if (type == GDK_BUTTON_RELEASE) e->button.state = GDK_BUTTON1_MASK;
+    }
+    gdk_event_set_device(
+        e, gdk_seat_get_pointer(gdk_display_get_default_seat(gdk_display_get_default())));
+    gtk_main_do_event(e);
+    gdk_event_free(e);
 }
 
-// A paned's handle: its child that's neither pane.
-GtkWidget* handle_of(GtkWidget* paned)
+// A drag of a divider by its handle window, `by` px along both axes (the
+// paned takes its own), in steps; or, with `move_to`, a press held while
+// the panes are laid out again by set_sizes and let go where it was.
+void drag(GdkWindow* handle, float by, rap::splitter* split = nullptr,
+          std::vector<float> move_to = {})
 {
-    GtkPaned* p = GTK_PANED(paned);
-    for (GtkWidget* c = gtk_widget_get_first_child(paned); c; c = gtk_widget_get_next_sibling(c))
-        if (c != gtk_paned_get_start_child(p) && c != gtk_paned_get_end_child(p)) return c;
-    return nullptr;
+    deliver(handle, GDK_BUTTON_PRESS, 2, 2);
+    pump(30);
+    if (split)
+    {
+        split->set_sizes(move_to);
+        pump(100);
+    }
+    else
+        for (int step = 1; step <= 4; ++step)
+        {
+            deliver(handle, GDK_MOTION_NOTIFY, 2 + by * step / 4, 2 + by * step / 4);
+            pump(30);
+        }
+    deliver(handle, GDK_BUTTON_RELEASE, 2, 2);
+    pump(50);
+}
+#else
+// A paned's drag gesture for the mouse (not touch's pan).
+GObject* drag_gesture(GtkWidget* paned)
+{
+    GObject* found = nullptr;
+    GListModel* controllers = gtk_widget_observe_controllers(paned);
+    for (guint i = 0, n = g_list_model_get_n_items(controllers); i < n && !found; ++i)
+    {
+        auto* c = static_cast<GObject*>(g_list_model_get_item(controllers, i));
+        if (GTK_IS_GESTURE_DRAG(c) && !GTK_IS_GESTURE_PAN(c)) found = c;
+        g_object_unref(c);
+    }
+    g_object_unref(controllers);
+    return found;
+}
+
+// The paned's drag, as its gesture reports one (drag-begin needs a real
+// press, which GTK 4 can't make): moved by `by` in steps, then ended; or,
+// with `move_to`, the panes laid out again by set_sizes and the drag ended
+// without moving.
+void drag(GtkWidget* paned, float by, rap::splitter* split = nullptr,
+          std::vector<float> move_to = {})
+{
+    GObject* gesture = drag_gesture(paned);
+    if (!gesture) return;
+    if (split)
+    {
+        split->set_sizes(move_to);
+        pump(100);
+    }
+    else
+        for (int step = 1; step <= 4; ++step)
+        {
+            g_signal_emit_by_name(gesture, "drag-update", double(by * step / 4),
+                                  double(by * step / 4));
+            pump(30);
+        }
+    g_signal_emit_by_name(gesture, "drag-end", 0.0, 0.0);
+    pump(50);
 }
 #endif
 
@@ -179,65 +260,62 @@ int main(int argc, char** argv)
 
 #if GTK_MAJOR_VERSION < 4
     auto handle = [](GtkWidget* paned) { return gtk_paned_get_handle_window(GTK_PANED(paned)); };
-    GdkWindow* elsewhere = gtk_widget_get_window(top);
-    click(first, elsewhere, outer, nudged(at, 40));
+    click(first, gtk_widget_get_window(top), outer, nudged(at, 40));
     expect(moved == 0, "a press from a pane, held while the panes are laid out again: no on_moved");
-    click(first, handle(first), outer, nudged(at, -30));
-    expect(moved == 1, "a press on the first divider, the panes moved: on_moved once");
-    click(second, handle(second), outer, nudged(at, 20));
-    expect(moved == 2, "a press on the second divider, the panes moved: on_moved once more");
-    click(first, handle(first), outer, {});
-    expect(moved == 2, "a press on a divider, nothing moved: no on_moved");
-    click(other, handle(other), outer, nudged(at, 10));
-    expect(moved == 2, "a press on the middle pane's splitter's divider: not the outer one's on_moved");
-    // The splitter in the last pane: a press on its divider reaches both its
-    // paned and the one it's the last pane of (as it bubbles); with both laid
-    // out again while it's down, it's the inner one's drag only.
-    auto send = [&](GtkWidget* to, GdkEventType type)
-    {
-        GdkEvent* e = gdk_event_new(type);
-        e->button.window = GDK_WINDOW(g_object_ref(handle(in_last)));
-        e->button.send_event = true;
-        e->button.button = GDK_BUTTON_PRIMARY;
-        gdk_event_set_device(e, gdk_seat_get_pointer(gdk_display_get_default_seat(gdk_display_get_default())));
-        gboolean handled = FALSE;
-        g_signal_emit_by_name(to, type == GDK_BUTTON_PRESS ? "button-press-event" : "button-release-event", e,
-                              &handled);
-        gdk_event_free(e);
-    };
-    const std::vector<float> lower_at = last->sizes(), nested_at = nested->sizes();
-    send(in_last, GDK_BUTTON_PRESS);
-    send(lower, GDK_BUTTON_PRESS);
-    last->set_sizes(nudged(lower_at, 30));
-    nested->set_sizes(nudged(nested_at, 15));
-    pump(100);
-    send(in_last, GDK_BUTTON_RELEASE);
-    send(lower, GDK_BUTTON_RELEASE);
-    pump(50);
-    expect(moved_nested == 1, "a press on the last pane's splitter's divider: its on_moved once");
+    drag(handle(first), 30);
+    expect(moved == 1, "the first divider dragged: on_moved once");
+    drag(handle(second), 20);
+    expect(moved == 2, "the second divider dragged: on_moved once more");
+    drag(handle(first), 0, outer, {});
+    expect(moved == 2, "a press on a divider let go, nothing moved: no on_moved");
+    drag(handle(first), 0, outer, nudged(outer->sizes(), -30));
+    expect(moved == 2,
+           "a press on a divider, the panes laid out again by set_sizes while it's down, let go "
+           "without moving: no on_moved");
+    drag(handle(other), 15);
+    expect(moved == 2,
+           "the middle pane's splitter's divider dragged: not the outer one's on_moved");
+    // A press on the last pane's splitter's divider is its paned's, which
+    // the splitter it's the last pane of holds too.
+    drag(handle(in_last), 15);
+    expect(moved_nested == 1, "the last pane's splitter's divider dragged: its on_moved once");
     expect(moved_last == 0, "and not the on_moved of the splitter it's the last pane of");
 #else
-    expect(rap::gtk_split::handle_picked(first, pick_middle(handle_of(first))),
-           "the first divider's middle is one of its handles");
-    expect(rap::gtk_split::handle_picked(first, pick_middle(handle_of(second))),
-           "the second divider's middle is one of its handles");
-    expect(!rap::gtk_split::handle_picked(first, pick_middle(gtk_paned_get_start_child(GTK_PANED(first)))),
-           "the middle of the left pane (a button) isn't");
-    expect(!rap::gtk_split::handle_picked(first, pick_middle(gtk_paned_get_end_child(GTK_PANED(second)))),
-           "the middle of the right pane isn't");
-    expect(!rap::gtk_split::handle_picked(first, pick_middle(handle_of(other))),
-           "the middle pane's splitter's divider isn't the outer splitter's");
-    expect(rap::gtk_split::handle_picked(other, pick_middle(handle_of(other))), "but it is that splitter's own");
-    expect(!rap::gtk_split::handle_picked(lower, pick_middle(handle_of(in_last))),
-           "the last pane's splitter's divider isn't the splitter it's the last pane of");
-    expect(rap::gtk_split::handle_picked(in_last, pick_middle(handle_of(in_last))), "but it is its own");
-    expect(rap::gtk_split::handle_picked(lower, pick_middle(handle_of(lower))),
-           "and the lower splitter's own divider is its");
-    expect(!rap::gtk_split::handle_picked(first, nullptr), "nothing picked isn't");
-    (void)moved;
-    (void)moved_last;
-    (void)moved_nested;
-    (void)nudged;
+    expect(drag_gesture(first) && drag_gesture(second) && drag_gesture(in_last),
+           "each paned has its drag gesture");
+    // A touch drag (GtkGesturePan, which GTK starts in a wider band than the
+    // mouse's) counts only from where a mouse drag starts: the handle, here
+    // a wide one. (Real touch can't be synthesized here: what's checked is
+    // where it would count from.)
+    {
+        GtkWidget* h = rap::gtk_split::handle_of(first);
+        graphene_rect_t r{};
+        const bool placed = h && gtk_widget_compute_bounds(h, first, &r);
+        const float mid_y = r.origin.y + r.size.height / 2;
+        expect(placed && rap::gtk_split::on_handle(first, r.origin.x + r.size.width / 2, mid_y),
+               "a touch drag counts from the handle's middle");
+        expect(placed && !rap::gtk_split::on_handle(first, r.origin.x + r.size.width + 3, mid_y) &&
+                   !rap::gtk_split::on_handle(first, r.origin.x - 3, mid_y),
+               "but not from 3 px either side of a wide handle, where GTK starts a touch drag but "
+               "not a "
+               "mouse's");
+        expect(!rap::gtk_split::on_handle(first, r.origin.x / 2, mid_y),
+               "nor from the middle of a pane");
+    }
+    drag(first, 30);
+    expect(moved == 1, "the first divider dragged: on_moved once");
+    drag(second, 20);
+    expect(moved == 2, "the second divider dragged: on_moved once more");
+    drag(first, 0, outer, nudged(outer->sizes(), -30));
+    expect(moved == 2,
+           "the panes laid out again by set_sizes while a divider's held, let go without moving: "
+           "no on_moved");
+    drag(other, 15);
+    expect(moved == 2,
+           "the middle pane's splitter's divider dragged: not the outer one's on_moved");
+    drag(in_last, 15);
+    expect(moved_nested == 1, "the last pane's splitter's divider dragged: its on_moved once");
+    expect(moved_last == 0, "and not the on_moved of the splitter it's the last pane of");
     (void)at;
 #endif
 

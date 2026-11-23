@@ -1,6 +1,8 @@
-// A splitter's chain of GtkPaneds, and whether a press is on one of its
-// handles: shared by the GTK 3 and GTK 4 backends, and by the test that
-// checks the GTK 4 hit test against real paneds (GTK 4 can't make a press).
+// A splitter's chain of GtkPaneds, shared by the GTK 3 and GTK 4 backends,
+// and whether a press is on one of its handles: GTK 3's, on the handle's
+// window; GTK 4's, for a touch drag (GTK 4's splitter takes its drags from
+// the paneds' own gestures, which start the mouse's only from the handle,
+// but touch's from a wider band).
 #pragma once
 
 #include <gtk/gtk.h>
@@ -36,40 +38,28 @@ inline GtkWidget* next(GtkWidget* paned)
                                                                                                     : nullptr;
 }
 
-inline bool in_chain(GtkWidget* first, GtkWidget* paned)
-{
-    for (GtkWidget* w = first; w; w = next(w))
-        if (w == paned) return true;
-    return false;
-}
-
 #if GTK_MAJOR_VERSION >= 4
-// Whether `picked` (the widget under a press, gtk_widget_pick's answer) is
-// one of the handles of the splitter whose chain starts at `first`: the
-// child of one of its paneds that's neither pane. Its nearest paned in the
-// chain decides, so a press in a pane, a nested pane's handle in another
-// splitter's chain, or anything inside them is not.
-inline bool handle_picked(GtkWidget* first, GtkWidget* picked)
+// A paned's handle: its child that's neither pane.
+inline GtkWidget* handle_of(GtkWidget* paned)
 {
-    for (GtkWidget* w = picked; w; w = gtk_widget_get_parent(w))
-    {
-        GtkWidget* parent = gtk_widget_get_parent(w);
-        if (!parent || !GTK_IS_PANED(parent) || !in_chain(first, parent)) continue;
-        GtkPaned* paned = GTK_PANED(parent);
-        return w != gtk_paned_get_start_child(paned) && w != gtk_paned_get_end_child(paned);
-    }
-    return false;
+    GtkPaned* p = GTK_PANED(paned);
+    for (GtkWidget* c = gtk_widget_get_first_child(paned); c; c = gtk_widget_get_next_sibling(c))
+        if (c != gtk_paned_get_start_child(p) && c != gtk_paned_get_end_child(p)) return c;
+    return nullptr;
 }
 
-// Whether a press event lands on one of those handles: picked where it is,
-// as the paned's own drag takes it (a handle's wider grab area counts).
-inline bool press_on_handle(GtkWidget* first, GdkEvent* e)
+// Whether (x, y), in the paned's coordinates, is where GTK starts a mouse
+// drag of its divider: the handle, and a thin one's few pixels either side
+// (GtkPaned's HANDLE_EXTRA_SIZE, 6). GTK starts a touch drag in a wider
+// band; rapport counts a touch drag only from here, as a mouse's (#138).
+inline bool on_handle(GtkWidget* paned, double x, double y)
 {
-    GtkNative* native = gtk_widget_get_native(first);
-    double x = 0, y = 0, sx = 0, sy = 0;
-    if (!native || !gdk_event_get_position(e, &x, &y)) return false;
-    gtk_native_get_surface_transform(native, &sx, &sy);
-    return handle_picked(first, gtk_widget_pick(GTK_WIDGET(native), x - sx, y - sy, GTK_PICK_DEFAULT));
+    GtkWidget* handle = handle_of(paned);
+    graphene_rect_t r;
+    if (!handle || !gtk_widget_compute_bounds(handle, paned, &r)) return false;
+    if (!gtk_paned_get_wide_handle(GTK_PANED(paned))) graphene_rect_inset(&r, -6, -6);
+    const graphene_point_t at = GRAPHENE_POINT_INIT(float(x), float(y));
+    return graphene_rect_contains_point(&r, &at);
 }
 #else
 // GTK 3: a press on a handle comes on that paned's own handle window.

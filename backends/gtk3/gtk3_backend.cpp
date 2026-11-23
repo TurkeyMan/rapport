@@ -2238,7 +2238,10 @@ public:
     }
 
     // GtkPaned reports a drag no differently from layout, so a drag is a
-    // press and release on a divider with the position changed in between.
+    // press and release on a divider with the position moved by the drag
+    // in between: a position change made while the pointer moves with the
+    // button down (the paned dragging it, in that motion's handling), not
+    // one of rapport's own (set_sizes, a divider still being placed: #105).
     // A press that bubbles up from a pane (one its widget didn't take, held
     // while the window relaid them out) is no drag (#30).
     void on_moved(std::function<void()> f) override
@@ -2253,6 +2256,7 @@ public:
                 +[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
                 {
                     auto* self = static_cast<splitter_impl*>(p);
+                    self->dragged_ = false;
                     if (rap::gtk_split::press_on_handle(self->w_, e))
                         self->pressed_ = self->sizes();
                     else
@@ -2261,11 +2265,26 @@ public:
                 },
                 this);
             connect(
+                w, "notify::position",
+                +[](GObject* paned, GParamSpec*, gpointer p)
+                {
+                    auto* self = static_cast<splitter_impl*>(p);
+                    if (self->pressed_.empty() || g_object_get_data(paned, "rapport-own-position"))
+                        return;
+                    GdkEvent* e = gtk_get_current_event();
+                    if (e && (e->type == GDK_MOTION_NOTIFY || e->type == GDK_TOUCH_UPDATE))
+                        self->dragged_ = true;
+                    if (e) gdk_event_free(e);
+                },
+                this);
+            connect(
                 w, "button-release-event",
                 +[](GtkWidget*, GdkEventButton*, gpointer p) -> gboolean
                 {
                     auto* self = static_cast<splitter_impl*>(p);
-                    if (!self->pressed_.empty() && self->sizes() != self->pressed_ && self->moved_)
+                    const bool dragged = std::exchange(self->dragged_, false);
+                    if (dragged && !self->pressed_.empty() && self->sizes() != self->pressed_ &&
+                        self->moved_)
                         self->moved_();
                     self->pressed_.clear();
                     return false;
@@ -2308,6 +2327,7 @@ public:
 private:
     std::function<void()> moved_;
     std::vector<float> pressed_;  // the sizes when a button went down on it
+    bool dragged_ = false;        // the press's drag has moved a divider since
 };
 
 // A layout::tabs' pages: which are visible (set_page_visible) and whether
@@ -5144,8 +5164,17 @@ public:
                 auto* self = static_cast<canvas_impl*>(p);
                 self->allocated_ = true;
                 self->scale_ = device_scale_of(self->w_);
-                if (self->resize_) self->resize_({float(a->width), float(a->height)});
-                self->target_changed();
+                // Told once a splitter it's in has placed all its panes.
+                const size_f size{float(a->width), float(a->height)};
+                pane_sizes::now_or_after(self, self->alive_,
+                                         [self, size, alive = std::weak_ptr<bool>(self->alive_)]
+                                         {
+                                             // A copy: on_resize may destroy the canvas, and it with it.
+                                             if (auto f = self->resize_) f(size);
+                                             // on_resize may have destroyed it (its window, say).
+                                             const std::shared_ptr<bool> still = alive.lock();
+                                             if (still && *still) self->target_changed();
+                                         });
             },
             this);
         connect(
@@ -6391,7 +6420,7 @@ private:
         for (size_t i = 0; i < split.paneds.size(); ++i)
         {
             int size = split.stretch[i] > 0 ? avail * split.stretch[i] / stretch_sum : natural[i];
-            gtk_paned_set_position(split.paneds[i], size);
+            set_own_position(split.paneds[i], size);  // the first layout, not a drag
         }
     }
 
@@ -6408,6 +6437,7 @@ private:
         // keep their size when the window grows.
         const bool rest_stretch = std::any_of(s.panes.begin() + std::ptrdiff_t(from + 1), s.panes.end(),
                                              [](auto& p) { return p.common.stretch > 0; });
+        paneds::watch();  // its panes told their sizes once all are placed (#105)
         GtkWidget* paned = gtk_paned_new(gtk_orientation(s.dir));
         auto* p = GTK_PANED(paned);
         // Thin: the theme's narrow handle, a line (Adwaita's 1 px), which

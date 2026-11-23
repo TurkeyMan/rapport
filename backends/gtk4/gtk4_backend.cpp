@@ -2552,11 +2552,15 @@ public:
     {
     }
 
-    // GtkPaned reports a drag no differently from layout, so a drag is a
-    // press and release on a divider with the position changed in between,
-    // seen in the capture phase before the paned's own gesture takes them.
-    // A press anywhere else in the panes (a button in one, held while the
-    // window relaid them out) is no drag (#30).
+    // GtkPaned reports a drag no differently from layout, so a drag is the
+    // paned's own: its drag gestures (the mouse's, and touch's pan). GTK
+    // lets the mouse's go on only from that paned's handle (a thin one's
+    // few pixels either side too); touch's from a wider band, counted only
+    // from the mouse's (split_handle.h, on_handle). A press anywhere else in
+    // the panes (a button in one, held while the window relaid them out),
+    // or on another splitter's handle, is no drag (#30). It's begun, moved
+    // the divider (a drag-update: the pointer moved with it; set_sizes
+    // meanwhile isn't one, #105) and ended with the sizes changed.
     void on_moved(std::function<void()> f) override
     {
         const bool first = !moved_;
@@ -2564,32 +2568,14 @@ public:
         if (!first) return;
         for (GtkWidget* w = w_; w; w = next_in_split(w))
         {
-            GtkEventController* watch = gtk_event_controller_legacy_new();
-            gtk_event_controller_set_propagation_phase(watch, GTK_PHASE_CAPTURE);
-            connect(
-                watch, "event",
-                +[](GtkEventControllerLegacy*, GdkEvent* e, gpointer p) -> gboolean
-                {
-                    auto* self = static_cast<splitter_impl*>(p);
-                    const GdkEventType type = gdk_event_get_event_type(e);
-                    if (type == GDK_BUTTON_PRESS)
-                    {
-                        if (rap::gtk_split::press_on_handle(self->w_, e))
-                            self->pressed_ = self->sizes();
-                        else
-                            self->pressed_.clear();
-                    }
-                    else if (type == GDK_BUTTON_RELEASE)
-                    {
-                        if (!self->pressed_.empty() && self->sizes() != self->pressed_ &&
-                            self->moved_)
-                            self->moved_();
-                        self->pressed_.clear();
-                    }
-                    return false;
-                },
-                this);
-            gtk_widget_add_controller(w, watch);
+            GListModel* controllers = gtk_widget_observe_controllers(w);
+            for (guint i = 0, n = g_list_model_get_n_items(controllers); i < n; ++i)
+            {
+                auto* c = static_cast<GObject*>(g_list_model_get_item(controllers, i));
+                if (GTK_IS_GESTURE_DRAG(c)) watch_drag(c);
+                g_object_unref(c);
+            }
+            g_object_unref(controllers);
         }
     }
 
@@ -2634,7 +2620,48 @@ private:
         return false;
     }
     std::function<void()> moved_;
-    std::vector<float> pressed_;  // the sizes when a button went down on it
+    std::vector<float> pressed_;  // the sizes when a drag of a divider began
+    bool dragged_ = false;        // the drag has moved since
+    bool counted_ = true;         // the drag began where a mouse's can (touch's band is wider)
+
+    // One of a paned's drag gestures, watched after the paned's own handlers
+    // (connected after them), so the position is the drag's.
+    void watch_drag(GObject* gesture)
+    {
+        connect(
+            gesture, "drag-begin",
+            +[](GtkGestureDrag* g, double x, double y, gpointer p)
+            {
+                auto* self = static_cast<splitter_impl*>(p);
+                self->pressed_ = self->sizes();
+                self->dragged_ = false;
+                // Touch's pan starts in a wider band than the mouse's drag:
+                // counted only from where a mouse drag starts.
+                GtkWidget* paned = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+                self->counted_ = !GTK_IS_GESTURE_PAN(g) || ::rap::gtk_split::on_handle(paned, x, y);
+            },
+            this);
+        connect(
+            gesture, "drag-update",
+            +[](GtkGestureDrag*, double, double, gpointer p)
+            {
+                auto* self = static_cast<splitter_impl*>(p);
+                if (self->counted_) self->dragged_ = true;
+            },
+            this);
+        connect(
+            gesture, "drag-end",
+            +[](GtkGestureDrag*, double, double, gpointer p)
+            {
+                auto* self = static_cast<splitter_impl*>(p);
+                const bool dragged = std::exchange(self->dragged_, false);
+                // (No sizes from its beginning: they can't have been the same.)
+                const bool changed = self->pressed_.empty() || self->sizes() != self->pressed_;
+                self->pressed_.clear();
+                if (dragged && changed && self->moved_) self->moved_();
+            },
+            this);
+    }
 };
 
 // Which pages show (rap::tabs::set_page_visible) and whether the strip does
@@ -5348,8 +5375,17 @@ public:
             {
                 auto* self = static_cast<canvas_impl*>(p);
                 self->scale_ = device_scale_of(self->w_);
-                if (self->resize_) self->resize_({float(w), float(h)});
-                self->target_changed();
+                // Told once a splitter it's in has placed all its panes.
+                const size_f size{float(w), float(h)};
+                pane_sizes::now_or_after(self, self->alive_,
+                                         [self, size, alive = std::weak_ptr<bool>(self->alive_)]
+                                         {
+                                             // A copy: on_resize may destroy the canvas, and it with it.
+                                             if (auto f = self->resize_) f(size);
+                                             // on_resize may have destroyed it (its window, say).
+                                             const std::shared_ptr<bool> still = alive.lock();
+                                             if (still && *still) self->target_changed();
+                                         });
             },
             this);
         focusable_ = s.focusable;
@@ -6477,6 +6513,7 @@ private:
         // keep their size when the window grows.
         const bool rest_stretch = std::any_of(s.panes.begin() + std::ptrdiff_t(from + 1), s.panes.end(),
                                              [](auto& p) { return p.common.stretch > 0; });
+        paneds::watch();  // its panes told their sizes once all are placed (#105)
         GtkWidget* paned = gtk_paned_new(gtk_orientation(s.dir));
         auto* p = GTK_PANED(paned);
         // Thin: the theme's narrow handle, a line (Adwaita's 1 px), which
