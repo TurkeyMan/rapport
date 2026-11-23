@@ -151,6 +151,48 @@ namespace
 using namespace gtkcommon;
 
 // TODO: take accent and contrast from the settings portal.
+
+// A GTK widget can outlive the rapport object made for it (a reference
+// kept elsewhere, teardown left to GTK), and GTK goes on calling what it
+// was given. So every connection or callback that reaches a rapport object
+// is one of two (#140):
+// - a tracked connection (connect, connect_after), which disconnect() takes
+//   off before the object goes: for what lives with the object's widgets;
+// - or one holding a self_token's weak reference, emptied as the object
+//   goes: for what GTK makes, recycles or keeps on its own (a list's or a
+//   tree's rows, a document tab's buttons, a popover), and what isn't a
+//   signal (a drawing area's draw func, a model's function), which
+//   disconnect() can't reach. A draw func can also be cleared as it goes.
+// Never the raw pointer with a flag in the object to say it's gone: reading
+// the flag is reading the freed object.
+template <class T>
+class self_token
+{
+public:
+    explicit self_token(T* self)
+        : self_(std::make_shared<T*>(self))
+    {
+    }
+    ~self_token() { forget(); }
+    self_token(const self_token&) = delete;
+    self_token& operator=(const self_token&) = delete;
+
+    void forget() { *self_ = nullptr; }  // from now on live() is nullptr
+    // For a callback's data: a weak reference, freed by drop (a closure's
+    // destroy notify) or drop_data (a GDestroyNotify).
+    gpointer make() const { return new std::weak_ptr<T*>(self_); }
+    static void drop(gpointer p, GClosure*) { drop_data(p); }
+    static void drop_data(gpointer p) { delete static_cast<std::weak_ptr<T*>*>(p); }
+    // The object, while it's there.
+    static T* live(gpointer p)
+    {
+        const std::shared_ptr<T*> self = static_cast<std::weak_ptr<T*>*>(p)->lock();
+        return self ? *self : nullptr;
+    }
+
+private:
+    std::shared_ptr<T*> self_;
+};
 }  // namespace
 }  // namespace rap::gtk4
 
@@ -1038,10 +1080,18 @@ public:
         : widget_base(nullptr, gtk_scrolled_window_new())
     {
         root_ = g_list_store_new(GTK_TYPE_STRING_OBJECT);
-        model_ = gtk_tree_list_model_new(G_LIST_MODEL(g_object_ref(root_)), false, false,
-                                         +[](gpointer item, gpointer p) -> GListModel*
-                                         { return static_cast<tree_impl*>(p)->children_of(item); },
-                                         this, nullptr);
+        // The model's child function isn't a signal: the model, and the
+        // views holding it, may outlive this (#140). It asks through
+        // `children_`, which forgets this as it goes.
+        children_ = new children_source{this};
+        model_ = gtk_tree_list_model_new(
+            G_LIST_MODEL(g_object_ref(root_)), false, false,
+            +[](gpointer item, gpointer p) -> GListModel*
+            {
+                tree_impl* tree = static_cast<children_source*>(p)->tree;
+                return tree ? tree->children_of(item) : nullptr;
+            },
+            children_, +[](gpointer p) { delete static_cast<children_source*>(p); });
         sel_ = gtk_single_selection_new(G_LIST_MODEL(g_object_ref(model_)));
         gtk_single_selection_set_autoselect(sel_, false);
         gtk_single_selection_set_can_unselect(sel_, true);
@@ -1121,6 +1171,8 @@ public:
     }
     ~tree_impl() override
     {
+        children_->tree = nullptr;  // before the model may go, and it with it
+        self_.forget();
         g_object_unref(sel_);
         g_object_unref(model_);
         g_object_unref(root_);
@@ -1324,12 +1376,26 @@ protected:
     void on_disconnect() override
     {
         alive_ = false;
+        self_.forget();  // its rows' callbacks reach nothing from here
+        children_->tree = nullptr;
         path_icons_.cancel();
         if (popover_) gtk_widget_unparent(popover_);
         popover_ = nullptr;
     }
 
 private:
+    struct children_source
+    {
+        tree_impl* tree;  // nullptr once it's gone
+    };
+    children_source* children_ = nullptr;  // the model's (it frees it)
+    // The rows' own signals (a row's box, its right-click, its expanding):
+    // GTK recycles and drops rows, so they aren't the window's connections
+    // (connect), and a row may outlive this (#140): each holds the token.
+    self_token<tree_impl> self_{this};
+    gpointer token() const { return self_.make(); }
+    static constexpr auto drop_token = &self_token<tree_impl>::drop;
+    static tree_impl* live(gpointer p) { return self_token<tree_impl>::live(p); }
     struct node
     {
         std::string label;
@@ -1549,8 +1615,8 @@ private:
     // lazy_ itself.
     static void row_expanded(GtkTreeListRow* row, GParamSpec*, gpointer p)
     {
-        auto* self = static_cast<tree_impl*>(p);
-        if (!self->alive_ || !gtk_tree_list_row_get_expanded(row)) return;
+        tree_impl* self = live(p);
+        if (!self || !gtk_tree_list_row_get_expanded(row)) return;
         const std::string id = id_of(row);
 #if GTK_CHECK_VERSION(4, 10, 0)
         // Every row can open now; the keyboard shouldn't open one with nothing in it.
@@ -1574,7 +1640,8 @@ private:
         gtk_widget_set_focusable(check, false);
         gtk_widget_set_visible(check, false);
         g_object_set_data(G_OBJECT(check), "rapport-item", li);
-        g_signal_connect(check, "toggled", G_CALLBACK(check_toggled), this);
+        g_signal_connect_data(check, "toggled", G_CALLBACK(check_toggled), token(), drop_token,
+                              GConnectFlags(0));
         boxes_.push_back(GTK_WIDGET(g_object_ref(check)));  // a row can go before its teardown
         GtkWidget* label = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(label), 0);
@@ -1592,13 +1659,14 @@ private:
         GtkGesture* click = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
         g_object_set_data(G_OBJECT(click), "rapport-item", li);
-        g_signal_connect(click, "pressed", G_CALLBACK(row_pressed), this);
+        g_signal_connect_data(click, "pressed", G_CALLBACK(row_pressed), token(), drop_token,
+                              GConnectFlags(0));
         gtk_widget_add_controller(expander, GTK_EVENT_CONTROLLER(click));
     }
     static void row_pressed(GtkGestureClick* g, int, double x, double y, gpointer p)
     {
-        auto* self = static_cast<tree_impl*>(p);
-        if (!self->alive_) return;
+        tree_impl* self = live(p);
+        if (!self) return;
         gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
         auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(g), "rapport-item"));
         const guint pos = gtk_list_item_get_position(li);
@@ -1615,8 +1683,8 @@ private:
     // and the app says what the click means.
     static void check_toggled(GtkCheckButton* b, gpointer p)
     {
-        auto* self = static_cast<tree_impl*>(p);
-        if (!self->alive_ || self->binding_) return;
+        tree_impl* self = live(p);
+        if (!self || self->binding_) return;
         auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
         const guint pos = li ? gtk_list_item_get_position(li) : GTK_INVALID_LIST_POSITION;
         if (pos == GTK_INVALID_LIST_POSITION) return;
@@ -1672,7 +1740,8 @@ private:
         if (!g_object_get_data(G_OBJECT(row), "rapport-watched"))
         {
             g_object_set_data(G_OBJECT(row), "rapport-watched", GINT_TO_POINTER(1));
-            g_signal_connect(row, "notify::expanded", G_CALLBACK(row_expanded), this);
+            g_signal_connect_data(row, "notify::expanded", G_CALLBACK(row_expanded), token(),
+                                  drop_token, GConnectFlags(0));
         }
     }
     guint rows() const { return g_list_model_get_n_items(G_LIST_MODEL(model_)); }
