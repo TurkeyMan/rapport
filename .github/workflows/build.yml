@@ -109,6 +109,7 @@ jobs:
           export G_DEBUG=fatal-criticals
           xvfb-run -a env GDK_BACKEND=x11 RAPPORT_BACKEND=gtk4 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-sizes-in-resize-test
           xvfb-run -a env GDK_BACKEND=x11 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-moved-test-gtk4
+          xvfb-run -a env GDK_BACKEND=x11 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-outlived-widgets-test-gtk4
 
   # MSVC as plugins, with the shared runtime a plugin build needs (std:: types
   # cross its DLLs, #136), and statically linked with the static runtime, as
