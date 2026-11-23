@@ -1120,7 +1120,7 @@ public:
                 std::erase_if(self->boxes_,
                               [li](GtkWidget* b)
                               {
-                                  if (g_object_get_data(G_OBJECT(b), "rapport-item") != li) return false;
+                                  if (item_of(b) != GTK_LIST_ITEM(li)) return false;
                                   g_object_unref(b);
                                   return true;
                               });
@@ -1373,7 +1373,7 @@ public:
         // The row showing it, if one is.
         for (GtkWidget* b : boxes_)
         {
-            auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
+            auto* li = item_of(b);
             auto* row = li ? GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)) : nullptr;
             if (row && id_of(row) == id) show_check(b, st);
         }
@@ -1392,6 +1392,28 @@ protected:
     }
 
 private:
+    // A row's box and right-click gesture know their list item weakly: GTK
+    // tears items down and recycles them, and a box or gesture held
+    // elsewhere may outlive it (#140). nullptr once it's gone.
+    static void set_item(GObject* o, GtkListItem* li)
+    {
+        auto* ref = new GWeakRef;
+        g_weak_ref_init(ref, li);
+        g_object_set_data_full(
+            o, "rapport-item", ref,
+            +[](gpointer p)
+            {
+                g_weak_ref_clear(static_cast<GWeakRef*>(p));
+                delete static_cast<GWeakRef*>(p);
+            });
+    }
+    static GtkListItem* item_of(gpointer o)
+    {
+        auto* ref = static_cast<GWeakRef*>(g_object_get_data(G_OBJECT(o), "rapport-item"));
+        GObject* li = ref ? static_cast<GObject*>(g_weak_ref_get(ref)) : nullptr;
+        if (li) g_object_unref(li);  // held by its view while it's there
+        return li ? GTK_LIST_ITEM(li) : nullptr;
+    }
     struct children_source
     {
         tree_impl* tree;  // nullptr once it's gone
@@ -1613,7 +1635,7 @@ private:
     {
         for (GtkWidget* b : boxes_)
         {
-            auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
+            auto* li = item_of(b);
             auto* row = li ? GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)) : nullptr;
             if (row && !is_placeholder(row) && id_of(row) == id) bind_row(li);
         }
@@ -1647,7 +1669,7 @@ private:
         GtkWidget* check = gtk_check_button_new();
         gtk_widget_set_focusable(check, false);
         gtk_widget_set_visible(check, false);
-        g_object_set_data(G_OBJECT(check), "rapport-item", li);
+        set_item(G_OBJECT(check), li);
         g_signal_connect_data(check, "toggled", G_CALLBACK(check_toggled), token(), drop_token,
                               GConnectFlags(0));
         boxes_.push_back(GTK_WIDGET(g_object_ref(check)));  // a row can go before its teardown
@@ -1666,7 +1688,7 @@ private:
         // view.
         GtkGesture* click = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
-        g_object_set_data(G_OBJECT(click), "rapport-item", li);
+        set_item(G_OBJECT(click), li);
         g_signal_connect_data(click, "pressed", G_CALLBACK(row_pressed), token(), drop_token,
                               GConnectFlags(0));
         gtk_widget_add_controller(expander, GTK_EVENT_CONTROLLER(click));
@@ -1676,8 +1698,8 @@ private:
         tree_impl* self = live(p);
         if (!self) return;
         gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-        auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(g), "rapport-item"));
-        const guint pos = gtk_list_item_get_position(li);
+        auto* li = item_of(g);
+        const guint pos = li ? gtk_list_item_get_position(li) : GTK_INVALID_LIST_POSITION;
         if (pos == GTK_INVALID_LIST_POSITION) return;
         if (auto* item = GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)); item && is_placeholder(item)) return;
         if (gtk_single_selection_get_selected(self->sel_) != pos)
@@ -1693,7 +1715,7 @@ private:
     {
         tree_impl* self = live(p);
         if (!self || self->binding_) return;
-        auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
+        auto* li = item_of(b);
         const guint pos = li ? gtk_list_item_get_position(li) : GTK_INVALID_LIST_POSITION;
         if (pos == GTK_INVALID_LIST_POSITION) return;
         const std::string id = self->id_at(pos);
