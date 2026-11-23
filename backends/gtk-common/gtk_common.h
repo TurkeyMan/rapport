@@ -1071,11 +1071,10 @@ template <class F, class... A>
 bool call_app(const std::shared_ptr<bool>& life, const F& f, A&&... args)
 {
     const std::weak_ptr<bool> alive = life;
-    if (f)
-    {
-        F copy = f;
-        copy(std::forward<A>(args)...);
-    }
+    if constexpr (std::is_constructible_v<bool, const F&>)  // a std::function: may be empty
+        if (!f) return still_there(alive);
+    F copy = f;
+    copy(std::forward<A>(args)...);
     return still_there(alive);
 }
 template <class F, class... A>
