@@ -108,6 +108,35 @@ int main()
            "a callback's resizes told after the rest, by the same delivery (" + told + ")");
     expect(deepest == 1, "no telling inside another (" + std::to_string(deepest) + " deep)");
 
+    // Only one waiting, its callback resizing another: that's told once it
+    // returns, by the same delivery, not inside it (with nothing left after
+    // it in the queue, the delivery is still under way).
+    told.clear();
+    deepest = depth = 0;
+    {
+        ps::placing_scope scope;
+        ps::now_or_after(&a, a.alive,
+                         [&]
+                         {
+                             deepest = std::max(deepest, ++depth);
+                             told += (told.empty() ? "" : " ") + std::string("A1");
+                             ps::now_or_after(&c, c.alive,
+                                              [&]
+                                              {
+                                                  deepest = std::max(deepest, ++depth);
+                                                  told += " C1";
+                                                  --depth;
+                                              });
+                             told += " A1-done";
+                             --depth;
+                         });
+    }
+    expect(told == "A1 A1-done C1",
+           "the only one waiting, its callback resizing another: told after it returns (" + told +
+               ")");
+    expect(deepest == 1, "and not inside it (" + std::to_string(deepest) + " deep)");
+    expect(ps::queue.empty() && !ps::delivering, "nothing left waiting, the delivery over");
+
     // Gone, or marked gone: not told.
     told.clear();
     {

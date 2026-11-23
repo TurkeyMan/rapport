@@ -85,7 +85,7 @@ struct placing_held
 // after its newer one.
 inline void now_or_after(const void* pane, std::weak_ptr<bool> alive, std::function<void()> tell)
 {
-    if (!placing && next >= queue.size())
+    if (!placing && !delivering && queue.empty())
     {
         tell();
         return;
