@@ -3858,19 +3858,18 @@ public:
             // the selection's new state comes from.
             GtkEventController* space = gtk_event_controller_key_new();
             gtk_event_controller_set_propagation_phase(space, GTK_PHASE_CAPTURE);
-            g_signal_connect(
+            connect(
                 space, "key-pressed",
-                G_CALLBACK(+[](GtkEventControllerKey*, guint key, guint, GdkModifierType mods,
-                               gpointer p) -> gboolean
-                           {
-                               auto* self = static_cast<list_impl*>(p);
-                               if (key != GDK_KEY_space ||
-                                   (mods & gtk_accelerator_get_default_mod_mask()) || !self->model_)
-                                   return false;
-                               if (auto row = self->focused_row())
-                                   self->model_->toggle_checked(*row);
-                               return true;
-                           }),
+                +[](GtkEventControllerKey*, guint key, guint, GdkModifierType mods,
+                    gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<list_impl*>(p);
+                    if (key != GDK_KEY_space || (mods & gtk_accelerator_get_default_mod_mask()) ||
+                        !self->model_)
+                        return false;
+                    if (auto row = self->focused_row()) self->model_->toggle_checked(*row);
+                    return true;
+                },
                 this);
             gtk_widget_add_controller(w_, space);
         }
@@ -4200,24 +4199,32 @@ public:
         GtkGesture* click = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_MIDDLE);
         gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
-        g_signal_connect(click, "pressed", G_CALLBACK(+[](GtkGestureClick* g, int, double, double y, gpointer p)
-                                                       {
-                                                           auto* self = static_cast<list_impl*>(p);
-                                                           gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-                                                           self->start_auto_scroll(y);
-                                                       }),
-                         this);
-        g_signal_connect(click, "released", G_CALLBACK(+[](GtkGestureClick*, int, double, double, gpointer p)
-                                                        { static_cast<list_impl*>(p)->stop_auto_scroll(); }),
-                         this);
-        g_signal_connect(click, "cancel", G_CALLBACK(+[](GtkGesture*, GdkEventSequence*, gpointer p)
-                                                      { static_cast<list_impl*>(p)->stop_auto_scroll(); }),
-                         this);
+        connect(
+            click, "pressed",
+            +[](GtkGestureClick* g, int, double, double y, gpointer p)
+            {
+                auto* self = static_cast<list_impl*>(p);
+                gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+                self->start_auto_scroll(y);
+            },
+            this);
+        connect(
+            click, "released",
+            +[](GtkGestureClick*, int, double, double, gpointer p)
+            { static_cast<list_impl*>(p)->stop_auto_scroll(); },
+            this);
+        connect(
+            click, "cancel",
+            +[](GtkGesture*, GdkEventSequence*, gpointer p)
+            { static_cast<list_impl*>(p)->stop_auto_scroll(); },
+            this);
         gtk_widget_add_controller(w_, GTK_EVENT_CONTROLLER(click));
         GtkEventController* motion = gtk_event_controller_motion_new();
-        g_signal_connect(motion, "motion", G_CALLBACK(+[](GtkEventControllerMotion*, double, double y, gpointer p)
-                                                       { static_cast<list_impl*>(p)->auto_y = y; }),
-                         this);
+        connect(
+            motion, "motion",
+            +[](GtkEventControllerMotion*, double, double y, gpointer p)
+            { static_cast<list_impl*>(p)->auto_y = y; },
+            this);
         gtk_widget_add_controller(w_, motion);
     }
     void start_auto_scroll(double y)
@@ -4263,26 +4270,34 @@ public:
         {
             GtkGesture* drag = gtk_gesture_drag_new();
             gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), GDK_BUTTON_PRIMARY);
-            g_signal_connect(drag, "drag-begin", G_CALLBACK(+[](GtkGestureDrag* g, double x, double y, gpointer p)
-                                                            { static_cast<list_impl*>(p)->cell_drag_begin(g, x, y); }),
-                             this);
-            g_signal_connect(drag, "drag-update", G_CALLBACK(+[](GtkGestureDrag* g, double dx, double dy, gpointer p)
-                                                             { static_cast<list_impl*>(p)->cell_drag_update(g, dx, dy); }),
-                             this);
-            g_signal_connect(drag, "drag-end", G_CALLBACK(+[](GtkGestureDrag*, double, double, gpointer p)
-                                                          { static_cast<list_impl*>(p)->cell_drag_end(true); }),
-                             this);
+            connect(
+                drag, "drag-begin",
+                +[](GtkGestureDrag* g, double x, double y, gpointer p)
+                { static_cast<list_impl*>(p)->cell_drag_begin(g, x, y); },
+                this);
+            connect(
+                drag, "drag-update",
+                +[](GtkGestureDrag* g, double dx, double dy, gpointer p)
+                { static_cast<list_impl*>(p)->cell_drag_update(g, dx, dy); },
+                this);
+            connect(
+                drag, "drag-end",
+                +[](GtkGestureDrag*, double, double, gpointer p)
+                { static_cast<list_impl*>(p)->cell_drag_end(true); },
+                this);
             gtk_widget_add_controller(w_, GTK_EVENT_CONTROLLER(drag));
             GtkEventController* keys = gtk_event_controller_key_new();
-            g_signal_connect(keys, "key-pressed",
-                             G_CALLBACK(+[](GtkEventControllerKey*, guint key, guint, GdkModifierType, gpointer p) -> gboolean
-                                        {
-                                            auto* self = static_cast<list_impl*>(p);
-                                            if (key != GDK_KEY_Escape || !self->cell_.dragging) return false;
-                                            self->cell_drag_end(false);
-                                            return true;
-                                        }),
-                             this);
+            connect(
+                keys, "key-pressed",
+                +[](GtkEventControllerKey*, guint key, guint, GdkModifierType,
+                    gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<list_impl*>(p);
+                    if (key != GDK_KEY_Escape || !self->cell_.dragging) return false;
+                    self->cell_drag_end(false);
+                    return true;
+                },
+                this);
             gtk_widget_add_controller(w_, keys);
         }
         cell_drag_ = std::move(d);
@@ -4340,6 +4355,7 @@ protected:
         *life_ = false;
         path_icons_.cancel();
         stop_dnd_tick();
+        stop_auto_scroll();  // a tick callback: not a signal (#140)
         set_line(nullptr, nullptr);
         end_drag_out();
         if (resnap_) g_source_remove(std::exchange(resnap_, 0));
@@ -4353,6 +4369,25 @@ private:
         list_impl* list;
         size_t column;
         bool painted;
+    };
+    // What a cell's own callbacks hold, not the list: GTK recycles and
+    // keeps cells, so they aren't the list's connections (connect), and a
+    // cell may outlive the list (#140). Its column while the list's there.
+    struct cell_ref
+    {
+        std::weak_ptr<bool> life;
+        column_ctx* ctx;
+        column_ctx* live() const
+        {
+            const std::shared_ptr<bool> l = life.lock();
+            return l && *l ? ctx : nullptr;
+        }
+        static gpointer make(const std::shared_ptr<bool>& life, column_ctx& ctx)
+        {
+            return new cell_ref{life, &ctx};
+        }
+        static void drop(gpointer p) { delete static_cast<cell_ref*>(p); }
+        static void drop_closure(gpointer p, GClosure*) { drop(p); }
     };
 
     // The cell widget at a point of the column view, its row and column.
@@ -5087,14 +5122,16 @@ private:
                                                 int(g_metrics.line_height + 0.5f));
             gtk_widget_set_hexpand(area, true);
             gtk_widget_set_vexpand(area, true);
+            // Not a signal, so not taken off with the list's: the cell may
+            // outlive the list (#140). It draws only while the list's there.
             gtk_drawing_area_set_draw_func(
                 GTK_DRAWING_AREA(area),
                 +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
                 {
-                    static_cast<column_ctx*>(p)->list->draw_cell(area, cr, w, h,
-                                                               *static_cast<column_ctx*>(p));
+                    if (column_ctx* c = static_cast<cell_ref*>(p)->live())
+                        c->list->draw_cell(area, cr, w, h, *c);
                 },
-                &ctx, nullptr);
+                cell_ref::make(life_, ctx), cell_ref::drop);
             child = GTK_WIDGET(g_object_new(rapport_cell_get_type(), nullptr));
             gtk_box_append(GTK_BOX(child), area);
             g_object_set_data(G_OBJECT(child), "rapport-area", area);
@@ -5123,18 +5160,20 @@ private:
                 gtk_widget_set_focusable(check, false);
                 gtk_box_append(GTK_BOX(child), check);
                 g_object_set_data(G_OBJECT(child), "rapport-check", check);
-                g_signal_connect(
+                g_signal_connect_data(
                     check, "toggled",
                     G_CALLBACK(+[](GtkCheckButton* b, gpointer p)
                                {
                                    if (g_object_get_data(G_OBJECT(b), "rapport-binding")) return;
-                                   auto* self = static_cast<column_ctx*>(p)->list;
+                                   column_ctx* c = static_cast<cell_ref*>(p)->live();
+                                   if (!c) return;
+                                   auto* self = c->list;
                                    GtkWidget* cell = gtk_widget_get_parent(GTK_WIDGET(b));
                                    const size_t tagged = row_of(cell);
                                    if (self->model_ && tagged > 0)
                                        self->model_->toggle_checked(tagged - 1);
                                }),
-                    &ctx);
+                    cell_ref::make(life_, ctx), cell_ref::drop_closure, GConnectFlags(0));
             }
             // Over the icon, the model's drawing in its place (an icon
             // without a file or name) and its overlay (a badge). The drawing
@@ -5169,14 +5208,16 @@ private:
 
         GtkGesture* click = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
-        g_signal_connect(click, "pressed",
-                         G_CALLBACK(+[](GtkGestureClick* g, int, double x, double y, gpointer p)
-                                    {
-                                        auto* cell = gtk_event_controller_get_widget(
-                                            GTK_EVENT_CONTROLLER(g));
-                                        static_cast<column_ctx*>(p)->list->context_menu_at(cell, x, y);
-                                    }),
-                         &ctx);
+        g_signal_connect_data(
+            click, "pressed",
+            G_CALLBACK(+[](GtkGestureClick* g, int, double x, double y, gpointer p)
+                       {
+                           column_ctx* c = static_cast<cell_ref*>(p)->live();
+                           if (!c) return;
+                           auto* cell = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+                           c->list->context_menu_at(cell, x, y);
+                       }),
+            cell_ref::make(life_, ctx), cell_ref::drop_closure, GConnectFlags(0));
         gtk_widget_add_controller(child, GTK_EVENT_CONTROLLER(click));
 
         g_object_set_data(G_OBJECT(child), "rapport-ctx", &ctx);
