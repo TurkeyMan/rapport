@@ -5533,7 +5533,14 @@ public:
                 if (self->scale_ > 0 && scale != self->scale_)
                 {
                     self->scale_ = scale;
-                    if (self->resize_) self->resize_({float(w), float(h)});
+                    if (auto f = self->resize_)
+                    {
+                        const std::weak_ptr<bool> alive = self->alive_;
+                        f({float(w), float(h)});
+                        // The app's on_resize may have destroyed it (#140).
+                        const std::shared_ptr<bool> still = alive.lock();
+                        if (!still || !*still) return;
+                    }
                     self->target_changed();
                 }
                 // The frame and the painting go on the whole device pixels;
