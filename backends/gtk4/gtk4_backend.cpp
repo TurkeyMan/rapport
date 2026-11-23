@@ -774,9 +774,7 @@ public:
     }
     ~menu_actions()
     {
-        // The group's the owner widget's too, which may outlive this; its
-        // actions point at this's items, so they go with it (#140).
-        for (auto& name : names_) g_action_map_remove_action(G_ACTION_MAP(group_), name.c_str());
+        drop_actions();
         g_object_unref(group_);
     }
     menu_actions(const menu_actions&) = delete;
@@ -785,13 +783,28 @@ public:
     // A new model for `menu`; the caller owns the reference.
     GMenu* build(menu menu)
     {
-        for (auto& name : names_) g_action_map_remove_action(G_ACTION_MAP(group_), name.c_str());
-        names_.clear();
+        drop_actions();
         menu_ = std::move(menu);
         return model(menu_);
     }
 
 private:
+    // The actions made for menu_'s items, which they point at: out of the
+    // group, and their activate taken off, as the items go (a new menu, or
+    // this). The group is the owner widget's too, which may outlive this,
+    // and an action may be held elsewhere (#140).
+    void drop_actions()
+    {
+        for (auto& name : names_) g_action_map_remove_action(G_ACTION_MAP(group_), name.c_str());
+        names_.clear();
+        for (auto [action, handler] : actions_)
+        {
+            g_signal_handler_disconnect(action, handler);
+            g_object_unref(action);
+        }
+        actions_.clear();
+    }
+
     GMenu* model(const menu& items)
     {
         GMenu* top = g_menu_new();
@@ -825,15 +838,16 @@ private:
                 item.checked ? g_simple_action_new_stateful(name.c_str(), nullptr, g_variant_new_boolean(*item.checked))
                              : g_simple_action_new(name.c_str(), nullptr);
             g_simple_action_set_enabled(action, item.enabled && item.action);
-            g_signal_connect(action, "activate",
-                             G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer p)
-                                        {
-                                            auto* mi = static_cast<const menu_item*>(p);
-                                            if (mi->action) mi->action();
-                                        }),
-                             const_cast<menu_item*>(&item));
+            const gulong handler =
+                g_signal_connect(action, "activate",
+                                 G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer p)
+                                            {
+                                                auto* mi = static_cast<const menu_item*>(p);
+                                                if (mi->action) mi->action();
+                                            }),
+                                 const_cast<menu_item*>(&item));
             g_action_map_add_action(G_ACTION_MAP(group_), G_ACTION(action));
-            g_object_unref(action);
+            actions_.push_back({action, handler});  // this's reference, dropped with it
             GMenuItem* mi = g_menu_item_new(item.label.c_str(), (prefix_ + "." + name).c_str());
             if (!item.shortcut.empty()) g_menu_item_set_attribute(mi, "accel", "s", gtk_accel(item.shortcut).c_str());
             g_menu_append_item(section, mi);
@@ -847,6 +861,7 @@ private:
     std::string prefix_;
     GSimpleActionGroup* group_;
     std::vector<std::string> names_;
+    std::vector<std::pair<GSimpleAction*, gulong>> actions_;  // menu_'s, with their activate
     menu menu_;
 };
 
@@ -883,6 +898,14 @@ public:
         attach_menu(GTK_MENU_BUTTON(w_), &actions_, &menu_fn_);
     }
 
+protected:
+    // The create-popup func isn't a signal, and points at this (#140).
+    void on_disconnect() override
+    {
+        gtk_menu_button_set_create_popup_func(GTK_MENU_BUTTON(w_), nullptr, nullptr, nullptr);
+    }
+
+public:
     void set_text(const std::string& t) override
     {
         if (shown_ && text_ == t) return;  // (#88)
@@ -5997,6 +6020,12 @@ public:
         std::erase(recent(), win_);
         for (auto& part : parts) part->disconnect();
         disconnect();
+        // The menu bar's create-popup funcs aren't signals, and point at
+        // bars, which go with this; its buttons may outlive it (#140).
+        for (auto& bar : bars)
+            if (bar->button)
+                gtk_menu_button_set_create_popup_func(GTK_MENU_BUTTON(bar->button), nullptr,
+                                                      nullptr, nullptr);
         gtk_window_destroy(GTK_WINDOW(win_));
     }
 
@@ -6263,6 +6292,7 @@ public:
             gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(button), false);
             bar->actions = std::make_unique<menu_actions>(button, "bar");
             attach_menu(GTK_MENU_BUTTON(button), bar->actions.get(), &bar->fn);
+            bar->button = button;
             gtk_box_append(GTK_BOX(menu_bar), button);
             bars.push_back(std::move(bar));
         }
@@ -6419,6 +6449,7 @@ public:
     {
         std::function<menu()> fn;
         std::unique_ptr<menu_actions> actions;
+        GtkWidget* button = nullptr;  // its create-popup func points at fn and actions (#140)
     };
     GtkWidget* menu_bar = nullptr;
     GtkWidget* header_bar = nullptr;  // GNOME's, when the window has one
