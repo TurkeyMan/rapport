@@ -2553,8 +2553,10 @@ public:
     }
 
     // GtkPaned reports a drag no differently from layout, so a drag is the
-    // paned's own: its drag gestures (the mouse's, and touch's pan), which
-    // GTK lets go on only from that paned's handle. A press anywhere else in
+    // paned's own: its drag gestures (the mouse's, and touch's pan). GTK
+    // lets the mouse's go on only from that paned's handle (a thin one's
+    // few pixels either side too); touch's from a wider band, counted only
+    // from the mouse's (split_handle.h, on_handle). A press anywhere else in
     // the panes (a button in one, held while the window relaid them out),
     // or on another splitter's handle, is no drag (#30). It's begun, moved
     // the divider (a drag-update: the pointer moved with it; set_sizes
@@ -2620,6 +2622,7 @@ private:
     std::function<void()> moved_;
     std::vector<float> pressed_;  // the sizes when a drag of a divider began
     bool dragged_ = false;        // the drag has moved since
+    bool counted_ = true;         // the drag began where a mouse's can (touch's band is wider)
 
     // One of a paned's drag gestures, watched after the paned's own handlers
     // (connected after them), so the position is the drag's.
@@ -2627,17 +2630,24 @@ private:
     {
         connect(
             gesture, "drag-begin",
-            +[](GtkGestureDrag*, double, double, gpointer p)
+            +[](GtkGestureDrag* g, double x, double y, gpointer p)
             {
                 auto* self = static_cast<splitter_impl*>(p);
                 self->pressed_ = self->sizes();
                 self->dragged_ = false;
+                // Touch's pan starts in a wider band than the mouse's drag:
+                // counted only from where a mouse drag starts.
+                GtkWidget* paned = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+                self->counted_ = !GTK_IS_GESTURE_PAN(g) || ::rap::gtk_split::on_handle(paned, x, y);
             },
             this);
         connect(
             gesture, "drag-update",
             +[](GtkGestureDrag*, double, double, gpointer p)
-            { static_cast<splitter_impl*>(p)->dragged_ = true; },
+            {
+                auto* self = static_cast<splitter_impl*>(p);
+                if (self->counted_) self->dragged_ = true;
+            },
             this);
         connect(
             gesture, "drag-end",

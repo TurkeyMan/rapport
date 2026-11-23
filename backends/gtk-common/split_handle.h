@@ -1,7 +1,8 @@
 // A splitter's chain of GtkPaneds, shared by the GTK 3 and GTK 4 backends,
-// and (GTK 3) whether a press is on one of its handles. GTK 4's splitter
-// takes its drags from the paneds' own drag gestures, which GTK lets go on
-// only from the paned's handle.
+// and whether a press is on one of its handles: GTK 3's, on the handle's
+// window; GTK 4's, for a touch drag (GTK 4's splitter takes its drags from
+// the paneds' own gestures, which start the mouse's only from the handle,
+// but touch's from a wider band).
 #pragma once
 
 #include <gtk/gtk.h>
@@ -37,7 +38,30 @@ inline GtkWidget* next(GtkWidget* paned)
                                                                                                     : nullptr;
 }
 
-#if GTK_MAJOR_VERSION < 4
+#if GTK_MAJOR_VERSION >= 4
+// A paned's handle: its child that's neither pane.
+inline GtkWidget* handle_of(GtkWidget* paned)
+{
+    GtkPaned* p = GTK_PANED(paned);
+    for (GtkWidget* c = gtk_widget_get_first_child(paned); c; c = gtk_widget_get_next_sibling(c))
+        if (c != gtk_paned_get_start_child(p) && c != gtk_paned_get_end_child(p)) return c;
+    return nullptr;
+}
+
+// Whether (x, y), in the paned's coordinates, is where GTK starts a mouse
+// drag of its divider: the handle, and a thin one's few pixels either side
+// (GtkPaned's HANDLE_EXTRA_SIZE, 6). GTK starts a touch drag in a wider
+// band; rapport counts a touch drag only from here, as a mouse's (#138).
+inline bool on_handle(GtkWidget* paned, double x, double y)
+{
+    GtkWidget* handle = handle_of(paned);
+    graphene_rect_t r;
+    if (!handle || !gtk_widget_compute_bounds(handle, paned, &r)) return false;
+    if (!gtk_paned_get_wide_handle(GTK_PANED(paned))) graphene_rect_inset(&r, -6, -6);
+    const graphene_point_t at = GRAPHENE_POINT_INIT(float(x), float(y));
+    return graphene_rect_contains_point(&r, &at);
+}
+#else
 // GTK 3: a press on a handle comes on that paned's own handle window.
 inline bool press_on_handle(GtkWidget* first, GdkEventButton* e)
 {

@@ -67,11 +67,25 @@ struct placing_scope
     placing_scope& operator=(const placing_scope&) = delete;
 };
 
+// A splitter placing its panes within something that will tell what waited
+// once it's done (Qt: an event filter on the splitter, ahead of the event
+// its own placing_scope brackets): no delivery when this ends.
+struct placing_held
+{
+    placing_held() { ++placing; }
+    ~placing_held() { --placing; }
+    placing_held(const placing_held&) = delete;
+    placing_held& operator=(const placing_held&) = delete;
+};
+
 // `tell`, now, or once the splitters being placed are (with `pane`'s alive
-// token: untold if it's gone by then).
+// token: untold if it's gone by then). With some still waiting to be told
+// (GTK tells them once its layout is done; or a delivery under way), it
+// waits behind them, so no pane is told out of order, or its older size
+// after its newer one.
 inline void now_or_after(const void* pane, std::weak_ptr<bool> alive, std::function<void()> tell)
 {
-    if (!placing)
+    if (!placing && next >= queue.size())
     {
         tell();
         return;

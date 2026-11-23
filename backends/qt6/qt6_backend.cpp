@@ -1873,6 +1873,11 @@ public:
         hook(s,
              [this](QEvent* e)
              {
+                 // What this places is told as the event the filter's ahead
+                 // of ends (placing_splitter::event), not here: a pane told
+                 // its size may destroy the window, and this with it, and
+                 // the event goes on to the splitter after (#138).
+                 pane_sizes::placing_held held;
                  // Sizes set for a window about to grow (a pane shown and the
                  // window widened in the same step) take their place once it
                  // has; QSplitter would give the growth to the stretching pane.

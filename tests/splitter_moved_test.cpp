@@ -283,6 +283,25 @@ int main(int argc, char** argv)
 #else
     expect(drag_gesture(first) && drag_gesture(second) && drag_gesture(in_last),
            "each paned has its drag gesture");
+    // A touch drag (GtkGesturePan, which GTK starts in a wider band than the
+    // mouse's) counts only from where a mouse drag starts: the handle, here
+    // a wide one. (Real touch can't be synthesized here: what's checked is
+    // where it would count from.)
+    {
+        GtkWidget* h = rap::gtk_split::handle_of(first);
+        graphene_rect_t r{};
+        const bool placed = h && gtk_widget_compute_bounds(h, first, &r);
+        const float mid_y = r.origin.y + r.size.height / 2;
+        expect(placed && rap::gtk_split::on_handle(first, r.origin.x + r.size.width / 2, mid_y),
+               "a touch drag counts from the handle's middle");
+        expect(placed && !rap::gtk_split::on_handle(first, r.origin.x + r.size.width + 3, mid_y) &&
+                   !rap::gtk_split::on_handle(first, r.origin.x - 3, mid_y),
+               "but not from 3 px either side of a wide handle, where GTK starts a touch drag but "
+               "not a "
+               "mouse's");
+        expect(!rap::gtk_split::on_handle(first, r.origin.x / 2, mid_y),
+               "nor from the middle of a pane");
+    }
     drag(first, 30);
     expect(moved == 1, "the first divider dragged: on_moved once");
     drag(second, 20);

@@ -107,13 +107,15 @@ int main(int argc, char** argv)
     // its latest), and a layout may come in more than one pass. In each
     // delivery every pane reads the same sizes, the layout being told, each
     // its own the size it's told; the last delivery's are where the layout
-    // ended. An on_resize's set_sizes (the call at `set_at`) asks for a new
-    // layout: sizes() is what it asked for until that's laid out
-    // (splitter::sizes), so the calls after it don't count until one reads
-    // a layout as placed, its sizes adding up to the splitter's length (GTK
-    // may place a chain's later paneds before its first: a pass that reads
-    // the first's asked size with the others' placed ones).
-    auto check = [&](const std::string& what, size_t set_at = size_t(-1))
+    // ended. An on_resize's set_sizes (the call at `set_at`, asking `asked`)
+    // asks for a new layout, and until that's laid out sizes() is what it
+    // asked for (splitter::sizes: the asked sizes, the size now for a 0):
+    // each call after it, up to the first that reads a layout as placed
+    // (its sizes adding up to the splitter's length), must read exactly
+    // that. (Those are the rest of the set_sizes's own delivery, and, on
+    // GTK 4, a pass that places a chain's later paned before its first.)
+    auto check =
+        [&](const std::string& what, size_t set_at = size_t(-1), std::vector<float> asked = {})
     {
         const std::vector<float> final = split->sizes();
         auto total = [](const std::vector<float>& v)
@@ -122,17 +124,30 @@ int main(int argc, char** argv)
             for (float f : v) t += f;
             return t;
         };
-        std::vector<seen> asked_until_laid_out;  // the calls set aside
+        std::vector<seen> pending;  // read while the set_sizes waited for its layout
+        int not_asked = 0;
+        std::string first_not_asked;
         if (set_at < calls.size())
         {
             size_t resume = set_at + 1;
             while (resume < calls.size() &&
                    std::abs(total(calls[resume].sizes) - total(final)) >= 2)
                 ++resume;
-            asked_until_laid_out.assign(calls.begin() + std::ptrdiff_t(set_at + 1),
-                                        calls.begin() + std::ptrdiff_t(resume));
+            pending.assign(calls.begin() + std::ptrdiff_t(set_at + 1),
+                           calls.begin() + std::ptrdiff_t(resume));
             calls.erase(calls.begin() + std::ptrdiff_t(set_at + 1),
                         calls.begin() + std::ptrdiff_t(resume));
+            for (const seen& c : pending)
+            {
+                bool ok = c.sizes.size() == 3;
+                for (size_t j = 0; ok && j < asked.size(); ++j)
+                    ok = std::abs(c.sizes[j] - asked[j]) < 1.5f;
+                if (ok && c.pane >= asked.size())
+                    ok = std::abs(c.sizes[c.pane] - c.told) < 1.5f;  // the size now
+                if (!ok && !not_asked++)
+                    first_not_asked =
+                        "; first: pane " + std::to_string(c.pane) + " read " + joined(c.sizes);
+            }
         }
         auto near = [](const std::vector<float>& a, const std::vector<float>& b)
         {
@@ -174,9 +189,8 @@ int main(int argc, char** argv)
         if (std::getenv("RAPPORT_TEST_VERBOSE"))
         {
             for (const seen& c : calls) std::printf("     %s\n", said(c).c_str());
-            for (const seen& c : asked_until_laid_out)
-                std::printf("     (set aside, before the asked sizes were laid out: %s)\n",
-                            said(c).c_str());
+            for (const seen& c : pending)
+                std::printf("     (read while the set_sizes waited: %s)\n", said(c).c_str());
         }
         expect(!calls.empty(), what + ": the panes were told their sizes (" +
                                    std::to_string(calls.size()) + " on_resize calls, " +
@@ -187,6 +201,12 @@ int main(int argc, char** argv)
                what +
                    ": in each layout every pane's on_resize reads the same sizes, that layout's (" +
                    std::to_string(mixed) + " not" + first_mixed + ")");
+        if (set_at < size_t(-1))
+            expect(not_asked == 0,
+                   what + ": each on_resize after the set_sizes, until it's laid out (" +
+                       std::to_string(pending.size()) + "), reads what it asked for, " +
+                       joined(asked) + " (" + std::to_string(not_asked) + " not" + first_not_asked +
+                       ")");
         expect(near(last, final), what + ": the last layout told is where it ended, " +
                                       joined(final) + " (told " + joined(last) + ")");
     };
@@ -196,8 +216,8 @@ int main(int argc, char** argv)
     // A window's first layout (GTK 3 lays a window out as it's shown,
     // outside its frame clock): its panes told the same way; and a window
     // destroyed from its first pane's first on_resize, the others untold.
-    std::function<void()> first_show, destroyed_on_show;
-    rap::subscription late[2];
+    std::function<void()> first_show, destroyed_on_show, grown;
+    rap::subscription late[5];
     first_show = [&]
     {
         calls.clear();
@@ -233,8 +253,51 @@ int main(int argc, char** argv)
                 expect(gone, "a window's first pane's first on_resize destroyed it");
                 expect(after_gone == 0, "its other panes waiting weren't told after it was gone (" +
                                             std::to_string(after_gone) + ")");
-                std::printf(fails ? "%d failed\n" : "all passed\n", fails);
-                (*ui)->quit(fails ? 1 : 0);
+                grown();
+            });
+    };
+    // Sizes asked for that the window can't hold yet wait for it to grow
+    // (Qt keeps them, and its splitter takes them up as the window's resized,
+    // in an event filter ahead of the splitter's own handling); a pane's
+    // on_resize from that destroys the window.
+    grown = [&]
+    {
+        calls.clear();
+        gone = false;
+        after_gone = 0;
+        then = nullptr;
+        win = open();
+        if (!split) return (*ui)->quit(2);
+        win->show();
+        late[2] = (*ui)->timer(
+            500, false,
+            [&]
+            {
+                split->set_sizes({590, 10, 0});  // past what 600 px holds
+                late[3] = (*ui)->timer(
+                    300, false,
+                    [&]
+                    {
+                        then = [&]
+                        {
+                            split = nullptr;
+                            win.reset();
+                            gone = true;
+                        };
+                        win->resize({800, 300});
+                        late[4] = (*ui)->timer(
+                            500, false,
+                            [&]
+                            {
+                                expect(gone, "a pane's on_resize, the window grown into "
+                                             "sizes asked for, destroyed it");
+                                expect(after_gone == 0,
+                                       "its other panes waiting weren't told after (" +
+                                           std::to_string(after_gone) + ")");
+                                std::printf(fails ? "%d failed\n" : "all passed\n", fails);
+                                (*ui)->quit(fails ? 1 : 0);
+                            });
+                    });
             });
     };
     rap::subscription steps[5];
@@ -275,7 +338,7 @@ int main(int argc, char** argv)
                                     const auto s = split->sizes();
                                     expect(!then,
                                            "a resize: the first pane's on_resize set new sizes");
-                                    check("its on_resize setting new sizes", set_at);
+                                    check("its on_resize setting new sizes", set_at, {200, 250});
                                     // The first divider: GTK 3 moves a
                                     // chain's later ones as an earlier
                                     // one moves (set_sizes alone, too).
