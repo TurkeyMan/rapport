@@ -5259,11 +5259,13 @@ private:
                 GTK_DRAWING_AREA(badge),
                 +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
                 {
-                    if (!static_cast<cell_ref*>(p)->live()) return;
                     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
                     for (const char* key : {"rapport-draw", "rapport-overlay"})
                         if (auto* draw = static_cast<draw_fn*>(g_object_get_data(G_OBJECT(a), key)))
                         {
+                            // Before each: the app's drawing may have ended
+                            // the list (its window destroyed, say).
+                            if (!static_cast<cell_ref*>(p)->live()) return;
                             cairo_painter painter(cr, GTK_WIDGET(a));
                             (*draw)(painter, {float(w), float(h)});
                         }
