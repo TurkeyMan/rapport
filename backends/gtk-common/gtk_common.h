@@ -23,6 +23,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -1048,6 +1049,64 @@ private:
     std::shared_ptr<bool> life_ = std::make_shared<bool>(true);
 };
 
+// -- calling the app -----------------------------------------------------------
+//
+// Every call into app code from a widget (its on_* callbacks, a model's
+// paint, an icon's drawing, a menu's builder) goes through call_app or
+// call_app_for (#140): a copy of the callable is called, since the call may
+// destroy the object that holds it (and with it the callable, mid-call),
+// and what's returned says whether the rapport object it's for (`life`, a
+// part's life() or its own token) is still there. The code after returns at
+// once if not: nothing of a destroyed object is touched after the app's
+// code has run. (A model's getters, which answer what a row shows, aren't
+// calls the app may destroy the widget from: see widgets.h, list_model.)
+inline bool still_there(const std::weak_ptr<bool>& life)
+{
+    const std::shared_ptr<bool> l = life.lock();
+    return l && *l;
+}
+
+// `f(args...)` if it's set, through a copy; whether `life` is still there.
+template <class F, class... A>
+bool call_app(const std::shared_ptr<bool>& life, const F& f, A&&... args)
+{
+    const std::weak_ptr<bool> alive = life;
+    if (f)
+    {
+        F copy = f;
+        copy(std::forward<A>(args)...);
+    }
+    return still_there(alive);
+}
+template <class F, class... A>
+bool call_app(const part& owner, const F& f, A&&... args)
+{
+    return call_app(owner.life(), f, std::forward<A>(args)...);
+}
+
+// The same for a callback with a result, which must be set: its result, and
+// whether `life` is still there.
+template <class R>
+struct app_result
+{
+    R value;
+    bool alive;
+};
+template <class F, class... A>
+auto call_app_for(const std::shared_ptr<bool>& life, const F& f, A&&... args)
+{
+    using R = std::invoke_result_t<F&, A...>;
+    const std::weak_ptr<bool> alive = life;
+    F copy = f;
+    R value = copy(std::forward<A>(args)...);
+    return app_result<R>{std::move(value), still_there(alive)};
+}
+template <class F, class... A>
+auto call_app_for(const part& owner, const F& f, A&&... args)
+{
+    return call_app_for(owner.life(), f, std::forward<A>(args)...);
+}
+
 // One signal connection, owned by whichever parts list holds it, so it goes
 // with the widgets it was made with (a stack page's, or the window's).
 class signal_link : public part
@@ -1676,7 +1735,7 @@ protected:
             +[](GtkTextBuffer*, gpointer p)
             {
                 auto* self = static_cast<text_view_common*>(p);
-                if (self->changed_) self->changed_();
+                call_app(*self, self->changed_);
             },
             this);
     }
