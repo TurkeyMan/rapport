@@ -243,14 +243,15 @@ public:
             link_ = true;
             on_click_ = s.on_click;
             set_text(s.text);
-            g_signal_connect(w_, "activate-link",
-                             G_CALLBACK(+[](GtkLabel*, gchar*, gpointer p) -> gboolean
-                                        {
-                                            auto* self = static_cast<label_impl*>(p);
-                                            if (self->on_click_) self->on_click_();
-                                            return true;
-                                        }),
-                             this);
+            connect(
+                w_, "activate-link",
+                +[](GtkLabel*, gchar*, gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<label_impl*>(p);
+                    if (self->on_click_) self->on_click_();
+                    return true;
+                },
+                this);
         }
         if (s.icon) add_icon(s.icon);
     }
@@ -290,13 +291,14 @@ void label_impl::add_icon(const icon& icon)
     if (!link_) return;
     gtk_widget_set_cursor_from_name(img, "pointer");
     GtkGesture* click = gtk_gesture_click_new();
-    g_signal_connect(click, "released",
-                     G_CALLBACK(+[](GtkGestureClick*, int, double, double, gpointer p)
-                                {
-                                    auto* self = static_cast<label_impl*>(p);
-                                    if (self->on_click_) self->on_click_();
-                                }),
-                     this);
+    connect(
+        click, "released",
+        +[](GtkGestureClick*, int, double, double, gpointer p)
+        {
+            auto* self = static_cast<label_impl*>(p);
+            if (self->on_click_) self->on_click_();
+        },
+        this);
     gtk_widget_add_controller(img, GTK_EVENT_CONTROLLER(click));
 }
 
@@ -770,7 +772,13 @@ public:
     {
         gtk_widget_insert_action_group(owner, prefix_.c_str(), G_ACTION_GROUP(group_));
     }
-    ~menu_actions() { g_object_unref(group_); }
+    ~menu_actions()
+    {
+        // The group's the owner widget's too, which may outlive this; its
+        // actions point at this's items, so they go with it (#140).
+        for (auto& name : names_) g_action_map_remove_action(G_ACTION_MAP(group_), name.c_str());
+        g_object_unref(group_);
+    }
     menu_actions(const menu_actions&) = delete;
     menu_actions& operator=(const menu_actions&) = delete;
 
@@ -2128,10 +2136,14 @@ public:
         gtk_box_append(GTK_BOX(content), arrow_);
         button_ = new_entry_button(box, content);
         gtk_widget_add_css_class(button_, s.leading ? "left" : "right");
-        g_signal_connect(
-            button_, "clicked",
-            G_CALLBACK(+[](GtkButton*, gpointer p) { static_cast<entry_box_action*>(p)->act(); }),
-            this);
+        // Not a part (no connect): its button and popover hold its token.
+        g_signal_connect_data(button_, "clicked",
+                              G_CALLBACK(+[](GtkButton*, gpointer p)
+                                         {
+                                             if (auto* self = self_token<entry_box_action>::live(p))
+                                                 self->act();
+                                         }),
+                              self_.make(), self_token<entry_box_action>::drop, GConnectFlags(0));
         set_tooltip(s.tooltip);
         if (s.bind) *s.bind = this;
     }
@@ -2207,21 +2219,23 @@ private:
         GtkRoot* root = gtk_widget_get_root(button_);
         return_to_ =
             root && gtk_root_get_focus(root) == button_ ? button_ : rapport_entry_box_text(box);
-        g_signal_connect(popover_, "closed",
-                         G_CALLBACK(+[](GtkPopover*, gpointer p)
-                                    {
-                                        GtkWidget* back =
-                                            static_cast<entry_box_action*>(p)->return_to_;
-                                        g_idle_add_full(
-                                            G_PRIORITY_DEFAULT_IDLE,
-                                            +[](gpointer p) -> gboolean
-                                            {
-                                                refocus_in_entry_box(static_cast<GtkWidget*>(p));
-                                                return G_SOURCE_REMOVE;
-                                            },
-                                            g_object_ref(back), g_object_unref);
-                                    }),
-                         this);
+        g_signal_connect_data(popover_, "closed",
+                              G_CALLBACK(+[](GtkPopover*, gpointer p)
+                                         {
+                                             auto* self = self_token<entry_box_action>::live(p);
+                                             if (!self || !self->return_to_) return;
+                                             GtkWidget* back = self->return_to_;
+                                             g_idle_add_full(
+                                                 G_PRIORITY_DEFAULT_IDLE,
+                                                 +[](gpointer p) -> gboolean
+                                                 {
+                                                     refocus_in_entry_box(
+                                                         static_cast<GtkWidget*>(p));
+                                                     return G_SOURCE_REMOVE;
+                                                 },
+                                                 g_object_ref(back), g_object_unref);
+                                         }),
+                              self_.make(), self_token<entry_box_action>::drop, GConnectFlags(0));
         popup_when_built(popover_);
     }
 
@@ -2231,6 +2245,7 @@ private:
     GtkWidget* arrow_ = nullptr;
     GtkWidget* popover_ = nullptr;
     GtkWidget* return_to_ = nullptr;
+    self_token<entry_box_action> self_{this};  // what its button and popover reach it by
     icon icon_;
     std::optional<std::string> tooltip_;  // the one it has (set_tooltip)
     std::function<void()> click_;
@@ -2264,14 +2279,15 @@ public:
             clear_ = new_entry_button(outer_, gtk_image_new_from_icon_name("edit-clear-symbolic"));
             gtk_widget_add_css_class(clear_, "right");
             set_entry_button_tooltip(clear_, rap::i18n::tr("rapport", "Clear"));
-            g_signal_connect(clear_, "clicked",
-                             G_CALLBACK(+[](GtkButton*, gpointer p)
-                                        {
-                                            auto* self = static_cast<entry_box_impl*>(p);
-                                            gtk_editable_set_text(GTK_EDITABLE(self->w_), "");
-                                            gtk_widget_grab_focus(self->w_);
-                                        }),
-                             this);
+            connect(
+                clear_, "clicked",
+                +[](GtkButton*, gpointer p)
+                {
+                    auto* self = static_cast<entry_box_impl*>(p);
+                    gtk_editable_set_text(GTK_EDITABLE(self->w_), "");
+                    gtk_widget_grab_focus(self->w_);
+                },
+                this);
         }
         for (const spec::entry_action& a : s.actions)
             if (!a.leading)
@@ -3494,6 +3510,9 @@ public:
     rap::window* window = nullptr;  // the window it's in: a transfer's source
 
 private:
+    // A tab's own buttons and gestures go with the tab, not the window's
+    // connections (connect), and may outlive this (#140): they hold this.
+    self_token<document_tabs_impl> self_{this};
     static std::set<document_tabs_impl*>& live()
     {
         static std::set<document_tabs_impl*> s;
@@ -3721,48 +3740,52 @@ private:
         gtk_widget_set_focus_on_click(close, false);
         gtk_widget_set_tooltip_text(close, rap::i18n::tr("rapport", "Close tab"));
         g_object_set_data_full(G_OBJECT(close), "rapport-tab", g_strdup(t.id.c_str()), g_free);
-        g_signal_connect(close, "clicked",
-                         G_CALLBACK(+[](GtkButton* b, gpointer p)
-                                    {
-                                        auto* self = static_cast<document_tabs_impl*>(p);
-                                        const auto* id = static_cast<const char*>(
-                                            g_object_get_data(G_OBJECT(b), "rapport-tab"));
-                                        self->state.close_asked(self->state.index_of(id));
-                                    }),
-                         this);
+        g_signal_connect_data(close, "clicked",
+                              G_CALLBACK(+[](GtkButton* b, gpointer p)
+                                         {
+                                             auto* self = self_token<document_tabs_impl>::live(p);
+                                             if (!self) return;
+                                             const auto* id = static_cast<const char*>(
+                                                 g_object_get_data(G_OBJECT(b), "rapport-tab"));
+                                             self->state.close_asked(self->state.index_of(id));
+                                         }),
+                              self_.make(), self_token<document_tabs_impl>::drop, GConnectFlags(0));
         gtk_box_append(GTK_BOX(box), close);
         if (!t.tooltip.empty()) gtk_widget_set_tooltip_text(box, t.tooltip.c_str());
         gtk_widget_set_size_request(box, width_, -1);
         g_object_set_data_full(G_OBJECT(box), "rapport-tab", g_strdup(t.id.c_str()), g_free);
         GtkGesture* middle = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(middle), GDK_BUTTON_MIDDLE);
-        g_signal_connect(middle, "released",
-                         G_CALLBACK(+[](GtkGestureClick* g, int, double, double, gpointer p)
-                                    {
-                                        auto* self = static_cast<document_tabs_impl*>(p);
-                                        GtkWidget* w = gtk_event_controller_get_widget(
-                                            GTK_EVENT_CONTROLLER(g));
-                                        const auto* id = static_cast<const char*>(
-                                            g_object_get_data(G_OBJECT(w), "rapport-tab"));
-                                        self->state.close_asked(self->state.index_of(id));
-                                    }),
-                         this);
+        g_signal_connect_data(middle, "released",
+                              G_CALLBACK(+[](GtkGestureClick* g, int, double, double, gpointer p)
+                                         {
+                                             auto* self = self_token<document_tabs_impl>::live(p);
+                                             if (!self) return;
+                                             GtkWidget* w = gtk_event_controller_get_widget(
+                                                 GTK_EVENT_CONTROLLER(g));
+                                             const auto* id = static_cast<const char*>(
+                                                 g_object_get_data(G_OBJECT(w), "rapport-tab"));
+                                             self->state.close_asked(self->state.index_of(id));
+                                         }),
+                              self_.make(), self_token<document_tabs_impl>::drop, GConnectFlags(0));
         gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(middle));
         // A right click: the tab's menu.
         GtkGesture* right = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right), GDK_BUTTON_SECONDARY);
-        g_signal_connect(right, "pressed",
-                         G_CALLBACK((+[](GtkGestureClick* g, int, double x, double y, gpointer p)
-                                    {
-                                        auto* self = static_cast<document_tabs_impl*>(p);
-                                        GtkWidget* w = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
-                                        const auto* id = static_cast<const char*>(
-                                            g_object_get_data(G_OBJECT(w), "rapport-tab"));
-                                        graphene_point_t in{float(x), float(y)}, out{};
-                                        if (!gtk_widget_compute_point(w, self->outer_, &in, &out)) out = in;
-                                        self->menu_for(id ? self->state.index_of(id) : -1, out.x, out.y);
-                                    })),
-                         this);
+        g_signal_connect_data(
+            right, "pressed",
+            G_CALLBACK((+[](GtkGestureClick* g, int, double x, double y, gpointer p)
+                        {
+                            auto* self = self_token<document_tabs_impl>::live(p);
+                            if (!self) return;
+                            GtkWidget* w = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+                            const auto* id = static_cast<const char*>(
+                                g_object_get_data(G_OBJECT(w), "rapport-tab"));
+                            graphene_point_t in{float(x), float(y)}, out{};
+                            if (!gtk_widget_compute_point(w, self->outer_, &in, &out)) out = in;
+                            self->menu_for(id ? self->state.index_of(id) : -1, out.x, out.y);
+                        })),
+            self_.make(), self_token<document_tabs_impl>::drop, GConnectFlags(0));
         gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(right));
         return box;
     }
