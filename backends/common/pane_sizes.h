@@ -8,7 +8,9 @@
 // (to the outermost one being placed: a splitter in a pane is placed within
 // its outer one's placing), what its panes are told waits, and is told once
 // the outermost's placing is done, in the order they were placed: sizes()
-// there is the whole new layout (#105). Each waits with its pane's alive
+// there is the whole new layout (#105). (Qt tells it there; GTK once its
+// own layout is done, as it's still allocating the window then: see
+// gtk_common.h.) Each waits with its pane's alive
 // token, so a callback that destroys another pane, or the window, leaves
 // the rest untold; one placed again before it's told is told once, its
 // latest. A callback that lays the window out again (a set_sizes) takes the

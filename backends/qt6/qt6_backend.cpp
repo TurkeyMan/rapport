@@ -5409,7 +5409,10 @@ public:
         finished_ = false;
         if (std::getenv("RAPPORT_NO_ACTIVATE"))  // test runs: shown, not given the focus
             frame_->setAttribute(Qt::WA_ShowWithoutActivating);
+        // Laid out at once: a pane told its size may destroy the window.
+        const std::weak_ptr<bool> alive = alive_;
         frame_->show();
+        if (gone(alive)) return;
         if (!frame_->testAttribute(Qt::WA_ShowWithoutActivating))
         {
             frame_->raise();
@@ -5419,7 +5422,12 @@ public:
     }
     void present() override
     {
-        if (!frame_->isVisible()) show();
+        if (!frame_->isVisible())
+        {
+            const std::weak_ptr<bool> alive = alive_;
+            show();
+            if (gone(alive)) return;  // destroyed by a pane told its size as it showed
+        }
         const bool quiet = std::getenv("RAPPORT_NO_ACTIVATE") != nullptr;
         // Minimised: back as it was, maximised if it was (showNormal would
         // unmaximise it). Quiet, WindowActive is left out, but Qt's Windows
@@ -5457,8 +5465,7 @@ public:
         // Laid out at once: a pane told its size may destroy the window.
         const std::weak_ptr<bool> alive = alive_;
         frame_->resize(std::max(1, int(s.w)), std::max(1, int(s.h)));
-        const std::shared_ptr<bool> still = alive.lock();
-        if (!still || !*still) return;
+        if (gone(alive)) return;
         keep_on_screen();
     }
     void set_min_size(size_f s) override
@@ -5709,6 +5716,11 @@ protected:
 
 private:
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // false once it's being destroyed
+    static bool gone(const std::weak_ptr<bool>& alive)
+    {
+        const std::shared_ptr<bool> still = alive.lock();
+        return !still || !*still;
+    }
     // Development aid: RAPPORT_SNAPSHOT=file.png saves the window shown last,
     // RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears, then quits.
     // The windows there now, the one shown most recently last (a dialog

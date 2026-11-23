@@ -91,10 +91,15 @@ int main(int argc, char** argv)
                 })
             .stretch();
     };
-    auto win = (*ui)->create(window{
-        "Splitter sizes in on_resize",
-        {splitter{rap::orientation::horizontal, pane(0), pane(1), pane(2)}.bind(split).stretch()}}
-                                 .size(600_px, 300_px));
+    auto open = [&]
+    {
+        return (*ui)->create(window{
+            "Splitter sizes in on_resize",
+            {splitter{rap::orientation::horizontal, pane(0), pane(1), pane(2)}
+                 .bind(split)
+                 .stretch()}}.size(600_px, 300_px));
+    };
+    auto win = open();
     if (!split) return 2;
     win->show();
 
@@ -188,6 +193,50 @@ int main(int argc, char** argv)
 
     // The steps, each once the last has been laid out and delivered.
     // (One subscription each: none is dropped from inside its own timer.)
+    // A window's first layout (GTK 3 lays a window out as it's shown,
+    // outside its frame clock): its panes told the same way; and a window
+    // destroyed from its first pane's first on_resize, the others untold.
+    std::function<void()> first_show, destroyed_on_show;
+    rap::subscription late[2];
+    first_show = [&]
+    {
+        calls.clear();
+        then = nullptr;
+        win = open();
+        if (!split) return (*ui)->quit(2);
+        win->show();
+        late[0] = (*ui)->timer(500, false,
+                               [&]
+                               {
+                                   check("as it's first shown");
+                                   destroyed_on_show();
+                               });
+    };
+    destroyed_on_show = [&]
+    {
+        calls.clear();
+        gone = false;
+        after_gone = 0;
+        then = [&]
+        {
+            split = nullptr;
+            win.reset();
+            gone = true;
+        };
+        win = open();
+        if (!split) return (*ui)->quit(2);
+        win->show();
+        late[1] = (*ui)->timer(
+            500, false,
+            [&]
+            {
+                expect(gone, "a window's first pane's first on_resize destroyed it");
+                expect(after_gone == 0, "its other panes waiting weren't told after it was gone (" +
+                                            std::to_string(after_gone) + ")");
+                std::printf(fails ? "%d failed\n" : "all passed\n", fails);
+                (*ui)->quit(fails ? 1 : 0);
+            });
+    };
     rap::subscription steps[5];
     auto after = [&](int i, std::function<void()> f)
     { steps[i] = (*ui)->timer(400, false, std::move(f)); };
@@ -255,9 +304,7 @@ int main(int argc, char** argv)
                                                                     "told after it was gone (" +
                                                                         std::to_string(after_gone) +
                                                                         ")");
-                                            std::printf(fails ? "%d failed\n" : "all passed\n",
-                                                        fails);
-                                            (*ui)->quit(fails ? 1 : 0);
+                                            first_show();
                                         });
                                 });
                         });

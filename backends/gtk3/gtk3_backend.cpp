@@ -5743,7 +5743,7 @@ public:
         std::erase(recent(), win_);
         for (auto& part : parts) part->disconnect();
         disconnect();
-        destroy_once_placed(win_);  // GTK's, once its layout is done
+        gtk_widget_destroy(win_);
         g_object_unref(side_buttons_);
     }
 
