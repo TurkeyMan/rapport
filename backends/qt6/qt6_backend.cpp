@@ -5343,6 +5343,7 @@ public:
     // their signals; until then nothing may reach the parts going now.
     ~window_impl() override
     {
+        *alive_ = false;
         // First, while every widget is still there; taken out, so it runs once.
         if (auto f = std::exchange(on_destroyed_, {})) f();
         filter_->owner = nullptr;
@@ -5453,7 +5454,11 @@ public:
     size_f size() const override { return {float(frame_->width()), float(frame_->height())}; }
     void resize(size_f s) override
     {
+        // Laid out at once: a pane told its size may destroy the window.
+        const std::weak_ptr<bool> alive = alive_;
         frame_->resize(std::max(1, int(s.w)), std::max(1, int(s.h)));
+        const std::shared_ptr<bool> still = alive.lock();
+        if (!still || !*still) return;
         keep_on_screen();
     }
     void set_min_size(size_f s) override
@@ -5703,6 +5708,7 @@ protected:
     }
 
 private:
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // false once it's being destroyed
     // Development aid: RAPPORT_SNAPSHOT=file.png saves the window shown last,
     // RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears, then quits.
     // The windows there now, the one shown most recently last (a dialog
