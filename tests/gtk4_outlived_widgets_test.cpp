@@ -156,6 +156,31 @@ void paint_now(GtkWidget* w)
 
 }  // namespace
 
+// What an app's callback that destroys its own window does after: reads
+// what it captured by value (freed with the callable, were rapport calling
+// the one it holds rather than a copy: ASan says so).
+int captured_reads = 0;
+void use(const std::string& captured)
+{
+    captured_reads += int(captured.size() > 0);
+}
+
+// The window `w`'s content (its one child).
+GtkWidget* content_of(GtkWidget* window)
+{
+    return window ? gtk_window_get_child(GTK_WINDOW(window)) : nullptr;
+}
+
+// The newest top level: the window just made.
+GtkWidget* newest_window()
+{
+    GListModel* tops = gtk_window_get_toplevels();
+    const guint n = g_list_model_get_n_items(tops);
+    GtkWidget* w = n ? GTK_WIDGET(g_list_model_get_item(tops, 0)) : nullptr;
+    if (w) g_object_unref(w);  // (get_item's reference: the window's own holds it)
+    return w;
+}
+
 int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -193,6 +218,150 @@ int main(int argc, char** argv)
     win->show();
     pump(600);
     if (!listed || !treed) return 2;
+
+    // -- an app's callback destroying its own window -------------------------
+    // The tree: its on_selection_changed, as a row's right-click selects it,
+    // destroys the window; the right-click goes no further (no menu asked).
+    {
+        int menus = 0;
+        std::unique_ptr<rap::window> own;
+        const std::string tag = "tree";
+        own = (*ui)->create(window{
+            "Tree ends itself",
+            {tree{{{"Alpha", "a"}, {"Beta", "b"}}}
+                 .on_selection_changed(
+                     [&own, tag]
+                     {
+                         own.reset();
+                         use(tag);
+                     })
+                 .on_context_menu(
+                     [&menus](std::optional<std::string>)
+                     {
+                         ++menus;
+                         return rap::menu{};
+                     })
+                 .stretch()}}.size(300_px, 200_px));
+        own->show();
+        pump(300);
+        std::vector<GtkWidget*> rows;
+        all_of(content_of(newest_window()), GTK_TYPE_TREE_EXPANDER, rows);
+        GObject* right_click = nullptr;
+        if (rows.size() > 1)
+        {
+            GListModel* controllers = gtk_widget_observe_controllers(rows[1]);
+            for (guint i = 0, n = g_list_model_get_n_items(controllers); i < n && !right_click; ++i)
+            {
+                auto* c = static_cast<GObject*>(g_list_model_get_item(controllers, i));
+                if (GTK_IS_GESTURE_CLICK(c) &&
+                    gtk_gesture_single_get_button(GTK_GESTURE_SINGLE(c)) == GDK_BUTTON_SECONDARY)
+                    right_click = G_OBJECT(g_object_ref(c));
+                g_object_unref(c);
+            }
+            g_object_unref(controllers);
+        }
+        expect(right_click != nullptr, "a tree row's right-click gesture");
+        captured_reads = 0;
+        if (right_click)
+        {
+            g_signal_emit_by_name(right_click, "pressed", 1, 5.0, 5.0);
+            g_object_unref(right_click);
+        }
+        pump(100);
+        expect(!own && captured_reads == 1,
+               "its on_selection_changed destroyed the window, then read its capture");
+        expect(menus == 0, "and the right-click went no further: no menu asked (" +
+                               std::to_string(menus) + ")");
+    }
+    // A button: its click destroys the window, then reads its capture.
+    {
+        std::unique_ptr<rap::window> own;
+        const std::string tag = "button";
+        own = (*ui)->create(window{
+            "Button ends itself",
+            {button{"End"}.on_click(
+                [&own, tag]
+                {
+                    own.reset();
+                    use(tag);
+                })}}.size(200_px, 100_px));
+        own->show();
+        pump(300);
+        std::vector<GtkWidget*> buttons;
+        all_of(content_of(newest_window()), GTK_TYPE_BUTTON, buttons);
+        expect(!buttons.empty(), "the button");
+        captured_reads = 0;
+        if (!buttons.empty()) g_signal_emit_by_name(buttons[0], "clicked");
+        pump(100);
+        expect(!own && captured_reads == 1,
+               "its click destroyed the window, then read its capture (" +
+                   std::to_string(captured_reads) + ")");
+    }
+    // An icon, unretained (nothing of the test's holds it): its drawing
+    // destroys the window, then reads its capture.
+    {
+        std::unique_ptr<rap::window> own;
+        const std::string tag = "icon";
+        rap::icon ending;
+        ending.draw = [&own, tag](rap::painter&, rap::size_f)
+        {
+            if (!own) return;
+            own.reset();
+            use(tag);
+        };
+        own = (*ui)->create(
+            window{"Icon ends itself", {button{"Drawn"}.icon(ending)}}.size(200_px, 100_px));
+        own->show();
+        pump(300);
+        captured_reads = 0;
+        for (int i = 0; i < 5 && own; ++i)
+        {
+            if (GtkWidget* c = content_of(newest_window())) paint_now(c);
+            pump(100);
+        }
+        expect(!own && captured_reads == 1,
+               "an unretained icon's drawing destroyed its window, then read its capture (" +
+                   std::to_string(captured_reads) + ")");
+    }
+    // A canvas: its on_paint destroys the window, then reads its capture.
+    // Its content kept in a window of the test's, so it's painted after.
+    {
+        std::unique_ptr<rap::window> own;
+        const std::string tag = "canvas";
+        own = (*ui)->create(window{
+            "Canvas ends itself",
+            {canvas{}.on_paint(
+                [&own, tag](rap::painter&, rap::size_f)
+                {
+                    if (!own) return;
+                    own.reset();
+                    use(tag);
+                })}}.size(200_px, 100_px));
+        own->show();
+        pump(300);
+        GtkWidget* from = newest_window();
+        GtkWidget* moved = content_of(from);
+        GtkWidget* holder = gtk_window_new();
+        if (moved)
+        {
+            g_object_ref(moved);
+            gtk_window_set_child(GTK_WINDOW(from), nullptr);
+            gtk_window_set_child(GTK_WINDOW(holder), moved);
+            g_object_unref(moved);
+        }
+        gtk_widget_set_visible(holder, true);
+        captured_reads = 0;
+        for (int i = 0; i < 5 && own; ++i)
+        {
+            if (moved) paint_now(moved);
+            pump(100);
+        }
+        expect(!own && captured_reads == 1,
+               "a canvas's on_paint destroyed its window, then read its capture (" +
+                   std::to_string(captured_reads) + ")");
+        gtk_window_destroy(GTK_WINDOW(holder));
+        pump(50);
+    }
     // A drag from a cell: its gesture and its keys on the list.
     rap::list::cell_drag drag;
     drag.begin = [](size_t, size_t, rap::point_f) -> std::optional<rap::list::cell_drag_start>
