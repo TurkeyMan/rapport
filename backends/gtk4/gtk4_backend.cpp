@@ -5229,10 +5229,14 @@ private:
             gtk_overlay_set_child(GTK_OVERLAY(holder), image);
             GtkWidget* badge = gtk_drawing_area_new();
             gtk_widget_set_can_target(badge, false);
+            // The app's drawing and overlay for the row's icon (object data,
+            // set as it's bound) may reach what's gone with the list: drawn
+            // only while it's there, as a painted cell's are (#140).
             gtk_drawing_area_set_draw_func(
                 GTK_DRAWING_AREA(badge),
-                +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer)
+                +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
                 {
+                    if (!static_cast<cell_ref*>(p)->live()) return;
                     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
                     for (const char* key : {"rapport-draw", "rapport-overlay"})
                         if (auto* draw = static_cast<draw_fn*>(g_object_get_data(G_OBJECT(a), key)))
@@ -5241,7 +5245,7 @@ private:
                             (*draw)(painter, {float(w), float(h)});
                         }
                 },
-                nullptr, nullptr);
+                cell_ref::make(life_, ctx), cell_ref::drop);
             gtk_overlay_add_overlay(GTK_OVERLAY(holder), badge);
             gtk_overlay_set_measure_overlay(GTK_OVERLAY(holder), badge, true);
             gtk_box_append(GTK_BOX(child), holder);
