@@ -165,6 +165,11 @@ using namespace gtkcommon;
 //   disconnect() can't reach. A draw func can also be cleared as it goes.
 // Never the raw pointer with a flag in the object to say it's gone: reading
 // the flag is reading the freed object.
+// The contract behind it: rapport never calls an app's callback (an icon's
+// drawing, a menu item's action, a model's paint) after the rapport object
+// that took it is destroyed, and checks again after each one it calls, as
+// that may destroy it. Owning the closure isn't enough: it may capture what
+// goes with the object (widgets.h, icon::draw).
 template <class T>
 class self_token
 {
