@@ -5658,6 +5658,9 @@ protected:
         *alive_ = false;
         for (guint id : ticks_) gtk_widget_remove_tick_callback(w_, id);
         ticks_.clear();
+        // Not a signal: off as well, or the drawing area, if it outlives
+        // this, draws through it (#140).
+        gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(w_), nullptr, nullptr, nullptr);
     }
 
 private:
