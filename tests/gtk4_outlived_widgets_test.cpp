@@ -301,39 +301,8 @@ int main(int argc, char** argv)
                "its click destroyed the window, then read its capture (" +
                    std::to_string(captured_reads) + ")");
     }
-    // An icon, unretained (nothing of the test's holds it): its drawing
-    // destroys the window, then reads its capture.
-    {
-        std::unique_ptr<rap::window> own;
-        const std::string tag = "icon";
-        bool armed = false;  // only while the test paints it
-        rap::icon ending;
-        ending.draw = [&own, &armed, tag](rap::painter&, rap::size_f)
-        {
-            if (!own || !armed) return;
-            own.reset();
-            use(tag);
-        };
-        own = (*ui)->create(
-            window{"Icon ends itself", {button{"Drawn"}.icon(ending)}}.size(200_px, 100_px));
-        own->show();
-        pump(300);
-        captured_reads = 0;
-        // Painted through a paintable of the test's: GTK's own paint, of a
-        // window its drawing destroys, goes on with that window after (and GTK
-        // complains), so the drawing ends it only as the test paints it.
-        for (int i = 0; i < 5 && own; ++i)
-        {
-            armed = true;
-            if (GtkWidget* c = content_of(window_titled("Icon ends itself"))) paint_now(c);
-            armed = false;
-            pump(100);
-        }
-        expect(!own && captured_reads == 1,
-               "an unretained icon's drawing destroyed its window, then read its capture (" +
-                   std::to_string(captured_reads) + ")");
-    }
-    // An icon whose drawing ends its window in GTK's own paint of that window
+    // An icon, unretained (nothing of the test's holds it), whose drawing ends
+    // its window in GTK's own paint of that window
     // (Xvfb in CI, with criticals fatal: GTK goes on painting it as the drawing
     // returns, so its GtkWindow goes after, from an idle). Broadway with no
     // viewer may not paint it.
