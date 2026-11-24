@@ -151,6 +151,150 @@ namespace
 using namespace gtkcommon;
 
 // TODO: take accent and contrast from the settings portal.
+
+// A GTK widget can outlive the rapport object made for it (a reference
+// kept elsewhere, teardown left to GTK), and GTK goes on calling what it
+// was given. So every connection or callback that reaches a rapport object
+// is one of two (#140):
+// - a tracked connection (connect, connect_after), which disconnect() takes
+//   off before the object goes: for what lives with the object's widgets;
+// - or one holding a self_token's weak reference, emptied as the object
+//   goes: for what GTK makes, recycles or keeps on its own (a list's or a
+//   tree's rows, a document tab's buttons, a popover), and what isn't a
+//   signal (a drawing area's draw func, a model's function), which
+//   disconnect() can't reach. A draw func can also be cleared as it goes.
+// Never the raw pointer with a flag in the object to say it's gone: reading
+// the flag is reading the freed object.
+// The contract behind it: rapport never calls an app's callback (an icon's
+// drawing, a menu item's action, a model's paint) after the rapport object
+// that took it is destroyed, and checks again after each one it calls, as
+// that may destroy it. Owning the closure isn't enough: it may capture what
+// goes with the object (widgets.h, icon::draw). An app's drawing may end
+// the very window being drawn: its rapport objects go at once, its GtkWindow
+// once no draw func runs (drawing and after_paint, below). Every draw func
+// counts itself (`drawing`) and holds its area (`held_area`) first, before
+// any call into the app's: what the app lets go of then waits for the paint
+// to end, as rapport's own guarantee, not GTK's.
+template <class T>
+class self_token
+{
+public:
+    explicit self_token(T* self)
+        : self_(std::make_shared<T*>(self))
+    {
+    }
+    ~self_token() { forget(); }
+    self_token(const self_token&) = delete;
+    self_token& operator=(const self_token&) = delete;
+
+    void forget() { *self_ = nullptr; }  // from now on live() is nullptr
+    // For a callback's data: a weak reference, freed by drop (a closure's
+    // destroy notify) or drop_data (a GDestroyNotify).
+    gpointer make() const { return new std::weak_ptr<T*>(self_); }
+    static void drop(gpointer p, GClosure*) { drop_data(p); }
+    static void drop_data(gpointer p) { delete static_cast<std::weak_ptr<T*>*>(p); }
+    // The object, while it's there.
+    static T* live(gpointer p)
+    {
+        const std::shared_ptr<T*> self = static_cast<std::weak_ptr<T*>*>(p)->lock();
+        return self ? *self : nullptr;
+    }
+
+private:
+    std::shared_ptr<T*> self_;
+};
+
+// The draw funcs running now, each of which may call the app's drawing. An
+// app's drawing may destroy the window being drawn, or let go of the drawing
+// area (its icon replaced, its owner gone): the rapport objects go at once,
+// as ever, but GTK goes on painting with them as the draw func returns. So
+// the GtkWindows destroyed and the areas let go of while one runs wait here,
+// and go only once no draw func is running: from an idle that the last to
+// return asks for, and that does nothing while one still runs (the app's
+// drawing may run a main loop of its own, which dispatches it). Nothing here
+// calls the app's (#143).
+int drawing_depth = 0;
+struct after_paint
+{
+    std::vector<GtkWidget*> windows;  // to destroy (each held)
+    std::vector<GtkWidget*> areas;    // to let go of (drawing areas, what they were in)
+    guint idle = 0;                   // the idle asked for, while it's there
+    bool empty() const { return windows.empty() && areas.empty(); }
+};
+after_paint& after_painting()
+{
+    static after_paint p;
+    return p;
+}
+// What's waiting goes now, if no draw func runs (else it waits for the last
+// to return). From the idle, and as the main loop returns or the backend
+// goes (a drawing may quit the app: the loop can return before the idle
+// runs). Calls nothing of the app's.
+void drain_after_paint()
+{
+    after_paint& p = after_painting();
+    if (drawing_depth > 0) return;
+    if (p.idle) g_source_remove(std::exchange(p.idle, 0));
+    const std::vector<GtkWidget*> windows = std::exchange(p.windows, {});
+    const std::vector<GtkWidget*> areas = std::exchange(p.areas, {});
+    for (GtkWidget* w : windows)
+    {
+        gtk_window_destroy(GTK_WINDOW(w));
+        g_object_unref(w);
+    }
+    for (GtkWidget* a : areas) g_object_unref(a);
+}
+void ask_after_paint()
+{
+    after_paint& p = after_painting();
+    if (p.idle || p.empty()) return;
+    p.idle = g_idle_add(
+        +[](gpointer) -> gboolean
+        {
+            after_painting().idle = 0;  // (removed as this returns)
+            drain_after_paint();        // nothing while a draw func runs: asked again as the last returns
+            return G_SOURCE_REMOVE;
+        },
+        nullptr);
+}
+struct drawing
+{
+    drawing() { ++drawing_depth; }
+    ~drawing()
+    {
+        if (--drawing_depth == 0) ask_after_paint();
+    }
+    drawing(const drawing&) = delete;
+    drawing& operator=(const drawing&) = delete;
+};
+
+// A drawing area held through the app's drawing, inside a draw func's
+// `drawing`, and what it's in up to its window (GTK is painting those too):
+// any let go of meanwhile (out of its parent) waits for the paint to end
+// (after_paint).
+class held_area
+{
+public:
+    explicit held_area(GtkDrawingArea* a)
+    {
+        GtkWidget* root = GTK_WIDGET(gtk_widget_get_root(GTK_WIDGET(a)));
+        for (GtkWidget* w = GTK_WIDGET(a); w && w != root; w = gtk_widget_get_parent(w))
+            held_.push_back(GTK_WIDGET(g_object_ref(w)));
+    }
+    ~held_area()
+    {
+        for (GtkWidget* w : held_)
+            if (gtk_widget_get_parent(w))
+                g_object_unref(w);
+            else
+                after_painting().areas.push_back(w);
+    }
+    held_area(const held_area&) = delete;
+    held_area& operator=(const held_area&) = delete;
+
+private:
+    std::vector<GtkWidget*> held_;
+};
 }  // namespace
 }  // namespace rap::gtk4
 
@@ -201,14 +345,15 @@ public:
             link_ = true;
             on_click_ = s.on_click;
             set_text(s.text);
-            g_signal_connect(w_, "activate-link",
-                             G_CALLBACK(+[](GtkLabel*, gchar*, gpointer p) -> gboolean
-                                        {
-                                            auto* self = static_cast<label_impl*>(p);
-                                            if (self->on_click_) self->on_click_();
-                                            return true;
-                                        }),
-                             this);
+            connect(
+                w_, "activate-link",
+                +[](GtkLabel*, gchar*, gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<label_impl*>(p);
+                    call_app(*self, self->on_click_);
+                    return true;
+                },
+                this);
         }
         if (s.icon) add_icon(s.icon);
     }
@@ -235,11 +380,13 @@ private:
     std::function<void()> on_click_;
 };
 
-GtkWidget* icon_widget(const icon& icon, int size);
+// An icon's widget. `owner` is the rapport object it's for: an app's
+// drawing (icon::draw) is called only while that's there (#140).
+GtkWidget* icon_widget(const icon& icon, int size, std::weak_ptr<bool> owner);
 
 void label_impl::add_icon(const icon& icon)
 {
-    GtkWidget* img = icon_widget(icon, 16);
+    GtkWidget* img = icon_widget(icon, 16, life());
     if (!img) return;
     GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_box_append(GTK_BOX(box), img);
@@ -248,22 +395,23 @@ void label_impl::add_icon(const icon& icon)
     if (!link_) return;
     gtk_widget_set_cursor_from_name(img, "pointer");
     GtkGesture* click = gtk_gesture_click_new();
-    g_signal_connect(click, "released",
-                     G_CALLBACK(+[](GtkGestureClick*, int, double, double, gpointer p)
-                                {
-                                    auto* self = static_cast<label_impl*>(p);
-                                    if (self->on_click_) self->on_click_();
-                                }),
-                     this);
+    connect(
+        click, "released",
+        +[](GtkGestureClick*, int, double, double, gpointer p)
+        {
+            auto* self = static_cast<label_impl*>(p);
+            call_app(*self, self->on_click_);
+        },
+        this);
     gtk_widget_add_controller(img, GTK_EVENT_CONTROLLER(click));
 }
 
 // A button's content: its text, or its icon (named or drawn), or the icon
 // before the text in a box, as GTK 3's image buttons show them (GTK 4's
 // button holds one child).
-GtkWidget* icon_and_text(const icon& icon, const std::string& text)
+GtkWidget* icon_and_text(const icon& icon, const std::string& text, std::weak_ptr<bool> owner)
 {
-    GtkWidget* img = icon ? icon_widget(icon, 16) : nullptr;
+    GtkWidget* img = icon ? icon_widget(icon, 16, std::move(owner)) : nullptr;
     if (!img)
     {
         GtkWidget* label = gtk_label_new_with_mnemonic(text.c_str());
@@ -289,7 +437,7 @@ public:
             +[](GtkButton*, gpointer p)
             {
                 auto* self = static_cast<button_impl*>(p);
-                if (self->click_) self->click_();
+                call_app(*self, self->click_);
             },
             this);
     }
@@ -310,7 +458,7 @@ public:
     void on_click(std::function<void()> f) override { click_ = std::move(f); }
 
 private:
-    void update() { gtk_button_set_child(GTK_BUTTON(w_), icon_and_text(icon_, text_)); }
+    void update() { gtk_button_set_child(GTK_BUTTON(w_), icon_and_text(icon_, text_, life())); }
 
     std::string text_;
     icon icon_;
@@ -379,7 +527,7 @@ void snap_to_device(cairo_t* cr, GtkWidget* w)
 // drawn icons follow scale and theme (the area takes its button's CSS
 // colour, greyed when insensitive); else the theme's image-missing, never
 // a blank. Null for no icon at all.
-GtkWidget* icon_widget(const icon& icon, int size)
+GtkWidget* icon_widget(const icon& icon, int size, std::weak_ptr<bool> owner)
 {
     GtkIconTheme* theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
     auto named = [&](const char* name)
@@ -410,7 +558,8 @@ GtkWidget* icon_widget(const icon& icon, int size)
                                });
         rap::icon rest = icon;
         rest.path.clear();
-        if (GtkWidget* child = g ? image(g) : icon_widget(rest, size)) gtk_box_append(GTK_BOX(box), child);
+        if (GtkWidget* child = g ? image(g) : icon_widget(rest, size, owner))
+            gtk_box_append(GTK_BOX(box), child);
         return box;
     }
     if (!icon.name.empty() && gtk_icon_theme_has_icon(theme, icon.name.c_str()))
@@ -426,15 +575,27 @@ GtkWidget* icon_widget(const icon& icon, int size)
     // Square and centred, however tall the toolbar row is.
     gtk_widget_set_halign(area, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(area, GTK_ALIGN_CENTER);
+    struct gated_draw
+    {
+        draw_fn draw;
+        std::weak_ptr<bool> owner;  // the app's drawing only while its rapport object's there
+    };
     gtk_drawing_area_set_draw_func(
         GTK_DRAWING_AREA(area),
         +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
         {
+            const drawing in_draw;
+            const held_area held(a);  // first: before any of the app's
+            auto* g = static_cast<gated_draw*>(p);
+            const std::shared_ptr<bool> owner = g->owner.lock();
+            if (!owner || !*owner) return;
             snap_to_device(cr, GTK_WIDGET(a));
             cairo_painter painter(cr, GTK_WIDGET(a));
-            (*static_cast<draw_fn*>(p))(painter, {float(w), float(h)});
+            call_app(owner, g->draw, painter,
+                     size_f{float(w), float(h)});  // a copy: it may end the owner, and g
         },
-        new draw_fn(std::move(draw)), +[](gpointer p) { delete static_cast<draw_fn*>(p); });
+        new gated_draw{std::move(draw), std::move(owner)},
+        +[](gpointer p) { delete static_cast<gated_draw*>(p); });
     return area;
 }
 
@@ -457,8 +618,8 @@ public:
             {
                 auto* self = static_cast<tool_button_impl*>(p);
                 if (self->quiet_) return;
-                if (self->click_) self->click_();
-                if (self->toggle_ && self->toggled_) self->toggled_(self->checked());
+                if (!call_app(*self, self->click_)) return;
+                if (self->toggle_) call_app(*self, self->toggled_, self->checked());
             },
             this);
     }
@@ -466,7 +627,8 @@ public:
     {
         if (icon_ && same_icon(*icon_, icon)) return;  // (#88)
         icon_ = icon;
-        if (GtkWidget* child = icon_widget(icon, 16)) gtk_button_set_child(GTK_BUTTON(w_), child);
+        if (GtkWidget* child = icon_widget(icon, 16, life()))
+            gtk_button_set_child(GTK_BUTTON(w_), child);
     }
     bool checked() const override
     {
@@ -505,7 +667,7 @@ public:
             +[](GtkWidget*, gpointer p)
             {
                 auto* self = static_cast<value_impl*>(p);
-                if (!self->quiet_ && self->changed_) self->changed_(self->value());
+                if (!self->quiet_) call_app(*self, self->changed_, self->value());
             },
             this);
     }
@@ -620,7 +782,7 @@ public:
             +[](GtkColorButton*, gpointer p)
             {
                 auto* self = static_cast<color_button_impl*>(p);
-                if (self->changed_) self->changed_(self->color());
+                call_app(*self, self->changed_, self->color());
             },
             this);
     }
@@ -664,7 +826,7 @@ public:
                     gtk_check_button_set_active(b, true);
                     self->updating_ = false;
                 }
-                if (self->toggled_) self->toggled_(gtk_check_button_get_active(b));
+                call_app(*self, self->toggled_, gtk_check_button_get_active(b));
             },
             this);
     }
@@ -727,21 +889,43 @@ public:
         , group_(g_simple_action_group_new())
     {
         gtk_widget_insert_action_group(owner, prefix_.c_str(), G_ACTION_GROUP(group_));
+        // For the test seam (rapport_gtk4_menu_action_for_tests) alone.
+        g_object_set_data_full(G_OBJECT(owner), "rapport-menu-group", g_object_ref(group_),
+                               g_object_unref);
     }
-    ~menu_actions() { g_object_unref(group_); }
+    ~menu_actions()
+    {
+        drop_actions();
+        g_object_unref(group_);
+    }
     menu_actions(const menu_actions&) = delete;
     menu_actions& operator=(const menu_actions&) = delete;
 
     // A new model for `menu`; the caller owns the reference.
     GMenu* build(menu menu)
     {
-        for (auto& name : names_) g_action_map_remove_action(G_ACTION_MAP(group_), name.c_str());
-        names_.clear();
+        drop_actions();
         menu_ = std::move(menu);
         return model(menu_);
     }
 
 private:
+    // The actions made for menu_'s items, which they point at: out of the
+    // group, and their activate taken off, as the items go (a new menu, or
+    // this). The group is the owner widget's too, which may outlive this,
+    // and an action may be held elsewhere (#140).
+    void drop_actions()
+    {
+        for (auto& name : names_) g_action_map_remove_action(G_ACTION_MAP(group_), name.c_str());
+        names_.clear();
+        for (auto [action, handler] : actions_)
+        {
+            g_signal_handler_disconnect(action, handler);
+            g_object_unref(action);
+        }
+        actions_.clear();
+    }
+
     GMenu* model(const menu& items)
     {
         GMenu* top = g_menu_new();
@@ -775,15 +959,16 @@ private:
                 item.checked ? g_simple_action_new_stateful(name.c_str(), nullptr, g_variant_new_boolean(*item.checked))
                              : g_simple_action_new(name.c_str(), nullptr);
             g_simple_action_set_enabled(action, item.enabled && item.action);
-            g_signal_connect(action, "activate",
-                             G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer p)
-                                        {
-                                            auto* mi = static_cast<const menu_item*>(p);
-                                            if (mi->action) mi->action();
-                                        }),
-                             const_cast<menu_item*>(&item));
+            const gulong handler =
+                g_signal_connect(action, "activate",
+                                 G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer p)
+                                            {
+                                                auto* mi = static_cast<const menu_item*>(p);
+                                                if (mi->action) mi->action();
+                                            }),
+                                 const_cast<menu_item*>(&item));
             g_action_map_add_action(G_ACTION_MAP(group_), G_ACTION(action));
-            g_object_unref(action);
+            actions_.push_back({action, handler});  // this's reference, dropped with it
             GMenuItem* mi = g_menu_item_new(item.label.c_str(), (prefix_ + "." + name).c_str());
             if (!item.shortcut.empty()) g_menu_item_set_attribute(mi, "accel", "s", gtk_accel(item.shortcut).c_str());
             g_menu_append_item(section, mi);
@@ -797,27 +982,42 @@ private:
     std::string prefix_;
     GSimpleActionGroup* group_;
     std::vector<std::string> names_;
+    std::vector<std::pair<GSimpleAction*, gulong>> actions_;  // menu_'s, with their activate
     menu menu_;
 };
 
 // A GtkMenuButton whose menu is built by `fn` each time it opens.
-void attach_menu(GtkMenuButton* button, menu_actions* actions, std::function<menu()>* fn)
+// `owner`: the rapport object it's for, whose token its builder's call
+// reports on (#140).
+void attach_menu(GtkMenuButton* button, menu_actions* actions, std::function<menu()>* fn,
+                 const part& owner)
 {
     struct context
     {
         menu_actions* actions;
         std::function<menu()>* fn;
+        std::weak_ptr<bool> owner;
     };
     gtk_menu_button_set_create_popup_func(
         button,
         +[](GtkMenuButton* b, gpointer p)
         {
             auto* c = static_cast<context*>(p);
-            GMenu* model = c->actions->build(*c->fn ? (*c->fn)() : menu{});
+            const std::shared_ptr<bool> owner = c->owner.lock();
+            if (!owner || !*owner) return;
+            menu m;
+            if (*c->fn)
+            {
+                auto asked = call_app_for(owner, *c->fn);
+                if (!asked.alive) return;  // the app's menu builder destroyed its owner
+                m = std::move(asked.value);
+            }
+            GMenu* model = c->actions->build(std::move(m));
             gtk_menu_button_set_menu_model(b, G_MENU_MODEL(model));
             g_object_unref(model);
         },
-        new context{actions, fn}, +[](gpointer p) { delete static_cast<context*>(p); });
+        new context{actions, fn, owner.life()},
+        +[](gpointer p) { delete static_cast<context*>(p); });
 }
 
 class menu_button_impl : public widget_base<rap::menu_button>
@@ -830,9 +1030,17 @@ public:
         gtk_menu_button_set_use_underline(GTK_MENU_BUTTON(w_), true);  // "_View": V is the access key
         set_text(s.text);
         if (s.icon) set_icon(s.icon);
-        attach_menu(GTK_MENU_BUTTON(w_), &actions_, &menu_fn_);
+        attach_menu(GTK_MENU_BUTTON(w_), &actions_, &menu_fn_, *this);
     }
 
+protected:
+    // The create-popup func isn't a signal, and points at this (#140).
+    void on_disconnect() override
+    {
+        gtk_menu_button_set_create_popup_func(GTK_MENU_BUTTON(w_), nullptr, nullptr, nullptr);
+    }
+
+public:
     void set_text(const std::string& t) override
     {
         if (shown_ && text_ == t) return;  // (#88)
@@ -856,7 +1064,7 @@ private:
     // Its own child for the icon; the arrow stays, as for a text one.
     void show_icon()
     {
-        gtk_menu_button_set_child(GTK_MENU_BUTTON(w_), icon_and_text(icon_, text_));
+        gtk_menu_button_set_child(GTK_MENU_BUTTON(w_), icon_and_text(icon_, text_, life()));
         gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(w_), true);
     }
     std::string text_;
@@ -1038,10 +1246,18 @@ public:
         : widget_base(nullptr, gtk_scrolled_window_new())
     {
         root_ = g_list_store_new(GTK_TYPE_STRING_OBJECT);
-        model_ = gtk_tree_list_model_new(G_LIST_MODEL(g_object_ref(root_)), false, false,
-                                         +[](gpointer item, gpointer p) -> GListModel*
-                                         { return static_cast<tree_impl*>(p)->children_of(item); },
-                                         this, nullptr);
+        // The model's child function isn't a signal: the model, and the
+        // views holding it, may outlive this (#140). It asks through
+        // `children_`, which forgets this as it goes.
+        children_ = new children_source{this};
+        model_ = gtk_tree_list_model_new(
+            G_LIST_MODEL(g_object_ref(root_)), false, false,
+            +[](gpointer item, gpointer p) -> GListModel*
+            {
+                tree_impl* tree = static_cast<children_source*>(p)->tree;
+                return tree ? tree->children_of(item) : nullptr;
+            },
+            children_, +[](gpointer p) { delete static_cast<children_source*>(p); });
         sel_ = gtk_single_selection_new(G_LIST_MODEL(g_object_ref(model_)));
         gtk_single_selection_set_autoselect(sel_, false);
         gtk_single_selection_set_can_unselect(sel_, true);
@@ -1062,7 +1278,7 @@ public:
                 std::erase_if(self->boxes_,
                               [li](GtkWidget* b)
                               {
-                                  if (g_object_get_data(G_OBJECT(b), "rapport-item") != li) return false;
+                                  if (item_of(b) != GTK_LIST_ITEM(li)) return false;
                                   g_object_unref(b);
                                   return true;
                               });
@@ -1078,14 +1294,14 @@ public:
                 +[](GtkSelectionModel*, guint, guint, gpointer p)
                 {
                     auto* self = static_cast<tree_impl*>(p);
-                    if (!self->quiet_ && self->changed_) self->changed_();
+                    if (!self->quiet_) call_app(*self, self->changed_);
                 },
                 this);
         connect(w_, "activate",
                 +[](GtkListView*, guint pos, gpointer p)
                 {
                     auto* self = static_cast<tree_impl*>(p);
-                    if (self->activate_) self->activate_(self->id_at(pos));
+                    call_app(*self, self->activate_, self->id_at(pos));
                 },
                 this);
         // Right-click on blank space (rows claim their own presses).
@@ -1108,7 +1324,7 @@ public:
                         const std::optional<std::string> id = self->focused();
                         auto it = id ? self->nodes_.find(*id) : self->nodes_.end();
                         if (it == self->nodes_.end() || !it->second.check) return false;
-                        if (self->toggled_) self->toggled_(*id);
+                        call_app(*self, self->toggled_, *id);
                         return true;
                     }
                     if (key != GDK_KEY_Menu && !(key == GDK_KEY_F10 && (state & GDK_SHIFT_MASK))) return false;
@@ -1121,6 +1337,8 @@ public:
     }
     ~tree_impl() override
     {
+        children_->tree = nullptr;  // before the model may go, and it with it
+        self_.forget();
         g_object_unref(sel_);
         g_object_unref(model_);
         g_object_unref(root_);
@@ -1299,7 +1517,8 @@ public:
                 lazy_tree::tracker::batch b(lazy_);
                 gtk_tree_list_row_set_expanded(row, open);
                 g_object_unref(row);
-                if (open) lazy_.opened(id);
+                // The app's on_expanding (asked through lazy_) may destroy it.
+                if (open && !call_app(*this, [&] { lazy_.opened(id); })) return;
             }
     }
     void on_selection_changed(std::function<void()> f) override { changed_ = std::move(f); }
@@ -1313,7 +1532,7 @@ public:
         // The row showing it, if one is.
         for (GtkWidget* b : boxes_)
         {
-            auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
+            auto* li = item_of(b);
             auto* row = li ? GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)) : nullptr;
             if (row && id_of(row) == id) show_check(b, st);
         }
@@ -1324,12 +1543,48 @@ protected:
     void on_disconnect() override
     {
         alive_ = false;
+        self_.forget();  // its rows' callbacks reach nothing from here
+        children_->tree = nullptr;
         path_icons_.cancel();
         if (popover_) gtk_widget_unparent(popover_);
         popover_ = nullptr;
     }
 
 private:
+    // A row's box and right-click gesture know their list item weakly: GTK
+    // tears items down and recycles them, and a box or gesture held
+    // elsewhere may outlive it (#140). nullptr once it's gone.
+    static void set_item(GObject* o, GtkListItem* li)
+    {
+        auto* ref = new GWeakRef;
+        g_weak_ref_init(ref, li);
+        g_object_set_data_full(
+            o, "rapport-item", ref,
+            +[](gpointer p)
+            {
+                g_weak_ref_clear(static_cast<GWeakRef*>(p));
+                delete static_cast<GWeakRef*>(p);
+            });
+    }
+    static GtkListItem* item_of(gpointer o)
+    {
+        auto* ref = static_cast<GWeakRef*>(g_object_get_data(G_OBJECT(o), "rapport-item"));
+        GObject* li = ref ? static_cast<GObject*>(g_weak_ref_get(ref)) : nullptr;
+        if (li) g_object_unref(li);  // held by its view while it's there
+        return li ? GTK_LIST_ITEM(li) : nullptr;
+    }
+    struct children_source
+    {
+        tree_impl* tree;  // nullptr once it's gone
+    };
+    children_source* children_ = nullptr;  // the model's (it frees it)
+    // The rows' own signals (a row's box, its right-click, its expanding):
+    // GTK recycles and drops rows, so they aren't the window's connections
+    // (connect), and a row may outlive this (#140): each holds the token.
+    self_token<tree_impl> self_{this};
+    gpointer token() const { return self_.make(); }
+    static constexpr auto drop_token = &self_token<tree_impl>::drop;
+    static tree_impl* live(gpointer p) { return self_token<tree_impl>::live(p); }
     struct node
     {
         std::string label;
@@ -1448,7 +1703,12 @@ private:
                 if (it != nodes_.end() && it->second.expanded && (!it->second.children.empty() || it->second.loading))
                 {
                     gtk_tree_list_row_set_expanded(row, true);
-                    lazy_.opened(id);
+                    if (!call_app(*this,
+                                  [&] { lazy_.opened(id); }))  // its on_expanding may destroy it
+                    {
+                        g_object_unref(row);
+                        return;
+                    }
                 }
                 g_object_unref(row);
             }
@@ -1539,7 +1799,7 @@ private:
     {
         for (GtkWidget* b : boxes_)
         {
-            auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
+            auto* li = item_of(b);
             auto* row = li ? GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)) : nullptr;
             if (row && !is_placeholder(row) && id_of(row) == id) bind_row(li);
         }
@@ -1549,8 +1809,8 @@ private:
     // lazy_ itself.
     static void row_expanded(GtkTreeListRow* row, GParamSpec*, gpointer p)
     {
-        auto* self = static_cast<tree_impl*>(p);
-        if (!self->alive_ || !gtk_tree_list_row_get_expanded(row)) return;
+        tree_impl* self = live(p);
+        if (!self || !gtk_tree_list_row_get_expanded(row)) return;
         const std::string id = id_of(row);
 #if GTK_CHECK_VERSION(4, 10, 0)
         // Every row can open now; the keyboard shouldn't open one with nothing in it.
@@ -1561,7 +1821,7 @@ private:
             return;
         }
 #endif
-        self->lazy_.opened(id);
+        call_app(*self, [&] { self->lazy_.opened(id); });
     }
     void setup(GtkListItem* li)
     {
@@ -1573,8 +1833,9 @@ private:
         GtkWidget* check = gtk_check_button_new();
         gtk_widget_set_focusable(check, false);
         gtk_widget_set_visible(check, false);
-        g_object_set_data(G_OBJECT(check), "rapport-item", li);
-        g_signal_connect(check, "toggled", G_CALLBACK(check_toggled), this);
+        set_item(G_OBJECT(check), li);
+        g_signal_connect_data(check, "toggled", G_CALLBACK(check_toggled), token(), drop_token,
+                              GConnectFlags(0));
         boxes_.push_back(GTK_WIDGET(g_object_ref(check)));  // a row can go before its teardown
         GtkWidget* label = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(label), 0);
@@ -1591,21 +1852,30 @@ private:
         // view.
         GtkGesture* click = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
-        g_object_set_data(G_OBJECT(click), "rapport-item", li);
-        g_signal_connect(click, "pressed", G_CALLBACK(row_pressed), this);
+        set_item(G_OBJECT(click), li);
+        g_signal_connect_data(click, "pressed", G_CALLBACK(row_pressed), token(), drop_token,
+                              GConnectFlags(0));
         gtk_widget_add_controller(expander, GTK_EVENT_CONTROLLER(click));
     }
     static void row_pressed(GtkGestureClick* g, int, double x, double y, gpointer p)
     {
-        auto* self = static_cast<tree_impl*>(p);
-        if (!self->alive_) return;
+        tree_impl* self = live(p);
+        if (!self) return;
         gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-        auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(g), "rapport-item"));
-        const guint pos = gtk_list_item_get_position(li);
+        auto* li = item_of(g);
+        const guint pos = li ? gtk_list_item_get_position(li) : GTK_INVALID_LIST_POSITION;
         if (pos == GTK_INVALID_LIST_POSITION) return;
         if (auto* item = GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)); item && is_placeholder(item)) return;
         if (gtk_single_selection_get_selected(self->sel_) != pos)
-            gtk_single_selection_set_selected(self->sel_, pos);  // the user's: reported
+        {
+            // The user's: reported. The app's on_selection_changed, from inside
+            // it, may destroy the tree and drop the selection with it: held
+            // till GTK's done with it.
+            GtkSingleSelection* sel = GTK_SINGLE_SELECTION(g_object_ref(self->sel_));
+            gtk_single_selection_set_selected(sel, pos);
+            g_object_unref(sel);
+            if (!live(p)) return;  // the app's on_selection_changed destroyed it
+        }
         GtkWidget* row = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
         graphene_point_t in = GRAPHENE_POINT_INIT(float(x), float(y)), out;
         if (!gtk_widget_compute_point(row, self->w_, &in, &out)) out = in;
@@ -1615,16 +1885,16 @@ private:
     // and the app says what the click means.
     static void check_toggled(GtkCheckButton* b, gpointer p)
     {
-        auto* self = static_cast<tree_impl*>(p);
-        if (!self->alive_ || self->binding_) return;
-        auto* li = static_cast<GtkListItem*>(g_object_get_data(G_OBJECT(b), "rapport-item"));
+        tree_impl* self = live(p);
+        if (!self || self->binding_) return;
+        auto* li = item_of(b);
         const guint pos = li ? gtk_list_item_get_position(li) : GTK_INVALID_LIST_POSITION;
         if (pos == GTK_INVALID_LIST_POSITION) return;
         const std::string id = self->id_at(pos);
         auto it = self->nodes_.find(id);
         if (it == self->nodes_.end() || !it->second.check) return;
         self->show_check(GTK_WIDGET(b), *it->second.check);
-        if (self->toggled_) self->toggled_(id);
+        call_app(*self, self->toggled_, id);
     }
     void show_check(GtkWidget* b, check_state st)
     {
@@ -1672,7 +1942,8 @@ private:
         if (!g_object_get_data(G_OBJECT(row), "rapport-watched"))
         {
             g_object_set_data(G_OBJECT(row), "rapport-watched", GINT_TO_POINTER(1));
-            g_signal_connect(row, "notify::expanded", G_CALLBACK(row_expanded), this);
+            g_signal_connect_data(row, "notify::expanded", G_CALLBACK(row_expanded), token(),
+                                  drop_token, GConnectFlags(0));
         }
     }
     guint rows() const { return g_list_model_get_n_items(G_LIST_MODEL(model_)); }
@@ -1720,7 +1991,9 @@ private:
     void popup(std::optional<std::string> id, double x, double y)
     {
         if (!alive_ || !context_) return;
-        menu m = context_(std::move(id));
+        auto asked = call_app_for(*this, context_, std::move(id));
+        if (!asked.alive) return;  // the app's on_context_menu destroyed it
+        menu m = std::move(asked.value);
         if (m.empty()) return;
         GMenu* model = ctx_menu_->build(std::move(m));
         if (popover_) gtk_widget_unparent(popover_);
@@ -1794,7 +2067,7 @@ public:
             +[](GtkPopover*, gpointer p)
             {
                 auto* self = static_cast<date_picker_impl*>(p);
-                if (self->date_ != self->shown_ && self->changed_) self->changed_(self->date_);
+                if (self->date_ != self->shown_) call_app(*self, self->changed_, self->date_);
             },
             this);
     }
@@ -2059,10 +2332,14 @@ public:
         gtk_box_append(GTK_BOX(content), arrow_);
         button_ = new_entry_button(box, content);
         gtk_widget_add_css_class(button_, s.leading ? "left" : "right");
-        g_signal_connect(
-            button_, "clicked",
-            G_CALLBACK(+[](GtkButton*, gpointer p) { static_cast<entry_box_action*>(p)->act(); }),
-            this);
+        // Not a part (no connect): its button and popover hold its token.
+        g_signal_connect_data(button_, "clicked",
+                              G_CALLBACK(+[](GtkButton*, gpointer p)
+                                         {
+                                             if (auto* self = self_token<entry_box_action>::live(p))
+                                                 self->act();
+                                         }),
+                              self_.make(), self_token<entry_box_action>::drop, GConnectFlags(0));
         set_tooltip(s.tooltip);
         if (s.bind) *s.bind = this;
     }
@@ -2108,10 +2385,12 @@ private:
     {
         if (!menu_)
         {
-            if (click_) click_();
+            call_app(life_, click_);
             return;
         }
-        menu m = menu_();
+        auto asked = call_app_for(life_, menu_);
+        if (!asked.alive) return;  // the app's menu builder destroyed it
+        menu m = std::move(asked.value);
         if (m.empty()) return;
         GMenu* model = menus_.build(std::move(m));
         if (popover_) gtk_widget_unparent(popover_);
@@ -2138,21 +2417,23 @@ private:
         GtkRoot* root = gtk_widget_get_root(button_);
         return_to_ =
             root && gtk_root_get_focus(root) == button_ ? button_ : rapport_entry_box_text(box);
-        g_signal_connect(popover_, "closed",
-                         G_CALLBACK(+[](GtkPopover*, gpointer p)
-                                    {
-                                        GtkWidget* back =
-                                            static_cast<entry_box_action*>(p)->return_to_;
-                                        g_idle_add_full(
-                                            G_PRIORITY_DEFAULT_IDLE,
-                                            +[](gpointer p) -> gboolean
-                                            {
-                                                refocus_in_entry_box(static_cast<GtkWidget*>(p));
-                                                return G_SOURCE_REMOVE;
-                                            },
-                                            g_object_ref(back), g_object_unref);
-                                    }),
-                         this);
+        g_signal_connect_data(popover_, "closed",
+                              G_CALLBACK(+[](GtkPopover*, gpointer p)
+                                         {
+                                             auto* self = self_token<entry_box_action>::live(p);
+                                             if (!self || !self->return_to_) return;
+                                             GtkWidget* back = self->return_to_;
+                                             g_idle_add_full(
+                                                 G_PRIORITY_DEFAULT_IDLE,
+                                                 +[](gpointer p) -> gboolean
+                                                 {
+                                                     refocus_in_entry_box(
+                                                         static_cast<GtkWidget*>(p));
+                                                     return G_SOURCE_REMOVE;
+                                                 },
+                                                 g_object_ref(back), g_object_unref);
+                                         }),
+                              self_.make(), self_token<entry_box_action>::drop, GConnectFlags(0));
         popup_when_built(popover_);
     }
 
@@ -2162,6 +2443,8 @@ private:
     GtkWidget* arrow_ = nullptr;
     GtkWidget* popover_ = nullptr;
     GtkWidget* return_to_ = nullptr;
+    self_token<entry_box_action> self_{this};  // what its button and popover reach it by
+    std::shared_ptr<bool> life_ = std::make_shared<bool>(true);  // for call_app: gone with it
     icon icon_;
     std::optional<std::string> tooltip_;  // the one it has (set_tooltip)
     std::function<void()> click_;
@@ -2195,14 +2478,15 @@ public:
             clear_ = new_entry_button(outer_, gtk_image_new_from_icon_name("edit-clear-symbolic"));
             gtk_widget_add_css_class(clear_, "right");
             set_entry_button_tooltip(clear_, rap::i18n::tr("rapport", "Clear"));
-            g_signal_connect(clear_, "clicked",
-                             G_CALLBACK(+[](GtkButton*, gpointer p)
-                                        {
-                                            auto* self = static_cast<entry_box_impl*>(p);
-                                            gtk_editable_set_text(GTK_EDITABLE(self->w_), "");
-                                            gtk_widget_grab_focus(self->w_);
-                                        }),
-                             this);
+            connect(
+                clear_, "clicked",
+                +[](GtkButton*, gpointer p)
+                {
+                    auto* self = static_cast<entry_box_impl*>(p);
+                    gtk_editable_set_text(GTK_EDITABLE(self->w_), "");
+                    gtk_widget_grab_focus(self->w_);
+                },
+                this);
         }
         for (const spec::entry_action& a : s.actions)
             if (!a.leading)
@@ -2214,7 +2498,8 @@ public:
             {
                 auto* self = static_cast<entry_box_impl*>(p);
                 self->update_clear();
-                if (!self->quiet_ && self->changed_) self->changed_(gtk_editable_get_text(e));
+                if (!self->quiet_)
+                    call_app(*self, self->changed_, std::string(gtk_editable_get_text(e)));
             },
             this);
         connect(
@@ -2222,7 +2507,7 @@ public:
             +[](GtkText*, gpointer p)
             {
                 auto* self = static_cast<entry_box_impl*>(p);
-                if (self->activate_) self->activate_();
+                call_app(*self, self->activate_);
             },
             this);
     }
@@ -2292,7 +2577,8 @@ public:
             {
                 auto* self = static_cast<entry_impl*>(p);
                 self->update_clear();
-                if (!self->quiet_ && self->changed_) self->changed_(gtk_editable_get_text(e));
+                if (!self->quiet_)
+                    call_app(*self, self->changed_, std::string(gtk_editable_get_text(e)));
             },
             this);
         if (clearable_)
@@ -2308,7 +2594,7 @@ public:
             +[](GtkEntry*, gpointer p)
             {
                 auto* self = static_cast<entry_impl*>(p);
-                if (self->activate_) self->activate_();
+                call_app(*self, self->activate_);
             },
             this);
     }
@@ -2380,7 +2666,7 @@ public:
                 const int now = self->current();
                 if (now == self->known_) return;
                 self->known_ = now;
-                if (!self->quiet_ && self->changed_) self->changed_(now);
+                if (!self->quiet_) call_app(*self, self->changed_, now);
             },
             this);
         // The font is known once styled, in a window.
@@ -2467,7 +2753,8 @@ public:
             +[](GtkEditable* e, gpointer p)
             {
                 auto* self = static_cast<combo_impl*>(p);
-                if (!self->quiet_ && self->changed_) self->changed_(gtk_editable_get_text(e));
+                if (!self->quiet_)
+                    call_app(*self, self->changed_, std::string(gtk_editable_get_text(e)));
             },
             this);
         connect(
@@ -2475,7 +2762,7 @@ public:
             +[](GtkEntry*, gpointer p)
             {
                 auto* self = static_cast<combo_impl*>(p);
-                if (self->activate_) self->activate_();
+                call_app(*self, self->activate_);
             },
             this);
     }
@@ -2658,7 +2945,7 @@ private:
                 // (No sizes from its beginning: they can't have been the same.)
                 const bool changed = self->pressed_.empty() || self->sizes() != self->pressed_;
                 self->pressed_.clear();
-                if (dragged && changed && self->moved_) self->moved_();
+                if (dragged && changed) call_app(*self, self->moved_);
             },
             this);
     }
@@ -2796,6 +3083,9 @@ public:
         gtk_widget_set_visible(slot_, w != nullptr);
     }
 
+    // Its tabs going: the app's drawing for its icon is called no more.
+    void close() { *gate_ = false; }
+
 private:
     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
     static bool only_drawn(const icon& i)
@@ -2804,19 +3094,33 @@ private:
     }
     // As icon_widget's drawn icons: drawn whenever it paints, so it follows
     // scale and theme.
-    static void set_drawing(GtkWidget* area, draw_fn draw)
+    // The app's drawing only while the tabs it heads are there (gate_):
+    // the heading's widgets may outlive them (#140).
+    void set_drawing(GtkWidget* area, draw_fn draw)
     {
+        struct gated_draw
+        {
+            draw_fn draw;
+            std::weak_ptr<bool> gate;
+        };
         gtk_drawing_area_set_draw_func(
             GTK_DRAWING_AREA(area),
             +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
             {
+                const drawing in_draw;
+                const held_area held(a);  // first: before any of the app's
+                auto* g = static_cast<gated_draw*>(p);
+                const std::shared_ptr<bool> open = g->gate.lock();
+                if (!open || !*open) return;
                 snap_to_device(cr, GTK_WIDGET(a));
                 cairo_painter painter(cr, GTK_WIDGET(a));
-                (*static_cast<draw_fn*>(p))(painter, {float(w), float(h)});
+                call_app(open, g->draw, painter,
+                         size_f{float(w), float(h)});  // a copy: it may end its tabs, and g
             },
-            new draw_fn(std::move(draw)), +[](gpointer p) { delete static_cast<draw_fn*>(p); });
+            new gated_draw{std::move(draw), gate_},
+            +[](gpointer p) { delete static_cast<gated_draw*>(p); });
     }
-    static GtkWidget* make_icon(const icon& i)
+    GtkWidget* make_icon(const icon& i)
     {
         constexpr int size = 16;
         if (only_drawn(i))
@@ -2835,9 +3139,12 @@ private:
             gtk_image_set_pixel_size(GTK_IMAGE(img), size);
             return img;
         }
-        return icon_widget(i, size);
+        return icon_widget(i, size, gate_);
     }
 
+    // Open while the tabs it heads are there (a heading is made before them,
+    // and copied): closed by them as they go (close).
+    std::shared_ptr<bool> gate_ = std::make_shared<bool>(true);
     GtkWidget* box_;
     GtkWidget* slot_;
     GtkWidget* label_;
@@ -2962,10 +3269,18 @@ public:
         if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)] || !shown_.at(i)) return;
         const auto build = std::move(lazy_[size_t(i)]);
         lazy_[size_t(i)] = nullptr;
-        GtkWidget* w = build_(build());
+        auto content = call_app_for(*this, build);
+        if (!content.alive) return;  // the app's page builder destroyed it
+        GtkWidget* w = build_(std::move(content.value));
         gtk_widget_set_hexpand(w, TRUE);
         gtk_widget_set_vexpand(w, TRUE);
         gtk_box_append(GTK_BOX(pages_[size_t(i)]), w);
+    }
+
+protected:
+    void on_disconnect() override
+    {
+        for (auto& h : headings_) h.close();  // their icons' drawing is the app's (#140)
     }
 
 private:
@@ -2975,7 +3290,7 @@ private:
     void user_switched(int before)
     {
         settled_ = current();
-        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+        if (settled_ >= 0 && settled_ != before) call_app(*this, changed_, settled_);
     }
     void strip()
     {
@@ -3110,10 +3425,18 @@ public:
         if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)] || !shown_.at(i)) return;
         const auto build = std::move(lazy_[size_t(i)]);
         lazy_[size_t(i)] = nullptr;
-        GtkWidget* w = build_(build());
+        auto content = call_app_for(*this, build);
+        if (!content.alive) return;  // the app's page builder destroyed it
+        GtkWidget* w = build_(std::move(content.value));
         gtk_widget_set_hexpand(w, TRUE);
         gtk_widget_set_vexpand(w, TRUE);
         gtk_box_append(GTK_BOX(pages_[size_t(i)]), w);
+    }
+
+protected:
+    void on_disconnect() override
+    {
+        for (auto& h : headings_) h.close();  // their icons' drawing is the app's (#140)
     }
 
 private:
@@ -3122,7 +3445,7 @@ private:
     void user_switched(int before)
     {
         settled_ = current();
-        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+        if (settled_ >= 0 && settled_ != before) call_app(*this, changed_, settled_);
     }
     // Page `i` current, quietly (row-selected doesn't come for the row
     // already selected, so its page is put up here too); -1: none.
@@ -3425,6 +3748,9 @@ public:
     rap::window* window = nullptr;  // the window it's in: a transfer's source
 
 private:
+    // A tab's own buttons and gestures go with the tab, not the window's
+    // connections (connect), and may outlive this (#140): they hold this.
+    self_token<document_tabs_impl> self_{this};
     static std::set<document_tabs_impl*>& live()
     {
         static std::set<document_tabs_impl*> s;
@@ -3639,7 +3965,7 @@ private:
             gtk_image_set_pixel_size(GTK_IMAGE(image), 16);
         }
         else
-            image = icon_widget(t.icon, 16);
+            image = icon_widget(t.icon, 16, life());
         if (image) gtk_box_append(GTK_BOX(box), image);
         GtkWidget* title = gtk_label_new(t.title.c_str());
         gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
@@ -3652,48 +3978,52 @@ private:
         gtk_widget_set_focus_on_click(close, false);
         gtk_widget_set_tooltip_text(close, rap::i18n::tr("rapport", "Close tab"));
         g_object_set_data_full(G_OBJECT(close), "rapport-tab", g_strdup(t.id.c_str()), g_free);
-        g_signal_connect(close, "clicked",
-                         G_CALLBACK(+[](GtkButton* b, gpointer p)
-                                    {
-                                        auto* self = static_cast<document_tabs_impl*>(p);
-                                        const auto* id = static_cast<const char*>(
-                                            g_object_get_data(G_OBJECT(b), "rapport-tab"));
-                                        self->state.close_asked(self->state.index_of(id));
-                                    }),
-                         this);
+        g_signal_connect_data(close, "clicked",
+                              G_CALLBACK(+[](GtkButton* b, gpointer p)
+                                         {
+                                             auto* self = self_token<document_tabs_impl>::live(p);
+                                             if (!self) return;
+                                             const auto* id = static_cast<const char*>(
+                                                 g_object_get_data(G_OBJECT(b), "rapport-tab"));
+                                             self->state.close_asked(self->state.index_of(id));
+                                         }),
+                              self_.make(), self_token<document_tabs_impl>::drop, GConnectFlags(0));
         gtk_box_append(GTK_BOX(box), close);
         if (!t.tooltip.empty()) gtk_widget_set_tooltip_text(box, t.tooltip.c_str());
         gtk_widget_set_size_request(box, width_, -1);
         g_object_set_data_full(G_OBJECT(box), "rapport-tab", g_strdup(t.id.c_str()), g_free);
         GtkGesture* middle = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(middle), GDK_BUTTON_MIDDLE);
-        g_signal_connect(middle, "released",
-                         G_CALLBACK(+[](GtkGestureClick* g, int, double, double, gpointer p)
-                                    {
-                                        auto* self = static_cast<document_tabs_impl*>(p);
-                                        GtkWidget* w = gtk_event_controller_get_widget(
-                                            GTK_EVENT_CONTROLLER(g));
-                                        const auto* id = static_cast<const char*>(
-                                            g_object_get_data(G_OBJECT(w), "rapport-tab"));
-                                        self->state.close_asked(self->state.index_of(id));
-                                    }),
-                         this);
+        g_signal_connect_data(middle, "released",
+                              G_CALLBACK(+[](GtkGestureClick* g, int, double, double, gpointer p)
+                                         {
+                                             auto* self = self_token<document_tabs_impl>::live(p);
+                                             if (!self) return;
+                                             GtkWidget* w = gtk_event_controller_get_widget(
+                                                 GTK_EVENT_CONTROLLER(g));
+                                             const auto* id = static_cast<const char*>(
+                                                 g_object_get_data(G_OBJECT(w), "rapport-tab"));
+                                             self->state.close_asked(self->state.index_of(id));
+                                         }),
+                              self_.make(), self_token<document_tabs_impl>::drop, GConnectFlags(0));
         gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(middle));
         // A right click: the tab's menu.
         GtkGesture* right = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right), GDK_BUTTON_SECONDARY);
-        g_signal_connect(right, "pressed",
-                         G_CALLBACK((+[](GtkGestureClick* g, int, double x, double y, gpointer p)
-                                    {
-                                        auto* self = static_cast<document_tabs_impl*>(p);
-                                        GtkWidget* w = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
-                                        const auto* id = static_cast<const char*>(
-                                            g_object_get_data(G_OBJECT(w), "rapport-tab"));
-                                        graphene_point_t in{float(x), float(y)}, out{};
-                                        if (!gtk_widget_compute_point(w, self->outer_, &in, &out)) out = in;
-                                        self->menu_for(id ? self->state.index_of(id) : -1, out.x, out.y);
-                                    })),
-                         this);
+        g_signal_connect_data(
+            right, "pressed",
+            G_CALLBACK((+[](GtkGestureClick* g, int, double x, double y, gpointer p)
+                        {
+                            auto* self = self_token<document_tabs_impl>::live(p);
+                            if (!self) return;
+                            GtkWidget* w = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+                            const auto* id = static_cast<const char*>(
+                                g_object_get_data(G_OBJECT(w), "rapport-tab"));
+                            graphene_point_t in{float(x), float(y)}, out{};
+                            if (!gtk_widget_compute_point(w, self->outer_, &in, &out)) out = in;
+                            self->menu_for(id ? self->state.index_of(id) : -1, out.x, out.y);
+                        })),
+            self_.make(), self_token<document_tabs_impl>::drop, GConnectFlags(0));
         gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(right));
         return box;
     }
@@ -3789,19 +4119,18 @@ public:
             // the selection's new state comes from.
             GtkEventController* space = gtk_event_controller_key_new();
             gtk_event_controller_set_propagation_phase(space, GTK_PHASE_CAPTURE);
-            g_signal_connect(
+            connect(
                 space, "key-pressed",
-                G_CALLBACK(+[](GtkEventControllerKey*, guint key, guint, GdkModifierType mods,
-                               gpointer p) -> gboolean
-                           {
-                               auto* self = static_cast<list_impl*>(p);
-                               if (key != GDK_KEY_space ||
-                                   (mods & gtk_accelerator_get_default_mod_mask()) || !self->model_)
-                                   return false;
-                               if (auto row = self->focused_row())
-                                   self->model_->toggle_checked(*row);
-                               return true;
-                           }),
+                +[](GtkEventControllerKey*, guint key, guint, GdkModifierType mods,
+                    gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<list_impl*>(p);
+                    if (key != GDK_KEY_space || (mods & gtk_accelerator_get_default_mod_mask()) ||
+                        !self->model_)
+                        return false;
+                    if (auto row = self->focused_row()) self->model_->toggle_checked(*row);
+                    return true;
+                },
                 this);
             gtk_widget_add_controller(w_, space);
         }
@@ -3894,7 +4223,7 @@ public:
                 // Painted cells draw with the selection's colours.
                 for (auto [li, ctx] : self->bound_)
                     if (ctx->painted) redraw_cell(gtk_list_item_get_child(li));
-                if (self->sel_changed_) self->sel_changed_();
+                call_app(*self, self->sel_changed_);
             },
             this);
         connect(
@@ -3902,7 +4231,7 @@ public:
             +[](GtkColumnView*, guint row, gpointer p)
             {
                 auto* self = static_cast<list_impl*>(p);
-                if (self->activate_) self->activate_(row);
+                call_app(*self, self->activate_, row);
             },
             this);
         connect(
@@ -4131,24 +4460,32 @@ public:
         GtkGesture* click = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_MIDDLE);
         gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
-        g_signal_connect(click, "pressed", G_CALLBACK(+[](GtkGestureClick* g, int, double, double y, gpointer p)
-                                                       {
-                                                           auto* self = static_cast<list_impl*>(p);
-                                                           gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-                                                           self->start_auto_scroll(y);
-                                                       }),
-                         this);
-        g_signal_connect(click, "released", G_CALLBACK(+[](GtkGestureClick*, int, double, double, gpointer p)
-                                                        { static_cast<list_impl*>(p)->stop_auto_scroll(); }),
-                         this);
-        g_signal_connect(click, "cancel", G_CALLBACK(+[](GtkGesture*, GdkEventSequence*, gpointer p)
-                                                      { static_cast<list_impl*>(p)->stop_auto_scroll(); }),
-                         this);
+        connect(
+            click, "pressed",
+            +[](GtkGestureClick* g, int, double, double y, gpointer p)
+            {
+                auto* self = static_cast<list_impl*>(p);
+                gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+                self->start_auto_scroll(y);
+            },
+            this);
+        connect(
+            click, "released",
+            +[](GtkGestureClick*, int, double, double, gpointer p)
+            { static_cast<list_impl*>(p)->stop_auto_scroll(); },
+            this);
+        connect(
+            click, "cancel",
+            +[](GtkGesture*, GdkEventSequence*, gpointer p)
+            { static_cast<list_impl*>(p)->stop_auto_scroll(); },
+            this);
         gtk_widget_add_controller(w_, GTK_EVENT_CONTROLLER(click));
         GtkEventController* motion = gtk_event_controller_motion_new();
-        g_signal_connect(motion, "motion", G_CALLBACK(+[](GtkEventControllerMotion*, double, double y, gpointer p)
-                                                       { static_cast<list_impl*>(p)->auto_y = y; }),
-                         this);
+        connect(
+            motion, "motion",
+            +[](GtkEventControllerMotion*, double, double y, gpointer p)
+            { static_cast<list_impl*>(p)->auto_y = y; },
+            this);
         gtk_widget_add_controller(w_, motion);
     }
     void start_auto_scroll(double y)
@@ -4194,26 +4531,34 @@ public:
         {
             GtkGesture* drag = gtk_gesture_drag_new();
             gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), GDK_BUTTON_PRIMARY);
-            g_signal_connect(drag, "drag-begin", G_CALLBACK(+[](GtkGestureDrag* g, double x, double y, gpointer p)
-                                                            { static_cast<list_impl*>(p)->cell_drag_begin(g, x, y); }),
-                             this);
-            g_signal_connect(drag, "drag-update", G_CALLBACK(+[](GtkGestureDrag* g, double dx, double dy, gpointer p)
-                                                             { static_cast<list_impl*>(p)->cell_drag_update(g, dx, dy); }),
-                             this);
-            g_signal_connect(drag, "drag-end", G_CALLBACK(+[](GtkGestureDrag*, double, double, gpointer p)
-                                                          { static_cast<list_impl*>(p)->cell_drag_end(true); }),
-                             this);
+            connect(
+                drag, "drag-begin",
+                +[](GtkGestureDrag* g, double x, double y, gpointer p)
+                { static_cast<list_impl*>(p)->cell_drag_begin(g, x, y); },
+                this);
+            connect(
+                drag, "drag-update",
+                +[](GtkGestureDrag* g, double dx, double dy, gpointer p)
+                { static_cast<list_impl*>(p)->cell_drag_update(g, dx, dy); },
+                this);
+            connect(
+                drag, "drag-end",
+                +[](GtkGestureDrag*, double, double, gpointer p)
+                { static_cast<list_impl*>(p)->cell_drag_end(true); },
+                this);
             gtk_widget_add_controller(w_, GTK_EVENT_CONTROLLER(drag));
             GtkEventController* keys = gtk_event_controller_key_new();
-            g_signal_connect(keys, "key-pressed",
-                             G_CALLBACK(+[](GtkEventControllerKey*, guint key, guint, GdkModifierType, gpointer p) -> gboolean
-                                        {
-                                            auto* self = static_cast<list_impl*>(p);
-                                            if (key != GDK_KEY_Escape || !self->cell_.dragging) return false;
-                                            self->cell_drag_end(false);
-                                            return true;
-                                        }),
-                             this);
+            connect(
+                keys, "key-pressed",
+                +[](GtkEventControllerKey*, guint key, guint, GdkModifierType,
+                    gpointer p) -> gboolean
+                {
+                    auto* self = static_cast<list_impl*>(p);
+                    if (key != GDK_KEY_Escape || !self->cell_.dragging) return false;
+                    self->cell_drag_end(false);
+                    return true;
+                },
+                this);
             gtk_widget_add_controller(w_, keys);
         }
         cell_drag_ = std::move(d);
@@ -4271,6 +4616,7 @@ protected:
         *life_ = false;
         path_icons_.cancel();
         stop_dnd_tick();
+        stop_auto_scroll();  // a tick callback: not a signal (#140)
         set_line(nullptr, nullptr);
         end_drag_out();
         if (resnap_) g_source_remove(std::exchange(resnap_, 0));
@@ -4284,6 +4630,25 @@ private:
         list_impl* list;
         size_t column;
         bool painted;
+    };
+    // What a cell's own callbacks hold, not the list: GTK recycles and
+    // keeps cells, so they aren't the list's connections (connect), and a
+    // cell may outlive the list (#140). Its column while the list's there.
+    struct cell_ref
+    {
+        std::weak_ptr<bool> life;
+        column_ctx* ctx;
+        column_ctx* live() const
+        {
+            const std::shared_ptr<bool> l = life.lock();
+            return l && *l ? ctx : nullptr;
+        }
+        static gpointer make(const std::shared_ptr<bool>& life, column_ctx& ctx)
+        {
+            return new cell_ref{life, &ctx};
+        }
+        static void drop(gpointer p) { delete static_cast<cell_ref*>(p); }
+        static void drop_closure(gpointer p, GClosure*) { drop(p); }
     };
 
     // The cell widget at a point of the column view, its row and column.
@@ -4342,7 +4707,13 @@ private:
         cell_ = {};
         auto hit = cell_at(x, y);
         std::optional<cell_drag_start> start;
-        if (hit && model_) start = cell_drag_.begin(hit->row, hit->column, in_cell(*hit, x, y));
+        if (hit && model_)
+        {
+            auto begun =
+                call_app_for(*this, cell_drag_.begin, hit->row, hit->column, in_cell(*hit, x, y));
+            if (!begun.alive) return;  // the app's begin destroyed it
+            start = std::move(begun.value);
+        }
         if (!start)
         {
             gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_DENIED);  // an ordinary click
@@ -4365,8 +4736,16 @@ private:
         if (cell_.target_row) gtk_widget_remove_css_class(cell_.target_row, "rapport-drop");
         cell_.target.reset();
         cell_.target_row = nullptr;
-        if (auto hit = cell_at(cell_.x0 + dx, cell_.y0 + dy);
-            hit && cell_drag_.can_drop && cell_drag_.can_drop(cell_.from, hit->row, cell_.start.data))
+        auto hit = cell_at(cell_.x0 + dx, cell_.y0 + dy);
+        bool can = false;
+        if (hit && cell_drag_.can_drop)
+        {
+            auto asked =
+                call_app_for(*this, cell_drag_.can_drop, cell_.from, hit->row, cell_.start.data);
+            if (!asked.alive) return;  // the app's can_drop destroyed it
+            can = asked.value;
+        }
+        if (can)
         {
             cell_.target = hit->row;
             if ((cell_.target_row = row_widget(hit->cell))) gtk_widget_add_css_class(cell_.target_row, "rapport-drop");
@@ -4380,7 +4759,8 @@ private:
         cell_ = {};
         if (c.target_row) gtk_widget_remove_css_class(c.target_row, "rapport-drop");
         gtk_widget_set_cursor(w_, nullptr);
-        if (drop && c.dragging && c.target && cell_drag_.drop) cell_drag_.drop(c.from, *c.target, c.start.data);
+        if (drop && c.dragging && c.target)
+            call_app(*this, cell_drag_.drop, c.from, *c.target, c.start.data);
     }
     cell_drag cell_drag_;
     cell_drag_state cell_;
@@ -4817,8 +5197,14 @@ private:
         if (const size_t at = insertion_at(hover_.x, hover_.y); at != hover_.at)
         {
             hover_.at = at;
-            hover_.ok = hover_.reorder ? !is_noop_drop(at)
-                                       : !drop_in_.can_drop || drop_in_.can_drop(at, hover_.type);
+            if (hover_.reorder || !drop_in_.can_drop)
+                hover_.ok = hover_.reorder ? !is_noop_drop(at) : true;
+            else
+            {
+                auto asked = call_app_for(*this, drop_in_.can_drop, at, hover_.type);
+                if (!asked.alive) return GdkDragAction(0);  // the app's can_drop destroyed it
+                hover_.ok = asked.value;
+            }
         }
         show_line(hover_.ok ? hover_.at : std::nullopt);
         return hover_.ok ? GDK_ACTION_COPY : GdkDragAction(0);
@@ -4841,8 +5227,18 @@ private:
             gdk_drop_finish(drop, ok ? GDK_ACTION_COPY : GdkDragAction(0));
             return true;
         }
-        if (h.type.empty() || !drop_in_.drop ||
-            (drop_in_.can_drop && !drop_in_.can_drop(at, h.type)))
+        bool refused = h.type.empty() || !drop_in_.drop;
+        if (!refused && drop_in_.can_drop)
+        {
+            auto asked = call_app_for(*this, drop_in_.can_drop, at, h.type);
+            if (!asked.alive)  // the app's can_drop destroyed it
+            {
+                gdk_drop_finish(drop, GdkDragAction(0));
+                return true;
+            }
+            refused = !asked.value;
+        }
+        if (refused)
         {
             gdk_drop_finish(drop, GdkDragAction(0));
             return true;
@@ -4878,7 +5274,9 @@ private:
                                 auto life = r->life.lock();
                                 if (!life || !*life || !r->self->drop_in_.drop)
                                     return r->finish(false);
-                                r->finish(r->self->drop_in_.drop(r->at, r->type, *s));
+                                const auto dropped = call_app_for(
+                                    r->self->life(), r->self->drop_in_.drop, r->at, r->type, *s);
+                                r->finish(dropped.value);
                             });
             },
             r);
@@ -5018,14 +5416,18 @@ private:
                                                 int(g_metrics.line_height + 0.5f));
             gtk_widget_set_hexpand(area, true);
             gtk_widget_set_vexpand(area, true);
+            // Not a signal, so not taken off with the list's: the cell may
+            // outlive the list (#140). It draws only while the list's there.
             gtk_drawing_area_set_draw_func(
                 GTK_DRAWING_AREA(area),
                 +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
                 {
-                    static_cast<column_ctx*>(p)->list->draw_cell(area, cr, w, h,
-                                                               *static_cast<column_ctx*>(p));
+                    const drawing in_draw;
+                    const held_area held(area);  // first: before any of the app's
+                    if (column_ctx* c = static_cast<cell_ref*>(p)->live())
+                        c->list->draw_cell(area, cr, w, h, *c);
                 },
-                &ctx, nullptr);
+                cell_ref::make(life_, ctx), cell_ref::drop);
             child = GTK_WIDGET(g_object_new(rapport_cell_get_type(), nullptr));
             gtk_box_append(GTK_BOX(child), area);
             g_object_set_data(G_OBJECT(child), "rapport-area", area);
@@ -5054,18 +5456,20 @@ private:
                 gtk_widget_set_focusable(check, false);
                 gtk_box_append(GTK_BOX(child), check);
                 g_object_set_data(G_OBJECT(child), "rapport-check", check);
-                g_signal_connect(
+                g_signal_connect_data(
                     check, "toggled",
                     G_CALLBACK(+[](GtkCheckButton* b, gpointer p)
                                {
                                    if (g_object_get_data(G_OBJECT(b), "rapport-binding")) return;
-                                   auto* self = static_cast<column_ctx*>(p)->list;
+                                   column_ctx* c = static_cast<cell_ref*>(p)->live();
+                                   if (!c) return;
+                                   auto* self = c->list;
                                    GtkWidget* cell = gtk_widget_get_parent(GTK_WIDGET(b));
                                    const size_t tagged = row_of(cell);
                                    if (self->model_ && tagged > 0)
                                        self->model_->toggle_checked(tagged - 1);
                                }),
-                    &ctx);
+                    cell_ref::make(life_, ctx), cell_ref::drop_closure, GConnectFlags(0));
             }
             // Over the icon, the model's drawing in its place (an icon
             // without a file or name) and its overlay (a badge). The drawing
@@ -5076,19 +5480,30 @@ private:
             gtk_overlay_set_child(GTK_OVERLAY(holder), image);
             GtkWidget* badge = gtk_drawing_area_new();
             gtk_widget_set_can_target(badge, false);
+            // The app's drawing and overlay for the row's icon (object data,
+            // set as it's bound) may reach what's gone with the list: drawn
+            // only while it's there, as a painted cell's are (#140).
             gtk_drawing_area_set_draw_func(
                 GTK_DRAWING_AREA(badge),
-                +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer)
+                +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
                 {
+                    const drawing in_draw;
+                    const held_area held(a);  // first: before any of the app's
                     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
                     for (const char* key : {"rapport-draw", "rapport-overlay"})
                         if (auto* draw = static_cast<draw_fn*>(g_object_get_data(G_OBJECT(a), key)))
                         {
+                            // Before each: the app's drawing may have ended
+                            // the list (its window destroyed, say). A copy is
+                            // called: the object data holding it may go too.
+                            const std::shared_ptr<bool> life =
+                                static_cast<cell_ref*>(p)->life.lock();
+                            if (!life || !*life) return;
                             cairo_painter painter(cr, GTK_WIDGET(a));
-                            (*draw)(painter, {float(w), float(h)});
+                            if (!call_app(life, *draw, painter, size_f{float(w), float(h)})) return;
                         }
                 },
-                nullptr, nullptr);
+                cell_ref::make(life_, ctx), cell_ref::drop);
             gtk_overlay_add_overlay(GTK_OVERLAY(holder), badge);
             gtk_overlay_set_measure_overlay(GTK_OVERLAY(holder), badge, true);
             gtk_box_append(GTK_BOX(child), holder);
@@ -5100,14 +5515,16 @@ private:
 
         GtkGesture* click = gtk_gesture_click_new();
         gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
-        g_signal_connect(click, "pressed",
-                         G_CALLBACK(+[](GtkGestureClick* g, int, double x, double y, gpointer p)
-                                    {
-                                        auto* cell = gtk_event_controller_get_widget(
-                                            GTK_EVENT_CONTROLLER(g));
-                                        static_cast<column_ctx*>(p)->list->context_menu_at(cell, x, y);
-                                    }),
-                         &ctx);
+        g_signal_connect_data(
+            click, "pressed",
+            G_CALLBACK(+[](GtkGestureClick* g, int, double x, double y, gpointer p)
+                       {
+                           column_ctx* c = static_cast<cell_ref*>(p)->live();
+                           if (!c) return;
+                           auto* cell = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+                           c->list->context_menu_at(cell, x, y);
+                       }),
+            cell_ref::make(life_, ctx), cell_ref::drop_closure, GConnectFlags(0));
         gtk_widget_add_controller(child, GTK_EVENT_CONTROLLER(click));
 
         g_object_set_data(G_OBJECT(child), "rapport-ctx", &ctx);
@@ -5249,7 +5666,8 @@ private:
         auto it = std::ranges::find(cols_, col);
         if (it == cols_.end()) return;
         bool asc = gtk_column_view_sorter_get_primary_sort_order(sorter) == GTK_SORT_ASCENDING;
-        sort_(size_t(it - cols_.begin()), asc ? sort_order::ascending : sort_order::descending);
+        call_app(*this, sort_, size_t(it - cols_.begin()),
+                 asc ? sort_order::ascending : sort_order::descending);
     }
 
     void context_menu_at(GtkWidget* cell, double x, double y)
@@ -5264,7 +5682,11 @@ private:
         const bool at_cell = cell_menu_ && row && ctx;
         if (!context_menu_ && !at_cell) return;
 
-        menu menu = at_cell ? cell_menu_(*row, ctx->column, point_f{float(x), float(y)}) : context_menu_(row);
+        auto asked = at_cell ? call_app_for(*this, cell_menu_, *row, ctx->column,
+                                            point_f{float(x), float(y)})
+                             : call_app_for(*this, context_menu_, row);
+        if (!asked.alive) return;  // the app's menu builder destroyed it
+        menu menu = std::move(asked.value);
         if (menu.empty()) return;
 
         GMenu* model = ctx_menu_->build(std::move(menu));
@@ -5337,6 +5759,8 @@ public:
             GTK_DRAWING_AREA(w_),
             +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
             {
+                const drawing in_draw;
+                const held_area held(area);  // first: before any of the app's
                 auto* self = static_cast<canvas_impl*>(p);
                 // A new device scale is a resize in device pixels
                 // (canvas::on_resize), told before the frame that uses it.
@@ -5349,8 +5773,8 @@ public:
                 if (self->scale_ > 0 && scale != self->scale_)
                 {
                     self->scale_ = scale;
-                    if (self->resize_) self->resize_({float(w), float(h)});
-                    self->target_changed();
+                    if (!call_app(*self, self->resize_, size_f{float(w), float(h)})) return;
+                    if (!self->target_changed()) return;
                 }
                 // The frame and the painting go on the whole device pixels;
                 // the slivers round them are under a pixel, and show the
@@ -5359,14 +5783,14 @@ public:
                 if (span.width != self->span_.width || span.height != self->span_.height)
                 {
                     self->span_ = span;
-                    self->target_changed();
+                    if (!self->target_changed()) return;  // the app's on_frame_target destroyed it
                 }
                 self->span_ = span;
                 if (!self->paint_ && !self->frame_) return;
                 cairo_translate(cr, span.shift.x, span.shift.y);
                 cairo_painter painter(cr, GTK_WIDGET(area));
                 self->frame_.paint(painter, span.size);
-                if (self->paint_) self->paint_(painter, span.size);
+                call_app(*self, self->paint_, painter, span.size);
             },
             this, nullptr);
         connect(
@@ -5378,13 +5802,10 @@ public:
                 // Told once a splitter it's in has placed all its panes.
                 const size_f size{float(w), float(h)};
                 pane_sizes::now_or_after(self, self->alive_,
-                                         [self, size, alive = std::weak_ptr<bool>(self->alive_)]
+                                         [self, size]
                                          {
-                                             // A copy: on_resize may destroy the canvas, and it with it.
-                                             if (auto f = self->resize_) f(size);
-                                             // on_resize may have destroyed it (its window, say).
-                                             const std::shared_ptr<bool> still = alive.lock();
-                                             if (still && *still) self->target_changed();
+                                             if (call_app(*self, self->resize_, size))
+                                                 self->target_changed();
                                          });
             },
             this);
@@ -5548,6 +5969,9 @@ protected:
         *alive_ = false;
         for (guint id : ticks_) gtk_widget_remove_tick_callback(w_, id);
         ticks_.clear();
+        // Not a signal: off as well, or the drawing area, if it outlives
+        // this, draws through it (#140).
+        gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(w_), nullptr, nullptr, nullptr);
     }
 
 private:
@@ -5633,7 +6057,7 @@ private:
                 last_time_ = t;
                 last_pos_ = ev.pos;
             }
-            return pointer_ && pointer_(ev);
+            return pointer_ && call_app_for(*this, pointer_, ev).value;
         }
         if (type == GDK_SCROLL && scroll_)
         {
@@ -5656,7 +6080,7 @@ private:
             }
             }
             if (ev.dx == 0 && ev.dy == 0) return false;
-            return scroll_(ev);
+            return call_app_for(*this, scroll_, ev).value;
         }
         return false;
     }
@@ -5666,7 +6090,9 @@ private:
         if (!pointer_) return;
         point_f pos{float(x), float(y)};
         if (type == pointer_event_type::leave) pos = last_move_;
-        pointer_({type, pos, 0, 1, modifiers(gtk_event_controller_get_current_event_state(c))});
+        const pointer_event ev{type, pos, 0, 1,
+                               modifiers(gtk_event_controller_get_current_event_state(c))};
+        if (!call_app_for(*this, pointer_, ev).alive) return;  // the app's on_pointer destroyed it
         if (type != pointer_event_type::leave) last_move_ = pos;
     }
 
@@ -5685,7 +6111,7 @@ private:
         }
         else
             std::erase(held_, code);
-        return key_(ev);
+        return call_app_for(*this, key_, ev).value;
     }
 
     std::function<void(rap::painter&, rap::size_f)> paint_;
@@ -5693,10 +6119,8 @@ private:
     frames::frame_layer frame_;
     frames::gpu_readback readback_;  // GPU textures shown as pixels
     std::function<void(const rap::frame_target&)> frame_target_;
-    void target_changed()
-    {
-        if (frame_target_) frame_target_(target());
-    }
+    // The app told the frame target; whether this is still there after.
+    bool target_changed() { return call_app(*this, frame_target_, target()); }
     std::function<bool(const pointer_event&)> pointer_;
     std::function<bool(const scroll_event&)> scroll_;
     std::function<bool(const key_event&)> key_;
@@ -5835,6 +6259,22 @@ public:
         std::erase(recent(), win_);
         for (auto& part : parts) part->disconnect();
         disconnect();
+        // The menu bar's create-popup funcs aren't signals, and point at
+        // bars, which go with this; its buttons may outlive it (#140).
+        for (auto& bar : bars)
+            if (bar->button)
+                gtk_menu_button_set_create_popup_func(GTK_MENU_BUTTON(bar->button), nullptr,
+                                                      nullptr, nullptr);
+        // Destroyed by the app's drawing (one of this window's, or any): GTK
+        // goes on painting it as that returns, so the GtkWindow goes once no
+        // draw func runs (after_paint), held till then. Nothing of the app's
+        // is reached from it: what's connected is taken off above, and the
+        // rest holds tokens now empty.
+        if (drawing_depth > 0)
+        {
+            after_painting().windows.push_back(GTK_WIDGET(g_object_ref(win_)));
+            return;
+        }
         gtk_window_destroy(GTK_WINDOW(win_));
     }
 
@@ -5976,7 +6416,7 @@ public:
                     }
                 g_slist_free(files);
                 if (paths.empty() || !self->on_files_dropped_) return false;
-                self->on_files_dropped_(paths);
+                call_app(*self, self->on_files_dropped_, paths);
                 return true;
             },
             this);
@@ -6100,7 +6540,8 @@ public:
             gtk_menu_button_set_has_frame(GTK_MENU_BUTTON(button), false);
             gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(button), false);
             bar->actions = std::make_unique<menu_actions>(button, "bar");
-            attach_menu(GTK_MENU_BUTTON(button), bar->actions.get(), &bar->fn);
+            attach_menu(GTK_MENU_BUTTON(button), bar->actions.get(), &bar->fn, *this);
+            bar->button = button;
             gtk_box_append(GTK_BOX(menu_bar), button);
             bars.push_back(std::move(bar));
         }
@@ -6147,8 +6588,9 @@ public:
         const bool not_text = navigation || keyval == GDK_KEY_Escape || (keyval >= GDK_KEY_F1 && keyval <= GDK_KEY_F12);
         // A shortcut chord is the window's first, as an accelerator (this is
         // the capture phase).
-        if (typing && !not_text) return window_chords::to_window(ev) && on_key_(ev);
-        return on_key_(ev);
+        if (typing && !not_text)
+            return window_chords::to_window(ev) && call_app_for(*this, on_key_, ev).value;
+        return call_app_for(*this, on_key_, ev).value;
     }
     // An editable text field (an entry's text, an editable text view).
     static bool editable_field(GtkWidget* w)
@@ -6234,7 +6676,7 @@ public:
         key_event ev;
         ev.key = *k;
         ev.modifiers = modifiers(gdk_event_get_modifier_state(e));
-        return on_key_(ev);
+        return call_app_for(*this, on_key_, ev).value;
     }
     static bool pressed_in_canvas(GdkEvent* e)
     {
@@ -6257,6 +6699,7 @@ public:
     {
         std::function<menu()> fn;
         std::unique_ptr<menu_actions> actions;
+        GtkWidget* button = nullptr;  // its create-popup func points at fn and actions (#140)
     };
     GtkWidget* menu_bar = nullptr;
     GtkWidget* header_bar = nullptr;  // GNOME's, when the window has one
@@ -6315,7 +6758,11 @@ protected:
 private:
     void close_requested()
     {
-        if (on_close_request_ && !on_close_request_()) return;
+        if (on_close_request_)
+        {
+            const auto asked = call_app_for(*this, on_close_request_);
+            if (!asked.alive || !asked.value) return;  // kept, or the app destroyed it
+        }
         if (dialog_)
             finish(dialog_role::cancel);
         else
@@ -6328,7 +6775,7 @@ private:
         close();
         if (finished_) return;
         finished_ = true;
-        if (auto f = on_finished_) f(role);
+        call_app(*this, on_finished_, role);
     }
 
     GtkWidget* win_;
@@ -6936,6 +7383,7 @@ private:
 class gtk4_backend : public backend
 {
 public:
+    ~gtk4_backend() override { drain_after_paint(); }  // run() may never have been
     static backend* create(int* argc, char** argv, const look_options& look)
     {
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
@@ -7020,6 +7468,7 @@ public:
         loop_ = g_main_loop_new(nullptr, false);
         window_impl::main_loop() = loop_;
         g_main_loop_run(loop_);
+        drain_after_paint();  // no draw func runs here
         window_impl::main_loop() = nullptr;
         g_main_loop_unref(loop_);
         loop_ = nullptr;
@@ -7592,6 +8041,18 @@ extern "C" RAPPORT_EXPORT const char* rapport_gtk4_fullscreen_requests_for_tests
     out = r.value_or(std::string());
     r = std::string();
     return out.c_str();
+}
+
+// Test seam (#140): the action `name` ("i0": a menu's first item's) of the
+// menu built for `owner` (a menu button), with a reference the caller
+// drops; nullptr if there's none. Held past the menu, as GTK or an app may
+// hold one, it must reach nothing gone.
+extern "C" RAPPORT_EXPORT void* rapport_gtk4_menu_action_for_tests(void* owner, const char* name)
+{
+    auto* group =
+        static_cast<GActionMap*>(g_object_get_data(G_OBJECT(owner), "rapport-menu-group"));
+    GAction* action = group ? g_action_map_lookup_action(group, name) : nullptr;
+    return action ? g_object_ref(action) : nullptr;
 }
 
 // Test seam (#88): `window` (a GtkWindow) notified as fullscreen or not,

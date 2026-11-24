@@ -220,6 +220,12 @@ struct icon
     // Draws the icon into `size` (logical px) on a Painter with the right
     // device_scale. Draw with theme colours (theme_color::window_text) so it
     // follows dark mode; backends redraw it when the theme or scale changes.
+    // Like every callback given to rapport, it's called only while the
+    // rapport object it was given to (the button, label, tab or list row
+    // showing the icon) is there, never after it's destroyed, though a
+    // toolkit widget of it may live on; so it may capture what goes with
+    // that object. And one that destroys it stops what rapport was doing
+    // with it (#140). Implemented on GTK 4; GTK 3 and Qt are #142.
     std::function<void(rap::painter&, rap::size_f)> draw;
     // Drawn over the icon in its square, as a file manager's overlays: a
     // badge on a row's icon in a list (the only place it's drawn).
