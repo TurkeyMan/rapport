@@ -994,6 +994,16 @@ if(TARGET rapport_win32)
     add_test(NAME win32-splitter-sizes COMMAND rapport-win32-splitter-sizes-test)
     set_tests_properties(win32-splitter-sizes PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 
+    add_executable(rapport-win32-pane-uncovered-test win32_pane_uncovered_test.cpp)
+    target_link_libraries(rapport-win32-pane-uncovered-test PRIVATE rapport::rapport user32 gdi32 dwmapi)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-pane-uncovered-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-pane-uncovered-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-pane-uncovered-test rapport_win32)
+    add_test(NAME win32-pane-uncovered COMMAND rapport-win32-pane-uncovered-test)
+    set_tests_properties(win32-pane-uncovered PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77)
+
     # A shown window's decisions while a relayout_at_once has drawing off (#108).
     add_executable(rapport-win32-at-once-visibility-test win32_at_once_visibility_test.cpp)
     target_link_libraries(rapport-win32-at-once-visibility-test PRIVATE rapport::rapport user32)
