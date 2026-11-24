@@ -202,18 +202,87 @@ private:
 };
 
 // The draw funcs running now, each of which may call the app's drawing. An
-// app's drawing may destroy the window being drawn: its rapport objects go at
-// once, as ever, but GTK goes on painting that GtkWindow as the draw func
-// returns (destroyed, GTK complains). So a window destroyed while one runs
-// has its GtkWindow destroyed after, from an idle that calls nothing of the
-// app's (#143).
+// app's drawing may destroy the window being drawn, or let go of the drawing
+// area (its icon replaced, its owner gone): the rapport objects go at once,
+// as ever, but GTK goes on painting with them as the draw func returns. So
+// the GtkWindows destroyed and the areas let go of while one runs wait here,
+// and go only once no draw func is running: from an idle that the last to
+// return asks for, and that does nothing while one still runs (the app's
+// drawing may run a main loop of its own, which dispatches it). Nothing here
+// calls the app's (#143).
 int drawing_depth = 0;
+struct after_paint
+{
+    std::vector<GtkWidget*> windows;  // to destroy (each held)
+    std::vector<GtkWidget*> areas;    // to let go of (drawing areas, what they were in)
+    bool asked = false;               // the idle's there
+    bool empty() const { return windows.empty() && areas.empty(); }
+};
+after_paint& after_painting()
+{
+    static after_paint p;
+    return p;
+}
+void ask_after_paint()
+{
+    after_paint& p = after_painting();
+    if (p.asked || p.empty()) return;
+    p.asked = true;
+    g_idle_add(
+        +[](gpointer) -> gboolean
+        {
+            after_paint& p = after_painting();
+            p.asked = false;
+            if (drawing_depth > 0) return G_SOURCE_REMOVE;  // asked again as the last returns
+            const std::vector<GtkWidget*> windows = std::exchange(p.windows, {});
+            const std::vector<GtkWidget*> areas = std::exchange(p.areas, {});
+            for (GtkWidget* w : windows)
+            {
+                gtk_window_destroy(GTK_WINDOW(w));
+                g_object_unref(w);
+            }
+            for (GtkWidget* a : areas) g_object_unref(a);
+            return G_SOURCE_REMOVE;
+        },
+        nullptr);
+}
 struct drawing
 {
     drawing() { ++drawing_depth; }
-    ~drawing() { --drawing_depth; }
+    ~drawing()
+    {
+        if (--drawing_depth == 0) ask_after_paint();
+    }
     drawing(const drawing&) = delete;
     drawing& operator=(const drawing&) = delete;
+};
+
+// A drawing area held through the app's drawing, inside a draw func's
+// `drawing`, and what it's in up to its window (GTK is painting those too):
+// any let go of meanwhile (out of its parent) waits for the paint to end
+// (after_paint).
+class held_area
+{
+public:
+    explicit held_area(GtkDrawingArea* a)
+    {
+        GtkWidget* root = GTK_WIDGET(gtk_widget_get_root(GTK_WIDGET(a)));
+        for (GtkWidget* w = GTK_WIDGET(a); w && w != root; w = gtk_widget_get_parent(w))
+            held_.push_back(GTK_WIDGET(g_object_ref(w)));
+    }
+    ~held_area()
+    {
+        for (GtkWidget* w : held_)
+            if (gtk_widget_get_parent(w))
+                g_object_unref(w);
+            else
+                after_painting().areas.push_back(w);
+    }
+    held_area(const held_area&) = delete;
+    held_area& operator=(const held_area&) = delete;
+
+private:
+    std::vector<GtkWidget*> held_;
 };
 }  // namespace
 }  // namespace rap::gtk4
@@ -510,6 +579,7 @@ GtkWidget* icon_widget(const icon& icon, int size, std::weak_ptr<bool> owner)
             if (!owner || !*owner) return;
             snap_to_device(cr, GTK_WIDGET(a));
             cairo_painter painter(cr, GTK_WIDGET(a));
+            const held_area held(a);
             call_app(owner, g->draw, painter,
                      size_f{float(w), float(h)});  // a copy: it may end the owner, and g
         },
@@ -3032,6 +3102,7 @@ private:
                 if (!open || !*open) return;
                 snap_to_device(cr, GTK_WIDGET(a));
                 cairo_painter painter(cr, GTK_WIDGET(a));
+                const held_area held(a);
                 call_app(open, g->draw, painter,
                          size_f{float(w), float(h)});  // a copy: it may end its tabs, and g
             },
@@ -5416,6 +5487,7 @@ private:
                                 static_cast<cell_ref*>(p)->life.lock();
                             if (!life || !*life) return;
                             cairo_painter painter(cr, GTK_WIDGET(a));
+                            const held_area held(a);
                             if (!call_app(life, *draw, painter, size_f{float(w), float(h)})) return;
                         }
                 },
@@ -5705,6 +5777,7 @@ public:
                 cairo_translate(cr, span.shift.x, span.shift.y);
                 cairo_painter painter(cr, GTK_WIDGET(area));
                 self->frame_.paint(painter, span.size);
+                const held_area held(area);
                 call_app(*self, self->paint_, painter, span.size);
             },
             this, nullptr);
@@ -6181,19 +6254,13 @@ public:
                 gtk_menu_button_set_create_popup_func(GTK_MENU_BUTTON(bar->button), nullptr,
                                                       nullptr, nullptr);
         // Destroyed by the app's drawing (one of this window's, or any): GTK
-        // goes on painting it as that returns, so the GtkWindow goes after,
-        // held till then. Nothing of the app's is reached from it: what's
-        // connected is taken off above, and the rest holds tokens now empty.
+        // goes on painting it as that returns, so the GtkWindow goes once no
+        // draw func runs (after_paint), held till then. Nothing of the app's
+        // is reached from it: what's connected is taken off above, and the
+        // rest holds tokens now empty.
         if (drawing_depth > 0)
         {
-            g_idle_add_full(
-                G_PRIORITY_DEFAULT_IDLE,  // after the paint (GDK's is higher)
-                +[](gpointer w) -> gboolean
-                {
-                    gtk_window_destroy(GTK_WINDOW(w));
-                    return G_SOURCE_REMOVE;
-                },
-                g_object_ref(win_), g_object_unref);
+            after_painting().windows.push_back(GTK_WIDGET(g_object_ref(win_)));
             return;
         }
         gtk_window_destroy(GTK_WINDOW(win_));

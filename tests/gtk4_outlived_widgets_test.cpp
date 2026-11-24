@@ -339,6 +339,90 @@ int main(int argc, char** argv)
         expect(window_titled("Icon ends its frame") == nullptr,
                "and its GtkWindow went after the paint");
     }
+    // As that, the drawing running a main loop of its own after (as a modal
+    // dialog would) before it returns: what's to go after the paint doesn't go
+    // in it, the paint not over.
+    {
+        std::unique_ptr<rap::window> own;
+        const std::string tag = "icon, nested loop";
+        bool armed = false;
+        int iterated = 0;
+        rap::icon ending;
+        ending.draw = [&own, &armed, &iterated, tag](rap::painter&, rap::size_f)
+        {
+            if (!own || !armed) return;
+            armed = false;
+            own.reset();
+            for (int i = 0; i < 50; ++i)
+                if (g_main_context_iteration(nullptr, FALSE)) ++iterated;
+            use(tag);
+        };
+        own = (*ui)->create(
+            window{"Icon ends its frame, nested", {button{"Drawn"}.icon(ending)}}.size(200_px,
+                                                                                       100_px));
+        own->show();
+        pump(300);
+        captured_reads = 0;
+        armed = true;
+        for (int i = 0; i < 10 && own; ++i)
+        {
+            std::vector<GtkWidget*> areas;
+            all_of(content_of(window_titled("Icon ends its frame, nested")), GTK_TYPE_DRAWING_AREA,
+                   areas);
+            for (GtkWidget* a : areas) gtk_widget_queue_draw(a);
+            pump(100);
+        }
+        armed = false;
+        pump(200);
+        expect(!own && captured_reads == 1,
+               "an icon's drawing ended its window, then ran a main loop (" +
+                   std::to_string(iterated) + " dispatched) and read its capture (" +
+                   std::to_string(captured_reads) + ")");
+        expect(window_titled("Icon ends its frame, nested") == nullptr,
+               "and its GtkWindow went after the paint");
+    }
+    // An icon whose drawing replaces its button's icon, in GTK's own paint:
+    // its drawing area is let go of (its window still there) as it draws, then
+    // reads its capture. Xvfb, criticals fatal; Broadway may not paint it.
+    {
+        rap::button* drawn = nullptr;
+        const std::string tag = "icon replaced";
+        bool armed = false;
+        int replaced = 0;
+        rap::icon replacing;
+        replacing.draw = [&drawn, &armed, &replaced, tag](rap::painter&, rap::size_f)
+        {
+            if (!drawn || !armed) return;
+            armed = false;
+            ++replaced;
+            rap::icon plain;
+            plain.draw = [](rap::painter&, rap::size_f) {};
+            drawn->set_icon(plain);  // this drawing's area out of the button
+            use(tag);
+        };
+        std::unique_ptr<rap::window> own = (*ui)->create(
+            window{"Icon replaced", {button{"Drawn"}.icon(replacing).bind(drawn)}}.size(200_px,
+                                                                                        100_px));
+        own->show();
+        pump(300);
+        captured_reads = 0;
+        armed = true;
+        for (int i = 0; i < 10 && armed; ++i)
+        {
+            std::vector<GtkWidget*> areas;
+            all_of(content_of(window_titled("Icon replaced")), GTK_TYPE_DRAWING_AREA, areas);
+            for (GtkWidget* a : areas) gtk_widget_queue_draw(a);
+            pump(100);
+        }
+        armed = false;
+        pump(200);
+        expect(replaced == 1 && captured_reads == 1,
+               "an icon's drawing replaced its button's icon in GTK's own paint, then read its "
+               "capture (" +
+                   std::to_string(replaced) + ", " + std::to_string(captured_reads) + ")");
+        own.reset();
+        pump(100);
+    }
     // A canvas: its on_paint destroys the window, then reads its capture.
     // Its content kept in a window of the test's, so it's painted after.
     {
