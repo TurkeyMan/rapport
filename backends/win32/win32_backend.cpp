@@ -1357,6 +1357,10 @@ struct move_batch
     std::map<HWND, std::vector<std::pair<HWND, RECT>>> moves;  // parent -> its children's moves
     std::vector<std::pair<HWND, bool>> shown;                  // controls shown or hidden, once moved
     std::set<HWND> panes;  // scroll panes' panels resized in the pass: drawn off screen when they paint (paint_pane)
+    // Scroll panes' hosts moved in the pass without redrawing, and where each
+    // was (in its parent's coordinates): what it moved off is painted with
+    // the pass (see moves_in_one_pass).
+    std::vector<std::pair<HWND, RECT>> uncovering;
     // For a size the window doesn't have yet (see window::resize): nothing
     // moves or shows, and canvases draw for where they'll be.
     bool ahead = false;
@@ -1490,6 +1494,30 @@ public:
         }
         for (auto [h, shown] : batch_.shown) show_now(h, shown);
         buffered.insert(batch_.panes.begin(), batch_.panes.end());
+        // What a pane's host moved off (moved without redrawing, Windows
+        // leaves that to us): the pane's old pixels stayed there, behind
+        // whatever now lies there (the controls beside it, its parent's
+        // background) until something else painted it. Painted in the
+        // update below, with whatever's there now, before the panes are
+        // validated (none painted on screen). On a pane, it's drawn whole.
+        std::set<HWND> roots;
+        for (auto [host, was] : batch_.uncovering)
+        {
+            HWND parent = GetParent(host);
+            if (!parent || pane_of(parent)) continue;
+            RECT now;
+            GetWindowRect(host, &now);
+            MapWindowPoints(HWND_DESKTOP, parent, reinterpret_cast<POINT*>(&now), 2);
+            HRGN off = CreateRectRgnIndirect(&was);
+            HRGN on = CreateRectRgnIndirect(&now);
+            if (off && on && CombineRgn(off, off, on, RGN_DIFF) > NULLREGION)
+            {
+                redraw_now(parent, nullptr, off, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                roots.insert(GetAncestor(parent, GA_ROOT));
+            }
+            if (off) DeleteObject(off);
+            if (on) DeleteObject(on);
+        }
         // Then painted, all of them, before anything else runs: left to their
         // WM_PAINTs, which come only once the queue is idle, they landed a
         // band at a time over several frames (a pane's controls, top to
@@ -1500,7 +1528,6 @@ public:
         // RDW_VALIDATE alone leaves, and it was sent WM_PAINT for it in the
         // update (a pane's canvas rendering there, then again in the print).
         for (HWND whole : buffered) RedrawWindow(whole, nullptr, nullptr, RDW_VALIDATE | RDW_NOERASE | RDW_NOFRAME | RDW_ALLCHILDREN);
-        std::set<HWND> roots;
         for (auto& [parent, list] : batch_.moves) roots.insert(GetAncestor(parent, GA_ROOT));
         for (auto [h, shown] : batch_.shown)
             if (shown) roots.insert(GetAncestor(h, GA_ROOT));
@@ -10660,11 +10687,21 @@ public:
             return;
         }
         g_moves->panes.insert(panel_);
-        // Without redrawing either: what it uncovers keeps what was there a
-        // moment, until the panel's drawn.
+        // Without redrawing either: what it uncovers in itself keeps what
+        // was there a moment, until the panel's drawn; what it moves off in
+        // its parent is painted with the pass (moves_in_one_pass).
         if (!placed_at(h, x, y, w, hgt))
+        {
+            if (h == host_ && IsWindowVisible(h))
+            {
+                RECT was;
+                GetWindowRect(h, &was);
+                MapWindowPoints(HWND_DESKTOP, GetParent(h), reinterpret_cast<POINT*>(&was), 2);
+                g_moves->uncovering.push_back({h, was});
+            }
             traced_set_window_pos(h, nullptr, x, y, w, hgt,
                                   SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+        }
     }
     void show_all(bool shown) override
     {
