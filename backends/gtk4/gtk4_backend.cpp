@@ -492,8 +492,11 @@ GtkWidget* icon_widget(const icon& icon, int size, std::weak_ptr<bool> owner)
             if (!owner || !*owner) return;
             snap_to_device(cr, GTK_WIDGET(a));
             cairo_painter painter(cr, GTK_WIDGET(a));
-            call_app(owner, g->draw, painter,
-                     size_f{float(w), float(h)});  // a copy: it may end the owner, and g
+            // A copy: it may end the owner, and g. The area held through it, as
+            // GTK goes on with it after (its window destroyed, it'd be gone).
+            g_object_ref(a);
+            call_app(owner, g->draw, painter, size_f{float(w), float(h)});
+            g_object_unref(a);
         },
         new gated_draw{std::move(draw), std::move(owner)},
         +[](gpointer p) { delete static_cast<gated_draw*>(p); });
@@ -1769,8 +1772,13 @@ private:
         if (auto* item = GTK_TREE_LIST_ROW(gtk_list_item_get_item(li)); item && is_placeholder(item)) return;
         if (gtk_single_selection_get_selected(self->sel_) != pos)
         {
-            gtk_single_selection_set_selected(self->sel_, pos);  // the user's: reported
-            if (!live(p)) return;  // the app's on_selection_changed may have destroyed it
+            // The user's: reported. The app's on_selection_changed, from inside
+            // it, may destroy the tree and drop the selection with it: held
+            // till GTK's done with it.
+            GtkSingleSelection* sel = GTK_SINGLE_SELECTION(g_object_ref(self->sel_));
+            gtk_single_selection_set_selected(sel, pos);
+            g_object_unref(sel);
+            if (!live(p)) return;  // the app's on_selection_changed destroyed it
         }
         GtkWidget* row = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
         graphene_point_t in = GRAPHENE_POINT_INIT(float(x), float(y)), out;
@@ -3008,8 +3016,10 @@ private:
                 if (!open || !*open) return;
                 snap_to_device(cr, GTK_WIDGET(a));
                 cairo_painter painter(cr, GTK_WIDGET(a));
-                call_app(open, g->draw, painter,
-                         size_f{float(w), float(h)});  // a copy: it may end its tabs, and g
+                // A copy: it may end its tabs, and g; the area held through it.
+                g_object_ref(a);
+                call_app(open, g->draw, painter, size_f{float(w), float(h)});
+                g_object_unref(a);
             },
             new gated_draw{std::move(draw), gate_},
             +[](gpointer p) { delete static_cast<gated_draw*>(p); });
@@ -5390,7 +5400,10 @@ private:
                                 static_cast<cell_ref*>(p)->life.lock();
                             if (!life || !*life) return;
                             cairo_painter painter(cr, GTK_WIDGET(a));
-                            if (!call_app(life, *draw, painter, size_f{float(w), float(h)})) return;
+                            g_object_ref(a);  // held through it, as GTK goes on with it after
+                            const bool still = call_app(life, *draw, painter, size_f{float(w), float(h)});
+                            g_object_unref(a);
+                            if (!still) return;
                         }
                 },
                 cell_ref::make(life_, ctx), cell_ref::drop);
@@ -5678,7 +5691,9 @@ public:
                 cairo_translate(cr, span.shift.x, span.shift.y);
                 cairo_painter painter(cr, GTK_WIDGET(area));
                 self->frame_.paint(painter, span.size);
+                g_object_ref(area);  // held through it, as GTK goes on with it after
                 call_app(*self, self->paint_, painter, span.size);
+                g_object_unref(area);
             },
             this, nullptr);
         connect(

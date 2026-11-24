@@ -171,14 +171,18 @@ GtkWidget* content_of(GtkWidget* window)
     return window ? gtk_window_get_child(GTK_WINDOW(window)) : nullptr;
 }
 
-// The newest top level: the window just made.
-GtkWidget* newest_window()
+// The top level titled `title`: a window the test made.
+GtkWidget* window_titled(const char* title)
 {
     GListModel* tops = gtk_window_get_toplevels();
-    const guint n = g_list_model_get_n_items(tops);
-    GtkWidget* w = n ? GTK_WIDGET(g_list_model_get_item(tops, 0)) : nullptr;
-    if (w) g_object_unref(w);  // (get_item's reference: the window's own holds it)
-    return w;
+    for (guint i = 0, n = g_list_model_get_n_items(tops); i < n; ++i)
+    {
+        auto* w = GTK_WIDGET(g_list_model_get_item(tops, i));
+        g_object_unref(w);  // (get_item's reference: the window's own holds it)
+        const char* t = gtk_window_get_title(GTK_WINDOW(w));
+        if (t && !std::strcmp(t, title)) return w;
+    }
+    return nullptr;
 }
 
 int main(int argc, char** argv)
@@ -245,7 +249,7 @@ int main(int argc, char** argv)
         own->show();
         pump(300);
         std::vector<GtkWidget*> rows;
-        all_of(content_of(newest_window()), GTK_TYPE_TREE_EXPANDER, rows);
+        all_of(content_of(window_titled("Tree ends itself")), GTK_TYPE_TREE_EXPANDER, rows);
         GObject* right_click = nullptr;
         if (rows.size() > 1)
         {
@@ -288,7 +292,7 @@ int main(int argc, char** argv)
         own->show();
         pump(300);
         std::vector<GtkWidget*> buttons;
-        all_of(content_of(newest_window()), GTK_TYPE_BUTTON, buttons);
+        all_of(content_of(window_titled("Button ends itself")), GTK_TYPE_BUTTON, buttons);
         expect(!buttons.empty(), "the button");
         captured_reads = 0;
         if (!buttons.empty()) g_signal_emit_by_name(buttons[0], "clicked");
@@ -302,10 +306,11 @@ int main(int argc, char** argv)
     {
         std::unique_ptr<rap::window> own;
         const std::string tag = "icon";
+        bool armed = false;  // only while the test paints it
         rap::icon ending;
-        ending.draw = [&own, tag](rap::painter&, rap::size_f)
+        ending.draw = [&own, &armed, tag](rap::painter&, rap::size_f)
         {
-            if (!own) return;
+            if (!own || !armed) return;
             own.reset();
             use(tag);
         };
@@ -314,9 +319,14 @@ int main(int argc, char** argv)
         own->show();
         pump(300);
         captured_reads = 0;
+        // Painted through a paintable of the test's: GTK's own paint, of a
+        // window its drawing destroys, goes on with that window after (and GTK
+        // complains), so the drawing ends it only as the test paints it.
         for (int i = 0; i < 5 && own; ++i)
         {
-            if (GtkWidget* c = content_of(newest_window())) paint_now(c);
+            armed = true;
+            if (GtkWidget* c = content_of(window_titled("Icon ends itself"))) paint_now(c);
+            armed = false;
             pump(100);
         }
         expect(!own && captured_reads == 1,
@@ -328,18 +338,19 @@ int main(int argc, char** argv)
     {
         std::unique_ptr<rap::window> own;
         const std::string tag = "canvas";
+        bool armed = false;  // once its content's in the test's window
         own = (*ui)->create(window{
             "Canvas ends itself",
             {canvas{}.on_paint(
-                [&own, tag](rap::painter&, rap::size_f)
+                [&own, &armed, tag](rap::painter&, rap::size_f)
                 {
-                    if (!own) return;
+                    if (!own || !armed) return;
                     own.reset();
                     use(tag);
                 })}}.size(200_px, 100_px));
         own->show();
         pump(300);
-        GtkWidget* from = newest_window();
+        GtkWidget* from = window_titled("Canvas ends itself");
         GtkWidget* moved = content_of(from);
         GtkWidget* holder = gtk_window_new();
         if (moved)
@@ -351,6 +362,7 @@ int main(int argc, char** argv)
         }
         gtk_widget_set_visible(holder, true);
         captured_reads = 0;
+        armed = true;
         for (int i = 0; i < 5 && own; ++i)
         {
             if (moved) paint_now(moved);
@@ -440,15 +452,18 @@ int main(int argc, char** argv)
     gtk_window_set_default_size(GTK_WINDOW(keeper), 400, 500);
     gtk_window_set_child(GTK_WINDOW(keeper), content);
     g_object_unref(content);
-    gtk_widget_set_visible(keeper, true);
-    pump(300);
-    // Painted, the app's drawing for a row's icon ends the list (its window
+    // Painted there (GTK's own paint, of the keeper: not the window it
+    // destroys), the app's drawing for a row's icon ends the list (its window
     // destroyed): neither that row's overlay nor anything after draws the
     // app's.
     g_end_in_draw = true;
-    for (int i = 0; i < 5 && !g_ended_by_draw; ++i)
+    gtk_widget_set_visible(keeper, true);
+    pump(300);
+    for (int i = 0; i < 10 && !g_ended_by_draw; ++i)
     {
-        paint_now(content);
+        std::vector<GtkWidget*> areas;
+        all_of(content, GTK_TYPE_DRAWING_AREA, areas);
+        for (GtkWidget* a : areas) gtk_widget_queue_draw(a);
         pump(100);
     }
     expect(g_ended_by_draw, "a row's icon drawing ended the list (its window destroyed)");
