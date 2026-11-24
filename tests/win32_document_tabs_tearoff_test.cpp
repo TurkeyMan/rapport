@@ -43,6 +43,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -191,7 +192,6 @@ struct told_receive
     rap::window* source = nullptr;
 };
 struct fixture;
-std::vector<std::unique_ptr<fixture>> fixtures;
 rap::ui* g_ui = nullptr;
 bool g_menu_bar = false;  // stage 1 (under a menu bar), or the caption's strip
 HWND g_hook_window = nullptr;  // a window kept to the end, for the test hooks
@@ -264,6 +264,9 @@ struct fixture
         return p;
     }
 };
+// After the type: a vector of unique_ptr to an incomplete type can't be
+// destroyed (MSVC 14.52 instantiates its destructor at the definition).
+std::vector<std::unique_ptr<fixture>> fixtures;
 
 fixture* make(const std::string& name, std::vector<std::string> ids, const std::string& group);
 
@@ -335,7 +338,7 @@ fixture* make(const std::string& name, std::vector<std::string> ids, const std::
     w.tabs(tabs_spec(f, ids, group));
     f.win = g_ui->create(std::move(w));  // never shown
     pump();
-    f.top = FindWindowW(nullptr, std::wstring(name.begin(), name.end()).c_str());
+    f.top = test_window(std::wstring(name.begin(), name.end()).c_str());
     HWND caption = strip_of(f.top);
     f.caption = caption != nullptr;
     f.strip = caption ? caption : tab_control_of(f.top);

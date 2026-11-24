@@ -7,6 +7,7 @@
 #include "../common/container_state.h"
 #include "../common/document_tabs.h"
 #include "../common/line_control.h"
+#include "../common/pane_sizes.h"
 #include "../common/window_chords.h"
 #include "qt_painter.h"
 #include "rapport/backend.h"
@@ -78,6 +79,7 @@
 #include <QScrollBar>
 #include <QSlider>
 #include <QSplitter>
+#include <QSplitterHandle>
 #include <QStackedWidget>
 #include <QStyleHints>
 #include <QStyledItemDelegate>
@@ -139,6 +141,25 @@ int px(extent e)
     case extent::unit::auto_: break;
     }
     return -1;
+}
+
+// The same icon, as far as can be told without drawing: by name, file and
+// path, neither drawn (a drawn one's function can't be compared: never the
+// same). A setter given the icon it has does nothing (#88).
+bool same_icon(const rap::icon& a, const rap::icon& b)
+{
+    return !a.draw && !b.draw && !a.overlay && !b.overlay && a.name == b.name && a.file == b.file &&
+           a.path == b.path;
+}
+
+QString qs(const std::string& s);
+// A combo box's items already `items`.
+bool same_items(const QComboBox* c, const std::vector<std::string>& items)
+{
+    if (c->count() != int(items.size())) return false;
+    for (int i = 0; i < c->count(); ++i)
+        if (c->itemText(i) != qs(items[size_t(i)])) return false;
+    return true;
 }
 
 QString qs(const std::string& s)
@@ -687,21 +708,41 @@ public:
         : w_(w)
     {
     }
-    void set_enabled(bool e) override { w_->setEnabled(e); }
+    // A setter given the value it has does nothing (#88): no native call,
+    // no relayout, no repaint.
+    // Its own state (WA_ForceDisabled: disabled itself), not the effective
+    // one: under a disabled parent it's disabled anyway, and a disable of
+    // its own must still be recorded, to keep it so when the parent's
+    // enabled again.
+    void set_enabled(bool e) override
+    {
+        if (w_->testAttribute(Qt::WA_ForceDisabled) == !e) return;
+        w_->setEnabled(e);
+    }
     void set_visible(bool v) override
     {
         // In a toolbar, its action shows and hides it.
         if (auto* action = qobject_cast<QAction*>(w_->property("rapport-toolbar-action").value<QObject*>()))
-            return action->setVisible(v);
+        {
+            if (action->isVisible() != v) action->setVisible(v);
+            return;
+        }
         // Not yet in its parent, showing it would open it as a window; it
         // shows with its parent anyway.
         if (v && !w_->parentWidget()) return;
+        // Shown or hidden already, explicitly (a new widget not yet shown or
+        // hidden reads as hidden: its first hide must still be made, or it
+        // shows with its window).
+        if (w_->testAttribute(Qt::WA_WState_ExplicitShowHide) && w_->isHidden() == !v) return;
         w_->setVisible(v);
         // A form field's row label goes with it.
         if (auto* label = qobject_cast<QWidget*>(w_->property("rapport-form-label").value<QObject*>()))
             label->setVisible(v);
     }
-    void set_tooltip(const std::string& t) override { w_->setToolTip(qs(t)); }
+    void set_tooltip(const std::string& t) override
+    {
+        if (const QString q = qs(t); w_->toolTip() != q) w_->setToolTip(q);
+    }
     void focus() override { w_->setFocus(Qt::OtherFocusReason); }
     bool has_focus() const override
     {
@@ -798,7 +839,7 @@ public:
                              [this]
                              {
                                  label()->clear();  // (the same text isn't laid out again)
-                                 set_text(text_);
+                                 apply_text(text_);
                              });
                      return false;
                  });
@@ -813,6 +854,16 @@ public:
     }
     void set_text(const std::string& t) override
     {
+        if (shown_ && t == text_) return;
+        apply_text(t);
+    }
+
+private:
+    // The text set on the label, whatever it had: a rebuild (a new
+    // palette) as well as a new text.
+    void apply_text(const std::string& t)
+    {
+        shown_ = true;
         text_ = t;
         if (link_)
             // Through the full text the label re-applies on resize.
@@ -823,6 +874,7 @@ public:
 
 private:
     std::string text_;
+    bool shown_ = false;  // text_ set on the label (set_text, once at least)
     // With an icon, the label sits after it in a row of its own; on a link
     // the icon takes the link's click and pointer.
     static QWidget* with_icon(elided_label* text, const spec::label& s)
@@ -889,8 +941,19 @@ public:
                              if (click_) click_();
                          });
     }
-    void set_text(const std::string& t) override { button()->setText(mnemonic(t)); }
-    void set_icon(const icon& icon) override { button()->setIcon(to_q_icon(icon, 16, w_)); }
+    void set_text(const std::string& t) override
+    {
+        if (const QString q = mnemonic(t); button()->text() != q) button()->setText(q);
+    }
+    void set_icon(const icon& icon) override
+    {
+        if (icon_set_ && same_icon(icon, icon_)) return;
+        icon_set_ = true;
+        icon_ = icon;
+        button()->setIcon(to_q_icon(icon, 16, w_));
+    }
+    rap::icon icon_;  // the one set (set_icon), to tell a new one by
+    bool icon_set_ = false;
     void on_click(std::function<void()> f) override { click_ = std::move(f); }
 
 private:
@@ -941,6 +1004,7 @@ public:
     }
     void set_state(check_state s) override
     {
+        if (state() == s) return;
         box()->setCheckState(s == check_state::indeterminate ? Qt::PartiallyChecked
                              : s == check_state::checked     ? Qt::Checked
                                                             : Qt::Unchecked);
@@ -973,9 +1037,23 @@ public:
                              if (menu_fn_) fill_menu(menu_, menu_fn_());
                          });
     }
-    void set_text(const std::string& t) override { button()->setText(mnemonic(t)); }
-    void set_icon(const icon& icon) override { button()->setIcon(to_q_icon(icon, 16, w_)); }
-    void set_pushed(bool v) override { button()->setChecked(v); }
+    void set_text(const std::string& t) override
+    {
+        if (const QString q = mnemonic(t); button()->text() != q) button()->setText(q);
+    }
+    void set_icon(const icon& icon) override
+    {
+        if (icon_set_ && same_icon(icon, icon_)) return;
+        icon_set_ = true;
+        icon_ = icon;
+        button()->setIcon(to_q_icon(icon, 16, w_));
+    }
+    rap::icon icon_;  // the one set (set_icon), to tell a new one by
+    bool icon_set_ = false;
+    void set_pushed(bool v) override
+    {
+        if (button()->isChecked() != v) button()->setChecked(v);
+    }
     void on_menu(std::function<menu()> f) override { menu_fn_ = std::move(f); }
 
 private:
@@ -996,8 +1074,10 @@ public:
     }
     void set_fraction(float f) override
     {
+        const int v = int(std::clamp(f, 0.f, 1.f) * 1000);
+        if (bar()->maximum() != 0 && bar()->value() == v) return;
         if (bar()->maximum() == 0) bar()->setRange(0, 1000);
-        bar()->setValue(int(std::clamp(f, 0.f, 1.f) * 1000));
+        bar()->setValue(v);
     }
     // Qt animates a busy bar by itself.
     void pulse() override { bar()->setRange(0, 0); }
@@ -1138,6 +1218,7 @@ public:
     {
         if (auto it = by_id_.find(id); it != by_id_.end())
         {
+            if (it->second->isExpanded() == open) return;
             // Asks wait until Qt's finished: a handler may destroy the tree.
             lazy_tree::tracker::batch b(lazy_);
             it->second->setExpanded(open);
@@ -1173,7 +1254,8 @@ public:
     void set_separator_before(const std::string& id, bool on) override
     {
         const auto it = by_id_.find(id);
-        if (it != by_id_.end()) it->second->setData(0, tree_line_delegate::line_role, on);
+        if (it != by_id_.end() && it->second->data(0, tree_line_delegate::line_role).toBool() != on)
+            it->second->setData(0, tree_line_delegate::line_role, on);
     }
     void update_item(const std::string& id, const std::string& label, const rap::icon& icon, bool has_children) override
     {
@@ -1198,7 +1280,7 @@ public:
     void set_check(const std::string& id, check_state st) override
     {
         const auto it = checks_.find(id);
-        if (it == checks_.end()) return;
+        if (it == checks_.end() || it->second == st) return;
         it->second = st;
         quiet q(*this);
         by_id_[id]->setCheckState(0, qt_check(st));
@@ -1334,6 +1416,7 @@ public:
     }
     void set_date(rap::date d) override
     {
+        if (date() == d) return;
         quiet_ = true;
         edit()->setDate(QDate(d.year, d.month, d.day));
         quiet_ = false;
@@ -1390,17 +1473,25 @@ public:
     }
     void set_icon(const icon& i) override
     {
+        if (same_icon(i, icon_)) return;
         icon_ = i;
         refresh();
     }
-    void set_tooltip(const std::string& t) override { action_->setToolTip(qs(t)); }
+    void set_tooltip(const std::string& t) override
+    {
+        if (const QString q = qs(t); action_->toolTip() != q) action_->setToolTip(q);
+    }
     void set_checked(bool c) override
     {
+        if (checked_ == c) return;
         checked_ = c;
         refresh();
     }
     bool checked() const override { return checked_; }
-    void set_enabled(bool e) override { action_->setEnabled(e); }
+    void set_enabled(bool e) override
+    {
+        if (action_->isEnabled() != e) action_->setEnabled(e);
+    }
     void on_menu(std::function<menu()> f) override
     {
         menu_ = std::move(f);
@@ -1476,13 +1567,19 @@ public:
     // The app's change, not the user's: on_changed isn't fired.
     void set_text(const std::string& t) override
     {
+        const QString q = qs(t);
+        if (edit()->text() == q) return;
         quiet_ = true;
-        edit()->setText(qs(t));
+        edit()->setText(q);
         quiet_ = false;
     }
-    void set_placeholder(const std::string& t) override { edit()->setPlaceholderText(qs(t)); }
+    void set_placeholder(const std::string& t) override
+    {
+        if (const QString q = qs(t); edit()->placeholderText() != q) edit()->setPlaceholderText(q);
+    }
     void set_read_only(bool v) override
     {
+        if (edit()->isReadOnly() == v) return;
         edit()->setReadOnly(v);
         update_base();
     }
@@ -1490,6 +1587,7 @@ public:
     // it), so giving the frame back doesn't move the layout.
     void set_frame(bool v) override
     {
+        if (edit()->hasFrame() == v) return;
         if (!v && edit()->hasFrame()) edit()->setMinimumHeight(edit()->sizeHint().height());
         edit()->setFrame(v);
         if (v) edit()->setMinimumHeight(0);
@@ -1536,6 +1634,7 @@ public:
     }
     void set_items(std::vector<std::string> items) override
     {
+        if (same_items(combo(), items)) return;
         quiet_ = true;
         combo()->clear();
         for (auto& i : items) combo()->addItem(qs(i));
@@ -1545,6 +1644,7 @@ public:
     // The app's change, not the user's: on_changed isn't fired.
     void set_current(int i) override
     {
+        if (combo()->currentIndex() == i) return;
         quiet_ = true;
         combo()->setCurrentIndex(i);
         quiet_ = false;
@@ -1579,6 +1679,7 @@ public:
     // the items clears the edit's text, which is put back).
     void set_items(std::vector<std::string> items) override
     {
+        if (same_items(combo(), items)) return;
         quiet_ = true;
         const QString text = combo()->currentText();
         combo()->clear();
@@ -1589,8 +1690,10 @@ public:
     std::string text() const override { return combo()->currentText().toStdString(); }
     void set_text(const std::string& t) override
     {
+        const QString q = qs(t);
+        if (combo()->currentText() == q) return;
         quiet_ = true;
-        combo()->setEditText(qs(t));
+        combo()->setEditText(q);
         quiet_ = false;
     }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
@@ -1642,6 +1745,10 @@ public:
 
     void set_text(const std::string& t, std::vector<span> spans = {}) override
     {
+        // Plain text it has already, plainly (nothing styled since): as it
+        // is. (Styled text is set again: its spans aren't compared.)
+        if (spans.empty() && !styled_ && edit()->toPlainText() == qs(t)) return;
+        styled_ = !spans.empty();
         auto* doc = edit()->document();
         const bool undo = doc->isUndoRedoEnabled();
         doc->setUndoRedoEnabled(false);
@@ -1671,6 +1778,7 @@ public:
 
     void append(const std::string& t, const text_style& style) override
     {
+        styled_ = true;  // (its style isn't told from none)
         QTextCursor c(edit()->document());
         c.movePosition(QTextCursor::End);
         c.insertText(qs(t), char_format(w_, style));
@@ -1678,6 +1786,7 @@ public:
 
     void set_read_only(bool ro) override
     {
+        if (edit()->isReadOnly() == ro) return;
         edit()->setReadOnly(ro);
         // Read-only text is still selectable from the keyboard (Ctrl+A,
         // Shift+arrows), without showing a caret.
@@ -1710,10 +1819,43 @@ public:
 
 private:
     QPlainTextEdit* edit() const { return static_cast<QPlainTextEdit*>(w_); }
+    bool styled_ = false;  // styled text set or appended since its text was last set plainly
     std::function<void()> changed_;
 };
 
 // -- containers ---------------------------------------------------------------
+
+// rapport's QSplitter: whatever it does with an event (a resize, a layout
+// request, a pane shown or added) or its handles do (a drag), it places its
+// panes within it, so what they're told of their sizes waits until all are
+// placed (pane_sizes.h, #105). rapport's own setSizes calls are bracketed
+// where they're made.
+class placing_handle : public QSplitterHandle
+{
+public:
+    using QSplitterHandle::QSplitterHandle;
+
+protected:
+    bool event(QEvent* e) override
+    {
+        pane_sizes::placing_scope scope;
+        return QSplitterHandle::event(e);
+    }
+};
+
+class placing_splitter : public QSplitter
+{
+public:
+    using QSplitter::QSplitter;
+
+protected:
+    bool event(QEvent* e) override
+    {
+        pane_sizes::placing_scope scope;
+        return QSplitter::event(e);
+    }
+    QSplitterHandle* createHandle() override { return new placing_handle(orientation(), this); }
+};
 
 // Splitter panes: the first layout follows stretch factors (panes without
 // stretch at their natural size), or the sizes given before it; after
@@ -1731,6 +1873,11 @@ public:
         hook(s,
              [this](QEvent* e)
              {
+                 // What this places is told as the event the filter's ahead
+                 // of ends (placing_splitter::event), not here: a pane told
+                 // its size may destroy the window, and this with it, and
+                 // the event goes on to the splitter after (#138).
+                 pane_sizes::placing_held held;
                  // Sizes set for a window about to grow (a pane shown and the
                  // window widened in the same step) take their place once it
                  // has; QSplitter would give the growth to the stretching pane.
@@ -1792,7 +1939,7 @@ public:
     {
         if (laid_out_)
             apply(s);
-        else
+        else if (pending_ != s)
             pending_ = s;
     }
 
@@ -1835,6 +1982,7 @@ private:
         if (avail <= 0 || stretch_sum == 0) return;
         for (int i = 0; i < n && size_t(i) < stretch_.size(); ++i)
             if (stretch_[size_t(i)] > 0) sizes[i] = avail * stretch_[size_t(i)] / stretch_sum;
+        pane_sizes::placing_scope scope;
         splitter()->setSizes(sizes);
     }
 
@@ -1858,7 +2006,12 @@ private:
             wanted_ = s;
         else
             wanted_.reset();
-        splitter()->setSizes(sizes);
+        // The sizes it has already: no relayout (#88).
+        if (sizes != splitter()->sizes())
+        {
+            pane_sizes::placing_scope scope;
+            splitter()->setSizes(sizes);
+        }
     }
 
     std::vector<int> stretch_;
@@ -1899,74 +2052,684 @@ struct lazy_pages
     }
 };
 
+// The size of the visible pages of `count` (`page(i)` each, `shown(i)`
+// whether it's visible): the largest of their sizes (their least sizes for
+// `minimum`), as QStackedLayout measures, a page's explicit minimum
+// included. Hidden pages take no layout. None visible: nothing.
+template <class Page, class Shown>
+QSize visible_pages_size(int count, Page page, Shown shown, bool minimum)
+{
+    QSize s(0, 0);
+    for (int i = 0; i < count; ++i)
+    {
+        const QWidget* w = page(i);
+        if (!w || !shown(i)) continue;
+        const QSize least = w->minimumSizeHint().expandedTo(w->minimumSize());
+        s = s.expandedTo(minimum ? least : w->sizeHint().expandedTo(least).boundedTo(w->maximumSize()));
+    }
+    return s;
+}
+
+// A tabs strip's QTabWidget. With its strip hidden (hide_single_tab), it
+// measures as its visible pages alone: QTabWidget counts its bar unless it
+// auto-hides, which goes by the number of tabs, not the visible ones.
+class tab_widget : public QTabWidget
+{
+public:
+    // Natural: QTabWidget's own with the strip (it counts only the visible
+    // pages, and bounds the bar as it does with scroll buttons), at least
+    // the minimum; without the strip, the visible pages alone.
+    QSize sizeHint() const override
+    {
+        return (strip_hidden ? hint(false) : QTabWidget::sizeHint()).expandedTo(hint(true));
+    }
+    QSize minimumSizeHint() const override { return hint(true); }
+
+    // A change to the bar's tabs (a title, an icon for another) made through
+    // the bar itself: QTabWidget's own setters lay everything above out
+    // again. The bar asks its tab widget to lay out (posted); with the tabs'
+    // measured size unchanged, the bar is placed again within them first
+    // (its resize may ask again, a layout left dirty), then every request
+    // the change and the placing posted, to the tab widget or to the bar,
+    // is dropped: nothing above relayouts (#101). Requests due before the
+    // change are handled first, as they would have been.
+    void bar_change(const std::function<void()>& change)
+    {
+        QCoreApplication::sendPostedEvents(this, QEvent::LayoutRequest);
+        QCoreApplication::sendPostedEvents(tabBar(), QEvent::LayoutRequest);
+        const QSize natural = sizeHint(), least = minimumSizeHint();
+        change();
+        if (sizeHint() == natural && minimumSizeHint() == least)
+        {
+            place_bar();
+            QCoreApplication::removePostedEvents(this, QEvent::LayoutRequest);
+            QCoreApplication::removePostedEvents(tabBar(), QEvent::LayoutRequest);
+        }
+        else
+            updateGeometry();
+    }
+
+    bool strip_hidden = false;
+
+private:
+    // The bar where QTabWidget puts it (its own layout, for the bar alone).
+    // Not shown, it's placed when it is.
+    void place_bar()
+    {
+        if (!isVisible() || strip_hidden) return;
+        QStyleOptionTabWidgetFrame opt;
+        initStyleOption(&opt);
+        const QRect at = style()->subElementRect(QStyle::SE_TabWidgetTabBar, &opt, this);
+        if (tabBar()->geometry() != at) tabBar()->setGeometry(at);
+    }
+    // Its visible pages only, strip shown or not: QTabWidget's minimum asks
+    // its page stack, which counts hidden pages too. With the strip, the bar
+    // and the frame as QTabWidget adds them (no corner widgets here).
+    QSize hint(bool minimum) const
+    {
+        const QSize pages = visible_pages_size(
+            count(), [this](int i) { return widget(i); }, [this](int i) { return isTabVisible(i); }, minimum);
+        if (strip_hidden) return pages;
+        const QSize bar = minimum ? tabBar()->minimumSizeHint() : tabBar()->sizeHint();
+        const bool across = tabPosition() == North || tabPosition() == South;
+        const QSize in = across ? QSize(std::max(pages.width(), bar.width()), pages.height() + bar.height())
+                                : QSize(pages.width() + bar.width(), std::max(pages.height(), bar.height()));
+        QStyleOptionTabWidgetFrame opt;
+        initStyleOption(&opt);
+        opt.state = QStyle::State_None;
+        return style()->sizeFromContents(QStyle::CT_TabWidget, &opt, in, this);
+    }
+};
+
+// Sets a flag for as long as it lives: a tabs' own changes to its current
+// page, which fire no on_changed.
+struct quiet_scope
+{
+    explicit quiet_scope(bool& flag)
+        : flag_(flag)
+        , was_(flag)
+    {
+        flag_ = true;
+    }
+    ~quiet_scope() { flag_ = was_; }
+    bool& flag_;
+    bool was_;
+};
+
+// A tab page's icon (#101): none for an empty one. One that shows nothing
+// (for_path with no fallback: Qt shows `name` only) still takes its slot, as
+// a blank one: QTabBar and the list size a tab or row by the icon size only
+// for an icon that isn't null.
+QIcon page_q_icon(const rap::icon& i, const QWidget* w)
+{
+    if (!i) return QIcon();
+    QIcon q = to_q_icon(i, 16, w);
+    if (q.isNull())
+    {
+        QPixmap blank(16, 16);
+        blank.fill(Qt::transparent);
+        q = QIcon(blank);
+    }
+    return q;
+}
+
+// Runs `redraw` (queued: once for a burst) when `w`'s palette, style or
+// device scale changes, so drawn icons are drawn again in its new colours
+// and at its new scale. Nothing once `alive` is false: the part goes before
+// its Qt widgets do.
+void on_icon_redraw(QWidget* w, std::shared_ptr<bool> alive, std::function<void()> redraw)
+{
+    auto pending = std::make_shared<bool>(false);
+    hook(w,
+         [w, alive, redraw = std::move(redraw), pending](QEvent* e)
+         {
+             const auto t = e->type();
+             bool redraws = t == QEvent::PaletteChange || t == QEvent::ApplicationPaletteChange ||
+                            t == QEvent::StyleChange || t == QEvent::ScreenChangeInternal;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+             redraws = redraws || t == QEvent::DevicePixelRatioChange;
+#endif
+             if (!redraws || *pending || !*alive) return false;
+             *pending = true;
+             QMetaObject::invokeMethod(
+                 w,
+                 [alive, redraw, pending]
+                 {
+                     *pending = false;
+                     if (*alive) redraw();
+                 },
+                 Qt::QueuedConnection);
+             return false;
+         });
+}
+
 class tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    explicit tabs_impl(QTabWidget* t)
+    explicit tabs_impl(tab_widget* t)
         : widget_base(t)
     {
         QObject::connect(t, &QTabWidget::currentChanged, t,
                          [this](int i)
                          {
+                             const int before = settled_;
                              lazy_.ensure_built(i);
-                             if (changed_) changed_(i);
+                             if (!quiet_) user_switched(before);
                          });
+        on_icon_redraw(t->tabBar(), alive_, [this] { redraw_icons(); });
     }
-    int current() const override { return tabs()->currentIndex(); }
+    ~tabs_impl() override { *alive_ = false; }
+    // Its pages' icons from the start (spec::tabs::icons), already on the
+    // bar: kept, to tell a new one by and to draw again.
+    void keep_icons(const std::vector<rap::icon>& icons)
+    {
+        icons_ = icons;
+        icons_.resize(size_t(tabs()->count()));
+    }
+    // Neither changes the current page (no on_changed, settled_ as it was).
+    void set_page_icon(int page, const rap::icon& i) override
+    {
+        if (page < 0 || page >= tabs()->count()) return;
+        icons_.resize(size_t(tabs()->count()));
+        if (same_icon(i, icons_[size_t(page)])) return;  // (#91; a drawn one is never the same)
+        icons_[size_t(page)] = i;
+        show_icon(page);
+    }
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= tabs()->count()) return;
+        const QString text = mnemonic(title);
+        titles_.resize(size_t(tabs()->count()));
+        auto& kept = titles_[size_t(page)];
+        if ((kept ? *kept : tabs()->tabText(page)) == text) return;  // (#91)
+        // A hidden page's title kept until it's shown: QTabBar::setTabText
+        // enables the tab's mnemonic shortcut whether the tab is visible or
+        // not, so a hidden tab renamed "_Build" would be selected (and built)
+        // by Alt+B. (A sidebar's QListWidgetItem has no shortcut.)
+        if (!page_visible(page))
+        {
+            if (text == tabs()->tabText(page))
+                kept.reset();
+            else
+                kept = text;
+            return;
+        }
+        // Through the bar: relaid out above only if the measured size changes.
+        tabs()->bar_change([&] { tabs()->tabBar()->setTabText(page, text); });
+    }
+    // Its pages hidden from the start (spec::tabs::visible) and its strip
+    // (hide_single_tab): the first visible page current, the others' tabs
+    // hidden, before anything is shown or a lazy page built.
+    void init(const std::vector<bool>& visible, bool hide_single)
+    {
+        quiet_scope q(quiet_);
+        const int n = tabs()->count();
+        visible_.assign(size_t(n), true);
+        for (int i = 0; i < n && size_t(i) < visible.size(); ++i) visible_[size_t(i)] = visible[size_t(i)];
+        hide_single_ = hide_single;
+        const int first = first_visible_page(visible_, n);
+        if (first >= 0) tabs()->setCurrentIndex(first);
+        for (int i = 0; i < n; ++i)
+            if (!visible_[size_t(i)]) tabs()->setTabVisible(i, false);
+        if (first < 0) set_none(true);
+        update_strip(true);
+        reconcile();
+        settled_ = current();
+    }
+    int current() const override { return none_ ? -1 : tabs()->currentIndex(); }
+    // A hidden page, or one out of range: nothing.
     void set_current(int i) override
     {
-        tabs()->setCurrentIndex(i);
+        ++ops_;
+        if (!page_visible(i)) return;
+        if (tabs()->currentIndex() == i) return;  // (#88)
+        {
+            quiet_scope q(quiet_);  // the app's own: no on_changed (#98)
+            tabs()->setCurrentIndex(i);
+        }
         lazy_.ensure_built(i);
+        reconcile();
+        settled_ = current();
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= tabs()->count() || page_visible(page) == on) return;  // (#88)
+        ++ops_;
+        quiet_scope q(quiet_);
+        visible_[size_t(page)] = on;
+        if (!on)
+        {
+            // The current page hidden: the nearest visible after it (before
+            // it, with none after) made current first, so QTabBar's own
+            // choice never comes into it.
+            if (!none_ && page == tabs()->currentIndex())
+            {
+                const int next = nearest_visible_page(visible_, tabs()->count(), page);
+                if (next >= 0)
+                {
+                    tabs()->setCurrentIndex(next);
+                    lazy_.ensure_built(next);
+                }
+                else
+                    set_none(true);
+            }
+            tabs()->setTabVisible(page, false);
+        }
+        else
+        {
+            // The first page shown again with every page hidden: out of
+            // "none" first, since showing its tab may make Qt select it and
+            // build it at once, and a builder calling the tabs back must find
+            // it current. Then it's made current only if nothing nested has
+            // acted since; whatever a builder did stands.
+            const bool first_shown = none_;
+            const unsigned at = ++ops_;
+            if (first_shown) set_none(false);
+            show_kept_title(page);
+            tabs()->setTabVisible(page, true);
+            if (first_shown && ops_ == at)
+            {
+                if (tabs()->currentIndex() != page) tabs()->setCurrentIndex(page);
+                lazy_.ensure_built(page);
+            }
+            // Read back after any build: a visible page current, or none
+            // (a builder that hid every page again).
+            const int now = tabs()->currentIndex();
+            set_none(now < 0 || !page_visible(now));
+        }
+        update_strip(false);
+        tabs()->updateGeometry();
+        reconcile();
+        settled_ = current();
+    }
+    bool page_visible(int page) const override
+    {
+        return page >= 0 && size_t(page) < visible_.size() && visible_[size_t(page)];
+    }
+    // The strip as the option now has it: the same value, or one that
+    // leaves the strip as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (hide_single_ == on) return;
+        hide_single_ = on;
+        update_strip(false);
+    }
+    bool hide_single_tab() const override { return hide_single_; }
     void set_lazy(lazy_pages pages)
     {
         lazy_ = std::move(pages);
         lazy_.ensure_built(current());
+        reconcile();
+        settled_ = current();
     }
 
 private:
-    QTabWidget* tabs() const { return static_cast<QTabWidget*>(w_); }
+    tab_widget* tabs() const { return static_cast<tab_widget*>(w_); }
+    // A user's switch from `before` (current() as it was), its page built:
+    // on_changed once, with the page current now (a builder may have switched
+    // again, or hidden every page), if there's one and it isn't `before`.
+    void user_switched(int before)
+    {
+        reconcile();
+        settled_ = current();
+        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+    }
+    // QTabWidget's page stack, hidden with every page: no page shows.
+    void set_none(bool none)
+    {
+        none_ = none;
+        if (auto* stack = tabs()->findChild<QStackedWidget*>(QString(), Qt::FindDirectChildrenOnly))
+            stack->setVisible(!none);
+    }
+    // At the end of every operation: current()'s page the only one visible,
+    // or none (Qt can show a page widget itself after a builder's nested
+    // switch, inside setTabVisible).
+    void reconcile()
+    {
+        const int now = current();
+        for (int i = 0; i < tabs()->count(); ++i)
+            if (QWidget* w = tabs()->widget(i)) w->setVisible(i == now);
+    }
+    unsigned ops_ = 0;  // the app's set_current and set_page_visible calls, nested ones included
+    // The strip shown or hidden (hide_single_tab); hidden, the page alone
+    // fills the area, with no frame round it (document mode).
+    void update_strip(bool first)
+    {
+        const bool shown = tabs_strip_shown(visible_, tabs()->count(), hide_single_);
+        if (!first && tabs()->strip_hidden == !shown) return;
+        tabs()->strip_hidden = !shown;
+        tabs()->tabBar()->setVisible(shown);
+        tabs()->setDocumentMode(!shown);
+        tabs()->updateGeometry();
+        QEvent relayout(QEvent::LayoutRequest);
+        QCoreApplication::sendEvent(tabs(), &relayout);
+    }
+    // Page `page`'s icon on its tab. One for another goes through the bar,
+    // which only repaints the tab (QTabBar's icon size, the same width) and
+    // relayouts nothing; one added or removed may change the tab's width,
+    // through QTabWidget, which lays itself out again.
+    void show_icon(int page)
+    {
+        QTabBar* bar = tabs()->tabBar();
+        const QIcon q = page_q_icon(icons_[size_t(page)], bar);
+        const bool had = !bar->tabIcon(page).isNull();
+        if (!had && q.isNull()) return;
+        if (had && !q.isNull())
+            tabs()->bar_change([&] { bar->setTabIcon(page, q); });
+        else
+            tabs()->setTabIcon(page, q);
+    }
+    // A title set while page `page` was hidden, on its tab as it's shown
+    // (just before: setTabVisible enables the tab's shortcut with it).
+    void show_kept_title(int page)
+    {
+        if (size_t(page) >= titles_.size() || !titles_[size_t(page)]) return;
+        const QString text = *titles_[size_t(page)];
+        titles_[size_t(page)].reset();
+        tabs()->bar_change([&] { tabs()->tabBar()->setTabText(page, text); });
+    }
+    // The icons again, in the bar's new colours or at its new scale (a
+    // drawn one is drawn again): each one for another, so nothing moves.
+    void redraw_icons()
+    {
+        for (int i = 0; i < tabs()->count() && size_t(i) < icons_.size(); ++i)
+            if (icons_[size_t(i)]) show_icon(i);
+    }
+
     std::function<void(int)> changed_;
     lazy_pages lazy_;
+    std::vector<bool> visible_;  // per page
+    std::vector<rap::icon> icons_;  // per page, as set; empty: none
+    std::vector<std::optional<QString>> titles_;  // per page: set while hidden, not yet on its tab
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    bool hide_single_ = false;
+    bool none_ = false;   // every page hidden: current() is -1
+    bool quiet_ = false;  // our own change of page: no on_changed
+    int settled_ = 0;     // current() as the last operation or switch left it
+};
+
+// A sidebar's list of page names: at its natural size, its visible rows
+// whole (a hidden page's row takes no room).
+class side_list : public QListWidget
+{
+public:
+    // Its visible rows, at least one row's height (none visible, or none at
+    // all), and never under Qt's own minimum. Given less, it scrolls.
+    QSize sizeHint() const override
+    {
+        int rows = 0, one = 0;
+        for (int i = 0; i < count(); ++i)
+        {
+            const int h = sizeHintForRow(i);
+            if (one <= 0) one = h;
+            if (!isRowHidden(i)) rows += h;
+        }
+        if (one <= 0) one = fontMetrics().height() + 2 * spacing();
+        const int h = 2 * frameWidth() + std::max(rows, one);
+        return QSize(QListWidget::sizeHint().width(), std::max(h, minimumSizeHint().height()));
+    }
+};
+
+// A sidebar's pages: sized to its largest visible page (a hidden one takes
+// no layout).
+class side_stack : public QStackedWidget
+{
+public:
+    QSize sizeHint() const override
+    {
+        return visible_pages_size(
+            count(), [this](int i) { return widget(i); }, [this](int i) { return shown(i); }, false);
+    }
+    QSize minimumSizeHint() const override
+    {
+        return visible_pages_size(
+            count(), [this](int i) { return widget(i); }, [this](int i) { return shown(i); }, true);
+    }
+
+    std::function<bool(int)> shown = [](int) { return true; };
 };
 
 // Tabs as a list of page names down the left, the page beside it.
 class side_tabs_impl : public widget_base<rap::tabs>
 {
 public:
-    side_tabs_impl(QWidget* box, QListWidget* list, QStackedWidget* stack)
+    side_tabs_impl(QWidget* box, side_list* list, QWidget* line, side_stack* stack)
         : widget_base(box)
         , list_(list)
+        , line_(line)
         , stack_(stack)
     {
         QObject::connect(list_, &QListWidget::currentRowChanged, list_,
                          [this](int i)
                          {
                              if (i < 0) return;
+                             const int before = settled_;
                              lazy_.ensure_built(i);
-                             stack_->setCurrentIndex(i);
-                             if (changed_) changed_(i);
+                             // A builder that selected another page has
+                             // put that one up.
+                             if (list_->currentRow() == i) stack_->setCurrentIndex(i);
+                             if (!quiet_) user_switched(before);
                          });
+        stack_->shown = [this](int i) { return page_visible(i); };
+        on_icon_redraw(list_, alive_, [this] { redraw_icons(); });
     }
-    int current() const override { return std::max(0, list_->currentRow()); }
+    ~side_tabs_impl() override { *alive_ = false; }
+    // As tabs_impl's: its pages' icons from the start, already on the rows.
+    void keep_icons(const std::vector<rap::icon>& icons)
+    {
+        icons_ = icons;
+        icons_.resize(size_t(list_->count()));
+    }
+    // Neither changes the current page (no on_changed, settled_ as it was).
+    void set_page_icon(int page, const rap::icon& i) override
+    {
+        if (page < 0 || page >= list_->count()) return;
+        icons_.resize(size_t(list_->count()));
+        if (same_icon(i, icons_[size_t(page)])) return;  // (#91; a drawn one is never the same)
+        icons_[size_t(page)] = i;
+        show_icon(page);
+    }
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= list_->count()) return;
+        const QString text = qs(title).remove('_');  // as built
+        QListWidgetItem* item = list_->item(page);
+        if (item->text() == text) return;  // (#91)
+        item->setText(text);  // the row repainted; its height is fixed
+        fit_width();
+    }
+    // The list's width for its rows' titles and icons (hidden ones' too, so
+    // showing a page never moves it).
+    static int list_width(const QListWidget* list)
+    {
+        const int icon_room = list->iconSize().width() +
+                              2 * (list->style()->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, list) + 1);
+        int width = 0;
+        for (int i = 0; i < list->count(); ++i)
+        {
+            const QListWidgetItem* item = list->item(i);
+            width = std::max(width, list->fontMetrics().horizontalAdvance(item->text()) +
+                                        (item->icon().isNull() ? 0 : icon_room));
+        }
+        return width + 48;
+    }
+    // As tabs_impl's: the first visible page current, the others' rows
+    // hidden, and the list (hide_single_tab).
+    void init(const std::vector<bool>& visible, bool hide_single)
+    {
+        quiet_scope q(quiet_);
+        const int n = list_->count();
+        visible_.assign(size_t(n), true);
+        for (int i = 0; i < n && size_t(i) < visible.size(); ++i) visible_[size_t(i)] = visible[size_t(i)];
+        hide_single_ = hide_single;
+        const int first = first_visible_page(visible_, n);
+        if (first >= 0) list_->setCurrentRow(first);
+        for (int i = 0; i < n; ++i)
+            if (!visible_[size_t(i)]) list_->setRowHidden(i, true);
+        if (first < 0) set_none(true);
+        update_strip();
+        relayout();
+        reconcile();
+        settled_ = current();
+    }
+    int current() const override { return none_ ? -1 : std::max(0, list_->currentRow()); }
+    // A hidden page, or one out of range: nothing.
     void set_current(int i) override
     {
-        list_->setCurrentRow(i);
+        if (!page_visible(i)) return;
+        if (list_->currentRow() == i) return;  // (#88)
+        {
+            quiet_scope q(quiet_);  // the app's own: no on_changed (#98)
+            list_->setCurrentRow(i);
+        }
         lazy_.ensure_built(i);
+        reconcile();
+        settled_ = current();
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= list_->count() || page_visible(page) == on) return;  // (#88)
+        quiet_scope q(quiet_);
+        visible_[size_t(page)] = on;
+        if (!on)
+        {
+            if (!none_ && page == list_->currentRow())
+            {
+                const int next = nearest_visible_page(visible_, list_->count(), page);
+                if (next >= 0)
+                    list_->setCurrentRow(next);
+                else
+                    set_none(true);
+            }
+            list_->setRowHidden(page, true);
+        }
+        else
+        {
+            list_->setRowHidden(page, false);
+            if (none_)  // the first page shown again: current
+            {
+                // Out of "none" before the build, so a builder calling the
+                // tabs back finds the page current; then up goes the page
+                // current after it, as with the row still selected (every
+                // page hidden again: none, nothing up).
+                set_none(false);
+                list_->setCurrentRow(page);
+                lazy_.ensure_built(page);
+                // Read back after the build: a visible page current, or none.
+                const int now = list_->currentRow();
+                set_none(now < 0 || !page_visible(now));
+                if (!none_) stack_->setCurrentIndex(now);
+            }
+        }
+        update_strip();
+        relayout();
+        reconcile();
+        settled_ = current();
+    }
+    bool page_visible(int page) const override
+    {
+        return page >= 0 && size_t(page) < visible_.size() && visible_[size_t(page)];
+    }
+    // The list as the option now has it: the same value, or one that
+    // leaves the list as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (hide_single_ == on) return;
+        const bool was = tabs_strip_shown(visible_, list_->count(), hide_single_);
+        hide_single_ = on;
+        if (tabs_strip_shown(visible_, list_->count(), hide_single_) == was) return;
+        update_strip();
+        relayout();
+    }
+    bool hide_single_tab() const override { return hide_single_; }
     void set_lazy(lazy_pages pages)
     {
         lazy_ = std::move(pages);
         lazy_.ensure_built(current());
+        reconcile();
+        settled_ = current();
     }
+    // Sizes the rows again (an app's row height: the list's least height
+    // counts its visible rows).
+    std::function<void()> size_rows;
 
 private:
-    QListWidget* list_;
-    QStackedWidget* stack_;
+    // As tabs_impl's: on_changed once, with the page current now, if there's
+    // one and it isn't `before`.
+    void user_switched(int before)
+    {
+        reconcile();
+        settled_ = current();
+        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+    }
+    void set_none(bool none)
+    {
+        none_ = none;
+        stack_->setVisible(!none);
+    }
+    // At the end of every operation: current()'s page the only one visible,
+    // or none.
+    void reconcile()
+    {
+        const int now = current();
+        for (int i = 0; i < stack_->count(); ++i)
+            if (QWidget* w = stack_->widget(i)) w->setVisible(i == now);
+    }
+    // The list and its line hidden with at most one page visible
+    // (hide_single_tab): the page fills the area.
+    void update_strip()
+    {
+        const bool shown = tabs_strip_shown(visible_, list_->count(), hide_single_);
+        list_->setVisible(shown);
+        line_->setVisible(shown);
+    }
+    void relayout()
+    {
+        if (size_rows) size_rows();
+        list_->updateGeometry();
+        stack_->updateGeometry();
+        widget()->updateGeometry();
+    }
+    // The list as wide as its rows now need: relaid out only when that's
+    // another width (#101).
+    void fit_width()
+    {
+        const int width = list_width(list_);
+        if (list_->minimumWidth() == width && list_->maximumWidth() == width) return;
+        list_->setFixedWidth(width);
+    }
+    // Page `page`'s icon on its row: one for another only repaints the row
+    // (the list's icon size); one added or removed may change its width.
+    void show_icon(int page)
+    {
+        QListWidgetItem* item = list_->item(page);
+        const QIcon q = page_q_icon(icons_[size_t(page)], list_);
+        const bool had = !item->icon().isNull();
+        if (!had && q.isNull()) return;
+        item->setIcon(q);
+        if (had == q.isNull()) fit_width();
+    }
+    // As tabs_impl's: the icons again, each one for another.
+    void redraw_icons()
+    {
+        for (int i = 0; i < list_->count() && size_t(i) < icons_.size(); ++i)
+            if (icons_[size_t(i)]) show_icon(i);
+    }
+
+    side_list* list_;
+    QWidget* line_;
+    side_stack* stack_;
     std::function<void(int)> changed_;
     lazy_pages lazy_;
+    std::vector<bool> visible_;  // per page
+    std::vector<rap::icon> icons_;  // per page, as set; empty: none
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    bool hide_single_ = false;
+    bool none_ = false;   // every page hidden: current() is -1
+    bool quiet_ = false;  // our own change of page: no on_changed
+    int settled_ = 0;     // current() as the last operation or switch left it
 };
 
 // -- stack --------------------------------------------------------------------
@@ -2458,10 +3221,19 @@ public:
                              if (!quiet_ && toggled_) toggled_(on);
                          });
     }
-    void set_icon(const icon& icon) override { button()->setIcon(to_q_icon(icon, 16, w_)); }
+    void set_icon(const icon& icon) override
+    {
+        if (icon_set_ && same_icon(icon, icon_)) return;
+        icon_set_ = true;
+        icon_ = icon;
+        button()->setIcon(to_q_icon(icon, 16, w_));
+    }
+    rap::icon icon_;  // the one set (set_icon), to tell a new one by
+    bool icon_set_ = false;
     bool checked() const override { return button()->isChecked(); }
     void set_checked(bool c) override
     {
+        if (button()->isChecked() == c) return;
         quiet_ = true;  // set from code: no on_toggled
         button()->setChecked(c);
         quiet_ = false;
@@ -2506,7 +3278,7 @@ public:
         slider_->setSingleStep(1);
         slider_->setPageStep(std::max(1, int(std::lround(s.page / step_))));
         apply_range();
-        set_value(s.value);
+        apply_value(s.value);  // shown whatever it is (the label too, at the minimum)
         QObject::connect(slider_, &QSlider::valueChanged, slider_,
                          [this](int)
                          {
@@ -2525,23 +3297,21 @@ public:
     }
     void set_value(double v) override
     {
-        quiet_ = true;
-        const double t = std::clamp(map_.track(v), min_, max_);
-        set_ = {t == map_.track(v) ? v : map_.value(t), int(std::lround((t - min_) / step_))};
-        slider_->setValue(set_.second);
-        quiet_ = false;
-        show_value();
+        if (value() == v) return;
+        apply_value(v);
     }
     void set_range(double mn, double mx) override
     {
+        if (map_.track(mn) == min_ && map_.track(mx) == max_) return;
         const double v = value();
         min_ = map_.track(mn);
         max_ = map_.track(mx);
         apply_range();
-        set_value(v);
+        apply_value(v);  // its position along the new range, its label with it
     }
     void set_marks(std::vector<std::pair<double, std::string>> marks) override
     {
+        if (marks == marks_) return;
         marks_ = std::move(marks);
         apply_range();
     }
@@ -2549,6 +3319,17 @@ public:
 
 private:
     int position_of(double v) const { return int(std::lround((std::clamp(map_.track(v), min_, max_) - min_) / step_)); }
+    // `v` set and shown, whatever's there: its position on the track, its
+    // label.
+    void apply_value(double v)
+    {
+        quiet_ = true;
+        const double t = std::clamp(map_.track(v), min_, max_);
+        set_ = {t == map_.track(v) ? v : map_.value(t), int(std::lround((t - min_) / step_))};
+        slider_->setValue(set_.second);
+        quiet_ = false;
+        show_value();
+    }
     // QSlider's ticks are evenly spaced: the first two marks' spacing.
     void apply_range()
     {
@@ -2612,14 +3393,18 @@ public:
                          });
     }
     double value() const override { return box()->value(); }
+    // As it is only if it shows `v`: its value and its text (a user's typing
+    // not yet taken in, or taken in as another value, isn't `v`).
     void set_value(double v) override
     {
+        if (box()->value() == v && box()->cleanText() == box()->textFromValue(v)) return;
         quiet_ = true;
-        box()->setValue(v);
+        box()->setValue(v);  // (its text rewritten too, the same value or not: the typing put back)
         quiet_ = false;
     }
     void set_range(double mn, double mx) override
     {
+        if (box()->minimum() == mn && box()->maximum() == mx) return;
         quiet_ = true;
         box()->setRange(mn, mx);
         quiet_ = false;
@@ -2660,6 +3445,7 @@ public:
     rap::color color() const override { return color_; }
     void set_color(rap::color c) override
     {
+        if (c.r == color_.r && c.g == color_.g && c.b == color_.b && c.a == color_.a) return;
         color_ = c;
         swatch();
     }
@@ -2753,6 +3539,7 @@ public:
         frames_->stop();
     }
 
+    std::optional<cursor> cursor_;  // the one set (set_cursor)
     void invalidate() override { w_->update(); }
     // Nothing until it has been laid out and shown, as on GTK: before that a
     // Qt widget has a placeholder size (640x480), which an app sizing its
@@ -2764,6 +3551,8 @@ public:
     float device_scale() const override { return float(w_->devicePixelRatioF()); }
     void set_cursor(cursor c) override
     {
+        if (cursor_ == c) return;
+        cursor_ = c;
         switch (c)
         {
         case cursor::default_: w_->unsetCursor(); break;
@@ -2874,8 +3663,16 @@ public:
     void resized()
     {
         if (!laid_out_) return;
-        if (resize_) resize_(size());
-        if (frame_target_) frame_target_(target());
+        // Told once a splitter it's in has placed all its panes.
+        pane_sizes::now_or_after(this, alive_,
+                                 [this, alive = std::weak_ptr<bool>(alive_)]
+                                 {
+                                     // A copy: on_resize may destroy the canvas, and it with it.
+                                     if (auto f = resize_) f(size());
+                                     // on_resize may have destroyed it (its window, say).
+                                     const std::shared_ptr<bool> still = alive.lock();
+                                     if (still && *still && frame_target_) frame_target_(target());
+                                 });
     }
     // Shown, so laid out: its size is real from now on.
     void shown()
@@ -3292,6 +4089,8 @@ public:
     void set_current(size_t row) override
     {
         if (row >= size_t(rows_->count)) return;
+        // The cursor there, selected alone, already: as it is.
+        if (current() == row && selection() == std::vector<size_t>{row}) return;
         view_->selectionModel()->setCurrentIndex(rows_->index(int(row), first_text_column_),
                                                  QItemSelectionModel::ClearAndSelect |
                                                      QItemSelectionModel::Rows);
@@ -3332,8 +4131,15 @@ public:
         bar->setValue(std::clamp(bar->value() + by, bar->minimum(), bar->maximum()));
     }
 
+    // As the header shows it already (live: a click flips it before the app
+    // says what it means), nothing done (#88).
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
+        const QHeaderView* h = view_->header();
+        const Qt::SortOrder q = order == sort_order::ascending ? Qt::AscendingOrder : Qt::DescendingOrder;
+        if (sort_column_ == column && sort_order_ == order && h->isSortIndicatorShown() == column.has_value() &&
+            (!column || (h->sortIndicatorSection() == int(*column) && h->sortIndicatorOrder() == q)))
+            return;
         sort_column_ = column;
         sort_order_ = order;
         show_sort_indicator();
@@ -3356,7 +4162,7 @@ public:
     }
     void set_column_order(const std::vector<size_t>& order) override
     {
-        if (!is_column_order(order, cols_.size())) return;
+        if (!is_column_order(order, cols_.size()) || column_order() == order) return;
         QHeaderView* h = view_->header();
         for (size_t v = 0; v < order.size(); ++v)
             h->moveSection(h->visualIndex(int(order[v])), int(v));
@@ -3365,7 +4171,8 @@ public:
     void set_column_widths(const std::vector<float>& widths) override
     {
         for (size_t i = 0; i < widths.size() && i < cols_.size(); ++i)
-            if (widths[i] > 0) view_->header()->resizeSection(int(i), int(widths[i]));
+            if (widths[i] > 0 && view_->header()->sectionSize(int(i)) != int(widths[i]))
+                view_->header()->resizeSection(int(i), int(widths[i]));
         fitted_ = true;  // restored widths win over stretching
     }
 
@@ -3375,7 +4182,8 @@ public:
     }
     void set_column_visible(size_t column, bool v) override
     {
-        if (column < cols_.size()) view_->setColumnHidden(int(column), !v);
+        if (column >= cols_.size() || column_visible(column) == v) return;
+        view_->setColumnHidden(int(column), !v);
         stretch_last();
     }
 
@@ -4475,6 +5283,16 @@ void list_view::scrollContentsBy(int dx, int dy)
 
 // -- window -------------------------------------------------------------------
 
+// Test seam (#88): the fullscreen requests this backend has made, in order,
+// "F" for each fullscreen and "U" for each unfullscreen; read and cleared
+// through rapport_qt6_fullscreen_requests_for_tests below. Nothing is kept
+// until a test first reads it (an app's requests aren't recorded).
+std::optional<std::string>& fullscreen_requests_for_tests()
+{
+    static std::optional<std::string> requests;
+    return requests;
+}
+
 class window_impl;
 
 // Every window is a QDialog, for its keys: Enter presses the default
@@ -4530,6 +5348,7 @@ public:
     // their signals; until then nothing may reach the parts going now.
     ~window_impl() override
     {
+        *alive_ = false;
         // First, while every widget is still there; taken out, so it runs once.
         if (auto f = std::exchange(on_destroyed_, {})) f();
         filter_->owner = nullptr;
@@ -4586,13 +5405,19 @@ public:
             frame_->resize(size);
     }
 
-    void set_title(const std::string& t) override { frame_->setWindowTitle(qs(t)); }
+    void set_title(const std::string& t) override
+    {
+        if (const QString q = qs(t); frame_->windowTitle() != q) frame_->setWindowTitle(q);
+    }
     void show() override
     {
         finished_ = false;
         if (std::getenv("RAPPORT_NO_ACTIVATE"))  // test runs: shown, not given the focus
             frame_->setAttribute(Qt::WA_ShowWithoutActivating);
+        // Laid out at once: a pane told its size may destroy the window.
+        const std::weak_ptr<bool> alive = alive_;
         frame_->show();
+        if (gone(alive)) return;
         if (!frame_->testAttribute(Qt::WA_ShowWithoutActivating))
         {
             frame_->raise();
@@ -4602,7 +5427,12 @@ public:
     }
     void present() override
     {
-        if (!frame_->isVisible()) show();
+        if (!frame_->isVisible())
+        {
+            const std::weak_ptr<bool> alive = alive_;
+            show();
+            if (gone(alive)) return;  // destroyed by a pane told its size as it showed
+        }
         const bool quiet = std::getenv("RAPPORT_NO_ACTIVATE") != nullptr;
         // Minimised: back as it was, maximised if it was (showNormal would
         // unmaximise it). Quiet, WindowActive is left out, but Qt's Windows
@@ -4637,10 +5467,16 @@ public:
     size_f size() const override { return {float(frame_->width()), float(frame_->height())}; }
     void resize(size_f s) override
     {
+        // Laid out at once: a pane told its size may destroy the window.
+        const std::weak_ptr<bool> alive = alive_;
         frame_->resize(std::max(1, int(s.w)), std::max(1, int(s.h)));
+        if (gone(alive)) return;
         keep_on_screen();
     }
-    void set_min_size(size_f s) override { frame_->setMinimumSize(int(s.w), int(s.h)); }
+    void set_min_size(size_f s) override
+    {
+        if (frame_->minimumSize() != QSize(int(s.w), int(s.h))) frame_->setMinimumSize(int(s.w), int(s.h));
+    }
     std::optional<point_f> position() const override
     {
         if (!placeable()) return std::nullopt;
@@ -4664,12 +5500,32 @@ public:
 
     bool fullscreen() const override { return frame_->isFullScreen(); }
     bool maximized() const override { return frame_->isMaximized(); }
+    // Against what was last asked for (or seen: the window manager's own
+    // change), not windowState(): that changes only once the compositor
+    // acknowledges, so a quick reversal (true, then false) must still be
+    // sent.
+    // Fullscreen is asynchronous (#88). The request still unanswered (pending)
+    // is compared if there is one, else the state last reported: the same is
+    // nothing asked. A notification records the state, and answers the
+    // pending request only when it reports what that asked for; one that
+    // reports otherwise answers an older request, so the newer stays pending
+    // (true, false, true's answer, true again: asked F, U, F). With nothing
+    // pending, a notification (the user's or the window manager's) is simply
+    // the state now. Known limit: a request the window manager refuses
+    // without a notification stays pending, so the same request again is
+    // skipped until a fullscreen notification comes; asking again wouldn't
+    // help.
     void set_fullscreen(bool on) override
     {
-        if (on == frame_->isFullScreen()) return;
+        if (fullscreen_pending_ ? *fullscreen_pending_ == on : fullscreen_ == on) return;
+        fullscreen_pending_ = on;  // (before the call: offscreen answers inside it)
+        if (auto& r = fullscreen_requests_for_tests()) *r += on ? 'F' : 'U';
         if (on)
         {
-            was_maximized_ = frame_->isMaximized();
+            // What to go back to, taken only on the way into full screen: a
+            // request made again while the frame is full screen already (on,
+            // off, the first's late answer, on) keeps it.
+            if (!frame_->isFullScreen()) was_maximized_ = frame_->isMaximized();
             frame_->showFullScreen();
         }
         else if (was_maximized_)
@@ -4681,6 +5537,9 @@ public:
 
     void set_icon(const icon& icon) override
     {
+        if (icon_set_ && same_icon(icon, icon_)) return;
+        icon_set_ = true;
+        icon_ = icon;
         if (!icon.name.empty())
             if (QIcon named = theme_icon(icon.name); !named.isNull())
             {
@@ -4691,8 +5550,11 @@ public:
     }
 
     void set_app_id(const std::string&) override {}  // the process's (.desktop), not a window's
+    rap::icon icon_;  // the window's (set_icon), to tell a new one by
+    bool icon_set_ = false;
     void set_menu_bar_visible(bool on) override
     {
+        if (menu_bar_wanted_ == on) return;
         menu_bar_wanted_ = on;
         show_menu_bar();
     }
@@ -4748,6 +5610,9 @@ public:
     void state_changed()
     {
         const bool fs = frame_->isFullScreen();
+        // The pending request answered only by its own state (see
+        // set_fullscreen).
+        if (fullscreen_pending_ && *fullscreen_pending_ == fs) fullscreen_pending_.reset();
         if (fs == fullscreen_) return;
         fullscreen_ = fs;
         show_menu_bar();
@@ -4855,6 +5720,12 @@ protected:
     }
 
 private:
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // false once it's being destroyed
+    static bool gone(const std::weak_ptr<bool>& alive)
+    {
+        const std::shared_ptr<bool> still = alive.lock();
+        return !still || !*still;
+    }
     // Development aid: RAPPORT_SNAPSHOT=file.png saves the window shown last,
     // RAPPORT_SNAPSHOT_DELAY ms (default 500) after it appears, then quits.
     // The windows there now, the one shown most recently last (a dialog
@@ -4970,6 +5841,7 @@ private:
     bool dialog_;
     bool finished_ = false;
     bool fullscreen_ = false;
+    std::optional<bool> fullscreen_pending_;  // a fullscreen request not yet answered (set_fullscreen)
     bool was_maximized_ = false;
     std::function<void(dialog_role)> on_finished_;
     std::function<bool()> on_close_request_;
@@ -5210,7 +6082,8 @@ private:
 
     QWidget* make(const node& n, const spec::splitter& s, orientation)
     {
-        auto* sp = new QSplitter(s.dir == orientation::vertical ? Qt::Vertical : Qt::Horizontal);
+        auto* sp =
+            new placing_splitter(s.dir == orientation::vertical ? Qt::Vertical : Qt::Horizontal);
         sp->setChildrenCollapsible(false);
         // Thin: a 1 px handle, which QSplitter keeps 5 px to drag (it
         // widens the handle's grab area over the panes).
@@ -5252,16 +6125,22 @@ private:
     QWidget* make(const node& n, const spec::tabs& s, orientation)
     {
         if (s.sidebar) return make_sidebar(n, s);
-        auto* tabs = new QTabWidget;
+        auto* tabs = new tab_widget;
+        tabs->setIconSize(QSize(16, 16));  // a page's icon (#101): the small-icon size
         lazy_pages lazy{s.lazy, {}, page_builder()};
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             const bool is_lazy = i < s.lazy.size() && s.lazy[i];
             QWidget* page = page_of(is_lazy ? nullptr : build(s.pages[i], orientation::vertical));
-            tabs->addTab(page, mnemonic(s.titles[i]));
+            const QIcon page_icon = i < s.icons.size() ? page_q_icon(s.icons[i], tabs->tabBar()) : QIcon();
+            tabs->addTab(page, page_icon, mnemonic(s.titles[i]));
             lazy.pages.push_back(page);
         }
         auto& w = add<tabs_impl>(n, tabs);
+        w.keep_icons(s.icons);
+        // Pages hidden from the start, before a lazy one is built: only the
+        // first visible page is.
+        w.init(s.visible, s.hide_single_tab);
         if (!s.lazy.empty()) w.set_lazy(std::move(lazy));
         return tabs;
     }
@@ -5273,10 +6152,10 @@ private:
         auto* l = new QHBoxLayout(box);
         l->setContentsMargins(0, 0, 0, 0);
         l->setSpacing(0);
-        auto* list = new QListWidget;
-        auto* stack = new QStackedWidget;
+        auto* list = new side_list;
+        auto* stack = new side_stack;
         lazy_pages lazy{s.lazy, {}, page_builder()};
-        int width = 0;
+        list->setIconSize(QSize(16, 16));  // a page's icon (#101): the small-icon size
         // An item's height: the app's row height (look_options::row_height)
         // where it's set, else the line and room round it.
         const int item_height = g_app_row_height > 0 ? fixed_row(list->font(), g_app_row_height)
@@ -5285,28 +6164,36 @@ private:
         {
             auto* item = new QListWidgetItem(qs(s.titles[i]).remove('_'), list);
             item->setSizeHint(QSize(0, item_height));
-            width = std::max(width, list->fontMetrics().horizontalAdvance(item->text()));
+            if (i < s.icons.size() && s.icons[i]) item->setIcon(page_q_icon(s.icons[i], list));
             const bool is_lazy = i < s.lazy.size() && s.lazy[i];
             QWidget* page = page_of(is_lazy ? nullptr : build(s.pages[i], orientation::vertical));
             stack->addWidget(page);
             lazy.pages.push_back(page);
         }
-        list->setFixedWidth(width + 48);
+        list->setFixedWidth(side_tabs_impl::list_width(list));
         // At its natural size every item whole: at least their rows' height
         // and its frame. Both again with a new font or style (a larger text
         // size: the rows never under its line and 2), as a list's and a
         // tree's rows are.
+        // Its visible rows only (a hidden page's takes no room).
+        std::function<void()> resize_rows;
         if (g_app_row_height > 0)
         {
             auto size_rows = [list]
             {
                 const int h = fixed_row(list->font(), g_app_row_height);
-                for (int i = 0; i < list->count(); ++i) list->item(i)->setSizeHint(QSize(0, h));
-                list->setMinimumHeight(h * list->count() + 2 * list->frameWidth());
+                int shown = 0;
+                for (int i = 0; i < list->count(); ++i)
+                {
+                    list->item(i)->setSizeHint(QSize(0, h));
+                    shown += !list->isRowHidden(i);
+                }
+                list->setMinimumHeight(h * shown + 2 * list->frameWidth());
                 list->doItemsLayout();
                 list->updateGeometry();
             };
             size_rows();
+            resize_rows = size_rows;
             // After Qt has handled the change (queued): the new font's metrics
             // and the new style's frame width are only the list's then. A
             // burst of changes measures once.
@@ -5340,8 +6227,12 @@ private:
         line->setFrameShadow(QFrame::Sunken);
         l->addWidget(line);
         l->addWidget(stack, 1);
-        auto& tabs = add<side_tabs_impl>(n, box, list, stack);
-        tabs.set_current(0);
+        auto& tabs = add<side_tabs_impl>(n, box, list, line, stack);
+        tabs.size_rows = std::move(resize_rows);
+        tabs.keep_icons(s.icons);
+        // Pages hidden from the start, before a lazy one is built: only the
+        // first visible page is.
+        tabs.init(s.visible, s.hide_single_tab);
         if (!s.lazy.empty()) tabs.set_lazy(std::move(lazy));
         return box;
     }
@@ -5708,6 +6599,7 @@ public:
 
     void set_color_scheme(color_scheme s) override
     {
+        if (palette::app_scheme() == palette::scheme_number(s)) return;
         palette::app_scheme() = palette::scheme_number(s);
         apply_scheme();
     }
@@ -6067,5 +6959,17 @@ private:
 
 }  // namespace
 }  // namespace rap::qt6
+
+// Test seam (#88): the fullscreen requests made since the last call ("F",
+// "U", in order), cleared. The first call starts the recording. Not part of
+// the backend's interface.
+extern "C" RAPPORT_EXPORT const char* rapport_qt6_fullscreen_requests_for_tests()
+{
+    static std::string out;
+    auto& r = rap::qt6::fullscreen_requests_for_tests();
+    out = r.value_or(std::string());
+    r = std::string();
+    return out.c_str();
+}
 
 RAPPORT_BACKEND_ENTRY(qt6, rap::qt6::qt6_backend)

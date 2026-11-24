@@ -8,6 +8,7 @@
 // text, list box and separator) must print the same too.
 #include <rapport/rapport.h>
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <dwmapi.h>
 #include <cstdio>
 #include <cstdlib>
@@ -182,7 +183,7 @@ int main(int argc, char** argv)
         tabs{{"one", label{"first"}}, {"two", label{"second"}}}.sidebar(),
     }}}});
     win->show();
-    HWND root = FindWindowW(nullptr, L"Rapport pane frames");
+    HWND root = test_window(L"Rapport pane frames");
     if (!root) return 2;
     // On the desktop: a CI machine's is small, and pixels off it can't be read.
     SetWindowPos(root, nullptr, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);

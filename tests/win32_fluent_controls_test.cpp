@@ -17,6 +17,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 
@@ -124,7 +125,7 @@ DWORD over(DWORD top, DWORD under)
 
 HWND top_of(const char* title)
 {
-    return FindWindowW(nullptr, std::wstring(title, title + std::strlen(title)).c_str());
+    return test_window(std::wstring(title, title + std::strlen(title)).c_str());
 }
 
 HWND child(HWND top, const wchar_t* cls, const wchar_t* text = nullptr)

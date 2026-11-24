@@ -104,15 +104,42 @@ namespace
 
 constexpr UINT wm_rapport_post = WM_APP + 1;
 
-// The backend's message window, which runs what's posted to it
-// (wm_rapport_post) on the UI thread.
-HWND g_messages = nullptr;
+// The way onto the backend's message window, which runs what's posted to
+// it (wm_rapport_post) on the UI thread, from any thread (backend.h, post).
+// Closed as the backend's torn down, before what's queued is taken out and
+// destroyed: a post either reaches the queue before then (and is destroyed
+// with the rest) or finds it closed and is destroyed by its caller; none
+// lands between, to be dropped with the window. Shared by whatever posts
+// (a path icon finder's thread may outlive the backend).
+struct post_gate
+{
+    std::mutex m;
+    HWND to = nullptr;  // nullptr: closed
+    void post(std::function<void()> f)
+    {
+        auto* job = new std::function<void()>(std::move(f));
+        {
+            std::lock_guard lock(m);
+            if (to && PostMessageW(to, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job))) return;
+        }
+        delete job;  // closed, or not delivered (the queue full): not run
+    }
+    void close()
+    {
+        std::lock_guard lock(m);
+        to = nullptr;
+    }
+};
+// The backend's, while it's up (set and cleared on the UI thread).
+std::shared_ptr<post_gate> g_post_gate;
 void post_to_ui(std::function<void()> f)
 {
-    auto* job = new std::function<void()>(std::move(f));
-    if (!g_messages || !PostMessageW(g_messages, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job)))
-        delete job;
+    if (const std::shared_ptr<post_gate> gate = g_post_gate) gate->post(std::move(f));
 }
+// For tests: called as the backend's torn down, after what was queued is
+// taken out, before its message window goes.
+void (*g_teardown_hook_for_tests)(void*) = nullptr;
+void* g_teardown_hook_data = nullptr;
 
 BOOL traced_set_window_pos(HWND h, HWND after, int x, int y, int w, int height, UINT flags)
 {
@@ -143,6 +170,10 @@ std::wstring mnemonic(const std::string& s)
 }
 constexpr UINT wm_rapport_frame = WM_APP + 2;
 constexpr UINT wm_rapport_relayout = WM_APP + 3;
+// What waited for a layout (after_layout), run from the message loop: a
+// layout made from inside another call (a flush, relayout_at_once) runs none
+// of the app's code there.
+constexpr UINT wm_rapport_after_layout = WM_APP + 31;
 constexpr UINT wm_rapport_selection = WM_APP + 4;  // a list's coalesced selection change
 constexpr UINT wm_rapport_fill_last = WM_APP + 5;
 constexpr UINT wm_rapport_read_back = WM_APP + 6;  // a pane's canvas's frame, read back  // a list's last column refits, once a header drag lands
@@ -434,39 +465,147 @@ void forget_group_themes(HWND h);
 // in light mode isn't the window's colour (Windows 10 and 11: a shade
 // lighter): their backgrounds take the body's, or each control is a band of
 // the window's on it. Measured once per tab control, from what it prints.
-std::map<HWND, HBRUSH>& tab_bodies()
+// Each tab control's body colour, dropped as the control goes (dark_tabs_proc's
+// WM_NCDESTROY, and any dead one as another's is measured); the brushes are
+// one per colour, shared, so a window made and destroyed again and again
+// holds no more GDI objects than the colours it shows.
+// A window rapport keeps something for, going (its WM_NCDESTROY in a
+// subclass of rapport's): marked dying with `prop` through the whole of it,
+// so nothing below that looks again keeps anything, and what's kept for it
+// forgotten before and after the rest of its teardown. `hook` is a test's,
+// standing for a subclass below.
+template <class Forget>
+LRESULT tear_down_kept(HWND h, WPARAM wp, LPARAM lp, const wchar_t* prop, Forget&& forget,
+                       void (*hook)(HWND, void*), void* hook_data)
 {
-    static std::map<HWND, HBRUSH> m;
+    SetPropW(h, prop, h);
+    forget();
+    if (hook) hook(h, hook_data);
+    const LRESULT r = DefSubclassProc(h, WM_NCDESTROY, wp, lp);
+    forget();
+    RemovePropW(h, prop);
+    return r;
+}
+std::map<HWND, COLORREF>& tab_bodies()
+{
+    static std::map<HWND, COLORREF> m;
+    return m;
+}
+std::map<COLORREF, HBRUSH>& tab_body_brushes()
+{
+    static std::map<COLORREF, HBRUSH> m;
     return m;
 }
 unsigned g_tab_bodies_gen = 0;  // bumped as they're forgotten
 void forget_tab_bodies()
 {
-    for (auto& [tab, brush] : tab_bodies()) DeleteObject(brush);
+    for (auto& [colour, brush] : tab_body_brushes()) DeleteObject(brush);
+    tab_body_brushes().clear();
     tab_bodies().clear();
     ++g_tab_bodies_gen;
 }
+void forget_tab_body(HWND tab)
+{
+    tab_bodies().erase(tab);
+    ++g_tab_bodies_gen;  // nothing found on it, or found not to be, kept
+}
+HBRUSH tab_body_brush_of(COLORREF colour)
+{
+    HBRUSH& b = tab_body_brushes()[colour];
+    if (!b) b = CreateSolidBrush(colour);
+    return b;
+}
+// A tab body's scan prints a tab control, and what that runs (the app's
+// code, a subclass) may destroy the tab or the control asking, retheme, or
+// lay out: a scan's answer is kept only if `h` is still a window and the
+// tab bodies and the layout pass are as they were when it began.
+struct tab_scan
+{
+    unsigned gen = g_tab_bodies_gen;
+    unsigned pass = g_layout_pass;
+    bool still(HWND h) const { return IsWindow(h) && gen == g_tab_bodies_gen && pass == g_layout_pass; }
+};
 void traced_tab_adjust(HWND, BOOL, RECT*);
-HBRUSH tab_body_brush(HWND tab)
+// Tabs being printed for their body now: a lookup that comes back to one
+// meanwhile (its print asking a sibling's colour, which asks the tab's body)
+// is refused, the window's colour and nothing kept for it, so a print can't
+// start another print of the same tab without end.
+std::set<HWND>& tabs_scanning()
+{
+    static std::set<HWND> s;
+    return s;
+}
+// Marks a tab being asked of (tabs_scanning) for as long as it lives; a
+// lookup that meets a tab so marked is refused.
+struct scanning_tab
+{
+    HWND tab;
+    explicit scanning_tab(HWND t)
+        : tab(t)
+    {
+        tabs_scanning().insert(tab);
+    }
+    ~scanning_tab() { tabs_scanning().erase(tab); }
+    scanning_tab(const scanning_tab&) = delete;
+    scanning_tab& operator=(const scanning_tab&) = delete;
+};
+void traced_tab_adjust(HWND h, BOOL larger, RECT* rect);
+// `r` from `from`'s client coordinates to `to`'s (nullptr: the screen's), as
+// MapWindowPoints maps a rectangle (normalized, mirrored windows included,
+// where two ClientToScreen calls swap its left and right); false if that
+// failed (its 0 is also a window at the origin's offset: told apart by the
+// error it sets).
+bool map_rect(HWND from, HWND to, RECT& r)
+{
+    SetLastError(ERROR_SUCCESS);
+    return MapWindowPoints(from, to, reinterpret_cast<POINT*>(&r), 2) != 0 || GetLastError() == ERROR_SUCCESS;
+}
+// A synchronous call into a tab (a message it runs code for: TCM_ADJUSTRECT,
+// WM_PRINTCLIENT), then whether all the scan stands on still does: the tab
+// and the control asking still windows, the tab bodies and the layout pass
+// as they were. Every such call of a scan goes through it.
+template <class Call>
+bool call_tab(HWND tab, HWND control, const tab_scan& scan, Call&& call)
+{
+    call();
+    return scan.still(tab) && IsWindow(control);
+}
+// Its body: called by the scan, the tab marked scanning already. Refused
+// (nothing found, nothing kept) if the tab or the control asking went, or
+// anything changed, on any call into it.
+HBRUSH tab_body_brush(HWND tab, HWND control, bool& refused)
 {
     auto& m = tab_bodies();
-    if (auto it = m.find(tab); it != m.end()) return it->second;
-    RECT client;
-    GetClientRect(tab, &client);
+    if (auto it = m.find(tab); it != m.end()) return tab_body_brush_of(it->second);
+    const tab_scan scan;
+    RECT client{};
+    if (!GetClientRect(tab, &client)) return nullptr;
     RECT body = client;
-    traced_tab_adjust(tab, FALSE, &body);
+    if (!call_tab(tab, control, scan, [&] { traced_tab_adjust(tab, FALSE, &body); }))
+    {
+        refused = true;
+        return nullptr;
+    }
     if (client.right <= 0 || client.bottom <= 0 || body.right <= body.left || body.bottom <= body.top) return nullptr;
     HDC screen = GetDC(tab), mem = CreateCompatibleDC(screen);
     HBITMAP bitmap = CreateCompatibleBitmap(screen, client.right, client.bottom);
     HGDIOBJ old = SelectObject(mem, bitmap);
-    SendMessageW(tab, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND);
-    const COLORREF colour = GetPixel(mem, (body.left + body.right) / 2, (body.top + body.bottom) / 2);
+    const bool still = call_tab(tab, control, scan,
+                                [&] { SendMessageW(tab, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT | PRF_ERASEBKGND); });
+    const COLORREF colour = still ? GetPixel(mem, (body.left + body.right) / 2, (body.top + body.bottom) / 2) : CLR_INVALID;
     SelectObject(mem, old);
     DeleteObject(bitmap);
     DeleteDC(mem);
     ReleaseDC(tab, screen);
-    if (colour == CLR_INVALID) return nullptr;
-    return m[tab] = CreateSolidBrush(colour);
+    // Gone or changed meanwhile: no body, the window's colour, not kept.
+    if (!still || colour == CLR_INVALID)
+    {
+        refused = true;
+        return nullptr;
+    }
+    std::erase_if(m, [](const auto& e) { return !IsWindow(e.first); });
+    m[tab] = colour;
+    return tab_body_brush_of(colour);
 }
 // The body brush of a visible tab control `control` lies wholly over (a
 // sibling, as its pages' controls are), if any.
@@ -476,41 +615,97 @@ void traced_tab_adjust(HWND h, BOOL larger, RECT* rect)
     TabCtrl_AdjustRect(h, larger, rect);
 }
 
-HBRUSH tab_body_under_scan(HWND control);
+HBRUSH tab_body_under_scan(HWND control, bool& refused);
+// Each control's answer, found or not, for this layout pass and these tab
+// bodies; a control's goes with it (its WM_NCDESTROY, through a subclass
+// added as it's first asked), so a window made at a handle another had
+// asks again.
+std::unordered_map<HWND, HBRUSH>& tab_body_answers()
+{
+    static std::unordered_map<HWND, HBRUSH> m;
+    return m;
+}
+void (*g_ground_dying_hook_for_tests)(HWND, void*) = nullptr;
+void* g_ground_dying_hook_data = nullptr;
+// Going: marked dying through the whole of its WM_NCDESTROY, so a lookup
+// from what runs below (a subclass, the control's own teardown) isn't kept,
+// and its answer dropped before and after that.
+LRESULT CALLBACK tab_body_answer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR)
+{
+    if (msg != WM_NCDESTROY) return DefSubclassProc(h, msg, wp, lp);
+    const LRESULT r = tear_down_kept(h, wp, lp, L"rapport-ground-dying", [h] { tab_body_answers().erase(h); },
+                                     g_ground_dying_hook_for_tests, g_ground_dying_hook_data);
+    RemoveWindowSubclass(h, tab_body_answer_proc, id);
+    return r;
+}
 // Asked by each label as it paints (WM_CTLCOLORSTATIC): found once per
 // control and layout pass, not by a walk over its siblings at every paint.
+// The answers, those of an earlier pass or tab bodies dropped first.
+std::unordered_map<HWND, HBRUSH>& tab_body_answers_now()
+{
+    auto& cache = tab_body_answers();
+    static unsigned cache_pass = 0, cache_gen = 0;
+    if (cache_pass != g_layout_pass || cache_gen != g_tab_bodies_gen)
+    {
+        cache.clear();
+        cache_pass = g_layout_pass;
+        cache_gen = g_tab_bodies_gen;
+    }
+    return cache;
+}
 HBRUSH tab_body_under(HWND control)
 {
-    struct known
-    {
-        unsigned pass, gen;
-        HBRUSH brush;
-    };
-    static std::unordered_map<HWND, known> cache;
-    if (auto it = cache.find(control);
-        it != cache.end() && it->second.pass == g_layout_pass && it->second.gen == g_tab_bodies_gen)
-        return it->second.brush;
+    auto& cache = tab_body_answers_now();
+    if (auto it = cache.find(control); it != cache.end()) return it->second;
     trace::mark(trace::phase::tab_cache_miss, uintptr_t(control));
-    const HBRUSH b = tab_body_under_scan(control);
-    cache[control] = {g_layout_pass, g_tab_bodies_gen, b};
+    // A control going: answered, never kept.
+    if (GetPropW(control, L"rapport-ground-dying")) return nullptr;  // the window's colour
+    // Its teardown hook first: the scan prints a tab control, and what that
+    // runs may destroy the control asking. Kept only if the control's still
+    // there, hooked, and nothing tore tab bodies down meanwhile.
+    const bool hooked = SetWindowSubclass(control, tab_body_answer_proc, 0, 0) != FALSE;
+    const tab_scan scan;
+    bool refused = false;
+    const HBRUSH b = tab_body_under_scan(control, refused);
+    if (refused) return nullptr;  // a scan in progress: the window's colour, not kept
+    if (!hooked || !scan.still(control)) return nullptr;  // the window's colour, not kept
+    cache[control] = b;
     return b;
 }
-HBRUSH tab_body_under_scan(HWND control)
+HBRUSH tab_body_under_scan(HWND control, bool& refused)
 {
-    RECT at;
-    GetWindowRect(control, &at);
+    RECT at{};
+    if (!GetWindowRect(control, &at)) return nullptr;
     for (HWND s = GetWindow(control, GW_HWNDFIRST); s; s = GetWindow(s, GW_HWNDNEXT))
     {
-        if (s == control || !IsWindowVisible(s)) continue;
+        // Shown as its siblings are (its style: a window not shown yet, or
+        // printed, has its pages' grounds as it will have on screen).
+        if (s == control || !(GetWindowLongPtrW(s, GWL_STYLE) & WS_VISIBLE) || GetPropW(s, L"rapport-tab-dying"))
+            continue;
         wchar_t cls[32] = {};
         GetClassNameW(s, cls, 32);
         if (_wcsicmp(cls, WC_TABCONTROLW)) continue;
-        RECT body;
-        GetClientRect(s, &body);
-        traced_tab_adjust(s, FALSE, &body);
-        MapWindowPoints(s, nullptr, reinterpret_cast<POINT*>(&body), 2);
-        RECT overlap;
-        if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s);
+        // Being asked of already, further up: refused (the first message to
+        // it, TCM_ADJUSTRECT, may come back here as well as its print).
+        if (tabs_scanning().count(s))
+        {
+            refused = true;
+            return nullptr;
+        }
+        const scanning_tab asking(s);
+        const tab_scan scan;
+        RECT body{};
+        if (!GetClientRect(s, &body)) continue;
+        // What TCM_ADJUSTRECT ran may have destroyed the tab or the control
+        // asking, or changed the tab bodies: nothing from here is kept.
+        if (!call_tab(s, control, scan, [&] { traced_tab_adjust(s, FALSE, &body); }))
+        {
+            refused = true;
+            return nullptr;
+        }
+        if (!map_rect(s, nullptr, body)) continue;
+        RECT overlap{};
+        if (IntersectRect(&overlap, &body, &at) && EqualRect(&overlap, &at)) return tab_body_brush(s, control, refused);
     }
     return nullptr;
 }
@@ -590,7 +785,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
         RECT c;
         GetClientRect(wnd, &c);
         const int saved = SaveDC(dc);
-        FillRect(dc, &c, theme_brush(surface_of(wnd)));
+        FillRect(dc, &c, content_brush_of(wnd));
         paint_toolbar_band(wnd, dc);  // (a top-level window's, if it has one)
         paint_group_frames(wnd, dc);
         RestoreDC(dc, saved);
@@ -640,8 +835,7 @@ bool forward_child_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& re
                                               : link              ? theme_color::link
                                                                   : surface_text_of(wnd))));
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
-        HBRUSH on_tab = dark_mode() ? nullptr : tab_body_under(c);
-        result = reinterpret_cast<LRESULT>(on_tab ? on_tab : surface_brush_of(c));
+        result = reinterpret_cast<LRESULT>(surface_brush_of(c));
         return true;
     }
     // Fields and drop-down lists, dark in dark mode (their defaults are
@@ -710,8 +904,57 @@ BOOL CALLBACK collect_pane_frame(HWND h, LPARAM lp)
     return TRUE;
 }
 
+// `parent`'s children printed into `dc` (at `parent`'s client origin, clipped
+// to its client area) as they show on screen: the bottom of the z-order
+// first, so one above covers one below, each clipped to itself, then its own
+// children inside its client area, likewise. WM_PRINT's PRF_CHILDREN goes
+// the other way, top first: a tab control (at the bottom, its pages above
+// it, WS_CLIPSIBLINGS on screen) printed last covered its pages with its
+// body (#119); a group box and what's in it, the same. One cut off entirely
+// (out of the clip) isn't printed, nor its children. Placed by its rect
+// mapped whole (map_rect): in a mirrored parent a point's screen left is
+// its client right, so ClientToScreen and ScreenToClient on a corner put
+// it out by its width. One whose rect can't be mapped isn't printed.
+void print_children(HWND parent, HDC dc)
+{
+    HWND first = GetWindow(parent, GW_CHILD);
+    for (HWND c = first ? GetWindow(first, GW_HWNDLAST) : nullptr; c; c = GetWindow(c, GW_HWNDPREV))
+    {
+        if (!(GetWindowLongPtrW(c, GWL_STYLE) & WS_VISIBLE)) continue;
+        // Its window and its client area, in `parent`'s client coordinates.
+        RECT w, inside, client;
+        GetWindowRect(c, &w);
+        GetClientRect(c, &inside);
+        client = inside;
+        if (!map_rect(nullptr, parent, w) || !map_rect(c, parent, client)) continue;
+        const int saved = SaveDC(dc);
+        OffsetViewportOrgEx(dc, w.left, w.top, nullptr);
+        if (IntersectClipRect(dc, 0, 0, w.right - w.left, w.bottom - w.top) != NULLREGION)
+        {
+            SendMessageW(c, WM_PRINT, reinterpret_cast<WPARAM>(dc),
+                         PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND);
+            OffsetViewportOrgEx(dc, client.left - w.left, client.top - w.top, nullptr);
+            if (IntersectClipRect(dc, 0, 0, inside.right, inside.bottom) != NULLREGION)
+                print_children(c, dc);
+        }
+        RestoreDC(dc, saved);
+    }
+}
+
+// A pane's panel and its controls printed into `dc`, at its client origin:
+// what paint_pane copies to the screen.
+void print_pane(HWND panel, HDC dc)
+{
+    g_printing_pane = panel;
+    SendMessageW(panel, WM_PRINT, reinterpret_cast<WPARAM>(dc),
+                 PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND);
+    print_children(panel, dc);
+    g_printing_pane = nullptr;
+}
+
 // A scroll pane's panel and everything on it drawn off screen (WM_PRINT: its
-// background, then its controls in turn, into the one bitmap), then put on
+// background, then its controls in turn, bottom of the z-order first, into
+// the one bitmap: print_children), then put on
 // screen in one go: its controls, moved and sized by a layout pass without
 // painting (see moves_in_one_pass), otherwise showed landing one at a time.
 // It's its WM_PAINT, which comes when nothing else is waiting: dragging a
@@ -754,13 +997,10 @@ bool paint_pane(HWND panel)
     if (old && old != HGDI_ERROR && !frames.failed &&
         (frames.windows.empty() || ExtSelectClipRgn(screen, frames.shown, RGN_DIFF) != ERROR))
     {
-        g_printing_pane = panel;
         {
             trace::scope timing(trace::phase::pane_print, uintptr_t(panel));
-            SendMessageW(panel, WM_PRINT, reinterpret_cast<WPARAM>(mem),
-                         PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND | PRF_CHILDREN);
+            print_pane(panel, mem);
         }
-        g_printing_pane = nullptr;
         {
             trace::scope timing(trace::phase::pane_blit, uintptr_t(panel));
             // Not over the controls' frames (clipped out above): printed, a
@@ -811,7 +1051,7 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             // panel's own paint is done: no loop if the copy fails each time.
             if (!paint_pane(h))
             {
-                FillRect(dc, &ps.rcPaint, theme_brush(surface_of(h)));
+                FillRect(dc, &ps.rcPaint, content_brush_of(h));
                 for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
                     RedrawWindow(c, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
             }
@@ -923,16 +1163,41 @@ HWND window_tooltip(HWND top)
     return tip;
 }
 
+// The tip each control was last given (apply_tooltip), by its window: what
+// it shows, without a native read (whose buffer would bound it). Forgotten
+// as the control goes (WM_NCDESTROY), so a new window given the same
+// handle starts with none.
+std::map<HWND, std::wstring>& tips_shown()
+{
+    static std::map<HWND, std::wstring> shown;
+    return shown;
+}
+LRESULT CALLBACK tip_forget_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR)
+{
+    if (msg == WM_NCDESTROY)
+    {
+        tips_shown().erase(h);
+        RemoveWindowSubclass(h, tip_forget_proc, id);
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
 void apply_tooltip(HWND control, const std::string& text)
 {
+    std::wstring w = wide(text);
+    // The tip it has already (or none, and none wanted): nothing done (#88).
+    auto& shown = tips_shown();
+    const auto had = shown.find(control);
+    if (had != shown.end() ? had->second == w : w.empty()) return;
     HWND top = GetAncestor(control, GA_ROOT);
     HWND tip = window_tooltip(top);
-    std::wstring w = wide(text);
     TOOLINFOW ti{};
     ti.cbSize = TTTOOLINFOW_V2_SIZE;  // also accepted by comctl32 v5
     ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     ti.hwnd = top;
     ti.uId = reinterpret_cast<UINT_PTR>(control);
+    if (had == shown.end()) SetWindowSubclass(control, tip_forget_proc, 0x7469, 0);
+    shown[control] = w;
     ti.lpszText = w.data();
     SendMessageW(tip, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     if (!text.empty()) SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
@@ -1081,13 +1346,27 @@ void track_container_control(HWND h)
     if (!scope.effective_tip().empty()) apply_tooltip(h, scope.effective_tip());
 }
 
+// The same icon, as far as can be told: the same name, file and path, and
+// neither drawn (a function can't be compared, so a drawn one is new).
+// Setters given the icon they have do nothing (#88).
+bool same_icon(const icon& a, const icon& b)
+{
+    return a.name == b.name && a.file == b.file && a.path == b.path && !a.draw && !b.draw && !a.overlay &&
+           !b.overlay;
+}
+
+// (A value it has already: nothing done, #88.)
 void set_control_enabled(HWND h, bool enabled)
 {
     if (auto* scope = control_container(h))
     {
-        scope->controls.at(h).enabled = enabled;
-        enabled = enabled && scope->effective_enabled();
+        auto& c = scope->controls.at(h);
+        const bool effective = enabled && scope->effective_enabled();
+        if (c.enabled == enabled && (IsWindowEnabled(h) != FALSE) == effective) return;
+        c.enabled = enabled;
+        enabled = effective;
     }
+    if ((IsWindowEnabled(h) != FALSE) == enabled) return;
     EnableWindow(h, enabled);
 }
 
@@ -1095,6 +1374,7 @@ void set_tooltip_text(HWND h, const std::string& text)
 {
     if (auto* scope = control_container(h))
     {
+        if (scope->controls.at(h).tooltip == text) return;  // (#88)
         scope->controls.at(h).tooltip = text;
         if (text.empty()) return apply_tooltip(h, scope->effective_tip());
     }
@@ -1328,12 +1608,125 @@ public:
     virtual HWND hwnd() const = 0;
     virtual void relayout() = 0;
     // Lays out and repaints now, in one go (a different tab page showing).
-    virtual void relayout_at_once() = 0;
-    // A layout still to come, now: for a size asked for before it.
-    virtual void flush_layout() {}
+    // False if the window went meanwhile (what its sizes' delivery ran
+    // destroyed it): the caller, gone with it, touches nothing more.
+    virtual bool relayout_at_once() = 0;
+    // A layout still to come, now: for a size asked for before it. False
+    // as relayout_at_once's.
+    virtual bool flush_layout() { return true; }
+    // This window's layouts under way (layout_scope). A layout asked for
+    // meanwhile (a resize, a page shown, layout_now from WM_SIZE) only marks
+    // it dirty: never one window's layout within another of its own, which
+    // would place what the outer one is placing and deliver sizes it then
+    // places over. Once the outermost is done, delivery and all, it's laid
+    // out again (layout_settled) while it's dirty.
+    unsigned in_layout = 0;
+    bool layout_dirty = false;
+    // Its scroll panes' content loops under way that began outside any layout
+    // of its own (for tests: layout_scope counts its layouts begun meanwhile).
+    unsigned standalone_scroll_loops = 0;
+    // The outermost layout scope done (a drag's): laid out again if a layout
+    // was asked for meanwhile, else what waited for it run.
+    virtual void layout_settled() {}
+    // Gone with the window: what runs app code within a layout (a delivery,
+    // a continuation) checks it after, and touches nothing if it's expired.
+    std::shared_ptr<bool> layout_alive = std::make_shared<bool>(true);
+    // Run once the window's layout is done, delivery and re-runs and all:
+    // what assumes the layout's been made (a splitter's on_moved for a drag
+    // released within one, a stack's focus moved into its new page, a page
+    // switch reported) when it's put off by a layout under way. Otherwise
+    // now. The caller guards its own lifetime (a weak_ptr it checks).
+    std::vector<std::function<void()>> after_layout;
+    void after_layout_or_now(std::function<void()> f)
+    {
+        if (in_layout)
+            after_layout.push_back(std::move(f));
+        else
+            f();
+    }
+    // A focus() (a control's, a stack's, a toolbar button's): now, or,
+    // within a layout of the window's, once it's done (#108). A layout's
+    // shows wait for its moves, so a control coming in with it (a stack's
+    // page, with the tab page it's on) isn't shown yet, and a stack finds
+    // no Tab stop in it. Only the latest one asked for is made: each takes
+    // the next generation (focus_generation_), and one put off is made by
+    // its own continuation, in its place among what waits for the layout,
+    // only while it's still the latest (no later one, put off or made
+    // there and then); and not if its `target` has gone.
+    void focus_now_or_after(std::weak_ptr<bool> target, std::function<void()> f)
+    {
+        const unsigned generation = ++focus_generation_;
+        if (!in_layout)
+        {
+            f();
+            return;
+        }
+        after_layout_or_now(
+            [this, generation, alive = std::weak_ptr<bool>(layout_alive),
+             target = std::move(target), f = std::move(f)]
+            {
+                if (alive.expired() || generation != focus_generation_ || target.expired()) return;
+                f();
+            });
+    }
+    unsigned focus_generation_ = 0;  // the latest focus()'s (focus_now_or_after)
+    // A relayout_at_once's visibility, taken before it turns drawing off
+    // (WM_SETREDRAW FALSE clears WS_VISIBLE): -1, none under way.
+    int at_once_visible = -1;
+    // Whether the window shows: as it did before a relayout_at_once turned
+    // its drawing off, while that's under way (IsWindowVisible reads it as
+    // hidden then); otherwise IsWindowVisible.
+    bool shown() const
+    {
+        return at_once_visible >= 0 ? at_once_visible != 0 : IsWindowVisible(hwnd()) != FALSE;
+    }
+    // Its canvases' swap chains kept composed by the DWM (see
+    // gpu_target::compose): while the window's fullscreen.
+    virtual bool keep_composed() const { return false; }
     float scale() const { return scale_of(hwnd()); }
     UINT dpi() const { return dpi_of(hwnd()); }
     int px(float logical) const { return int(std::lround(logical * scale())); }
+};
+
+unsigned g_layout_depth_max = 0;
+unsigned g_layout_passes = 0;
+// For tests (layout seams, below): the most passes any layout_now made, and
+// how many reached max_layout_passes (the rest posted), since last reset.
+unsigned g_layout_passes_max = 0, g_layout_cap_hits = 0;
+// The deepest any one scroll pane's content loop has nested (each pane's
+// own, scroll_item::loop_depth_), and the layouts of a window begun while a
+// scroll loop of that same window, begun outside any layout of it, was
+// under way (win_context::standalone_scroll_loops): a window laid out
+// within a loop no layout of its own holds, what the single-entry rule
+// (per window) rules out. Another window's layout then isn't one. For
+// tests too.
+unsigned g_scroll_loops_max = 0, g_layouts_in_standalone_scroll_loop = 0;
+// A window's layout under way (its own, a splitter's drag in it), round the
+// moves it makes and the sizes they deliver. `settles`: the outermost lays
+// the window out again if a layout was asked for meanwhile (layout_now runs
+// its own passes, so not its).
+struct layout_scope
+{
+    explicit layout_scope(win_context& w, bool settles = true)
+        : w_(w)
+        , settles_(settles)
+        , alive_(w.layout_alive)
+    {
+        g_layout_depth_max = std::max(g_layout_depth_max, ++w_.in_layout);
+        if (w_.standalone_scroll_loops) ++g_layouts_in_standalone_scroll_loop;
+    }
+    ~layout_scope()
+    {
+        if (alive_.expired()) return;  // the window went with what it delivered
+        if (--w_.in_layout == 0 && settles_ && (w_.layout_dirty || !w_.after_layout.empty())) w_.layout_settled();
+    }
+    layout_scope(const layout_scope&) = delete;
+    layout_scope& operator=(const layout_scope&) = delete;
+
+private:
+    win_context& w_;
+    bool settles_;
+    std::weak_ptr<bool> alive_;
 };
 
 SIZE text_extent(HWND h, const std::wstring& s, bool multiline = false, int max_width = 0)
@@ -1364,8 +1757,20 @@ struct move_batch
     // For a size the window doesn't have yet (see window::resize): nothing
     // moves or shows, and canvases draw for where they'll be.
     bool ahead = false;
+    unsigned id = 0;      // which (g_move_batches): a splitter placed in it knows it
+    HWND window = nullptr;  // whose: another window's layout makes a batch of its own
 };
 move_batch* g_moves = nullptr;
+unsigned g_move_batches = 0;
+// The batch whose moves are being made now, and their sizes delivered (the
+// controls' WM_SIZE, a canvas's on_resize): 0, none.
+unsigned g_delivering = 0;
+// Whether batch `id` is collecting moves (a placement in it, a nested one
+// joining it) or delivering them now.
+bool batch_live(unsigned id)
+{
+    return id && ((g_moves && g_moves->id == id) || g_delivering == id);
+}
 
 // A control that only moves carries its pixels along (no repaint); one that
 // changes size, or has a repaint pending (a label whose text changed as it
@@ -1412,6 +1817,43 @@ std::unordered_map<HWND, RECT> g_parked;
 // resize (window::resize): a canvas taking its size then neither tells the
 // app nor draws, keeping the frame it drew for the size it's about to have.
 bool g_canvases_quiet = false;
+// For tests: called as resize's second, quiet, ahead layout's delivery
+// ends (a test destroys the window there: no app callback of a quiet canvas
+// can).
+void (*g_resize_quiet_hook_for_tests)(void*) = nullptr;
+
+// The window whose controls are being placed, while they are: a control's
+// place can run app code (a canvas tells its on_resize of the size it's
+// placed at, ahead or when it's there already), which may destroy the
+// window, its controls with it (#108). Each container stops after a child's
+// place that did: nothing more of it, nor of what placed it.
+const std::weak_ptr<bool>* g_placing = nullptr;
+bool placing_stopped()
+{
+    return g_placing && g_placing->expired();
+}
+// Taken by each way into placing a window's controls that can run app code
+// as it does (its layout, place_all; a scroll pane's host sized, its
+// content placed and moved there and then): that window
+// the one placed until it ends, the one before it (an outer placing, of
+// this window or another) then again.
+class placing_scope
+{
+public:
+    explicit placing_scope(win_context& w)
+        : alive_(w.layout_alive)
+        , was_(std::exchange(g_placing, &alive_))
+    {
+    }
+    ~placing_scope() { g_placing = was_; }
+    placing_scope(const placing_scope&) = delete;
+    placing_scope& operator=(const placing_scope&) = delete;
+
+private:
+    std::weak_ptr<bool> alive_;
+    const std::weak_ptr<bool>* was_;
+};
+void* g_resize_quiet_hook_data = nullptr;
 
 void move_control(HWND h, int x, int y, int w, int hgt)
 {
@@ -1452,15 +1894,31 @@ void redraw_now(HWND h, const RECT* rect, HRGN region, UINT flags)
 class moves_in_one_pass
 {
 public:
-    explicit moves_in_one_pass(bool ahead = false)
+    // Joins the batch collecting for the same window (`window`, its top
+    // level), if any; otherwise a batch of its own, delivered as it ends,
+    // the one it was made within (another window's) collecting again after.
+    explicit moves_in_one_pass(HWND window, bool ahead = false)
     {
-        if (!g_moves) g_moves = &batch_, owner_ = true, batch_.ahead = ahead;
+        if (g_moves && g_moves->window == window) return;
+        outer_ = g_moves;
+        g_moves = &batch_;
+        owner_ = true;
+        batch_.ahead = ahead;
+        batch_.id = ++g_move_batches;
+        batch_.window = window;
     }
     ~moves_in_one_pass()
     {
         if (!owner_) return;
-        g_moves = nullptr;
+        g_moves = outer_;
         if (batch_.ahead) return;
+        // Delivering this batch's moves until the end (a nested batch made
+        // meanwhile delivers its own, then this one's again).
+        struct delivering
+        {
+            unsigned was;
+            ~delivering() { g_delivering = was; }
+        } now{std::exchange(g_delivering, batch_.id)};
         trace::scope batch_time(trace::phase::child_moves, batch_.moves.size());
         // On a scroll pane's panel, controls move without painting, and the
         // panel's drawn off screen when it next paints, then shown in one go
@@ -1552,6 +2010,7 @@ private:
     trace::scope pass_time_{trace::phase::move_pass};
     move_batch batch_;
     bool owner_ = false;
+    move_batch* outer_ = nullptr;  // another window's, collecting when this began
 };
 
 // Shows or hides a control. While its window is still hidden (being built)
@@ -1599,6 +2058,24 @@ HWND create_control(win_context& win, HWND parent, const wchar_t* cls, const std
     return h;
 }
 
+// An item's size with its common constraints: natural, but the width and
+// height it was given (common::width/height) where it has them. What every
+// container measures its content by, root content too (a page's, a
+// stack's, a window's, a scroll's): a canvas sized 300x200 as a page's
+// whole content asks for 300x200, not its 64x64 default (#92).
+SIZE measured_size(item* c)
+{
+    SIZE s = c->natural();
+    if (c->fixed_w > 0) s.cx = c->fixed_w;
+    if (c->fixed_h > 0) s.cy = c->fixed_h;
+    return s;
+}
+// Its height `width` across, with its fixed height where it has one.
+long measured_height(item* c, long width)
+{
+    return c->fixed_h > 0 ? c->fixed_h : c->height_at(width);
+}
+
 // A widget backed by one HWND, laid out as a leaf.
 template <class Base>
 class leaf : public Base, public item, public handler
@@ -1634,11 +2111,16 @@ public:
     }
     void focus() override
     {
-        HWND root = GetAncestor(h_, GA_ROOT);
-        if (IsWindowVisible(root))
-            SetFocus(h_);
-        else
-            SetPropW(root, L"rapport-focus", h_);
+        win_.focus_now_or_after(focus_token_,
+                                [this]
+                                {
+                                    HWND root = GetAncestor(h_, GA_ROOT);
+                                    // (not IsWindowVisible: a relayout_at_once's drawing off hides it from that)
+                                    if (win_.shown())
+                                        SetFocus(h_);
+                                    else
+                                        SetPropW(root, L"rapport-focus", h_);
+                                });
     }
 
     void place(RECT r) override
@@ -1656,9 +2138,46 @@ protected:
         handlers()[h] = this;
     }
     int px(float v) const { return win_.px(v); }
+    // What reads the control's laid-out geometry sees the layout as it will
+    // be, not as it was (#108): a layout asked for and still to come (a
+    // posted relayout, say) is made first, there and then, as
+    // canvas::size() does. Within a layout of the window, where none can be,
+    // it's as laid out so far. False if the control, or its window, went
+    // with that layout.
+    bool layout_current() const
+    {
+        if (win_.in_layout) return true;
+        const std::weak_ptr<bool> me = focus_token_;
+        return win_.flush_layout() && !me.expired();
+    }
+    // What acts on it (a scroll to a row): likewise after a layout to come,
+    // made first; within a layout, made once it's done (after_layout_or_now),
+    // the latest one asked for only (by generation: a later one, there and
+    // then or put off, leaves an earlier one undone), and not if the control
+    // or its window has gone.
+    void with_layout(std::function<void()> f)
+    {
+        const unsigned generation = ++view_generation_;
+        if (!win_.in_layout)
+        {
+            if (layout_current()) f();
+            return;
+        }
+        win_.after_layout_or_now(
+            [this, generation, me = std::weak_ptr<bool>(focus_token_),
+             alive = std::weak_ptr<bool>(win_.layout_alive), f = std::move(f)]
+            {
+                if (alive.expired() || me.expired() || generation != view_generation_) return;
+                f();
+            });
+    }
 
     win_context& win_;
     HWND h_ = nullptr;
+    // Gone with it: a focus() or a view's request put off until a layout's
+    // done (focus_now_or_after, with_layout).
+    std::shared_ptr<bool> focus_token_ = std::make_shared<bool>(true);
+    unsigned view_generation_ = 0;  // the latest with_layout's
 };
 
 // A deferred box's content (layout::deferred), built once: when the window
@@ -1880,6 +2399,7 @@ public:
                           ? RECT{pos, cross_pos, pos + sizes[i], cross_pos + cross_size}
                           : RECT{cross_pos, pos, cross_pos + cross_size, pos + sizes[i]};
             c->place(cr);
+            if (placing_stopped()) return;
             pos += sizes[i] + spacing();
         }
     }
@@ -2110,6 +2630,7 @@ public:
             if (row.label) row_h = std::max(row_h, row.label->natural().cy);
             long fw = row.field->expands_in_form() || row.field->stretch ? r.right - fx : std::min(f.cx, r.right - fx);
             row.field->place({fx, y + (row_h - f.cy) / 2, fx + fw, y + (row_h - f.cy) / 2 + f.cy});
+            if (placing_stopped()) return;
             if (row.label)
             {
                 const SIZE l = row.label->natural();
@@ -2175,6 +2696,7 @@ public:
         , link_(s.link)
         , on_click_(s.on_click)
         , icon_(s.icon)
+        , text_(s.text)
     {
         // The icon before the text: a static of its own (SysLink can't hold
         // one), which on a link takes the link's click and pointer.
@@ -2205,8 +2727,11 @@ public:
             adopt(create_control(win, parent, L"STATIC", wide(s.text),
                                 SS_LEFT | SS_NOPREFIX | (s.ellipsize ? SS_ENDELLIPSIS : 0)));
     }
+    // (Its text already: nothing done, #88.)
     void set_text(const std::string& t) override
     {
+        if (t == text_) return;
+        text_ = t;
         SetWindowTextW(h_, link_         ? link_markup(t).c_str()
                            : selectable_ ? to_crlf(wide(t)).c_str()
                                          : wide(t).c_str());
@@ -2351,6 +2876,7 @@ private:
     bool link_;
     std::function<void()> on_click_;
     icon icon_;
+    std::string text_;  // as last set (set_text: the same again does nothing)
     HWND icon_h_ = nullptr;
     HICON hicon_ = nullptr;
     int icon_px_ = 0;
@@ -2507,11 +3033,14 @@ public:
     }
     void set_text(const std::string& t) override
     {
-        SetWindowTextW(h_, mnemonic(t).c_str());
+        const std::wstring w = mnemonic(t);
+        if (w == window_text(h_)) return;  // (#88)
+        SetWindowTextW(h_, w.c_str());
         win_.relayout();
     }
     void set_icon(const icon& icon) override
     {
+        if (same_icon(icon, icon_)) return;  // (#88)
         icon_ = icon;
         set_button_image(h_, win_, icon_, images_, path_icon_);
         win_.relayout();
@@ -2600,6 +3129,7 @@ public:
     }
     void set_state(check_state s) override
     {
+        if (s == state()) return;  // (#88)
         SendMessageW(h_, BM_SETCHECK,
                      s == check_state::checked         ? BST_CHECKED
                      : s == check_state::indeterminate ? BST_INDETERMINATE
@@ -2801,6 +3331,7 @@ public:
     }
     void set_icon(const icon& i) override
     {
+        if (same_icon(i, icon_)) return;  // (#88)
         icon_ = i;
         want_icon(icon_, 16, win_.dpi());
         InvalidateRect(h_, nullptr, TRUE);
@@ -2808,6 +3339,7 @@ public:
     void set_tooltip(const std::string& t) override { set_tooltip_text(h_, t); }
     void set_checked(bool c) override
     {
+        if (c == checked_) return;  // (#88)
         checked_ = c;
         InvalidateRect(h_, nullptr, TRUE);
     }
@@ -2831,22 +3363,44 @@ public:
         GetWindowRect(h_, &r);
         show_popup_menu(h_, menu_(), POINT{r.left, r.bottom}, h_);
     }
+    // Its face drawn whole off the screen, then written in one go at alpha
+    // 255 (#86): straight onto the screen, its fill (GDI, alpha 0) and then
+    // its glyph (Direct2D) each reached the window's surface on their own,
+    // and on the toolbar band's glass, where the compositor reads alpha, a
+    // frame composed before the band made it opaque (win32_band_glass.cpp,
+    // after the message) showed the button as a hole, or without its glyph.
+    // Opaque is what it is in the end, on glass or not.
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
-        RECT r = d->rcItem;
-        const bool pressed = d->itemState & ODS_SELECTED;
-        const bool disabled = d->itemState & ODS_DISABLED;
+        BP_PAINTPARAMS params{sizeof params, 0, nullptr, nullptr};
+        HDC mem = nullptr;
+        HPAINTBUFFER buffer =
+            BeginBufferedPaint(d->hDC, &d->rcItem, BPBF_TOPDOWNDIB, &params, &mem);
+        draw_face(buffer ? mem : d->hDC, d->rcItem, d->itemState & ODS_SELECTED,
+                  d->itemState & ODS_DISABLED);
+        if (buffer)
+        {
+            BufferedPaintSetAlpha(buffer, nullptr, 255);
+            EndBufferedPaint(buffer, TRUE);
+        }
+        return true;
+    }
+    HWND hwnd() const { return h_; }
+
+private:
+    void draw_face(HDC dc, RECT r, bool pressed, bool disabled)
+    {
         // In a band field (win32_band_field.h): on its fill, WinUI's.
         color fill, ink;
         if (band_field_button_colors(GetParent(h_), pressed, checked_ || hot_, fill, ink))
         {
             HBRUSH b = CreateSolidBrush(color_ref(fill));
-            FillRect(d->hDC, &r, b);
+            FillRect(dc, &r, b);
             DeleteObject(b);
-            draw_glyph(d->hDC, r, ink);
-            return true;
+            draw_glyph(dc, r, ink);
+            return;
         }
-        FillRect(d->hDC, &r, theme_brush(theme_color::base));
+        FillRect(dc, &r, theme_brush(theme_color::base));
         if (pressed || checked_ || hot_)
         {
             const color tint = theme_color_of(theme_color::highlight);
@@ -2857,16 +3411,13 @@ public:
                 RGB(mix(face.r, tint.r), mix(face.g, tint.g), mix(face.b, tint.b)));
             RECT in = r;
             InflateRect(&in, -win_.px(1), -win_.px(1));
-            FillRect(d->hDC, &in, b);
+            FillRect(dc, &in, b);
             DeleteObject(b);
         }
-        draw_glyph(d->hDC, r,
-                   disabled ? theme_color_of(theme_color::placeholder_text) : theme_color_of(theme_color::text));
-        return true;
+        draw_glyph(dc, r,
+                   disabled ? theme_color_of(theme_color::placeholder_text)
+                            : theme_color_of(theme_color::text));
     }
-    HWND hwnd() const { return h_; }
-
-private:
     // The icon centred in `r` (left of centre for a menu's arrow), and the
     // arrow after it.
     void draw_glyph(HDC dc, RECT r, color ink)
@@ -2900,6 +3451,8 @@ private:
                                        DWORD_PTR data)
     {
         auto* self = reinterpret_cast<edit_button*>(data);
+        // Not erased first: its face fills it all (draw_item), in one write.
+        if (msg == WM_ERASEBKGND) return 1;
         if (msg == WM_MOUSEMOVE && !self->hot_)
         {
             self->hot_ = true;
@@ -2961,17 +3514,24 @@ public:
     std::string text() const override { return narrow(window_text(h_)); }
     void set_text(const std::string& t) override
     {
+        const std::wstring w = wide(t);
+        if (w == window_text(h_)) return;  // (#88)
         quiet_ = true;
-        SetWindowTextW(h_, wide(t).c_str());
+        SetWindowTextW(h_, w.c_str());
         quiet_ = false;
         place_buttons();
     }
-    void set_read_only(bool v) override { SendMessageW(h_, EM_SETREADONLY, v, 0); }
+    void set_read_only(bool v) override
+    {
+        if (v == ((GetWindowLongPtrW(h_, GWL_STYLE) & ES_READONLY) != 0)) return;  // (#88)
+        SendMessageW(h_, EM_SETREADONLY, v, 0);
+    }
     // Frameless: the edge stays, painted as background (frameless_subclass).
     // Read-only, the text then sits on the window's background
     // (WM_CTLCOLORSTATIC).
     void set_frame(bool v) override
     {
+        if (v == frame_) return;  // (#88)
         frame_ = v;
         if (v)
             RemoveWindowSubclass(h_, frameless_subclass, 2);
@@ -2998,10 +3558,15 @@ public:
     // A band field's font is its own size (field_font, from the text size):
     // it's measured again, as for a new theme.
     void fonts_changed() override { theme_changed(); }
+    // The one it was last given, nothing done (#88): ours alone to set, so
+    // kept, not read back.
     void set_placeholder(const std::string& p) override
     {
+        if (placeholder_ && *placeholder_ == p) return;
+        placeholder_ = p;
         SendMessageW(h_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(wide(p).c_str()));
     }
+    std::optional<std::string> placeholder_;  // the cue banner last set
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
     void on_activate(std::function<void()> f) override { activate_ = std::move(f); }
     void command(WORD code) override
@@ -3160,6 +3725,7 @@ public:
     // an automation client listens, and a dialog has many of these.
     void set_items(std::vector<std::string> items) override
     {
+        if (items == items_) return;  // (#88)
         items_ = std::move(items);
         filled_ = false;
         show_current_only();
@@ -3168,6 +3734,7 @@ public:
     int current() const override { return filled_ ? int(SendMessageW(h_, CB_GETCURSEL, 0, 0)) : current_; }
     void set_current(int i) override
     {
+        if (i == current()) return;  // (#88)
         current_ = i;
         if (filled_)
             SendMessageW(h_, CB_SETCURSEL, WPARAM(i), 0);
@@ -3337,6 +3904,8 @@ public:
     // Quiet, as set_text: the text put back is the app's, not the user's.
     void set_items(std::vector<std::string> items) override
     {
+        if (items == items_) return;  // (#88)
+        items_ = items;
         quiet_ = true;
         const std::wstring keep = window_text(h_);
         SendMessageW(h_, CB_RESETCONTENT, 0, 0);
@@ -3347,8 +3916,10 @@ public:
     std::string text() const override { return narrow(window_text(h_)); }
     void set_text(const std::string& t) override
     {
+        const std::wstring w = wide(t);
+        if (w == window_text(h_)) return;  // (#88)
         quiet_ = true;
-        SetWindowTextW(h_, wide(t).c_str());
+        SetWindowTextW(h_, w.c_str());
         quiet_ = false;
     }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
@@ -3623,6 +4194,7 @@ private:
     HBRUSH brush_ = nullptr;
     COLORREF brush_color_ = CLR_INVALID;
     bool quiet_ = false;
+    std::vector<std::string> items_;  // as last set (the same again does nothing, #88)
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
@@ -3760,6 +4332,21 @@ public:
     }
     void set_text(const std::string& t, std::vector<span> spans) override
     {
+        // The text it shows (read now: a user's edits change it), plain, with
+        // no styled text set or appended: nothing done (#88).
+        // The text set is still recorded: a theme rebuild restores text_, so
+        // a user's matching edit mustn't leave the old text there.
+        if (spans.empty() && spans_.empty() && appended_.empty() && text() == t)
+        {
+            text_ = t;
+            return;
+        }
+        apply_text(t, std::move(spans));
+    }
+    // The text set, whatever it shows now: set_text's, and a rebuild's (a
+    // new theme's), which mustn't be skipped as the same.
+    void apply_text(const std::string& t, std::vector<span> spans)
+    {
         text_ = t;
         spans_ = spans;
         appended_.clear();
@@ -3788,7 +4375,11 @@ public:
         format(at.cpMin, after.cpMax, style);
         quiet_ = false;
     }
-    void set_read_only(bool r) override { SendMessageW(h_, EM_SETREADONLY, r, 0); }
+    void set_read_only(bool r) override
+    {
+        if (r == ((GetWindowLongPtrW(h_, GWL_STYLE) & ES_READONLY) != 0)) return;  // (#88)
+        SendMessageW(h_, EM_SETREADONLY, r, 0);
+    }
     std::pair<size_t, size_t> selection() const override
     {
         CHARRANGE cr{};
@@ -4028,7 +4619,7 @@ private:
         const std::string t = text_;
         std::vector<span> spans = spans_;
         auto appended = std::move(appended_);
-        set_text(t, std::move(spans));
+        apply_text(t, std::move(spans));
         for (const auto& [text, style] : appended) append(text, style);
         SendMessageW(h_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&sel));
         SendMessageW(h_, EM_SETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll));
@@ -4148,12 +4739,12 @@ public:
     bool expands_in_form() const override { return true; }
     SIZE measure() override
     {
-        const SIZE c = content ? content->natural() : SIZE{0, 0};
+        const SIZE c = content ? measured_size(content) : SIZE{0, 0};
         return {std::max(c.cx, title_size().cx + win_.px(16)) + 2 * pad(), c.cy + top() + pad()};
     }
     long measure_height(long width) override
     {
-        return (content ? content->height_at(width - 2 * pad()) : 0) + top() + pad();
+        return (content ? measured_height(content, width - 2 * pad()) : 0) + top() + pad();
     }
     void place(RECT r) override
     {
@@ -4205,7 +4796,7 @@ public:
             RECT text{rect_.left + win_.px(9), rect_.top, rect_.left + win_.px(9) + t.cx, rect_.top + t.cy};
             RECT gap = text;
             InflateRect(&gap, win_.px(2), 0);
-            FillRect(dc, &gap, theme_brush(surface_of(parent_)));
+            FillRect(dc, &gap, content_brush_of(parent_));
             SetBkMode(dc, TRANSPARENT);
             if (theme)
                 DrawThemeText(theme, dc, BP_GROUPBOX, GBS_NORMAL, title_.c_str(), -1, DT_SINGLELINE | DT_LEFT, 0,
@@ -4333,6 +4924,8 @@ public:
         // 100% still crawled across. A decrease shows at once: go one past
         // the value, then back (at 100%, the range grows by one meanwhile).
         const int pos = int(std::lround(std::clamp(f, 0.f, 1.f) * 1000));
+        if (pos == pos_) return;  // (#88)
+        pos_ = pos;
         if (pos == 1000) SendMessageW(h_, PBM_SETRANGE32, 0, 1001);
         SendMessageW(h_, PBM_SETPOS, WPARAM(pos + 1), 0);
         SendMessageW(h_, PBM_SETPOS, WPARAM(pos), 0);
@@ -4344,11 +4937,13 @@ public:
         SetWindowLongPtrW(h_, GWL_STYLE, GetWindowLongPtrW(h_, GWL_STYLE) | PBS_MARQUEE);
         SendMessageW(h_, PBM_SETMARQUEE, TRUE, 30);
         marquee_ = true;
+        pos_ = -1;
     }
     SIZE measure() override { return {px(160), px(16)}; }
 
 private:
     bool marquee_ = false;
+    int pos_ = 0;  // the position set (set_fraction: the same again does nothing)
 };
 
 // A row of control `h` (a list, a tree, tabs) at `dpi`, device px:
@@ -4528,16 +5123,27 @@ public:
         const HTREEITEM h = TreeView_GetSelection(h_);
         return h ? std::optional<std::string>(id_of(h)) : std::nullopt;
     }
+    // Selected now; scrolled into view on the rows as they'll be laid out
+    // (with_layout, #108): selecting scrolls too, on the rows as they are.
     void select(const std::string& id) override
     {
-        lazy_tree::tracker::batch b(lazy_);
-        quiet q(*this);
-        if (!select_quietly(id)) TreeView_SelectItem(h_, nullptr);
+        if (selected() == std::optional<std::string>(id)) return;  // (#88)
+        {
+            lazy_tree::tracker::batch b(lazy_);
+            quiet q(*this);
+            if (!select_quietly(id)) TreeView_SelectItem(h_, nullptr);
+        }
+        with_layout(
+            [this]
+            {
+                if (HTREEITEM sel = TreeView_GetSelection(h_)) TreeView_EnsureVisible(h_, sel);
+            });
     }
     void set_expanded(const std::string& id, bool open) override
     {
         const auto it = by_id_.find(id);
         if (it == by_id_.end()) return;
+        if (((TreeView_GetItemState(h_, it->second, TVIS_EXPANDED) & TVIS_EXPANDED) != 0) == open) return;  // (#88)
         // Asks wait until the control's finished: a handler may destroy it.
         lazy_tree::tracker::batch b(lazy_);
         TreeView_Expand(h_, it->second, open ? TVE_EXPAND : TVE_COLLAPSE);
@@ -4550,7 +5156,7 @@ public:
     void set_check(const std::string& id, check_state st) override
     {
         const auto c = checks_.find(id);
-        if (c == checks_.end()) return;
+        if (c == checks_.end() || c->second == st) return;  // (#88)
         c->second = st;
         TreeView_SetItemState(h_, by_id_[id], INDEXTOSTATEIMAGEMASK(int(st) + 1),
                               TVIS_STATEIMAGEMASK);
@@ -5163,6 +5769,8 @@ public:
     }
     void set_date(rap::date d) override
     {
+        const rap::date now = date();
+        if (now.year == d.year && now.month == d.month && now.day == d.day) return;  // (#88)
         SYSTEMTIME st{};
         st.wYear = WORD(d.year);
         st.wMonth = WORD(d.month);
@@ -5214,16 +5822,23 @@ public:
         DestroyWindow(updown_);
     }
     double value() const override { return value_; }
+    // The value it has and shows (its edit's text, which a user's typing not
+    // yet committed changes too): nothing done (#88).
     void set_value(double v) override
     {
-        value_ = std::clamp(v, min_, max_);
+        const double next = std::clamp(v, min_, max_);
+        if (next == value_ && window_text(h_) == format(next)) return;
+        value_ = next;
         show();
     }
+    // A new range: the value applied against it, always.
     void set_range(double mn, double mx) override
     {
+        if (mn == min_ && mx == max_) return;  // (#88)
         min_ = mn;
         max_ = mx;
-        set_value(value_);
+        value_ = std::clamp(value_, min_, max_);
+        show();
     }
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
     void command(WORD code) override
@@ -5262,12 +5877,16 @@ public:
     }
 
 private:
-    void show()
+    std::wstring format(double v) const
     {
         wchar_t buf[64];
-        swprintf(buf, 64, L"%.*f", digits_, value_);
+        swprintf(buf, 64, L"%.*f", digits_, v);
+        return buf;
+    }
+    void show()
+    {
         quiet_ = true;
-        SetWindowTextW(h_, buf);
+        SetWindowTextW(h_, format(value_).c_str());
         quiet_ = false;
     }
     void set(double v)
@@ -5331,29 +5950,44 @@ public:
         const LRESULT pos = SendMessageW(h_, TBM_GETPOS, 0, 0);
         return pos == set_.second ? set_.first : map_.value(min_ + double(pos) * step_);
     }
+    // The value it has, where the thumb is (the user's drag reads back
+    // through TBM_GETPOS): nothing done (#88).
     void set_value(double v) override
     {
-        const double t = std::clamp(map_.track(v), min_, max_);
-        set_ = {t == map_.track(v) ? v : map_.value(t), std::lround((t - min_) / step_)};
-        SendMessageW(h_, TBM_SETPOS, TRUE, set_.second);
-        update_label();
+        const auto next = target_of(v);
+        if (next == set_ && SendMessageW(h_, TBM_GETPOS, 0, 0) == next.second) return;
+        apply_value(v);
     }
+    // A new range or marks: the value applied against them, always.
     void set_range(double mn, double mx) override
     {
+        if (map_.track(mn) == min_ && map_.track(mx) == max_) return;  // (#88)
         const double v = value();
         min_ = map_.track(mn);
         max_ = map_.track(mx);
         apply_range();
-        set_value(v);
+        apply_value(v);
     }
     void set_marks(std::vector<std::pair<double, std::string>> marks) override
     {
+        if (marks == marks_) return;  // (#88)
         const bool ticks = !marks_.empty();
         const double v = value();
         marks_ = std::move(marks);
         apply_range();
-        set_value(v);
+        apply_value(v);
         if (ticks != !marks_.empty()) win_.relayout();  // ticks take height
+    }
+    std::pair<double, long> target_of(double v) const
+    {
+        const double t = std::clamp(map_.track(v), min_, max_);
+        return std::pair{t == map_.track(v) ? v : map_.value(t), std::lround((t - min_) / step_)};
+    }
+    void apply_value(double v)
+    {
+        set_ = target_of(v);
+        SendMessageW(h_, TBM_SETPOS, TRUE, set_.second);
+        update_label();
     }
     void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
     void scroll(WORD code) override
@@ -5477,6 +6111,7 @@ public:
     rap::color color() const override { return color_; }
     void set_color(rap::color c) override
     {
+        if (c.r == color_.r && c.g == color_.g && c.b == color_.b && c.a == color_.a) return;  // (#88)
         color_ = c;
         InvalidateRect(h_, nullptr, TRUE);
     }
@@ -5546,17 +6181,20 @@ public:
     }
     void set_text(const std::string& t) override
     {
+        if (t == text_) return;  // (#88)
         text_ = t;
         SetWindowTextW(h_, (mnemonic(t) + L"  ▾").c_str());
         win_.relayout();
     }
     void set_icon(const icon& icon) override
     {
+        if (same_icon(icon, icon_)) return;  // (#88)
         icon_ = icon;
         set_button_image(h_, win_, icon_, images_, path_icon_);
     }
     void set_pushed(bool p) override
     {
+        if (p == pushed_) return;  // (#88)
         pushed_ = p;
         SendMessageW(h_, BM_SETSTATE, p, 0);
     }
@@ -5634,6 +6272,7 @@ public:
     }
     void set_icon(const icon& icon) override
     {
+        if (same_icon(icon, icon_)) return;  // (#88)
         icon_ = icon;
         want_icon(icon_, 16, win_.dpi());
         InvalidateRect(h_, nullptr, TRUE);
@@ -5641,7 +6280,8 @@ public:
     bool checked() const override { return toggle_ && checked_; }
     void set_checked(bool c) override
     {
-        if (!toggle_) return;
+        // checked_ is what it paints (owner-drawn; a click flips it too).
+        if (!toggle_ || c == checked_) return;  // (#88)
         checked_ = c;
         InvalidateRect(h_, nullptr, TRUE);
     }
@@ -5853,14 +6493,18 @@ public:
     // shows, if it hasn't).
     void focus_button(int id)
     {
-        if (usable(id - 1)) current_ = id - 1;
-        HWND root = GetAncestor(h_, GA_ROOT);
-        if (!IsWindowVisible(root))
-            SetPropW(root, L"rapport-focus", h_);
-        else if (GetFocus() == h_)
-            show_current();
-        else
-            SetFocus(h_);
+        win_.focus_now_or_after(focus_token_,
+                                [this, id]
+                                {
+                                    if (usable(id - 1)) current_ = id - 1;
+                                    HWND root = GetAncestor(h_, GA_ROOT);
+                                    if (!win_.shown())
+                                        SetPropW(root, L"rapport-focus", h_);
+                                    else if (GetFocus() == h_)
+                                        show_current();
+                                    else
+                                        SetFocus(h_);
+                                });
     }
     bool button_has_focus(int id) const { return GetFocus() == h_ && current_ == id - 1; }
     // The keys it moves and presses with, while it has the focus: its own,
@@ -5936,11 +6580,16 @@ public:
 
     void set_enabled(int id, bool e)
     {
+        if ((SendMessageW(h_, TB_ISBUTTONENABLED, WPARAM(id), 0) != 0) == e) return;  // (#88)
         SendMessageW(h_, TB_ENABLEBUTTON, WPARAM(id), MAKELPARAM(e, 0));
         update_tab_stop();
         repair_focus();
     }
-    void set_checked(int id, bool c) { SendMessageW(h_, TB_CHECKBUTTON, WPARAM(id), MAKELPARAM(c, 0)); }
+    void set_checked(int id, bool c)
+    {
+        if ((SendMessageW(h_, TB_ISBUTTONCHECKED, WPARAM(id), 0) != 0) == c) return;  // (#88)
+        SendMessageW(h_, TB_CHECKBUTTON, WPARAM(id), MAKELPARAM(c, 0));
+    }
     void set_text(int id, const std::string& text) { entries_[size_t(id) - 1].text = wide(text); }
     void set_icon(int id)
     {
@@ -6511,12 +7160,13 @@ void strip_button::focus() { strip_.focus_button(id_); }
 bool strip_button::has_focus() const { return strip_.button_has_focus(id_); }
 void strip_button::set_icon(const icon& icon)
 {
+    if (same_icon(icon, icon_)) return;  // (#88)
     icon_ = icon;
     strip_.set_icon(id_);
 }
 void strip_button::set_checked(bool c)
 {
-    if (!toggle_) return;
+    if (!toggle_ || c == checked_) return;  // (#88)
     checked_ = c;
     strip_.set_checked(id_, c);
 }
@@ -6938,6 +7588,7 @@ public:
         if (model_) model_->remove_observer(this);
     }
 
+    // The same model again is a reload (not #88's no-op): rows read anew.
     void set_model(list_model* m) override
     {
         if (model_) model_->remove_observer(this);
@@ -6959,13 +7610,28 @@ public:
     }
     void select(const std::vector<size_t>& rows) override
     {
+        {
+            std::vector<size_t> want = rows;
+            std::sort(want.begin(), want.end());
+            want.erase(std::unique(want.begin(), want.end()), want.end());
+            if (want == selection()) return;  // (#88)
+        }
         quiet_ = true;
         ListView_SetItemState(h_, -1, 0, LVIS_SELECTED);
         for (size_t r : rows) ListView_SetItemState(h_, int(r), LVIS_SELECTED, LVIS_SELECTED);
         quiet_ = false;
     }
-    void set_current(size_t row) override { ListView_SetItemState(h_, int(row), LVIS_FOCUSED, LVIS_FOCUSED); }
+    void set_current(size_t row) override
+    {
+        if (current() == std::optional<size_t>(row)) return;  // (#88)
+        ListView_SetItemState(h_, int(row), LVIS_FOCUSED, LVIS_FOCUSED);
+    }
+    // On the list's rows as they'll be laid out (with_layout, #108).
     void scroll_to(size_t row, scroll_align align) override
+    {
+        with_layout([this, row, align] { scroll_to_now(row, align); });
+    }
+    void scroll_to_now(size_t row, scroll_align align)
     {
         if (int(row) >= ListView_GetItemCount(h_)) return;
         ListView_EnsureVisible(h_, int(row), FALSE);
@@ -6975,11 +7641,13 @@ public:
         const int at = align == scroll_align::start ? 0
                        : align == scroll_align::end ? shown - h
                                                     : (shown - h) / 2;
-        set_row_offset(row, float(at) / win_.scale());
+        set_row_offset_now(row, float(at) / win_.scale());
     }
-    // In logical px below the header: the rows area.
+    // In logical px below the header: the rows area. As laid out after a
+    // layout to come (layout_current); within a layout, as laid out so far.
     std::optional<float> row_offset(size_t row) const override
     {
+        if (!layout_current()) return std::nullopt;
         if (int(row) >= ListView_GetItemCount(h_)) return std::nullopt;
         RECT r{};
         if (!ListView_GetItemRect(h_, int(row), &r, LVIR_BOUNDS)) return std::nullopt;
@@ -6987,8 +7655,13 @@ public:
         if (r.bottom <= header_px() || y >= rows_area_px()) return std::nullopt;
         return float(y) / win_.scale();
     }
-    // ListView_Scroll scrolls report views by whole rows: the nearest.
+    // ListView_Scroll scrolls report views by whole rows: the nearest. On the
+    // rows as they'll be laid out (with_layout).
     void set_row_offset(size_t row, float offset) override
+    {
+        with_layout([this, row, offset] { set_row_offset_now(row, offset); });
+    }
+    void set_row_offset_now(size_t row, float offset)
     {
         if (int(row) >= ListView_GetItemCount(h_)) return;
         ListView_EnsureVisible(h_, int(row), FALSE);
@@ -7022,6 +7695,18 @@ public:
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
         HWND header = ListView_GetHeader(h_);
+        // The arrows its header shows (its items' own flags, exact, whoever
+        // set them): nothing done (#88).
+        auto want = [&](int i) -> int
+        { return column && size_t(i) == *column ? (order == sort_order::ascending ? HDF_SORTUP : HDF_SORTDOWN) : 0; };
+        bool same = true;
+        for (int i = 0; i < int(columns_.size()) && same; ++i)
+        {
+            HDITEMW hd{};
+            hd.mask = HDI_FORMAT;
+            same = Header_GetItem(header, i, &hd) && (hd.fmt & (HDF_SORTUP | HDF_SORTDOWN)) == want(i);
+        }
+        if (same) return;
         for (int i = 0; i < int(columns_.size()); ++i)
         {
             HDITEMW hd{};
@@ -7050,6 +7735,10 @@ public:
         if (!is_column_order(order, columns_.size())) return;
         std::vector<int> o;
         for (size_t i : order) o.push_back(int(i));
+        {
+            std::vector<int> now(o.size());
+            if (ListView_GetColumnOrderArray(h_, int(now.size()), now.data()) && now == o) return;  // (#88)
+        }
         ListView_SetColumnOrderArray(h_, int(o.size()), o.data());
         fill_last();
         InvalidateRect(h_, nullptr, FALSE);
@@ -7063,7 +7752,11 @@ public:
         for (size_t i = 0; i < w.size() && i < columns_.size(); ++i)
         {
             if (!(w[i] > 0)) continue;
-            widths_[i] = px(w[i]);
+            const int width = px(w[i]);
+            if (restored_[i] && widths_[i] == width &&
+                (!visible_[i] || ListView_GetColumnWidth(h_, int(i)) == width))
+                continue;  // (#88)
+            widths_[i] = width;
             restored_[i] = true;
             if (visible_[i]) ListView_SetColumnWidth(h_, int(i), widths_[i]);
         }
@@ -8567,8 +9260,8 @@ void draw_dark_tabs(HWND h, HDC dc)
 {
     RECT c;
     GetClientRect(h, &c);
-    const theme_color surface = surface_of(h);
-    FillRect(dc, &c, theme_brush(surface));
+    const HBRUSH surface = content_brush_of(h);
+    FillRect(dc, &c, surface);
     const UINT dpi = dpi_of(h);
     auto px = [dpi](int v) { return MulDiv(v, int(dpi), 96); };
     RECT page = c;
@@ -8589,9 +9282,9 @@ void draw_dark_tabs(HWND h, HDC dc)
         const bool selected = i == current, hot = PtInRect(&r, pointer);
         if (selected) InflateRect(&r, px(2), px(2));
         FillRect(dc, &r,
-                 theme_brush(selected ? theme_color::card
-                             : hot    ? theme_color::hover
-                                      : surface));
+                 selected ? theme_brush(theme_color::card)
+                 : hot    ? theme_brush(theme_color::hover)
+                          : surface);
         FrameRect(dc, &r, theme_brush(theme_color::border));
         if (selected)
         {
@@ -8600,7 +9293,7 @@ void draw_dark_tabs(HWND h, HDC dc)
         }
         wchar_t text[128] = {};
         TCITEMW item{};
-        item.mask = TCIF_TEXT;
+        item.mask = TCIF_TEXT | TCIF_IMAGE;
         item.pszText = text;
         item.cchTextMax = int(std::size(text));
         TabCtrl_GetItem(h, i, &item);
@@ -8609,7 +9302,23 @@ void draw_dark_tabs(HWND h, HDC dc)
                                                                  : theme_color::disabled_text)));
         DWORD flags = DT_SINGLELINE | DT_VCENTER | DT_CENTER;
         if (ui & UISF_HIDEACCEL) flags |= DT_HIDEPREFIX;
-        DrawTextW(dc, text, -1, &r, flags);
+        // Its icon (#101), if it has one: before the title, the two centred
+        // together, as the control lays them out.
+        const HIMAGELIST images = TabCtrl_GetImageList(h);
+        int iw = 0, ih = 0;
+        if (item.iImage >= 0 && images && g_comctl.icon_size(images, &iw, &ih))
+        {
+            RECT measured{0, 0, 0, 0};
+            DrawTextW(dc, text, -1, &measured, (flags & ~DT_CENTER) | DT_CALCRECT);
+            const int gap = text[0] ? px(6) : 0;
+            const int x = r.left + (r.right - r.left - (iw + gap + int(measured.right))) / 2;
+            g_comctl.draw(images, item.iImage, dc, x, (r.top + r.bottom - ih) / 2, ILD_TRANSPARENT);
+            RECT title = r;
+            title.left = x + iw + gap;
+            DrawTextW(dc, text, -1, &title, (flags & ~DT_CENTER) | DT_LEFT);
+        }
+        else
+            DrawTextW(dc, text, -1, &r, flags);
         if (selected && GetFocus() == h && !(ui & UISF_HIDEFOCUS))
         {
             RECT focus = r;
@@ -8628,17 +9337,59 @@ void draw_base_tabs(HWND h, HDC dc)
 {
     RECT c;
     GetClientRect(h, &c);
-    FillRect(dc, &c, theme_brush(theme_color::base));
+    const HBRUSH surface = content_brush_of(h);
+    FillRect(dc, &c, surface);
     // Its own erase left out: around the tabs is the surface, filled here.
     DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
+    // The style fills the row beside and above the tabs in the dialog
+    // colour all the same, on any window: the rest of their row is the
+    // surface, the tabs (the current one standing 2 px out of the row) left
+    // as drawn. Whole or not at all: a tab not taken out of the row would be
+    // painted over, and the style's row is better than no tab.
+    const int n = TabCtrl_GetItemCount(h);
+    if (n == 0)
+    {
+        // No tabs: the row is what's above the page's frame, the style's
+        // colour down to the frame's first line.
+        RECT body = c;
+        traced_tab_adjust(h, FALSE, &body);
+        const int x = (c.left + c.right) / 2;
+        const COLORREF style_row = GetPixel(dc, x, 0);
+        LONG y = 0;
+        while (style_row != CLR_INVALID && y < body.top && GetPixel(dc, x, y) == style_row) ++y;
+        if (y > 0 && y < body.top)
+        {
+            RECT row{c.left, c.top, c.right, y};
+            FillRect(dc, &row, surface);
+        }
+    }
+    else
+    {
+        const int current = TabCtrl_GetCurSel(h), proud = MulDiv(2, int(dpi_of(h)), 96);
+        RECT first{};
+        HRGN row = TabCtrl_GetItemRect(h, 0, &first) ? CreateRectRgn(0, 0, c.right, first.bottom) : nullptr;
+        bool whole = row != nullptr;
+        for (int i = 0; whole && i < n; ++i)
+        {
+            RECT r;
+            whole = TabCtrl_GetItemRect(h, i, &r) != FALSE;
+            if (!whole) break;
+            if (i == current) InflateRect(&r, proud, proud);
+            HRGN tab = CreateRectRgnIndirect(&r);
+            whole = tab && CombineRgn(row, row, tab, RGN_DIFF) != ERROR;
+            if (tab) DeleteObject(tab);
+        }
+        if (whole) FillRgn(dc, row, surface);
+        if (row) DeleteObject(row);
+    }
     RECT body = c;
     traced_tab_adjust(h, FALSE, &body);
     if (body.right <= body.left || body.bottom <= body.top) return;
     const POINT mid{(body.left + body.right) / 2, (body.top + body.bottom) / 2};
     const COLORREF face = GetPixel(dc, mid.x, mid.y);
-    if (face == CLR_INVALID || face == color_ref(theme_color_of(theme_color::base))) return;
+    if (face == CLR_INVALID || face == color_ref(content_color_of(h))) return;
     // The body's pixels, out to the page's edge, whatever its inset.
-    HGDIOBJ old = SelectObject(dc, theme_brush(theme_color::base));
+    HGDIOBJ old = SelectObject(dc, surface);
     ExtFloodFill(dc, mid.x, mid.y, face, FLOODFILLSURFACE);
     SelectObject(dc, old);
 }
@@ -8694,8 +9445,15 @@ bool render_tabs(HWND h, HDC dc)
 // alike: through render_tabs, else drawn straight onto the DC, so a failure
 // still paints (a light body may keep the style's shade then), and is never
 // retried.
+void (*g_tab_dying_hook_for_tests)(HWND, void*) = nullptr;
+void* g_tab_dying_hook_data = nullptr;
 LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
 {
+    // Going: marked so no scan measures it again (what runs below may look
+    // a ground up), and forgotten before and after the rest of its teardown.
+    if (msg == WM_NCDESTROY)
+        return tear_down_kept(h, wp, lp, L"rapport-tab-dying", [h] { forget_tab_body(h); },
+                              g_tab_dying_hook_for_tests, g_tab_dying_hook_data);
     if ((msg != WM_PAINT && msg != WM_ERASEBKGND && msg != WM_PRINTCLIENT) || !own_tabs(h))
         return DefSubclassProc(h, msg, wp, lp);
     switch (msg)
@@ -8719,6 +9477,79 @@ LRESULT CALLBACK dark_tabs_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
     }
 }
 
+HICON tab_icon_handle(const rap::icon& icon, int size, UINT dpi, float scale);
+
+// An icon `size` px square with nothing in it (all masked): for an image
+// list's place that has no icon, which keeps the numbering. A 32-bit
+// bitmap whose alpha is all zero counts as having none, and draws black.
+HICON blank_icon(int size)
+{
+    const size_t bytes = size_t((size + 15) / 16 * 2) * size_t(size);
+    const std::vector<BYTE> transparent(bytes, 0xFF), colour(bytes, 0);
+    return CreateIcon(instance(), size, size, 1, 1, transparent.data(), colour.data());
+}
+
+// Which pages have a tab (or a sidebar's row). The control has no hidden
+// items: a hidden page's is deleted, so its items are the visible pages in
+// order, and a page's item is the count of visible pages before it.
+struct page_items
+{
+    int count = 0;           // pages
+    std::vector<bool> on;    // per page; empty: all visible
+    bool hide_single = false;  // spec::tabs::hide_single_tab
+
+    bool shown(int page) const
+    {
+        return page >= 0 && page < count && (size_t(page) >= on.size() || on[size_t(page)]);
+    }
+    // Its item, if it's shown; else where it would go.
+    int item_of(int page) const
+    {
+        int item = 0;
+        for (int i = 0; i < page && i < count; ++i) item += shown(i);
+        return item;
+    }
+    // The page an item is (-1: none).
+    int page_of(int item) const
+    {
+        if (item < 0) return -1;
+        for (int i = 0; i < count; ++i)
+            if (shown(i) && item-- == 0) return i;
+        return -1;
+    }
+    int shown_count() const
+    {
+        int n = 0;
+        for (int i = 0; i < count; ++i) n += shown(i);
+        return n;
+    }
+    void set(int page, bool v)
+    {
+        on.resize(size_t(count), true);
+        on[size_t(page)] = v;
+    }
+    // The strip (or the list) shows: with hide_single_tab, for two pages or more.
+    bool strip() const { return tabs_strip_shown(on, count, hide_single); }
+    // After `page` was hidden (shown: false) or shown, the page to be
+    // current, from the one that was: the nearest visible to a hidden
+    // current one; a page shown with none current.
+    int current_after(int page, bool shown_now, int was) const
+    {
+        if (!shown_now) return was == page ? nearest_visible_page(on, count, page) : was;
+        return was < 0 ? page : was;
+    }
+};
+
+// A strip's tabs as wide as their content (#112): in the fluent look, as
+// WinUI's are, a short title's tab no wider than its text (and icon, if it
+// has one) and the padding. The native look keeps the control's own
+// minimum (54 px at 96 DPI, from its font), the classic padding. Set once:
+// the control keeps it through a new font (a new DPI's).
+void fit_tabs_to_content(HWND h)
+{
+    if (fluent_controls()) TabCtrl_SetMinTabWidth(h, 0);
+}
+
 class tabs_impl : public leaf<rap::tabs>
 {
 public:
@@ -8727,24 +9558,95 @@ public:
     {
         adopt(create_control(win, parent, WC_TABCONTROLW, L"", WS_CLIPSIBLINGS | WS_TABSTOP));
         SetWindowSubclass(h_, dark_tabs_proc, 1, 0);
-        for (size_t i = 0; i < s.titles.size(); ++i)
-        {
-            std::wstring t = mnemonic(s.titles[i]);
-            TCITEMW item{};
-            item.mask = TCIF_TEXT;
-            item.pszText = t.data();
-            TabCtrl_InsertItem(h_, int(i), &item);
-        }
-        // A new DPI comes with a new font: the tabs' height follows it.
+        fit_tabs_to_content(h_);
+        items_.count = int(s.titles.size());
+        items_.on = s.visible;
+        items_.hide_single = s.hide_single_tab;
+        for (const std::string& t : s.titles) titles_.push_back(mnemonic(t));
+        icons_ = s.icons;
+        icons_.resize(size_t(items_.count));
+        if (std::ranges::any_of(icons_, [](const rap::icon& i) { return bool(i); })) rebuild_images();
+        // Hidden pages (page::visible(false)) have no tab from the start.
+        for (int i = 0; i < items_.count; ++i)
+            if (items_.shown(i)) insert_tab(i);
+        TabCtrl_SetCurSel(h_, items_.shown_count() > 0 ? 0 : -1);  // the first visible page
+        settled_ = current();
+        // A new DPI comes with a new font: the tabs' height follows it, and
+        // their icons are made at its size.
         SetWindowSubclass(
             h_,
             [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) -> LRESULT
             {
                 const LRESULT result = DefSubclassProc(h, msg, wp, lp);
-                if (msg == WM_SETFONT) reinterpret_cast<tabs_impl*>(data)->apply_rows();
+                if (msg == WM_SETFONT)
+                {
+                    auto* self = reinterpret_cast<tabs_impl*>(data);
+                    self->apply_rows();
+                    if (self->images_ && self->images_px_ != self->px(16)) self->rebuild_images();
+                }
                 return result;
             },
             2, reinterpret_cast<DWORD_PTR>(this));
+    }
+    ~tabs_impl() override
+    {
+        if (images_) g_comctl.destroy(images_);
+    }
+    // Drawn icons are in the text colour: made again in the new one.
+    void theme_changed() override
+    {
+        if (images_) rebuild_images();
+    }
+    // Page `page`'s icon (#101): its place in the image list (one per page,
+    // a blank where there's none) made again, the tab told when it gains or
+    // loses one. Swapped for another, only the image changes: the tab keeps
+    // its width, nothing is laid out. Hidden, it's kept for when it's shown.
+    void set_page_icon(int page, const rap::icon& icon) override
+    {
+        if (page < 0 || page >= items_.count) return;
+        rap::icon& now = icons_[size_t(page)];
+        if (same_icon(icon, now)) return;  // (#91)
+        const bool had = bool(now);
+        now = icon;
+        if (!images_)
+        {
+            if (!icon) return;
+            rebuild_images();  // the first icon: every page's place made
+        }
+        else
+        {
+            put_image(images_, page, page);
+            path_icons_.arm([this] { rebuild_images(); });
+        }
+        if (!items_.shown(page)) return;
+        if (had == bool(icon))
+        {
+            RECT r{};
+            if (TabCtrl_GetItemRect(h_, items_.item_of(page), &r)) InvalidateRect(h_, &r, FALSE);
+            return;
+        }
+        const SIZE before = strip_frame();
+        TCITEMW item{};
+        item.mask = TCIF_IMAGE;
+        item.iImage = icon ? page : -1;
+        TabCtrl_SetItem(h_, items_.item_of(page), &item);
+        if (const SIZE after = strip_frame(); after.cx != before.cx || after.cy != before.cy) win_.relayout();
+    }
+    // Its title (TCM_SETITEM); laid out again only if the strip's measure
+    // changed with it. Hidden, it's kept for when it's shown.
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= items_.count) return;
+        std::wstring w = mnemonic(title);
+        if (w == titles_[size_t(page)]) return;  // (#91)
+        titles_[size_t(page)] = std::move(w);
+        if (!items_.shown(page)) return;
+        const SIZE before = strip_frame();
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = titles_[size_t(page)].data();
+        TabCtrl_SetItem(h_, items_.item_of(page), &item);
+        if (const SIZE after = strip_frame(); after.cx != before.cx || after.cy != before.cy) win_.relayout();
     }
     // Fluent controls: its tabs at the density's height (TabViewItemMinHeight
     // standard; the compact density's, as the controls'). Null (native, out
@@ -8767,22 +9669,81 @@ public:
     std::vector<std::function<node()>> lazy;
     std::function<item*(const node&)> buildPage;
 
-    int current() const override { return TabCtrl_GetCurSel(h_); }
+    // The selected tab's page: -1 with every page hidden.
+    int current() const override { return items_.page_of(TabCtrl_GetCurSel(h_)); }
     void set_current(int i) override
     {
-        TabCtrl_SetCurSel(h_, i);
+        if (!items_.shown(i)) return;  // hidden, or out of range
+        if (TabCtrl_GetCurSel(h_) == items_.item_of(i)) return;  // (#88)
+        TabCtrl_SetCurSel(h_, items_.item_of(i));
         ensure_built(i);
-        win_.relayout_at_once();
+        if (!win_.relayout_at_once()) return;
+        settled_ = current();
     }
+    // A hidden page's tab deleted, a page shown again inserted at its place
+    // among the visible ones; the selection set without TCN_SELCHANGE, so
+    // no on_changed.
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= items_.count || items_.shown(page) == on) return;  // (#88)
+        const int was = current();
+        if (on)
+        {
+            items_.set(page, true);
+            insert_tab(page);
+        }
+        else
+        {
+            TabCtrl_DeleteItem(h_, items_.item_of(page));
+            items_.set(page, false);
+        }
+        const int now = items_.current_after(page, on, was);
+        TabCtrl_SetCurSel(h_, now < 0 ? -1 : items_.item_of(now));
+        ensure_built(now);
+        if (!win_.relayout_at_once()) return;
+        settled_ = current();
+    }
+    bool page_visible(int page) const override { return items_.shown(page); }
+    // The option, live: laid out again (and the control shown or hidden
+    // there) only when the strip comes or goes; the same value, or one with
+    // two pages or more visible, touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (items_.hide_single == on) return;
+        const bool was = items_.strip();
+        items_.hide_single = on;
+        if (items_.strip() != was) win_.relayout_at_once();
+    }
+    bool hide_single_tab() const override { return items_.hide_single; }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
     LRESULT notify(NMHDR* n, bool& handled) override
     {
         handled = n->code == TCN_SELCHANGE;
         if (handled)
         {
+            // A user's switch: on_changed once, with the page current after
+            // the build (a builder may have switched again, or hidden every
+            // page), if there's one and it isn't the page current before.
+            // Within a layout, once it's done: one report for however many
+            // switches came meanwhile, as things are then.
+            // Marked first: the build (a builder switching again, a user's
+            // switch within it) and the layout leave settled_ to the report.
+            const bool first = !std::exchange(change_queued_, true);
+            if (first) change_before_ = settled_;
             ensure_built(current());
-            win_.relayout_at_once();
-            if (changed_) changed_(current());
+            if (!win_.relayout_at_once()) return 0;
+            if (!first) return 0;
+            win_.after_layout_or_now(
+                [this, alive = std::weak_ptr<bool>(alive_)]
+                {
+                    if (!alive.lock()) return;
+                    change_queued_ = false;
+                    settled_ = current();
+                    // A copy, called last: the app's handler may destroy
+                    // the window, this widget and its changed_ with it.
+                    if (changed_ && settled_ >= 0 && settled_ != change_before_)
+                        if (auto f = changed_) f(settled_);
+                });
         }
         return 0;
     }
@@ -8805,35 +9766,108 @@ public:
         for (size_t i = 0; i < pages.size(); ++i)
         {
             // An unbuilt page takes the area it's given; once built it has
-            // a size like any other.
+            // a size like any other. A hidden page takes none.
             if (i < lazy.size() && lazy[i]) continue;
-            const SIZE s = pages[i]->natural();
+            if (!items_.shown(int(i))) continue;
+            const SIZE s = measured_size(pages[i]);
             in.cx = std::max(in.cx, s.cx);
             in.cy = std::max(in.cy, s.cy);
         }
+        // No strip (hide_single_tab, one page): the page is the whole area.
+        if (!items_.strip()) return in;
         RECT r{0, 0, in.cx + 2 * pad(), in.cy + 2 * pad()};
         traced_tab_adjust(h_, TRUE, &r);
         return {r.right - r.left, r.bottom - r.top};
     }
     void place(RECT r) override
     {
-        leaf::place(r);
-        RECT in{0, 0, r.right - r.left, r.bottom - r.top};
-        traced_tab_adjust(h_, FALSE, &in);
-        OffsetRect(&in, r.left, r.top);
-        InflateRect(&in, -pad(), -pad());
-        for (item* p : pages) p->place(in);
+        RECT in = r;
+        if (items_.strip())
+        {
+            leaf::place(r);
+            in = {0, 0, r.right - r.left, r.bottom - r.top};
+            traced_tab_adjust(h_, FALSE, &in);
+            OffsetRect(&in, r.left, r.top);
+            InflateRect(&in, -pad(), -pad());
+        }
+        for (size_t i = 0; i < pages.size(); ++i)
+            if (items_.shown(int(i)))
+            {
+                pages[i]->place(in);
+                if (placing_stopped()) return;
+            }
     }
     void show_all(bool shown) override
     {
-        leaf::show_all(shown);
+        show_control(h_, shown && visible && items_.strip());
         if (shown && visible) ensure_built(current());  // the first time a lazy page is the one showing
-        for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == current());
+        const int now = current();
+        if (!change_queued_) settled_ = now;  // (a user's switch waiting to be reported settles it then)
+        for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == now);
     }
 
 private:
+    // Page `page`'s tab, at its place among the visible ones.
+    void insert_tab(int page)
+    {
+        TCITEMW item{};
+        item.mask = TCIF_TEXT | TCIF_IMAGE;
+        item.pszText = titles_[size_t(page)].data();
+        item.iImage = images_ && icons_[size_t(page)] ? page : -1;
+        TabCtrl_InsertItem(h_, items_.item_of(page), &item);
+    }
+    // What the strip adds round a page: its measure, less the page's.
+    SIZE strip_frame() const
+    {
+        RECT r{0, 0, 0, 0};
+        traced_tab_adjust(h_, TRUE, &r);
+        return {r.right - r.left, r.bottom - r.top};
+    }
+    // Page `page`'s icon (else a blank) at image `index` of `list` (-1: added).
+    void put_image(HIMAGELIST list, int index, int page)
+    {
+        const rap::icon& icon = icons_[size_t(page)];
+        const int size = px(16);
+        path_icons_.add(icon, size);
+        HICON h = icon ? tab_icon_handle(icon, size, win_.dpi(), win_.scale()) : nullptr;
+        if (!h) h = blank_icon(size);
+        if (h)
+        {
+            g_comctl.replace_icon(list, index, h);
+            DestroyIcon(h);
+        }
+    }
+    // The image list made again whole, at the DPI's small-icon size: one
+    // image per page, so a page's tab's image is its page's number. Made
+    // with the first icon (a strip with none has no list, as it always
+    // was); again at a new DPI, a new theme (drawn ones are in the text
+    // colour), and once a path's own icon is found.
+    void rebuild_images()
+    {
+        path_icons_.clear();
+        const int size = px(16);
+        HIMAGELIST fresh = g_comctl.create(size, size, ILC_COLOR32 | ILC_MASK, std::max(items_.count, 1), 1);
+        if (!fresh) return;
+        for (int i = 0; i < items_.count; ++i) put_image(fresh, -1, i);
+        TabCtrl_SetImageList(h_, fresh);
+        if (images_) g_comctl.destroy(images_);
+        images_ = fresh;
+        images_px_ = size;
+        InvalidateRect(h_, nullptr, FALSE);
+        path_icons_.arm([this] { rebuild_images(); });
+    }
     int pad() const { return px(6); }
+    page_items items_;
+    std::vector<std::wstring> titles_;  // per page, as the tabs show them
+    std::vector<rap::icon> icons_;      // per page (#101); empty: none
+    HIMAGELIST images_ = nullptr;       // one image per page; none until a page has an icon
+    int images_px_ = 0;                 // the size images_ was made at
+    path_icon_rebuild path_icons_;      // images_ made again once a path's own icon is found
     std::function<void(int)> changed_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // for what runs after a layout (after_layout_or_now)
+    bool change_queued_ = false;  // a user switch's on_changed waiting for the layout
+    int change_before_ = -1;      // settled_ before the first of them
+    int settled_ = -1;  // current() as the last operation or switch left it
     const band_density* density_ = nullptr;  // fluent controls': the tabs' (set_in_band)
     bool rows_set_ = false;                  // its tabs' height set from density_
 };
@@ -8856,10 +9890,19 @@ public:
             std::wstring title = mnemonic(t);
             title.erase(std::remove(title.begin(), title.end(), L'&'), title.end());
             titles_.push_back(title);
-            SendMessageW(h_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(title.c_str()));
         }
+        items_.count = int(s.titles.size());
+        items_.on = s.visible;
+        items_.hide_single = s.hide_single_tab;
+        icons_.resize(size_t(items_.count));
+        file_icons_.resize(size_t(items_.count));
+        for (size_t i = 0; i < s.icons.size() && i < icons_.size(); ++i) take_icon(int(i), s.icons[i]);
+        // Hidden pages (page::visible(false)) have no row from the start.
+        for (int i = 0; i < items_.count; ++i)
+            if (items_.shown(i)) insert_row(i);
         apply_rows();
-        SendMessageW(h_, LB_SETCURSEL, 0, 0);
+        shown_ = first_visible_page(items_.on, items_.count);
+        SendMessageW(h_, LB_SETCURSEL, WPARAM(shown_ < 0 ? -1 : 0), 0);
         // A new DPI comes with a new font: the rows follow it.
         SetWindowSubclass(
             h_,
@@ -8871,11 +9914,56 @@ public:
             },
             1, reinterpret_cast<DWORD_PTR>(this));
     }
+    ~side_tabs_impl() override
+    {
+        for (HICON h : file_icons_)
+            if (h) DestroyIcon(h);
+    }
     // Its rows as tall as the new font's line, as they were made for the old.
     void fonts_changed() override
     {
         apply_rows();
         InvalidateRect(h_, nullptr, TRUE);
+    }
+    // Page `page`'s icon (#101), which its row draws as it paints: swapped
+    // for another, only that row is painted again; the first icon or the
+    // last, every row (#102); laid out again only if the list's width
+    // changed (the first icon makes room for them all, the last takes it
+    // away). Hidden, it's kept for when it's shown.
+    void set_page_icon(int page, const rap::icon& icon) override
+    {
+        if (page < 0 || page >= items_.count) return;
+        if (same_icon(icon, icons_[size_t(page)])) return;  // (#91)
+        const int before = list_width();
+        const bool column = icon_column();
+        take_icon(page, icon);
+        // The icons' column come or gone (the first icon, the last): every
+        // row's title moves, the page shown or not, the width changed or not.
+        if (icon_column() != column) InvalidateRect(h_, nullptr, FALSE);
+        if (list_width() != before)
+            win_.relayout();
+        else if (items_.shown(page))
+            invalidate_row(page);
+    }
+    // Its title: its row's string replaced (the selection kept), laid out
+    // again only if the list's width changed with it.
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= items_.count) return;
+        std::wstring w = mnemonic(title);
+        w.erase(std::remove(w.begin(), w.end(), L'&'), w.end());
+        if (w == titles_[size_t(page)]) return;  // (#91)
+        const int before = list_width();
+        titles_[size_t(page)] = std::move(w);
+        if (!items_.shown(page)) return;
+        const int row = items_.item_of(page);
+        const LRESULT selected = SendMessageW(h_, LB_GETCURSEL, 0, 0);
+        const LRESULT top = SendMessageW(h_, LB_GETTOPINDEX, 0, 0);
+        SendMessageW(h_, LB_DELETESTRING, WPARAM(row), 0);
+        insert_row(page);
+        if (selected == row) SendMessageW(h_, LB_SETCURSEL, WPARAM(row), 0);
+        SendMessageW(h_, LB_SETTOPINDEX, WPARAM(top), 0);
+        if (list_width() != before) win_.relayout();
     }
     // Fluent controls: its rows at the density's height.
     void set_in_band(const band_density* density, bool) override
@@ -8905,25 +9993,82 @@ public:
     std::vector<std::function<node()>> lazy;
     std::function<item*(const node&)> buildPage;
 
-    int current() const override { return std::max(0, int(SendMessageW(h_, LB_GETCURSEL, 0, 0))); }
+    // The selected row's page (the page showing if none is): -1 with every
+    // page hidden.
+    int current() const override
+    {
+        const int row = int(SendMessageW(h_, LB_GETCURSEL, 0, 0));
+        return row >= 0 ? items_.page_of(row) : shown_;
+    }
     void set_current(int i) override
     {
-        SendMessageW(h_, LB_SETCURSEL, WPARAM(i), 0);
+        if (!items_.shown(i)) return;  // hidden, or out of range
+        if (i == shown_ && SendMessageW(h_, LB_GETCURSEL, 0, 0) == items_.item_of(i)) return;  // (#88)
+        SendMessageW(h_, LB_SETCURSEL, WPARAM(items_.item_of(i)), 0);
         if (i == shown_) return;
         shown_ = i;
         ensure_built(i);
-        win_.relayout_at_once();
+        win_.relayout_at_once();  // (the last thing)
     }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
     void command(WORD code) override
     {
         // A click on the empty space below the names reports a change too.
         if (code != LBN_SELCHANGE || current() == shown_) return;
+        // As tabs_impl's: on_changed once, with the page current after the
+        // build, if there's one and it isn't the page shown before.
+        // Within a layout, once it's done: one report for however many
+        // switches came meanwhile, against the page shown before the first.
+        const bool first = !std::exchange(change_queued_, true);
+        if (first) change_before_ = shown_;
         shown_ = current();
         ensure_built(current());
-        win_.relayout_at_once();
-        if (changed_) changed_(current());
+        if (!win_.relayout_at_once()) return;
+        if (!first) return;
+        win_.after_layout_or_now(
+            [this, alive = std::weak_ptr<bool>(alive_)]
+            {
+                if (!alive.lock()) return;
+                change_queued_ = false;
+                const int now = current();
+                if (changed_ && now >= 0 && now != change_before_)
+                    if (auto f = changed_) f(now);  // (a copy, called last: see tabs_impl)
+            });
     }
+    // A hidden page's row deleted, a page shown again inserted at its place
+    // among the visible ones; LB_SETCURSEL sends no LBN_SELCHANGE, so no
+    // on_changed.
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= items_.count || items_.shown(page) == on) return;  // (#88)
+        const int was = current();
+        if (on)
+        {
+            items_.set(page, true);
+            insert_row(page);
+        }
+        else
+        {
+            SendMessageW(h_, LB_DELETESTRING, WPARAM(items_.item_of(page)), 0);
+            items_.set(page, false);
+        }
+        shown_ = items_.current_after(page, on, was);
+        SendMessageW(h_, LB_SETCURSEL, WPARAM(shown_ < 0 ? -1 : items_.item_of(shown_)), 0);
+        ensure_built(shown_);
+        win_.relayout_at_once();  // (the last thing)
+    }
+    bool page_visible(int page) const override { return items_.shown(page); }
+    // The option, live: laid out again (and the control shown or hidden
+    // there) only when the strip comes or goes; the same value, or one with
+    // two pages or more visible, touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (items_.hide_single == on) return;
+        const bool was = items_.strip();
+        items_.hide_single = on;
+        if (items_.strip() != was) win_.relayout_at_once();
+    }
+    bool hide_single_tab() const override { return items_.hide_single; }
     void ensure_built(int i)
     {
         if (i < 0 || size_t(i) >= lazy.size() || !lazy[size_t(i)]) return;
@@ -8934,7 +10079,8 @@ public:
     }
     bool draw_item(DRAWITEMSTRUCT* d) override
     {
-        if (d->itemID == UINT(-1) || d->itemID >= titles_.size()) return false;
+        const int page = d->itemID == UINT(-1) ? -1 : items_.page_of(int(d->itemID));
+        if (page < 0 || size_t(page) >= titles_.size()) return false;
         const bool selected = d->itemState & ODS_SELECTED;
         FillRect(d->hDC, &d->rcItem,
                  theme_brush(selected ? theme_color::highlight : theme_color::base));
@@ -8944,7 +10090,21 @@ public:
         HGDIOBJ old = SelectObject(d->hDC, ui_font(win_.dpi()));
         RECT text = d->rcItem;
         text.left += px(8);
-        DrawTextW(d->hDC, titles_[d->itemID].c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        // The icons' column (#101), with any page's icon: each row's icon
+        // in it, the titles after it in line.
+        if (icon_column())
+        {
+            const int size = px(16);
+            const int top = (d->rcItem.top + d->rcItem.bottom - size) / 2;
+            const rap::icon& icon = icons_[size_t(page)];
+            if (HICON file = file_icons_[size_t(page)])
+                DrawIconEx(d->hDC, text.left, top, file, size, size, 0, nullptr, DI_NORMAL);
+            else if (icon)
+                draw_icon_on_dc(d->hDC, RECT{text.left, top, text.left + size, top + size}, icon, win_.scale(),
+                                theme_color_of(selected ? theme_color::highlight_text : theme_color::text));
+            text.left += size + icon_gap();
+        }
+        DrawTextW(d->hDC, titles_[size_t(page)].c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
         SelectObject(d->hDC, old);
         if ((d->itemState & ODS_FOCUS) && !(d->itemState & ODS_NOFOCUSRECT)) DrawFocusRect(d->hDC, &d->rcItem);
         return true;
@@ -8959,41 +10119,98 @@ public:
             // An unbuilt page takes the area it's given; once built it has
             // a size like any other.
             if (i < lazy.size() && lazy[i]) continue;
-            const SIZE s = pages[i]->natural();
+            if (!items_.shown(int(i))) continue;  // a hidden page takes none
+            const SIZE s = measured_size(pages[i]);
             in.cx = std::max(in.cx, s.cx);
             in.cy = std::max(in.cy, s.cy);
         }
-        // Every row whole: the rows and the list's frame (its client edge,
-        // above and below) round them.
+        // No list (hide_single_tab, one page): the page is the whole area.
+        if (!items_.strip()) return in;
+        // Every row whole, the visible pages' only: the rows and the list's
+        // frame (its client edge, above and below) round them.
         const long frame = 2L * GetSystemMetricsForDpi(SM_CYEDGE, win_.dpi());
         return {list_width() + gap() + in.cx,
-                std::max<long>(in.cy, long(titles_.size()) * row_height() + frame)};
+                std::max<long>(in.cy, long(items_.shown_count()) * row_height() + frame)};
     }
     void place(RECT r) override
     {
-        const int lw = list_width();
-        leaf::place({r.left, r.top, r.left + lw, r.bottom});
-        for (item* p : pages) p->place({r.left + lw + gap(), r.top, r.right, r.bottom});
+        RECT in = r;
+        if (items_.strip())
+        {
+            const int lw = list_width();
+            leaf::place({r.left, r.top, r.left + lw, r.bottom});
+            in.left += lw + gap();
+        }
+        for (size_t i = 0; i < pages.size(); ++i)
+            if (items_.shown(int(i)))
+            {
+                pages[i]->place(in);
+                if (placing_stopped()) return;
+            }
     }
     void show_all(bool shown) override
     {
-        leaf::show_all(shown);
+        show_control(h_, shown && visible && items_.strip());
         if (shown && visible) ensure_built(current());
-        for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == current());
+        const int now = current();
+        for (size_t i = 0; i < pages.size(); ++i) pages[i]->show_all(shown && visible && int(i) == now);
     }
 
 private:
     int gap() const { return px(12); }
+    // As wide as the visible pages' names, and the icons' column if any
+    // page has an icon.
     int list_width()
     {
         long w = px(120);
-        for (const std::wstring& t : titles_) w = std::max(w, text_extent(h_, t).cx + px(36));
+        const long column = icon_column() ? px(16) + icon_gap() : 0;
+        for (size_t i = 0; i < titles_.size(); ++i)
+            if (items_.shown(int(i))) w = std::max(w, text_extent(h_, titles_[i]).cx + px(36) + column);
         return int(w);
     }
+    int icon_gap() const { return px(8); }
+    // The rows have an icons' column: some page (shown or not) has an icon,
+    // so hiding or showing one never moves the others' titles.
+    bool icon_column() const
+    {
+        return std::ranges::any_of(icons_, [](const rap::icon& i) { return bool(i); });
+    }
+    // Page `page`'s icon taken: a file's kind's handle from the shell made
+    // now (not from paint: the shell is slow); anything else drawn as the
+    // row paints, Windows' own by name prepared for it.
+    void take_icon(int page, const rap::icon& icon)
+    {
+        icons_[size_t(page)] = icon;
+        HICON& file = file_icons_[size_t(page)];
+        if (file) DestroyIcon(file);
+        file = nullptr;
+        if (!icon.file.empty() && icon.path.empty() && !icon.draw)
+            file = tab_icon_handle(icon, px(16), win_.dpi(), win_.scale());
+        else if (icon)
+            want_icon(icon, 16, win_.dpi());
+    }
+    void invalidate_row(int page)
+    {
+        RECT r{};
+        if (SendMessageW(h_, LB_GETITEMRECT, WPARAM(items_.item_of(page)), reinterpret_cast<LPARAM>(&r)) != LB_ERR)
+            InvalidateRect(h_, &r, FALSE);
+    }
+    // Page `page`'s row, at its place among the visible ones.
+    void insert_row(int page)
+    {
+        SendMessageW(h_, LB_INSERTSTRING, WPARAM(items_.item_of(page)),
+                     reinterpret_cast<LPARAM>(titles_[size_t(page)].c_str()));
+    }
 
-    std::vector<std::wstring> titles_;
-    int shown_ = 0;  // the page showing
+    page_items items_;
+    std::vector<std::wstring> titles_;  // per page
+    std::vector<rap::icon> icons_;      // per page (#101); empty: none
+    std::vector<HICON> file_icons_;     // per page: a file's kind's icon (icon::for_file), from the shell
+    int shown_ = 0;  // the page showing (-1: none, every page hidden)
     std::function<void(int)> changed_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // for what runs after a layout (after_layout_or_now)
+    bool change_queued_ = false;  // a user switch's on_changed waiting for the layout
+    int change_before_ = -1;      // the page shown before the first of them
 };
 
 // -- document tabs ------------------------------------------------------------
@@ -9414,6 +10631,7 @@ public:
     {
         const int i = state.index_of(id);
         if (i < 0) return;
+        if (state.current == i && TabCtrl_GetCurSel(h_) == i) return;  // (#88)
         state.current = i;
         TabCtrl_SetCurSel(h_, i);  // sends no TCN_SELCHANGE
     }
@@ -9677,7 +10895,7 @@ private:
         IntersectRect(&r, &r, &c);
         HDC dc = GetDC(h_);
         FillRect(dc, &r,
-                 dark_mode() || surface_of(h_) == theme_color::base ? theme_brush(surface_of(h_))
+                 dark_mode() || surface_of(h_) == theme_color::base ? content_brush_of(h_)
                                                                     : GetSysColorBrush(COLOR_3DFACE));
         ReleaseDC(h_, dc);
     }
@@ -9886,36 +11104,11 @@ private:
         }
         return DefSubclassProc(h, msg, wp, lp);
     }
-    // Light, on a base surface: the style's tabs, as the page tabs' are
-    // (draw_base_tabs), and the rest of their row in the surface's colour.
-    // The style fills the row beside and above the tabs in the dialog
-    // colour, on any window; a page's tabs have their body below to match
-    // it, but the strip's row is all there is, across the window's top.
+    // Light, on a base surface: the style's tabs, as the page tabs' are,
+    // the rest of their row in the content's colour (draw_base_tabs).
     void draw_base(HDC dc)
     {
         draw_base_tabs(h_, dc);
-        const int n = TabCtrl_GetItemCount(h_), current = TabCtrl_GetCurSel(h_);
-        RECT first{};
-        if (n <= 0 || !TabCtrl_GetItemRect(h_, 0, &first)) return;
-        RECT c;
-        GetClientRect(h_, &c);
-        // Whole or not at all: a tab not taken out of the row would be
-        // painted over, and the style's row is better than no tab.
-        HRGN row = CreateRectRgn(0, 0, c.right, first.bottom);
-        bool whole = row != nullptr;
-        for (int i = 0; whole && i < n; ++i)
-        {
-            RECT r;
-            whole = TabCtrl_GetItemRect(h_, i, &r) != FALSE;
-            if (!whole) break;
-            if (i == current)
-                InflateRect(&r, px(2), px(2));  // the current one stands out of the row
-            HRGN tab = CreateRectRgnIndirect(&r);
-            whole = tab && CombineRgn(row, row, tab, RGN_DIFF) != ERROR;
-            if (tab) DeleteObject(tab);
-        }
-        if (whole) FillRgn(dc, row, theme_brush(theme_color::base));
-        if (row) DeleteObject(row);
     }
     // New tab, and Close tab for the tab clicked (or the current one, from
     // the keyboard), as the keys do.
@@ -9946,8 +11139,8 @@ private:
     {
         RECT c;
         GetClientRect(h_, &c);
-        const theme_color surface = surface_of(h_);
-        FillRect(dc, &c, theme_brush(surface));
+        const HBRUSH surface = content_brush_of(h_);
+        FillRect(dc, &c, surface);
         HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h_, WM_GETFONT, 0, 0)));
         SetBkMode(dc, TRANSPARENT);
         const int n = TabCtrl_GetItemCount(h_), current = TabCtrl_GetCurSel(h_);
@@ -9964,9 +11157,9 @@ private:
             const bool selected = i == current, hot = PtInRect(&r, pointer);
             if (selected) InflateRect(&r, px(2), px(2));
             FillRect(dc, &r,
-                     theme_brush(selected ? theme_color::card
-                                 : hot    ? theme_color::hover
-                                          : surface));
+                     selected ? theme_brush(theme_color::card)
+                     : hot    ? theme_brush(theme_color::hover)
+                              : surface);
             FrameRect(dc, &r, theme_brush(theme_color::border));
             if (selected)
             {
@@ -10270,8 +11463,16 @@ public:
         , thin_(thin)
     {
     }
+    // A drag still on at teardown ends here, reported to no one: the panes
+    // it would report on are going (the window's items are cleared first),
+    // and the capture released before the bars go, its WM_CAPTURECHANGED
+    // finding no drag.
     ~splitter_impl() override
     {
+        moved_ = nullptr;
+        dragging_ = false;
+        dragged_ = false;
+        if (HWND c = GetCapture(); c && std::find(bars_.begin(), bars_.end(), c) != bars_.end()) ReleaseCapture();
         for (HWND b : bars_) DestroyWindow(b);
     }
     std::vector<item*> panes;
@@ -10322,8 +11523,17 @@ public:
     float divider() const override { return float(bar()) / win_.scale(); }
     // The sizes the panes were laid out at, as GTK's and Qt's report them,
     // so a pane that takes what the window gains is seen to grow (#29).
+    // As they'll be laid out (#108): a layout to come made first, as
+    // canvas::size() does; but while a set_sizes() waits for its layout,
+    // what it asked for (widgets.h: a restore then a save round-trips);
+    // within a layout (a pane's own size callback), the sizes being laid out.
     std::vector<float> sizes() const override
     {
+        if (!asked_ && !win_.in_layout)
+        {
+            const std::weak_ptr<bool> me = alive_;
+            if (!win_.flush_layout() || me.expired()) return {};
+        }
         std::vector<float> out;
         for (long s : current()) out.push_back(std::max(0L, s) / win_.scale());
         return out;
@@ -10332,11 +11542,23 @@ public:
     void set_sizes(const std::vector<float>& s) override
     {
         trace::scope step(trace::phase::drag_step, uintptr_t(parent_));
-        std::vector<long> was = current();
+        std::vector<long> was = intended();  // a callback's ask: from the intent, not the snapshot
         was.resize(panes.size(), 0);
-        sizes_.assign(panes.size(), 0);
+        std::vector<long> next(panes.size(), 0);
         for (size_t i = 0; i < panes.size(); ++i)
-            sizes_[i] = i < s.size() && s[i] > 0 ? long(s[i] * win_.scale()) : was[i];
+            next[i] = i < s.size() && s[i] > 0 ? std::lround(s[i] * win_.scale()) : was[i];
+        // The sizes its panes have as laid out, none asked for since: no
+        // relayout (#88). Otherwise asked for and laid out, as any change.
+        // The request is still recorded: a later layout (a resize) places
+        // sizes_, which mustn't keep an older request.
+        // Compared with the sizes it reports (current(): a hidden pane's is
+        // the size it comes back at, not the 0 it's placed at).
+        if (!asked_ && placed_.size() == panes.size() && next == intended())
+        {
+            sizes_ = std::move(next);
+            return;
+        }
+        sizes_ = std::move(next);
         asked_ = true;
         win_.relayout();
     }
@@ -10430,6 +11652,13 @@ public:
             }
             sz[flex] = std::max(0L, sz[flex]);
         }
+        // The sizes are the splitter's before its panes are placed: a pane
+        // told its size there (a canvas's on_resize) reads sizes() as laid
+        // out now, not as before.
+        placed_ = sz;
+        asked_ = false;
+        reported_ = intended();  // what a pane's callback in this layout reads
+        placed_in_ = g_moves ? g_moves->id : 0;
         long pos = dir_ == orientation::horizontal ? r.left : r.top;
         size_t b = 0;
         for (size_t k = 0; k < shown.size(); ++k)
@@ -10438,6 +11667,7 @@ public:
             const long s = std::max(0L, sz[i]);
             panes[i]->place(dir_ == orientation::horizontal ? RECT{pos, r.top, pos + s, r.bottom}
                                                             : RECT{r.left, pos, r.right, pos + s});
+            if (placing_stopped()) return;
             pos += s;
             if (k + 1 < shown.size() && b < bars_.size())
             {
@@ -10451,8 +11681,6 @@ public:
             }
         }
         for (; b < bars_.size(); ++b) show_control(bars_[b], false);
-        placed_ = sz;
-        asked_ = false;
     }
     void show_all(bool shown) override
     {
@@ -10502,7 +11730,15 @@ private:
     // Each pane's size now: as last laid out. Before that, or with sizes
     // asked for and not laid out yet, the ones asked for. A hidden pane, laid
     // out at nothing, has the size it comes back at.
+    // What sizes() reports. Inside a layout (a pane's callback while it's
+    // delivered), the sizes it's placing, not one asked for since from a
+    // callback (that layout comes after); otherwise intended().
     std::vector<long> current() const
+    {
+        if (placing()) return reported_;
+        return intended();
+    }
+    std::vector<long> intended() const
     {
         const bool remembered = sizes_.size() == panes.size();
         if (placed_.size() != panes.size() || (asked_ && remembered)) return remembered ? sizes_ : placed_;
@@ -10525,6 +11761,7 @@ private:
         case WM_LBUTTONDOWN:
             SetCapture(h);
             dragging_ = true;
+            dragged_ = false;
             pressed_ = sizes_;
             return 0;
         case WM_LBUTTONUP:
@@ -10532,7 +11769,21 @@ private:
             if (!dragging_) break;
             dragging_ = false;
             if (msg == WM_LBUTTONUP) ReleaseCapture();
-            if (sizes_ != pressed_ && moved_) moved_();
+            // Only the drag's own moves count: set_sizes between the press
+            // and the release changes sizes_ without one.
+            if (std::exchange(dragged_, false) && sizes_ != pressed_ && moved_)
+            {
+                // The drag's placement still to come (released within a layout
+                // of the window's own): reported once it's placed.
+                win_.after_layout_or_now(
+                    [this, alive = std::weak_ptr<bool>(alive_)]
+                    {
+                        // A copy, called last: on_moved may destroy the
+                        // window, this splitter and its moved_ with it.
+                        if (alive.lock() && moved_)
+                            if (auto f = moved_) f();
+                    });
+            }
             return 0;
         case WM_MOUSEMOVE:
         {
@@ -10591,6 +11842,7 @@ private:
             }
         sizes_.assign(panes.size(), 0);
         for (size_t k = 0; k < shown.size(); ++k) sizes_[shown[k]] = sz[k];
+        dragged_ = true;
         relayout_dragged();
     }
 
@@ -10610,7 +11862,18 @@ private:
     void relayout_dragged()
     {
         trace::scope timing(trace::phase::layout, uintptr_t(parent_));
-        moves_in_one_pass batch;
+        // Never within a layout of the window's own: after it, the sizes
+        // asked for until then.
+        if (win_.in_layout)
+        {
+            asked_ = true;
+            win_.layout_dirty = true;
+            return;
+        }
+        layout_scope inside(win_);  // round the moves' delivery too
+        // (No placing_scope: the moves are batched, so a canvas hears of its
+        // size as they're delivered, once place is done, not inside it.)
+        moves_in_one_pass batch(win_.hwnd());
         place(rect_);
     }
 
@@ -10620,10 +11883,20 @@ private:
     bool thin_;
     std::vector<HWND> bars_;
     std::vector<std::unique_ptr<std::function<LRESULT(HWND, UINT, WPARAM, LPARAM, bool&)>>> fns_;
-    std::vector<long> sizes_, placed_;
+    std::vector<long> sizes_, placed_, reported_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // for what's queued after a layout
+    unsigned placed_in_ = 0;  // the move batch it was last placed in (move_batch::id); 0, none
+    // Placed in the layout being delivered now: another splitter in the same
+    // window, not placed in it (a drag of this one's neighbour), reports its
+    // intent as ever.
+    bool placing() const
+    {
+        return batch_live(placed_in_) && reported_.size() == panes.size();
+    }
     bool asked_ = false;  // set_sizes since the last layout
     RECT rect_{};
     bool dragging_ = false;
+    bool dragged_ = false;       // the drag has moved the bar
     std::vector<long> pressed_;  // the sizes when the drag began
     std::function<void()> moved_;
 };
@@ -10662,7 +11935,7 @@ public:
     bool expands_in_form() const override { return true; }
     SIZE measure() override
     {
-        SIZE c = content ? content->natural() : SIZE{0, 0};
+        SIZE c = content ? measured_size(content) : SIZE{0, 0};
         c.cx += GetSystemMetrics(SM_CXVSCROLL);
         c.cy = std::min<long>(c.cy, font_metrics(win_.dpi()).cy * 10);  // asks for a modest height
         return c;
@@ -10673,6 +11946,7 @@ public:
         // Resizing the host lays the content out (WM_SIZE, below): not again.
         laid_out_ = false;
         move_pane_window(host_, r.left, r.top, r.right - r.left, r.bottom - r.top);
+        if (placing_stopped()) return;  // its WM_SIZE laid the content out
         if (!laid_out_) layout_content();
     }
     // In a layout pass the host and its panel move with their pixels (not
@@ -10726,12 +12000,39 @@ private:
         }
         laying_out_ = true;
         laid_out_ = true;
+        // Counted for tests (scroll_loop_stats_for_tests): this pane's loops
+        // under way, and whether a layout of its own window holds this one.
+        // (Gone with the window, as what this loop placed may make it.)
+        struct counted
+        {
+            win_context& w;
+            unsigned& depth;
+            std::weak_ptr<bool> alive;
+            bool standalone;
+            counted(win_context& w_, unsigned& d)
+                : w(w_)
+                , depth(d)
+                , alive(w_.layout_alive)
+                , standalone(w_.in_layout == 0)
+            {
+                g_scroll_loops_max = std::max(g_scroll_loops_max, ++depth);
+                if (standalone) ++w.standalone_scroll_loops;
+            }
+            ~counted()
+            {
+                if (alive.expired()) return;
+                --depth;
+                if (standalone) --w.standalone_scroll_loops;
+            }
+        } loop{win_, loop_depth_};
         // (A bar that shows only while the other is hidden could flip for
         // ever: three goes, and the last one stands.)
         for (int tries = 0; tries < 3; ++tries)
         {
             again_ = false;
-            if (lay_out_once(tries == 2) && !again_) break;
+            const bool held = lay_out_once(tries == 2);
+            if (placing_stopped()) return;
+            if (held && !again_) break;
         }
         laying_out_ = false;
     }
@@ -10741,11 +12042,11 @@ private:
     {
         RECT client;
         GetClientRect(host_, &client);
-        const SIZE n = content->natural();
+        const SIZE n = measured_size(content);
         // As tall as the content is at the width it's given: text that wraps
         // takes more lines when narrower than its natural width.
         const long w = horizontal_ ? std::max<long>(n.cx, client.right) : client.right;
-        const long h = std::max<long>(content->height_at(w), client.bottom);
+        const long h = std::max<long>(measured_height(content, w), client.bottom);
         SCROLLINFO si{sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, int(h - 1), UINT(client.bottom), 0, 0};
         y_ = std::clamp(y_, 0L, std::max(0L, h - client.bottom));
         si.nPos = int(y_);
@@ -10762,6 +12063,7 @@ private:
         if (!last && (now.right != client.right || now.bottom != client.bottom)) return false;
         move_pane_window(panel_, -x_, -y_, w, h);
         content->place({0, 0, w, h});
+        if (placing_stopped()) return true;
         content_w_ = w, content_h_ = h;
         return true;
     }
@@ -10793,6 +12095,7 @@ private:
         case WM_SIZE:
         {
             trace::scope timing(trace::phase::window_size, uintptr_t(host_));
+            placing_scope placing(win_);  // sized by a window's layout or not
             layout_content();
             return 0;
         }
@@ -10835,6 +12138,7 @@ private:
     long x_ = 0, y_ = 0;
     long content_w_ = 0, content_h_ = 0;
     bool laying_out_ = false, again_ = false;
+    unsigned loop_depth_ = 0;  // its content loops under way (counted, for tests)
     bool laid_out_ = false;  // by the host's WM_SIZE, in place()
 };
 
@@ -10999,10 +12303,14 @@ public:
     }
     void focus() override
     {
-        auto* p = pages_.shown_entry();
-        if (!p) return;
-        HWND root = GetAncestor(p->page->host, GA_ROOT);
-        focus_page(*p->page, IsWindowVisible(root) ? focus_at::window : focus_at::pending);
+        win_.focus_now_or_after(alive_,
+                                [this]
+                                {
+                                    auto* p = pages_.shown_entry();
+                                    if (!p) return;
+                                    focus_page(*p->page,
+                                               win_.shown() ? focus_at::window : focus_at::pending);
+                                });
     }
     bool has_focus() const override
     {
@@ -11021,7 +12329,7 @@ public:
         for (size_t i = 0; i < pages_.size(); ++i)
         {
             if (!counts(i)) continue;
-            const SIZE s = pages_[i].page->content->natural();
+            const SIZE s = measured_size(pages_[i].page->content);
             n.cx = std::max(n.cx, s.cx);
             n.cy = std::max(n.cy, s.cy);
         }
@@ -11031,7 +12339,7 @@ public:
     {
         long h = 0;
         for (size_t i = 0; i < pages_.size(); ++i)
-            if (counts(i)) h = std::max(h, pages_[i].page->content->height_at(width));
+            if (counts(i)) h = std::max(h, measured_height(pages_[i].page->content, width));
         return h;
     }
     void place(RECT r) override
@@ -11088,16 +12396,22 @@ private:
     // page it replaced.
     void bring_in(focus_at had)
     {
-        win_.relayout_at_once();
-        win_.flush_layout();
+        if (!win_.relayout_at_once() || !win_.flush_layout()) return;
         if (had == focus_at::none) return;
-        HWND root = GetAncestor(parent_, GA_ROOT);
-        if (auto* p = pages_.shown_entry())
-            focus_page(*p->page, had);
-        else if (had == focus_at::window)
-            SetFocus(root);  // nowhere left in the stack
-        else
-            RemovePropW(root, L"rapport-focus");
+        // Into the page once it's laid out (after a layout under way): a
+        // focus request as an explicit one is (focus_now_or_after), so the
+        // latest of them is made, of either kind (#108).
+        win_.focus_now_or_after(alive_,
+                                [this, had]
+                                {
+                                    HWND root = GetAncestor(parent_, GA_ROOT);
+                                    if (auto* p = pages_.shown_entry())
+                                        focus_page(*p->page, had);
+                                    else if (had == focus_at::window)
+                                        SetFocus(root);  // nowhere left in the stack
+                                    else
+                                        RemovePropW(root, L"rapport-focus");
+                                });
     }
     // Where the focus was in the page, else its first control.
     void focus_page(page_parts& p, focus_at how)
@@ -11114,6 +12428,7 @@ private:
 
     win_context& win_;
     HWND parent_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);  // for what runs after a layout (after_layout_or_now)
     bool homogeneous_;
     // Before the pages: destroyed with the window, the pages go first.
     stack_pages::graveyard<page_ptr> grave_;
@@ -11380,6 +12695,14 @@ private:
 // (window::resize), it then shows whole as the window does, and in the
 // moment before, the window still the old size, what the new frame doesn't
 // cover is the old one rather than a cleared band.
+//
+// In a fullscreen window (compose) the swap chain's alpha is premultiplied:
+// one that covers the monitor, opaque, is otherwise taken out of the DWM's
+// composition (direct or independent flip, or an overlay plane), and the
+// display then follows the canvas's presents, which stop when nothing
+// changes; some panels flicker as they do (#121). With per-pixel alpha it
+// stays a visual the DWM blends with what's under it. What's shown is still
+// opaque: the buffer's cleared to opaque black before the frame's drawn in.
 class gpu_target
 {
 public:
@@ -11391,19 +12714,11 @@ public:
         target_->SetRoot(nullptr);
         dev_->dcomp->Commit();
     }
-    static std::unique_ptr<gpu_target> make(std::shared_ptr<gpu_shared> dev, HWND h, UINT w, UINT hgt)
+    static std::unique_ptr<gpu_target> make(std::shared_ptr<gpu_shared> dev, HWND h, UINT w, UINT hgt, bool composed)
     {
         auto t = std::unique_ptr<gpu_target>(new gpu_target(std::move(dev)));
-        DXGI_SWAP_CHAIN_DESC1 desc{};
-        desc.Width = w;
-        desc.Height = hgt;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        desc.BufferCount = 2;
-        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-        if (FAILED(t->dev_->dxgi->CreateSwapChainForComposition(t->dev_->d3d.get(), &desc, nullptr, t->swap_.put())) ||
+        t->composed_ = composed;
+        if (!t->make_swap(w, hgt, t->swap_) ||
             FAILED(t->dev_->dcomp->CreateTargetForHwnd(h, TRUE, t->target_.put())) ||
             FAILED(t->dev_->dcomp->CreateVisual(t->visual_.put())) ||
             FAILED(t->visual_->SetContent(t->swap_.get())) ||
@@ -11415,6 +12730,27 @@ public:
         return t;
     }
     const std::shared_ptr<gpu_shared>& device() const { return dev_; }
+    DXGI_ALPHA_MODE alpha_mode() const
+    {
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        return SUCCEEDED(swap_->GetDesc1(&desc)) ? desc.AlphaMode : DXGI_ALPHA_MODE_UNSPECIFIED;
+    }
+    // Kept composed or not (see above): a new swap chain when that changes,
+    // once per change, shown with the next frame (the kept frame's kept).
+    // False when the device is lost.
+    bool compose(bool on)
+    {
+        if (on == composed_) return true;
+        composed_ = on;
+        com<IDXGISwapChain1> next;
+        if (!make_swap(w_, h_, next)) return false;
+        dc_->SetTarget(nullptr);
+        back_.reset();
+        if (FAILED(visual_->SetContent(next.get()))) return false;
+        swap_ = std::move(next);
+        committed_ = false;  // in the window with its first frame (end)
+        return bind();
+    }
     // Drawing for a canvas of w x h: the buffers grow to hold it, and never
     // shrink (what's past the canvas is the last frame's, cut off by the
     // window). The drawing is cut to w x h.
@@ -11446,6 +12782,8 @@ public:
         dc_->BeginDraw();
         dc_->SetDpi(96, 96);
         dc_->SetTransform(D2D1::Matrix3x2F::Identity());
+        // Opaque whatever the kept frame's alpha holds: the DWM blends this one.
+        if (composed_) dc_->Clear(D2D1::ColorF(0, 0, 0, 1));
         dc_->DrawBitmap(kept_.get(), D2D1::RectF(0, 0, float(w_), float(h_)), 1, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
                         nullptr, nullptr);
         if (dc_->EndDraw() == D2DERR_RECREATE_TARGET) return false;
@@ -11465,13 +12803,27 @@ private:
         : dev_(std::move(dev))
     {
     }
+    bool make_swap(UINT w, UINT h, com<IDXGISwapChain1>& swap)
+    {
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        desc.Width = w;
+        desc.Height = h;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = 2;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        desc.AlphaMode = composed_ ? DXGI_ALPHA_MODE_PREMULTIPLIED : DXGI_ALPHA_MODE_IGNORE;
+        return SUCCEEDED(dev_->dxgi->CreateSwapChainForComposition(dev_->d3d.get(), &desc, nullptr, swap.put()));
+    }
     bool bind()
     {
         com<IDXGISurface> surface;
         com<ID2D1Bitmap1> bitmap;
         const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
             D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                              composed_ ? D2D1_ALPHA_MODE_PREMULTIPLIED : D2D1_ALPHA_MODE_IGNORE));
         if (FAILED(swap_->GetBuffer(0, __uuidof(IDXGISurface), reinterpret_cast<void**>(surface.put()))) ||
             FAILED(dc_->CreateBitmapFromDxgiSurface(surface.get(), &props, bitmap.put())))
             return false;
@@ -11504,6 +12856,7 @@ private:
     com<ID2D1Bitmap1> kept_;  // the frame, kept between frames
     UINT w_ = 0, h_ = 0;
     bool committed_ = false;
+    bool composed_ = false;  // premultiplied alpha: kept composed (fullscreen)
 };
 
 class canvas_impl : public leaf<rap::canvas>
@@ -11544,9 +12897,11 @@ public:
     }
 
     void invalidate() override { InvalidateRect(h_, nullptr, FALSE); }
+    // Its swap chain's DXGI_ALPHA_MODE, or -1 while it's on the CPU (tests).
+    int swap_alpha_mode() const { return gpu_ ? int(gpu_->alpha_mode()) : -1; }
     size_f size() const override
     {
-        win_.flush_layout();
+        if (!win_.flush_layout()) return {};  // the window went (gone with it)
         const SIZE px = pixels();
         const float s = win_.scale();
         return {px.cx / s, px.cy / s};
@@ -11562,12 +12917,16 @@ public:
             return;
         }
         ahead_.reset();
-        leaf::place(r);
+        const std::shared_ptr<bool> alive = alive_;
+        leaf::place(
+            r);  // moved now (outside a layout's batch), its WM_SIZE tells the app, which may drop it
+        if (!*alive) return;
         if (placed_at(h_, r.left, r.top, r.right - r.left, r.bottom - r.top)) sized();  // not moved after all
     }
     float device_scale() const override { return win_.scale(); }
     void set_cursor(cursor c) override
     {
+        if (c == cursor_) return;  // (#88)
         cursor_ = c;
         POINT pt;
         GetCursorPos(&pt);
@@ -11911,13 +13270,26 @@ private:
         return {r.right, r.bottom};
     }
     // The app hears of a size once, whether ahead of the window or as it comes.
+    // Its on_resize may drop the window, and this canvas with it (#108):
+    // then nothing more of it. The handler's a copy, which outlives the
+    // canvas's own while it runs.
     void sized()
     {
         const SIZE px = pixels();
         if (px.cx == told_.cx && px.cy == told_.cy) return;
         told_ = px;
-        if (resize_) resize_(size());
-        if (frame_target_) frame_target_(target());
+        const std::shared_ptr<bool> alive = alive_;
+        if (resize_)
+        {
+            const auto resize = resize_;
+            resize(size());
+            if (!*alive) return;
+        }
+        if (frame_target_)
+        {
+            const auto tell = frame_target_;  // which may drop it too
+            tell(target());
+        }
     }
 
     // On the GPU's device when there is one (see gpu), on the CPU until then.
@@ -11931,7 +13303,7 @@ private:
         const std::shared_ptr<gpu_shared> dev = gpu::device(painted_);
         if (gpu_ && gpu_->device() != dev) gpu_.reset();  // lost, by another canvas
         if (gpu_frame_ && gpu_frame_->device != dev) drop_gpu_frame();
-        if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h)))
+        if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h, win_.keep_composed())))
             drop_cpu();
         if (gpu_)
         {
@@ -11945,7 +13317,7 @@ private:
                                                       reinterpret_cast<void**>(context4.put()))))
                     context4->Wait(gpu_frame_->fence.get(), gpu_frame_->fence_value);
             }
-            if (ID2D1DeviceContext* dc = gpu_->begin(w, h))
+            if (ID2D1DeviceContext* dc = gpu_->compose(win_.keep_composed()) ? gpu_->begin(w, h) : nullptr)
             {
                 draw(dc, dev->key, dc);
                 if (gpu_->end())
@@ -12502,19 +13874,46 @@ public:
     // With drawing off, the old page goes and the new one comes (through
     // the style bit, silently) and everything then paints in one pass,
     // rather than control by control across several frames.
-    void relayout_at_once() override
+    bool relayout_at_once() override
     {
+        if (in_layout)
+        {
+            // After the one under way, as it would have been now: measured
+            // anew, the window grown to its content and redrawn if it's
+            // shown, as decided now, or as the at-once under way decided
+            // before it turned drawing off (WM_SETREDRAW FALSE hides it).
+            at_once_pending_ = true;
+            at_once_grow_ = at_once_grow_ || shown();
+            if (!shown()) grow_owed_ = true;  // hidden: grown when it's next shown, as below
+            layout_dirty = true;
+            return true;
+        }
         if (!IsWindowVisible(hwnd_))
         {
+            // Grown to its content when it's next shown, as it would have
+            // been now if it showed (#108): a window comes back the same
+            // whether it was shown or not when its content changed.
+            grow_owed_ = true;
             relayout();
-            return;
+            return true;
         }
+        // Measured anew, as relayout() has it: what changed (a page shown,
+        // the strip back) may change the natural sizes, and grow_to_content
+        // and WM_GETMINMAXINFO read them.
+        ++g_layout_pass;
+        const int was_visible = std::exchange(at_once_visible, 1);  // shown: past the check above
+        const std::weak_ptr<bool> alive = layout_alive;
         SendMessageW(hwnd_, WM_SETREDRAW, FALSE, 0);
+        grow_owed_ = false;  // grown now
         grow_to_content();
+        if (alive.expired()) return false;
         layout_now();
+        if (alive.expired()) return false;
         SendMessageW(hwnd_, WM_SETREDRAW, TRUE, 0);
+        at_once_visible = was_visible;
         redraw_now(hwnd_, nullptr, nullptr,
                    RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        return !alive.expired();
     }
     // A window made smaller than content it has since gained (a page built
     // the first time it's shown) grows to fit it, as resizing would.
@@ -12523,7 +13922,7 @@ public:
         if (!root || IsZoomed(hwnd_) || IsIconic(hwnd_)) return;
         RECT c;
         GetClientRect(hwnd_, &c);
-        const SIZE n = root->natural();
+        const SIZE n = measured_size(root);
         const int m = margin();
         const long w = std::max<long>(c.right, n.cx + 2 * m),
                    h = std::max<long>(c.bottom, n.cy + 2 * m + strip_height());
@@ -12533,27 +13932,120 @@ public:
         traced_set_window_pos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
-    void layout_now()
+    // Laid out now, or, within a layout of its own (layout_scope), after it.
+    // Passes again while a layout was asked for during one (a callback
+    // resizing the window, say), up to max_layout_passes; past that, posted.
+    static constexpr unsigned max_layout_passes = 8;
+    bool draining_ = false;         // run_after_layout under way: a nested one waits
+    bool drain_posted_ = false;     // wm_rapport_after_layout on its way
+    bool at_once_pending_ = false;  // a relayout_at_once asked for within a layout
+    bool at_once_grow_ = false;     // and the window shown then: grown to its content
+    bool grow_owed_ =
+        false;  // a relayout_at_once while hidden: grown to its content when next shown
+    // `drain`: run what waited for the layout (after_layout) after it, here;
+    // only from where nothing of the window's is touched after (a message's
+    // handler, a scope's end). Otherwise it's posted (wm_rapport_after_layout).
+    void layout_now(bool drain = false)
     {
+        if (in_layout)
+        {
+            // The posted relayout, or any other, done by the pass this
+            // marks for: none left pending, so the next one asked posts.
+            relayout_pending_ = false;
+            layout_dirty = true;
+            return;
+        }
         trace::scope timing(trace::phase::layout, uintptr_t(hwnd_),
                             std::exchange(layout_cause_, 0));
         relayout_pending_ = false;
         if (!root) return;
-        place_all();
+        unsigned pass = 1;
+        bool redraw_all = false;
+        for (;; ++pass)
+        {
+            layout_dirty = false;
+            const std::weak_ptr<bool> alive = layout_alive;
+            {
+                layout_scope inside(*this, false);
+                // A relayout_at_once asked for in the pass before: what it
+                // does now (measured anew, grown to the content) done here.
+                if (std::exchange(at_once_pending_, false))
+                {
+                    ++g_layout_pass;
+                    if (std::exchange(at_once_grow_, false))
+                    {
+                        grow_owed_ = false;  // grown now
+                        grow_to_content();
+                        redraw_all = true;
+                    }
+                }
+                place_all();
+            }
+            if (alive.expired()) return;  // destroyed by what its sizes' delivery ran
+            if (!layout_dirty || !root) break;
+            if (pass == max_layout_passes)
+            {
+                ++g_layout_cap_hits;
+                layout_dirty = false;
+#ifndef NDEBUG
+                OutputDebugStringW(L"rapport: a window asked for its layout again every pass; posted\n");
+#endif
+                relayout();
+                break;
+            }
+        }
+        g_layout_passes = pass;
+        g_layout_passes_max = std::max(g_layout_passes_max, pass);
+        if (redraw_all)
+            redraw_now(hwnd_, nullptr, nullptr, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         // The toolbar band's controls on glass, once they're where they
         // went (the moves above are made as one, at the end); once more as
         // the tabs leave the caption, for their own fonts back.
         if (caption_ || glassed_) glass_band_controls(hwnd_);
         glassed_ = caption_;
+        if (drain)
+            run_after_layout();  // last: what it runs may destroy the window
+        else if (!after_layout.empty() && !drain_posted_)
+        {
+            drain_posted_ = true;
+            PostMessageW(hwnd_, wm_rapport_after_layout, 0, 0);
+        }
     }
     bool glassed_ = false;
+    void layout_settled() override
+    {
+        if (layout_dirty)
+            layout_now(true);
+        else
+            run_after_layout();
+    }
+    // What waited for the layout, first first, one at a time while none is
+    // owed (not dirty, no posted relayout: past the pass cap, the posted
+    // one): one that asks for a layout leaves the rest queued, in order, for
+    // after it. One drain at a time (a nested one waits for this one). Each
+    // may destroy the window: nothing's touched after one that did.
+    void run_after_layout()
+    {
+        if (draining_) return;
+        const std::weak_ptr<bool> alive = layout_alive;
+        draining_ = true;
+        while (!after_layout.empty() && !layout_dirty && !relayout_pending_ && !in_layout)
+        {
+            auto f = std::move(after_layout.front());
+            after_layout.erase(after_layout.begin());
+            f();
+            if (alive.expired()) return;
+        }
+        draining_ = false;
+    }
     void place_all()
     {
         sync_caption();  // first: it may change the client area
         sync_band_toolbar();
         RECT r = client();
         const int m = margin();
-        moves_in_one_pass batch(ahead_.has_value() && !grow_ahead_);
+        placing_scope placing(*this);
+        moves_in_one_pass batch(hwnd_, ahead_.has_value() && !grow_ahead_);
         // The document tabs across the top, edge to edge; the content, with
         // its margins, under them. In the caption, the strip stops at the
         // caption buttons, and the top of a window that isn't maximised is
@@ -12576,6 +14068,7 @@ public:
                 }
                 doc_tabs->set_frame(caption_, caption_ && !IsZoomed(hwnd_) ? caption_resize_band(hwnd_) : 0);
                 doc_tabs->place(strip);
+                if (placing_stopped()) return;
                 r.top += h;
             }
         }
@@ -12583,6 +14076,7 @@ public:
         InflateRect(&r, -m, -m);
         root->show_all(true);
         root->place(r);
+        if (placing_stopped()) return;
         place_band(content_top, r);
     }
 
@@ -12717,15 +14211,26 @@ public:
     int caption_height_ = 0;   // the frame extended by, as the strip was
     bool caption_hc_ = false;  // high contrast, as the frame was set for
 
-    void set_title(const std::string& t) override { SetWindowTextW(hwnd_, wide(t).c_str()); }
-    void flush_layout() override
+    void set_title(const std::string& t) override
     {
-        if (relayout_pending_) layout_now();
+        const std::wstring w = wide(t);
+        if (w == window_text(hwnd_)) return;  // (#88)
+        SetWindowTextW(hwnd_, w.c_str());
+    }
+    // Not from inside a layout (a pane told its size reading a canvas's):
+    // what's placed so far is what it gets, and the layout pending runs
+    // after this one, as posted.
+    bool flush_layout() override
+    {
+        if (!relayout_pending_ || in_layout) return true;
+        const std::weak_ptr<bool> alive = layout_alive;
+        layout_now();
+        return !alive.expired();
     }
     // The spec's size, but never smaller than the content.
     SIZE first_size()
     {
-        const SIZE n = root ? root->natural() : SIZE{200, 100};
+        const SIZE n = root ? measured_size(root) : SIZE{200, 100};
         const int m = margin();
         return {std::max<long>(n.cx + 2 * m, extent_px(hwnd_, initial_w_, false)),
                 std::max<long>(n.cy + 2 * m + strip_height(), extent_px(hwnd_, initial_h_, true))};
@@ -12745,9 +14250,11 @@ public:
     void show() override
     {
         finished_ = false;
+        const bool shown_before = shown_once_;
         if (!shown_once_)
         {
             shown_once_ = true;
+            grow_owed_ = false;  // its first size is measured from its content as it is
             // First size: one set by resize() before showing (a restored
             // size) as it is; otherwise the spec's, but never smaller than
             // the content.
@@ -12781,7 +14288,25 @@ public:
             else
                 flags |= SWP_NOMOVE;
             traced_set_window_pos(hwnd_, nullptr, x, y, r.right - r.left, r.bottom - r.top, flags);
+            const std::weak_ptr<bool> alive = layout_alive;
             layout_now();
+            if (alive.expired()) return;  // destroyed by what its sizes' delivery ran
+        }
+        else if (std::exchange(grow_owed_, false))
+        {
+            // Content changed while it was hidden (relayout_at_once): grown
+            // to it, by grow_to_content's own rules (never shrunk; not
+            // maximised or minimised), before it shows, so it doesn't jump.
+            // Measured anew first: shown from a callback within a layout of
+            // its own, the at-once's re-pass that would (at_once_pending_)
+            // hasn't run yet, and what's cached is from before the change.
+            // (Its resize there marks that layout to pass again, #106.)
+            ++g_layout_pass;
+            const std::weak_ptr<bool> alive = layout_alive;
+            grow_to_content();
+            if (alive.expired()) return;
+            layout_now();
+            if (alive.expired()) return;
         }
         if (dialog_ && parent && modal_spec_)
         {
@@ -12795,7 +14320,13 @@ public:
         // compositor's opening animation starts from the window complete,
         // not from a frame its contents fill in a moment later. (Cloaking it
         // until painted showed it complete too, but without the animation.)
-        ShowWindow(hwnd_, snapshot ? SW_SHOWNOACTIVATE : SW_SHOW);
+        // Shown before, it comes back as it was (maximised, minimised or
+        // restored): SW_SHOWNA, as SW_SHOW does with the focus left alone.
+        // SW_SHOWNOACTIVATE restores, so a maximised window hidden (close())
+        // and shown again came back restored under RAPPORT_NO_ACTIVATE, which
+        // should change only the activation. The first time, it's restored
+        // anyway, where it's been put above.
+        ShowWindow(hwnd_, !snapshot ? SW_SHOW : shown_before ? SW_SHOWNA : SW_SHOWNOACTIVATE);
         if (!painted_once_)
         {
             painted_once_ = true;
@@ -12812,7 +14343,7 @@ public:
     }
     void present() override
     {
-        if (!IsWindowVisible(hwnd_)) show();
+        if (!shown()) show();  // (shown already within a relayout_at_once, its drawing off)
         const bool quiet = std::getenv("RAPPORT_SNAPSHOT") != nullptr || std::getenv("RAPPORT_NO_ACTIVATE") != nullptr;
         // Minimised: back to its size before, maximised if it was.
         // SW_SHOWNOACTIVATE restores as SW_RESTORE does, without the focus.
@@ -12874,7 +14405,7 @@ public:
         SIZE least{px(min_size_.w), px(min_size_.h)};
         if (root)
         {
-            const SIZE n = root->natural();
+            const SIZE n = measured_size(root);
             const int m = margin();
             least.cx = std::max<LONG>(least.cx, n.cx + 2 * m);
             least.cy = std::max<LONG>(least.cy, n.cy + 2 * m + strip_height());
@@ -12896,12 +14427,16 @@ public:
         // frame at that size has their new content. Nothing ties a window's
         // resize to its content's frame: drawn after, the last frame showed
         // stretched for several refreshes.
-        const bool ahead = root && IsWindowVisible(hwnd_);
+        // (Not within a layout of its own: the window's resized, and laid out
+        // for it after that one.)
+        const bool ahead = root && IsWindowVisible(hwnd_) && !in_layout;
         if (ahead)
         {
             // First for the new size, nothing moved: canvases draw for it.
             ahead_ = r;
+            const std::weak_ptr<bool> alive = layout_alive;
             layout_now();
+            if (alive.expired()) return;  // destroyed by what its sizes' delivery ran
             redraw_now(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
             // Then its controls are moved, cut to the window as it still is,
             // for the larger of its old size and its new one each way, the
@@ -12916,11 +14451,21 @@ public:
             RECT now;
             GetClientRect(hwnd_, &now);
             grow_ahead_ = true;
-            g_canvases_quiet = true;
-            ahead_ = RECT{0, 0, std::max(r.right, now.right), std::max(r.bottom, now.bottom)};
-            layout_now();
-            redraw_now(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
-            g_canvases_quiet = false;
+            {
+                // The canvases quiet (a thread-wide flag) for this, and only
+                // this, however it ends: the window destroyed by what the
+                // layout's delivery ran leaves the next ones as they were.
+                struct quiet
+                {
+                    bool was = std::exchange(g_canvases_quiet, true);
+                    ~quiet() { g_canvases_quiet = was; }
+                } canvases;
+                ahead_ = RECT{0, 0, std::max(r.right, now.right), std::max(r.bottom, now.bottom)};
+                layout_now();
+                if (g_resize_quiet_hook_for_tests) g_resize_quiet_hook_for_tests(g_resize_quiet_hook_data);
+                if (alive.expired()) return;
+                redraw_now(hwnd_, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+            }
             ahead_.reset();
             grow_ahead_ = false;
             // And the window takes the size once the canvases' frames for it
@@ -12931,7 +14476,9 @@ public:
         adjust(r);
         RECT now;
         GetWindowRect(hwnd_, &now);
+        const std::weak_ptr<bool> alive = layout_alive;
         place_on_screen(now.left, now.top, r.right - r.left, r.bottom - r.top);
+        if (alive.expired()) return;  // destroyed by what its sizes' delivery ran
         // Laid out for the size it got: done in WM_SIZE if that changed
         // (normally to what was drawn for: nothing moves), but not if not.
         if (ahead) layout_now();
@@ -12965,7 +14512,9 @@ public:
         static dwm_get_fn dwm_get = reinterpret_cast<dwm_get_fn>(
             reinterpret_cast<void*>(GetProcAddress(LoadLibraryW(L"dwmapi.dll"), "DwmGetWindowAttribute")));
         if (dwm_get && GetWindowRect(hwnd_, &outer) &&
-            SUCCEEDED(dwm_get(hwnd_, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, &visible, sizeof visible)) && IsWindowVisible(hwnd_))
+            SUCCEEDED(
+                dwm_get(hwnd_, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, &visible, sizeof visible)) &&
+            shown())  // (a relayout_at_once's drawing off hides it from IsWindowVisible, not the screen)
             inset = RECT{visible.left - outer.left, visible.top - outer.top, outer.right - visible.right, outer.bottom - visible.bottom};
         const RECT& work = mi.rcWork;
         const auto fit = [](int pos, int size, int lo, int hi, int before, int after)
@@ -12987,6 +14536,7 @@ public:
                 (mi.rcWork.bottom - mi.rcWork.top) / s};
     }
     bool fullscreen() const override { return fullscreen_; }
+    bool keep_composed() const override { return fullscreen_; }
     // Snapped (Aero Snap) shows as a size other than the restored one.
     bool maximized() const override
     {
@@ -13027,6 +14577,9 @@ public:
                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
                                       SWP_FRAMECHANGED);
         }
+        // Every canvas drawn again, its swap chain switched (keep_composed)
+        // as it is: one the move didn't resize too.
+        RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
         if (on_fullscreen_) on_fullscreen_(on);
     }
     void on_fullscreen_changed(std::function<void(bool)> f) override { on_fullscreen_ = std::move(f); }
@@ -13071,6 +14624,7 @@ public:
     }
     void set_menu_bar_visible(bool on) override
     {
+        if (on == menu_bar_wanted_) return;  // (#88)
         menu_bar_wanted_ = on;
         if (menu_bar_ && !fullscreen_) SetMenu(hwnd_, on ? menu_bar_ : nullptr);
     }
@@ -13481,11 +15035,17 @@ private:
             case WM_SIZE:
             {
                 trace::scope timing(trace::phase::window_size, uintptr_t(h));
+                // (Sent within whatever moved the window, a resize from the
+                // app's code: what waited for the layout is posted, not run.)
                 if (self->root) self->layout_now();
                 return 0;
             }
             case wm_rapport_relayout:
-                if (self->relayout_pending_) self->layout_now();
+                if (self->relayout_pending_) self->layout_now(true);
+                return 0;
+            case wm_rapport_after_layout:
+                self->drain_posted_ = false;
+                self->run_after_layout();
                 return 0;
             case WM_GETMINMAXINFO:
             {
@@ -14257,6 +15817,7 @@ public:
         trace::install_message_hooks();
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
         set_control_style(look.controls, look.density);
+        set_content_surface(look.content_surface);
         g_app_row_height = look.row_height;
         // Per-monitor DPI awareness (v2) where the system has it.
         using fn_t = BOOL(WINAPI*)(HANDLE);
@@ -14286,16 +15847,13 @@ public:
         wc.lpszClassName = L"rapportMessages";
         RegisterClassExW(&wc);
         messages_ = make_window(0, L"rapportMessages", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance(), this);
-        g_messages = messages_;
+        gate_ = std::make_shared<post_gate>();
+        gate_->to = messages_;
+        g_post_gate = gate_;
         // Paths' own icons are found in the background (win32_shell_icons.h):
         // each found is told here, on this thread, and what paints them
         // (from what was found, never asking) paints again.
-        set_path_icon_post(
-            [messages = messages_](std::function<void()> f)
-            {
-                auto* job = new std::function<void()>(std::move(f));
-                if (!PostMessageW(messages, wm_rapport_post, 0, reinterpret_cast<LPARAM>(job))) delete job;
-            });
+        set_path_icon_post([gate = gate_](std::function<void()> f) { gate->post(std::move(f)); });
         path_repaint_ = add_path_icon_listener(
             [](const std::string&, int)
             {
@@ -14319,7 +15877,16 @@ public:
         remove_path_icon_listener(path_repaint_);
         g_frames = nullptr;
         frames_.reset();
-        g_messages = nullptr;
+        g_post_gate.reset();
+        // No more posts onto it (post_gate), then what's still posted to it
+        // destroyed here, on this (the UI) thread, not run (backend.h, post):
+        // left in the queue, a message for a window that's gone is dropped,
+        // its function never destroyed.
+        gate_->close();
+        MSG m;
+        while (PeekMessageW(&m, messages_, wm_rapport_post, wm_rapport_post, PM_REMOVE))
+            delete reinterpret_cast<std::function<void()>*>(m.lParam);
+        if (g_teardown_hook_for_tests) g_teardown_hook_for_tests(g_teardown_hook_data);
         DestroyWindow(messages_);
     }
 
@@ -14403,6 +15970,7 @@ public:
     // in every window now (before one is shown, it starts so).
     void set_color_scheme(color_scheme s) override
     {
+        if (palette::app_scheme() == palette::scheme_number(s)) return;  // (#88)
         palette::app_scheme() = palette::scheme_number(s);
         forget_theme_colors();
         apply_app_mode();
@@ -14428,10 +15996,9 @@ public:
             0);
         PostQuitMessage(code);
     }
-    void post(std::function<void()> f) override
-    {
-        PostMessageW(messages_, wm_rapport_post, 0, reinterpret_cast<LPARAM>(new std::function<void()>(std::move(f))));
-    }
+    // Not delivered (the queue full, the backend torn down): destroyed here,
+    // not run (backend.h, post_gate).
+    void post(std::function<void()> f) override { gate_->post(std::move(f)); }
 
     void message(rap::window* parent, const message_spec& m, std::function<void(dialog_role)> done) override
     {
@@ -15143,6 +16710,7 @@ private:
         bool repeat;
     };
     HWND messages_ = nullptr;
+    std::shared_ptr<post_gate> gate_;  // the way onto messages_ (post)
     size_t path_repaint_ = 0;
     std::unique_ptr<frame_clock> frames_;
     std::map<UINT_PTR, timer_entry> timers_;
@@ -15153,9 +16721,207 @@ private:
 };
 
 }  // namespace
+
+HBRUSH tab_body_brush_under(HWND control)
+{
+    return tab_body_under(control);
+}
+
+}  // namespace rap::win32
+
+// Private test seam (#119): a scroll pane's panel printed into `dc` as
+// paint_pane draws it off screen, so a never-shown window's pane copy can be
+// read. Inert unless called.
+extern "C" __declspec(dllexport) void rapport_win32_print_pane(HWND panel, HDC dc)
+{
+    rap::win32::print_pane(panel, dc);
+}
+
+// Private test seams: whether `control`'s tab body answer is cached, and
+// whether tab control `tab`'s body colour is.
+extern "C" __declspec(dllexport) int rapport_win32_tab_body_cached(HWND control)
+{
+    return rap::win32::tab_body_answers_now().count(control) ? 1 : 0;
+}
+// One lookup of `control`'s tab body, as a ground asks: 1 found, 0 not.
+extern "C" __declspec(dllexport) int rapport_win32_tab_body_lookup(HWND control)
+{
+    return rap::win32::tab_body_under(control) ? 1 : 0;
+}
+extern "C" __declspec(dllexport) int rapport_win32_tab_body_known(HWND tab)
+{
+    return rap::win32::tab_bodies().count(tab) ? 1 : 0;
+}
+// And a call from inside a tab control's WM_NCDESTROY, once it's forgotten
+// and before the rest of its teardown (what a subclass below rapport's sees).
+extern "C" __declspec(dllexport) void rapport_win32_set_tab_dying_hook(void (*hook)(HWND, void*), void* data)
+{
+    rap::win32::g_tab_dying_hook_for_tests = hook;
+    rap::win32::g_tab_dying_hook_data = data;
+}
+// The same inside a control's WM_NCDESTROY (one whose ground was looked up),
+// once its answer's dropped and before the rest of its teardown.
+extern "C" __declspec(dllexport) void rapport_win32_set_ground_dying_hook(void (*hook)(HWND, void*), void* data)
+{
+    rap::win32::g_ground_dying_hook_for_tests = hook;
+    rap::win32::g_ground_dying_hook_data = data;
+}
+
+namespace rap::win32
+{
+
+unsigned layout_depth_max_for_tests(bool reset)
+{
+    const unsigned was = g_layout_depth_max;
+    if (reset) g_layout_depth_max = 0;
+    return was;
+}
+unsigned layout_passes_for_tests()
+{
+    return g_layout_passes;
+}
+// A producer of the backend's own kind, as a path icon finder is: it holds
+// the backend's way onto its message window, which outlives the backend
+// (nullptr: no backend). Only C types cross the seam: what's posted is the
+// caller's fn and ctx, wrapped here, and the producer is freed here too.
+struct post_producer
+{
+    std::shared_ptr<post_gate> gate;
+};
+void* post_producer_acquire_for_tests()
+{
+    std::shared_ptr<post_gate> gate = g_post_gate;
+    return gate ? new post_producer{std::move(gate)} : nullptr;
+}
+// fn(ctx) on the UI thread once delivered; drop(ctx), never fn, if the post
+// is destroyed undelivered (refused at once, or still queued at teardown).
+void post_producer_post_for_tests(void* producer, void (*fn)(void*), void (*drop)(void*), void* ctx)
+{
+    struct c_post
+    {
+        void (*fn)(void*);
+        void (*drop)(void*);
+        void* ctx;
+        bool ran = false;
+        ~c_post()
+        {
+            if (!ran && drop) drop(ctx);
+        }
+    };
+    auto p = std::make_shared<c_post>(fn, drop, ctx);
+    static_cast<post_producer*>(producer)->gate->post(
+        [p]
+        {
+            p->ran = true;
+            if (p->fn) p->fn(p->ctx);
+        });
+}
+void post_producer_release_for_tests(void* producer)
+{
+    delete static_cast<post_producer*>(producer);
+}
+void set_teardown_hook_for_tests(void (*hook)(void*), void* data)
+{
+    g_teardown_hook_for_tests = hook;
+    g_teardown_hook_data = data;
+}
+void layout_limits_for_tests(bool reset, unsigned* passes_max, unsigned* cap_hits)
+{
+    if (passes_max) *passes_max = g_layout_passes_max;
+    if (cap_hits) *cap_hits = g_layout_cap_hits;
+    if (reset) g_layout_passes_max = g_layout_cap_hits = 0;
+}
+void scroll_loop_stats_for_tests(bool reset, unsigned* deepest, unsigned* layouts_in_standalone)
+{
+    if (deepest) *deepest = g_scroll_loops_max;
+    if (layouts_in_standalone) *layouts_in_standalone = g_layouts_in_standalone_scroll_loop;
+    if (reset) g_scroll_loops_max = g_layouts_in_standalone_scroll_loop = 0;
+}
+int canvas_alpha_mode_for_tests(HWND canvas)
+{
+    wchar_t cls[32]{};
+    GetClassNameW(canvas, cls, 32);
+    if (std::wcscmp(cls, L"rapportCanvas")) return -2;
+    auto* c = reinterpret_cast<canvas_impl*>(GetWindowLongPtrW(canvas, GWLP_USERDATA));
+    return c ? c->swap_alpha_mode() : -2;
+}
+
 }  // namespace rap::win32
 
 RAPPORT_BACKEND_ENTRY(win32, rap::win32::win32_backend)
+
+// Private test seams, exported so a plugin build's tests (the asan job's)
+// find them too: the deepest a window's layouts have nested (1: never
+// within another; `reset` nonzero starts again), and how many passes the
+// last layout_now made.
+extern "C" __declspec(dllexport) unsigned rapport_win32_layout_depth_max(int reset)
+{
+    return rap::win32::layout_depth_max_for_tests(reset != 0);
+}
+extern "C" __declspec(dllexport) unsigned rapport_win32_layout_passes()
+{
+    return rap::win32::layout_passes_for_tests();
+}
+// Private test seams, as those above: the most passes any layout_now made
+// and how many hit max_layout_passes; the deepest any one scroll pane's
+// content loop nested, and how many layouts of a window began within a
+// scroll loop of that window begun outside any layout of it. Each since the
+// last call with `reset` nonzero.
+// Private test seam, as those above: `hook` called as a backend's torn
+// down, after what was posted to it and still queued is taken out, before
+// its message window goes (nullptr: none). Nothing calls it but tests.
+extern "C" __declspec(dllexport) void rapport_win32_set_teardown_hook(void (*hook)(void*),
+                                                                      void* data)
+{
+    rap::win32::set_teardown_hook_for_tests(hook, data);
+}
+// Private test seams, as those above: a producer posting to the backend as
+// its own path icon finders do, outliving it; only C types cross. acquire
+// gives an opaque producer (nullptr with no backend), safe to post through
+// after the backend's gone; post has fn(ctx) run on the UI thread once
+// delivered, or drop(ctx), never fn, if the post is destroyed undelivered;
+// release frees the producer. Allocated and freed on the backend's side
+// alone; the backend's module is never unloaded once loaded (ui::load).
+extern "C" __declspec(dllexport) void* rapport_win32_post_producer_acquire()
+{
+    return rap::win32::post_producer_acquire_for_tests();
+}
+extern "C" __declspec(dllexport) void rapport_win32_post_producer_post(void* producer,
+                                                                       void (*fn)(void*),
+                                                                       void (*drop)(void*),
+                                                                       void* ctx)
+{
+    rap::win32::post_producer_post_for_tests(producer, fn, drop, ctx);
+}
+extern "C" __declspec(dllexport) void rapport_win32_post_producer_release(void* producer)
+{
+    rap::win32::post_producer_release_for_tests(producer);
+}
+extern "C" __declspec(dllexport) void rapport_win32_layout_limits(int reset, unsigned* passes_max,
+                                                                  unsigned* cap_hits)
+{
+    rap::win32::layout_limits_for_tests(reset != 0, passes_max, cap_hits);
+}
+extern "C" __declspec(dllexport) void rapport_win32_scroll_loop_stats(
+    int reset, unsigned* deepest, unsigned* layouts_in_standalone)
+{
+    rap::win32::scroll_loop_stats_for_tests(reset != 0, deepest, layouts_in_standalone);
+}
+// Private test seam, as those above: a canvas window's swap chain's
+// DXGI_ALPHA_MODE, -1 while it draws on the CPU, -2 if it's not a canvas.
+extern "C" __declspec(dllexport) int rapport_win32_canvas_alpha_mode(HWND canvas)
+{
+    return rap::win32::canvas_alpha_mode_for_tests(canvas);
+}
+// Private test seam, as those above and rapport_win32_trace_splitter_bar
+// (exported in every build, for tests only, no app's to call): a call as
+// window::resize's quiet ahead layout ends. Inert by default: unset (null),
+// resize only checks it.
+extern "C" __declspec(dllexport) void rapport_win32_set_resize_quiet_hook(void (*hook)(void*), void* data)
+{
+    rap::win32::g_resize_quiet_hook_for_tests = hook;
+    rap::win32::g_resize_quiet_hook_data = data;
+}
 
 // Private harness lookup: the caller keeps the splitter alive and drives input on its UI thread.
 extern "C" __declspec(dllexport) void* rapport_win32_trace_splitter_bar(rap::splitter* splitter,

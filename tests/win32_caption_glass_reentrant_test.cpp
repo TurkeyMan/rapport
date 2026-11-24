@@ -22,6 +22,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <commctrl.h>
 
 #include <cstdio>
@@ -106,7 +107,7 @@ int main(int argc, char** argv)
                           .base_surface()
                           .tabs(document_tabs{{{"a", "Alpha", {}, {}}}}));
     w->resize({900, 300});
-    HWND top = FindWindowW(nullptr, L"Caption glass, reentrant");
+    HWND top = test_window(L"Caption glass, reentrant");
     HWND slider = top ? FindWindowExW(top, nullptr, TRACKBAR_CLASSW, nullptr) : nullptr;
     expect(top && slider, "the window, never shown, and its slider in the band");
     if (!slider) return 1;
@@ -153,7 +154,7 @@ int main(int argc, char** argv)
                                    .base_surface()
                                    .tabs(document_tabs{{{"a", "Alpha", {}, {}}}}));
         v->resize({900, 300});
-        HWND top2 = FindWindowW(nullptr, L"Caption glass, laid out going");
+        HWND top2 = test_window(L"Caption glass, laid out going");
         HWND strip = top2 ? FindWindowExW(top2, nullptr, L"rapportCaptionTabs", nullptr) : nullptr;
         expect(top2 && strip, "a second window, never shown, its tabs in the caption");
         if (strip)

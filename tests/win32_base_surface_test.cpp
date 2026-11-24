@@ -1,5 +1,6 @@
-// A base surface window (window_spec::base_surface) is painted in the base
-// colour wherever its background shows, on Windows 11: the window's and its
+// A base surface window (window_spec::base_surface) is painted in its
+// content's colour wherever its background shows, on Windows 11 (WinUI's
+// layer, as its controls are fluent: win32-content-surface has the rest): the window's and its
 // containers' own, labels', check boxes', sliders' and the toolbar's, inside
 // a group box, on a tab page, and on a scroll pane after layout passes have
 // resized it (its content drawn off screen, paint_pane). Before Windows 11,
@@ -9,6 +10,7 @@
 // print whose clip leaves out its body's centre too.
 #include <rapport/rapport.h>
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <cstdio>
@@ -125,6 +127,19 @@ void expect_colour(const pixels& from, RECT r, DWORD want, const char* what)
     ++failures;
 }
 
+// Some of `r` not `background`: a label's text drawn, not only its
+// background (a page covered by its tab's body has no text at all, #119).
+void expect_text(const pixels& from, RECT r, DWORD background, const char* what)
+{
+    IntersectRect(&r, &r, &from.area);
+    size_t ink = 0;
+    for (int y = r.top; y < r.bottom; ++y)
+        for (int x = r.left; x < r.right; ++x) ink += from.at(x, y) != background;
+    if (ink >= 10) return;
+    std::fprintf(stderr, "failed: %s has no text (%zu pixels not %06lx)\n", what, ink, background);
+    ++failures;
+}
+
 // The shown window of class `cls` with text `text` (any, if null), after
 // skipping `skip` of them.
 HWND find(HWND root, const wchar_t* cls, const wchar_t* text, int skip = 0)
@@ -223,9 +238,11 @@ int main(int argc, char** argv)
     const bool hc = high_contrast();
     const bool dark = !hc && build >= 17763 && (!theme || std::strcmp(theme, "light"));
     const bool base = build >= 22000;
-    // Explorer's dark surfaces (backends/common/theme_palette.h), else the
-    // system colours.
-    const DWORD surface = base ? (dark ? 0x191919 : rgb(GetSysColor(COLOR_WINDOW)))
+    // A base surface's content on WinUI's layer, as the app's controls are
+    // fluent (look_options::content_surface automatic, #96); Explorer's dark
+    // window colour (backends/common/theme_palette.h), else the system
+    // colours, without one; high contrast's system colours.
+    const DWORD surface = base ? (hc ? rgb(GetSysColor(COLOR_WINDOW)) : dark ? 0x282828 : 0xF9F9F9)
                                : (dark ? 0x202020 : rgb(GetSysColor(COLOR_BTNFACE)));
     std::printf("build %lu, %s%s: surface %06lx\n", build, hc ? "high contrast" : dark ? "dark" : "light",
                 base ? ", base surface" : "", surface);
@@ -244,7 +261,7 @@ int main(int argc, char** argv)
         }}.stretch(),
     }}}.base_surface().size(480_px, 720_px));
     win->show();
-    HWND root = FindWindowW(nullptr, L"Rapport base surface");
+    HWND root = test_window(L"Rapport base surface");
     if (!root) return 2;
     // On the desktop (a CI machine's is small, and pixels off it can't be
     // read), or at RAPPORT_TEST_AT=x,y (away from someone's work); in front.
@@ -360,6 +377,7 @@ int main(int argc, char** argv)
     const DWORD page = base || dark ? surface : commonest(shot, body);
     expect_colour(shot, body, page, "a tab page");
     expect_colour(shot, rect_of(on_tab), page, "a label on a tab page");
+    expect_text(shot, rect_of(on_tab), page, "a label on a tab page");
     expect_colour(shot, rect_of(tab_check), page, "a check box on a tab page");
     expect_colour(shot, rect_of(tab_slider), page, "a slider on a tab page");
 
@@ -386,6 +404,7 @@ int main(int argc, char** argv)
     const DWORD pane_page = base || dark ? surface : commonest(shot, pane_body);
     expect_colour(shot, pane_body, pane_page, "a tab page on a scroll pane");
     expect_colour(shot, rect_of(on_pane_tab), pane_page, "a label on a tab page on a scroll pane");
+    expect_text(shot, rect_of(on_pane_tab), pane_page, "a label on a tab page on a scroll pane");
 
     // Each printed: whole, and through a clip of a strip down the body's
     // left that leaves out its centre (where its colour is read).

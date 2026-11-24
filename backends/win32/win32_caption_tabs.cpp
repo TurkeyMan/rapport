@@ -99,7 +99,8 @@ int line_px(UINT dpi)
 // high contrast's window colour there. The current tab is the colour of
 // what's under the strip, so the two are one: the toolbar band's fill where
 // the window has one (win32_caption_tabs.h), translucent as it is, else the
-// window's surface (its base colour on a base surface), opaque; in high
+// window's content (content_color_of: WinUI's layer or the base colour on
+// a base surface), opaque; in high
 // contrast it's the selection.
 // Its text, line and buttons are WinUI's (winui::chrome_palette), the line
 // drawn opaque, as over the band; high contrast's are the system's.
@@ -127,8 +128,7 @@ bool in_band_window(HWND h, color& fill)
 strip_colors colors_for(HWND h, bool transparent)
 {
     strip_colors c;
-    const theme_color surface = surface_of(h);
-    c.band = theme_color_of(surface);
+    c.band = content_color_of(h);
     c.hover = theme_color_of(theme_color::hover);
     c.pressed = theme_color_of(theme_color::pressed);
     if (high_contrast())
@@ -1991,7 +1991,7 @@ bool toolbar_band(HWND top, RECT& band)
 // strip's line's colour); high contrast's window and divider.
 toolbar_band_colors band_colors(HWND top)
 {
-    const color surface = theme_color_of(surface_of(top));
+    const color surface = content_color_of(top);
     if (high_contrast()) return {surface, surface, theme_color_of(theme_color::divider)};
     const winui::chrome_palette& p = dark_mode() ? winui::dark : winui::light;
     return {p.layer_on_mica_base_alt_default, p.layer_on_mica_base_alt_tertiary, winui::over(p.stroke, surface)};

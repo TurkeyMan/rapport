@@ -22,6 +22,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 
@@ -120,7 +121,7 @@ int px(float logical, UINT dpi)
 
 HWND top_of(const std::string& title)
 {
-    return FindWindowW(nullptr, std::wstring(title.begin(), title.end()).c_str());
+    return test_window(std::wstring(title.begin(), title.end()).c_str());
 }
 
 // The window's controls of class `cls`, left to right (each row of the

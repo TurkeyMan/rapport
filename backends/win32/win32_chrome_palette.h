@@ -89,4 +89,11 @@ inline constexpr chrome_palette dark{argb(0xFFFFFFFF), argb(0xC5FFFFFF), argb(0x
                                      argb(0x0FFFFFFF), argb(0x0AFFFFFF), argb(0x0FFFFFFF),
                                      argb(0x733A3A3A),   argb(0xFF2C2C2C), argb(0x15FFFFFF)};
 
+// WinUI's layer, opaque: LayerFillColorDefault over
+// SolidBackgroundFillColorBase, what WinUI's apps put their controls on
+// (look_options::content_surface). Light #80FFFFFF over #F3F3F3, #F9F9F9;
+// dark #4C3A3A3A over #202020, #282828.
+inline constexpr color layer_light = over(argb(0x80FFFFFF), argb(0xFFF3F3F3));
+inline constexpr color layer_dark = over(argb(0x4C3A3A3A), argb(0xFF202020));
+
 }  // namespace rap::win32::winui

@@ -161,6 +161,15 @@ namespace
 
 // -- widgets ------------------------------------------------------------------
 
+// Two icons the same, for a setter given the one it has (#88): their names,
+// files and paths, where neither is drawn (drawings can't be compared, so
+// a drawn one is always set anew).
+bool same_icon(const icon& a, const icon& b)
+{
+    return !a.draw && !b.draw && !a.overlay && !b.overlay && a.name == b.name && a.file == b.file &&
+           a.path == b.path;
+}
+
 // A container (box, form, group, toolbar) as a plain Widget, for handles.
 class plain_impl : public widget_base<rap::widget>
 {
@@ -174,6 +183,7 @@ public:
     explicit label_impl(const spec::label& s)
         : widget_base(gtk_label_new(s.text.c_str()))
     {
+        if (!s.link) text_ = s.text;
         gtk_label_set_xalign(GTK_LABEL(w_), 0);
         gtk_label_set_selectable(GTK_LABEL(w_), s.selectable);
         if (s.ellipsize) gtk_label_set_ellipsize(GTK_LABEL(w_), PANGO_ELLIPSIZE_END);
@@ -203,8 +213,11 @@ public:
         if (s.icon) add_icon(s.icon);
     }
 
+    // The text it has: nothing (#88).
     void set_text(const std::string& t) override
     {
+        if (text_ == t) return;
+        text_ = t;
         if (!link_) return gtk_label_set_text(GTK_LABEL(w_), t.c_str());
         gchar* escaped = g_markup_escape_text(t.c_str(), -1);
         gtk_label_set_markup(GTK_LABEL(w_),
@@ -218,6 +231,7 @@ private:
     void add_icon(const icon& icon);
 
     bool link_ = false;
+    std::optional<std::string> text_;  // what it shows (set_text)
     std::function<void()> on_click_;
 };
 
@@ -282,12 +296,14 @@ public:
 
     void set_text(const std::string& t) override
     {
+        if (text_ == t) return;  // (#88)
         text_ = t;
         update();
     }
     // Named or drawn: a named icon the theme lacks falls back to the drawing.
     void set_icon(const icon& icon) override
     {
+        if (icon_ && same_icon(icon_, icon)) return;  // (#88)
         icon_ = icon;
         update();
     }
@@ -448,6 +464,8 @@ public:
     }
     void set_icon(const icon& icon) override
     {
+        if (icon_ && same_icon(*icon_, icon)) return;  // (#88)
+        icon_ = icon;
         if (GtkWidget* child = icon_widget(icon, 16)) gtk_button_set_child(GTK_BUTTON(w_), child);
     }
     bool checked() const override
@@ -456,7 +474,7 @@ public:
     }
     void set_checked(bool c) override
     {
-        if (!toggle_) return;
+        if (!toggle_ || checked() == c) return;
         quiet_ = true;
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w_), c);
         quiet_ = false;
@@ -466,6 +484,7 @@ public:
 
 private:
     bool toggle_;
+    std::optional<icon> icon_;  // the one it shows (set_icon)
     bool quiet_ = false;
     std::function<void()> click_;
     std::function<void(bool)> toggled_;
@@ -491,7 +510,41 @@ public:
             this);
     }
     double value() const override { return map_.value(gtk_range_or_spin_value(this->w_)); }
+    // The value it shows: nothing (#88). A spin button shows its value only
+    // while its text says so: text typed and not yet taken (a pending edit)
+    // isn't the value, so the value is set and shown again.
     void set_value(double v) override
+    {
+        const double want = GTK_IS_SPIN_BUTTON(this->w_) ? v : map_.track(v);
+        if (gtk_range_or_spin_value(this->w_) == want && !spin_edit_pending()) return;  // (#88)
+        apply_value(v);
+    }
+    // A new range, and the value applied again in it (rule 11): the
+    // native one and value() agree whatever the range did to it.
+    void set_range(double min, double max) override
+    {
+        GtkAdjustment* adj = GTK_IS_SPIN_BUTTON(this->w_) ? gtk_spin_button_get_adjustment(GTK_SPIN_BUTTON(this->w_))
+                                                          : gtk_range_get_adjustment(GTK_RANGE(this->w_));
+        const bool spin = GTK_IS_SPIN_BUTTON(this->w_);
+        if (adj && gtk_adjustment_get_lower(adj) == (spin ? min : map_.track(min)) &&
+            gtk_adjustment_get_upper(adj) == (spin ? max : map_.track(max)))
+            return;  // (#88)
+        const double was = value();
+        quiet_ = true;
+        if (GTK_IS_SPIN_BUTTON(this->w_))
+            gtk_spin_button_set_range(GTK_SPIN_BUTTON(this->w_), min, max);
+        else
+            gtk_range_set_range(GTK_RANGE(this->w_), map_.track(min), map_.track(max));
+        quiet_ = false;
+        apply_value(std::clamp(was, std::min(min, max), std::max(min, max)));
+    }
+    void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
+
+private:
+    // The value set and shown, always (set_value's guard aside). A spin
+    // button given its own value again writes its text anew, so a pending
+    // edit gives way to it.
+    void apply_value(double v)
     {
         quiet_ = true;
         if (GTK_IS_SPIN_BUTTON(this->w_))
@@ -500,18 +553,17 @@ public:
             gtk_range_set_value(GTK_RANGE(this->w_), map_.track(v));
         quiet_ = false;
     }
-    void set_range(double min, double max) override
+    // A spin button's text isn't its value as shown (typed, not taken).
+    bool spin_edit_pending() const
     {
-        quiet_ = true;
-        if (GTK_IS_SPIN_BUTTON(this->w_))
-            gtk_spin_button_set_range(GTK_SPIN_BUTTON(this->w_), min, max);
-        else
-            gtk_range_set_range(GTK_RANGE(this->w_), map_.track(min), map_.track(max));
-        quiet_ = false;
+        if (!GTK_IS_SPIN_BUTTON(this->w_)) return false;
+        auto* spin = GTK_SPIN_BUTTON(this->w_);
+        gchar* shown = g_strdup_printf("%0.*f", int(gtk_spin_button_get_digits(spin)),
+                                       gtk_spin_button_get_value(spin));
+        const bool pending = std::string(gtk_editable_get_text(GTK_EDITABLE(spin))) != shown;
+        g_free(shown);
+        return pending;
     }
-    void on_changed(std::function<void(double)> f) override { changed_ = std::move(f); }
-
-private:
     static double gtk_range_or_spin_value(GtkWidget* w)
     {
         return GTK_IS_SPIN_BUTTON(w) ? gtk_spin_button_get_value(GTK_SPIN_BUTTON(w))
@@ -545,6 +597,7 @@ public:
     }
     void set_marks(std::vector<std::pair<double, std::string>> marks) override
     {
+        if (marks == marks_) return;  // (#88)
         marks_ = std::move(marks);
         set_scale_marks(GTK_SCALE(w_), map_, marks_);
     }
@@ -579,6 +632,8 @@ public:
     }
     void set_color(rap::color c) override
     {
+        const rap::color now = color();
+        if (now.r == c.r && now.g == c.g && now.b == c.b && now.a == c.a) return;  // (#88)
         const GdkRGBA rgba{c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
         gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(w_), &rgba);
     }
@@ -626,6 +681,7 @@ public:
 
     void set_state(check_state s) override
     {
+        if (state() == s) return;  // (#88)
         auto* b = GTK_CHECK_BUTTON(w_);
         updating_ = true;
         gtk_check_button_set_inconsistent(b, s == check_state::indeterminate);
@@ -779,24 +835,32 @@ public:
 
     void set_text(const std::string& t) override
     {
+        if (shown_ && text_ == t) return;  // (#88)
+        shown_ = true;
         text_ = t;
         if (icon_)
-            set_icon(icon_);
+            show_icon();
         else
             gtk_menu_button_set_label(GTK_MENU_BUTTON(w_), t.c_str());
     }
     void set_icon(const icon& icon) override
     {
+        if (icon_ && same_icon(icon_, icon)) return;  // (#88)
         icon_ = icon;
-        // Its own child for the icon; the arrow stays, as for a text one.
-        gtk_menu_button_set_child(GTK_MENU_BUTTON(w_), icon_and_text(icon_, text_));
-        gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(w_), true);
+        show_icon();
     }
     void set_pushed(bool) override {}
     void on_menu(std::function<menu()> f) override { menu_fn_ = std::move(f); }
 
 private:
+    // Its own child for the icon; the arrow stays, as for a text one.
+    void show_icon()
+    {
+        gtk_menu_button_set_child(GTK_MENU_BUTTON(w_), icon_and_text(icon_, text_));
+        gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(w_), true);
+    }
     std::string text_;
+    bool shown_ = false;  // text_ set (set_text)
     icon icon_;
     std::function<menu()> menu_fn_;
     menu_actions actions_;
@@ -811,11 +875,22 @@ public:
         gtk_widget_set_valign(w_, GTK_ALIGN_CENTER);
     }
 
+    // The fraction it shows: nothing (#88). Not while it's pulsing: a
+    // fraction set then (the one it had, even) shows it again, stopping.
     void set_fraction(float f) override
     {
-        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w_), std::clamp(f, 0.f, 1.f));
+        const double want = std::clamp(f, 0.f, 1.f);
+        if (!pulsing_ && gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(w_)) == want) return;  // (#88)
+        pulsing_ = false;
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w_), want);
     }
-    void pulse() override { gtk_progress_bar_pulse(GTK_PROGRESS_BAR(w_)); }
+    void pulse() override
+    {
+        pulsing_ = true;
+        gtk_progress_bar_pulse(GTK_PROGRESS_BAR(w_));
+    }
+private:
+    bool pulsing_ = false;  // pulse() since the last set_fraction
 };
 
 // A menu button showing the date, with a calendar in its popover.
@@ -1216,6 +1291,11 @@ public:
             if (GtkTreeListRow* row = gtk_tree_list_model_get_row(model_, *pos))
             {
                 // Asks wait until GTK's finished: a handler may destroy the tree.
+                if (bool(gtk_tree_list_row_get_expanded(row)) == open)  // (#88)
+                {
+                    g_object_unref(row);
+                    return;
+                }
                 lazy_tree::tracker::batch b(lazy_);
                 gtk_tree_list_row_set_expanded(row, open);
                 g_object_unref(row);
@@ -1228,7 +1308,7 @@ public:
     void set_check(const std::string& id, check_state st) override
     {
         const auto it = nodes_.find(id);
-        if (it == nodes_.end() || !it->second.check) return;
+        if (it == nodes_.end() || !it->second.check || *it->second.check == st) return;  // (#88)
         it->second.check = st;
         // The row showing it, if one is.
         for (GtkWidget* b : boxes_)
@@ -1722,6 +1802,8 @@ public:
     rap::date date() const override { return date_; }
     void set_date(rap::date d) override
     {
+        if (date_set_ && date_ == d) return;  // (#88)
+        date_set_ = true;
         date_ = d;
         updating_ = true;
         GDateTime* dt = g_date_time_new_local(d.year, d.month, d.day, 0, 0, 0);
@@ -1748,6 +1830,7 @@ private:
 
     GtkWidget* calendar_;
     rap::date date_, shown_;
+    bool date_set_ = false;  // date_ shown (set_date)
     std::function<void(rap::date)> changed_;
     bool updating_ = false;
 };
@@ -1985,16 +2068,20 @@ public:
     }
     void set_icon(const icon& i) override
     {
+        if (icon_ && same_icon(icon_, i)) return;  // (#88)
         icon_ = i;
         set_image_icon(GTK_IMAGE(image_), icon_);
     }
     void set_tooltip(const std::string& t) override
     {
+        if (tooltip_ && *tooltip_ == t) return;  // (#88)
+        tooltip_ = t;
         set_entry_button_tooltip(button_, t.c_str());
     }
     // The theme's checked button; a toggle button to a screen reader.
     void set_checked(bool c) override
     {
+        if (checked_ == c) return;  // (#88)
         checked_ = c;
         if (c)
             gtk_widget_set_state_flags(button_, GTK_STATE_FLAG_CHECKED, false);
@@ -2005,7 +2092,11 @@ public:
             c ? GTK_ACCESSIBLE_TRISTATE_TRUE : GTK_ACCESSIBLE_TRISTATE_FALSE, -1);
     }
     bool checked() const override { return checked_; }
-    void set_enabled(bool e) override { gtk_widget_set_sensitive(button_, e); }
+    void set_enabled(bool e) override
+    {
+        if (bool(gtk_widget_get_sensitive(button_)) == e) return;  // (#88)
+        gtk_widget_set_sensitive(button_, e);
+    }
     void on_menu(std::function<menu()> f) override
     {
         menu_ = std::move(f);
@@ -2072,6 +2163,7 @@ private:
     GtkWidget* popover_ = nullptr;
     GtkWidget* return_to_ = nullptr;
     icon icon_;
+    std::optional<std::string> tooltip_;  // the one it has (set_tooltip)
     std::function<void()> click_;
     std::function<menu()> menu_;
     bool checked_ = false;
@@ -2139,14 +2231,26 @@ public:
     // The app's change, not the user's: on_changed isn't fired.
     void set_text(const std::string& t) override
     {
+        if (t == gtk_editable_get_text(GTK_EDITABLE(w_))) return;  // (#88)
         quiet_ = true;
         gtk_editable_set_text(GTK_EDITABLE(w_), t.c_str());
         quiet_ = false;
     }
-    void set_read_only(bool v) override { gtk_editable_set_editable(GTK_EDITABLE(w_), !v); }
-    void set_frame(bool v) override { set_entry_frame(outer_, v); }
+    void set_read_only(bool v) override
+    {
+        if (!gtk_editable_get_editable(GTK_EDITABLE(w_)) == v) return;  // (#88)
+        gtk_editable_set_editable(GTK_EDITABLE(w_), !v);
+    }
+    void set_frame(bool v) override
+    {
+        if (frame_ && *frame_ == v) return;  // (#88)
+        frame_ = v;
+        set_entry_frame(outer_, v);
+    }
     void set_placeholder(const std::string& t) override
     {
+        const char* now = gtk_text_get_placeholder_text(GTK_TEXT(w_));
+        if (t == (now ? now : "")) return;  // (#88)
         gtk_text_set_placeholder_text(GTK_TEXT(w_), t.c_str());
     }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
@@ -2164,6 +2268,7 @@ private:
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
     bool quiet_ = false;
+    std::optional<bool> frame_;  // the one it has (set_frame)
 };
 
 class entry_impl : public widget_base<rap::entry>
@@ -2212,14 +2317,26 @@ public:
     // The app's change, not the user's: on_changed isn't fired.
     void set_text(const std::string& t) override
     {
+        if (t == gtk_editable_get_text(GTK_EDITABLE(w_))) return;  // (#88)
         quiet_ = true;
         gtk_editable_set_text(GTK_EDITABLE(w_), t.c_str());
         quiet_ = false;
     }
-    void set_read_only(bool v) override { gtk_editable_set_editable(GTK_EDITABLE(w_), !v); }
-    void set_frame(bool v) override { set_entry_frame(w_, v); }
+    void set_read_only(bool v) override
+    {
+        if (!gtk_editable_get_editable(GTK_EDITABLE(w_)) == v) return;  // (#88)
+        gtk_editable_set_editable(GTK_EDITABLE(w_), !v);
+    }
+    void set_frame(bool v) override
+    {
+        if (frame_ && *frame_ == v) return;  // (#88)
+        frame_ = v;
+        set_entry_frame(w_, v);
+    }
     void set_placeholder(const std::string& t) override
     {
+        const char* now = gtk_entry_get_placeholder_text(GTK_ENTRY(w_));
+        if (t == (now ? now : "")) return;  // (#88)
         gtk_entry_set_placeholder_text(GTK_ENTRY(w_), t.c_str());
     }
     void on_changed(std::function<void(const std::string&)> f) override { changed_ = std::move(f); }
@@ -2238,6 +2355,7 @@ private:
                                             rap::i18n::tr("rapport", "Clear"));
     }
     bool clearable_ = false, quiet_ = false;
+    std::optional<bool> frame_;  // the one it has (set_frame)
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
 };
@@ -2273,6 +2391,8 @@ public:
     // model, or a selection set, notifies "selected" as the user's does).
     void set_items(std::vector<std::string> items) override
     {
+        if (items_set_ && items == items_) return;  // (#88)
+        items_set_ = true;
         GtkStringList* list = gtk_string_list_new(nullptr);
         for (auto& i : items) gtk_string_list_append(list, i.c_str());
         quiet_ = true;
@@ -2290,6 +2410,7 @@ public:
     }
     void set_current(int i) override
     {
+        if (current() == i) return;  // (#88)
         quiet_ = true;
         gtk_drop_down_set_selected(GTK_DROP_DOWN(w_), i < 0 ? GTK_INVALID_LIST_POSITION : guint(i));
         known_ = current();
@@ -2300,6 +2421,7 @@ public:
 private:
     std::function<void(int)> changed_;
     std::vector<std::string> items_;
+    bool items_set_ = false;  // items_ shown (set_items)
     bool quiet_ = false;
     int known_ = -1;  // the selection last reported or set
 
@@ -2361,6 +2483,8 @@ public:
     // The app's changes, not the user's: on_changed isn't fired.
     void set_items(std::vector<std::string> items) override
     {
+        if (items_ && *items_ == items) return;  // (#88)
+        items_ = items;
         quiet_ = true;
         auto* combo = GTK_COMBO_BOX_TEXT(w_);
         gtk_combo_box_text_remove_all(combo);
@@ -2370,6 +2494,7 @@ public:
     std::string text() const override { return gtk_editable_get_text(GTK_EDITABLE(entry_)); }
     void set_text(const std::string& t) override
     {
+        if (t == gtk_editable_get_text(GTK_EDITABLE(entry_))) return;  // (#88)
         quiet_ = true;
         gtk_editable_set_text(GTK_EDITABLE(entry_), t.c_str());
         quiet_ = false;
@@ -2379,6 +2504,7 @@ public:
 
 private:
     GtkWidget* entry_;
+    std::optional<std::vector<std::string>> items_;  // the ones it has (set_items)
     std::function<void(const std::string&)> changed_;
     std::function<void()> activate_;
     bool quiet_ = false;
@@ -2426,11 +2552,15 @@ public:
     {
     }
 
-    // GtkPaned reports a drag no differently from layout, so a drag is a
-    // press and release on a divider with the position changed in between,
-    // seen in the capture phase before the paned's own gesture takes them.
-    // A press anywhere else in the panes (a button in one, held while the
-    // window relaid them out) is no drag (#30).
+    // GtkPaned reports a drag no differently from layout, so a drag is the
+    // paned's own: its drag gestures (the mouse's, and touch's pan). GTK
+    // lets the mouse's go on only from that paned's handle (a thin one's
+    // few pixels either side too); touch's from a wider band, counted only
+    // from the mouse's (split_handle.h, on_handle). A press anywhere else in
+    // the panes (a button in one, held while the window relaid them out),
+    // or on another splitter's handle, is no drag (#30). It's begun, moved
+    // the divider (a drag-update: the pointer moved with it; set_sizes
+    // meanwhile isn't one, #105) and ended with the sizes changed.
     void on_moved(std::function<void()> f) override
     {
         const bool first = !moved_;
@@ -2438,32 +2568,14 @@ public:
         if (!first) return;
         for (GtkWidget* w = w_; w; w = next_in_split(w))
         {
-            GtkEventController* watch = gtk_event_controller_legacy_new();
-            gtk_event_controller_set_propagation_phase(watch, GTK_PHASE_CAPTURE);
-            connect(
-                watch, "event",
-                +[](GtkEventControllerLegacy*, GdkEvent* e, gpointer p) -> gboolean
-                {
-                    auto* self = static_cast<splitter_impl*>(p);
-                    const GdkEventType type = gdk_event_get_event_type(e);
-                    if (type == GDK_BUTTON_PRESS)
-                    {
-                        if (rap::gtk_split::press_on_handle(self->w_, e))
-                            self->pressed_ = self->sizes();
-                        else
-                            self->pressed_.clear();
-                    }
-                    else if (type == GDK_BUTTON_RELEASE)
-                    {
-                        if (!self->pressed_.empty() && self->sizes() != self->pressed_ &&
-                            self->moved_)
-                            self->moved_();
-                        self->pressed_.clear();
-                    }
-                    return false;
-                },
-                this);
-            gtk_widget_add_controller(w, watch);
+            GListModel* controllers = gtk_widget_observe_controllers(w);
+            for (guint i = 0, n = g_list_model_get_n_items(controllers); i < n; ++i)
+            {
+                auto* c = static_cast<GObject*>(g_list_model_get_item(controllers, i));
+                if (GTK_IS_GESTURE_DRAG(c)) watch_drag(c);
+                g_object_unref(c);
+            }
+            g_object_unref(controllers);
         }
     }
 
@@ -2487,11 +2599,250 @@ public:
         return gtk_paned_get_wide_handle(paned) ? 5.f : 1.f;
     }
     std::vector<float> sizes() const override { return split_sizes(w_); }
-    void set_sizes(const std::vector<float>& s) override { set_split_sizes(w_, s); }
+    // The sizes it's placed at now: nothing (#88). Compared with the panes
+    // as laid out (split_sizes), never the last asked for, and only once
+    // it's laid out with no placement still waiting for room (a position
+    // asked for before the window grew): else it's set as before.
+    void set_sizes(const std::vector<float>& s) override
+    {
+        if (gtk_widget_get_width(w_) > 0 && !placement_pending() && split_sizes(w_) == s) return;  // (#88)
+        set_split_sizes(w_, s);
+    }
 
 private:
+    // A divider of its chain still waiting to reach the position asked for
+    // (place_divider's "rapport-want-position", -1 once there).
+    bool placement_pending() const
+    {
+        for (GtkWidget* p = w_; p; p = next_in_split(p))
+            if (auto* want = static_cast<int*>(g_object_get_data(G_OBJECT(p), "rapport-want-position")))
+                if (*want >= 0) return true;
+        return false;
+    }
     std::function<void()> moved_;
-    std::vector<float> pressed_;  // the sizes when a button went down on it
+    std::vector<float> pressed_;  // the sizes when a drag of a divider began
+    bool dragged_ = false;        // the drag has moved since
+    bool counted_ = true;         // the drag began where a mouse's can (touch's band is wider)
+
+    // One of a paned's drag gestures, watched after the paned's own handlers
+    // (connected after them), so the position is the drag's.
+    void watch_drag(GObject* gesture)
+    {
+        connect(
+            gesture, "drag-begin",
+            +[](GtkGestureDrag* g, double x, double y, gpointer p)
+            {
+                auto* self = static_cast<splitter_impl*>(p);
+                self->pressed_ = self->sizes();
+                self->dragged_ = false;
+                // Touch's pan starts in a wider band than the mouse's drag:
+                // counted only from where a mouse drag starts.
+                GtkWidget* paned = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+                self->counted_ = !GTK_IS_GESTURE_PAN(g) || ::rap::gtk_split::on_handle(paned, x, y);
+            },
+            this);
+        connect(
+            gesture, "drag-update",
+            +[](GtkGestureDrag*, double, double, gpointer p)
+            {
+                auto* self = static_cast<splitter_impl*>(p);
+                if (self->counted_) self->dragged_ = true;
+            },
+            this);
+        connect(
+            gesture, "drag-end",
+            +[](GtkGestureDrag*, double, double, gpointer p)
+            {
+                auto* self = static_cast<splitter_impl*>(p);
+                const bool dragged = std::exchange(self->dragged_, false);
+                // (No sizes from its beginning: they can't have been the same.)
+                const bool changed = self->pressed_.empty() || self->sizes() != self->pressed_;
+                self->pressed_.clear();
+                if (dragged && changed && self->moved_) self->moved_();
+            },
+            this);
+    }
+};
+
+// Which pages show (rap::tabs::set_page_visible) and whether the strip does
+// (hide_single_tab), for both kinds of tabs below. Pages keep their place:
+// a hidden one's widgets stay where they are, hidden.
+struct page_shown
+{
+    std::vector<bool> visible;  // per page
+    bool hide_single = false;
+
+    int count() const { return int(visible.size()); }
+    bool at(int i) const { return i >= 0 && i < count() && visible[size_t(i)]; }
+    bool any() const { return first_visible_page(visible, count()) >= 0; }
+    bool strip() const { return tabs_strip_shown(visible, count(), hide_single); }
+    // From the spec (empty: every page shown).
+    void start(const spec::tabs& s)
+    {
+        visible.assign(s.pages.size(), true);
+        for (size_t i = 0; i < s.visible.size() && i < visible.size(); ++i) visible[i] = s.visible[i];
+        hide_single = s.hide_single_tab;
+    }
+    // Page `page` shown or hidden: the page current after, given `current`
+    // before (the nearest visible when the current one goes; the one shown
+    // when none was).
+    int set(int page, bool on, int current)
+    {
+        visible[size_t(page)] = on;
+        if (!on && page == current) return nearest_visible_page(visible, count(), page);
+        if (on && current < 0) return page;
+        return current;
+    }
+};
+
+// A notebook. A hidden page's child is hidden, which takes its tab out of
+// the strip; with hide_single_tab and one page or none shown, the notebook
+// shows neither tabs nor its frame, and the page fills it.
+// Sets a flag for as long as it lives, and puts back what it was: nested
+// (a lazy page's builder calling the tabs again), the outer one's still on
+// after the inner one ends.
+struct quiet_scope
+{
+    explicit quiet_scope(bool& flag)
+        : flag_(flag)
+        , was_(std::exchange(flag, true))
+    {
+    }
+    ~quiet_scope() { flag_ = was_; }
+    quiet_scope(const quiet_scope&) = delete;
+    quiet_scope& operator=(const quiet_scope&) = delete;
+
+private:
+    bool& flag_;
+    bool was_;
+};
+
+// A tab's (or a sidebar row's) heading: its icon before its title, in a box
+// (rap::tabs::set_page_icon, set_page_title). The icon sits in a slot of its
+// own, hidden with none (the box's spacing goes with it), at 16 px: a file
+// type's image, a drawing area for a drawn one, else icon_widget's (named or
+// a path's). One drawn icon swapped for another keeps its area and takes the
+// new drawing: repainted, never resized. A hidden page's tab or row keeps
+// its heading, and shows it again with the page.
+class tab_heading
+{
+public:
+    tab_heading(const std::string& title, const icon& i)
+        : box_(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6))
+        , slot_(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0))
+        , label_(gtk_label_new_with_mnemonic(title.c_str()))
+        , title_(title)
+    {
+        gtk_widget_set_valign(slot_, GTK_ALIGN_CENTER);
+        // Shown, the slot is the small-icon size whatever it holds, nothing
+        // included: a path's icon being found (for_path with no fallback
+        // shows nothing meanwhile, or ever, if it has none) never shrinks the
+        // tab and grows it again. (An image's pixel size alone reserves
+        // nothing for an empty one.)
+        gtk_widget_set_size_request(slot_, 16, 16);
+        gtk_widget_set_visible(slot_, false);
+        gtk_box_append(GTK_BOX(box_), slot_);
+        gtk_box_append(GTK_BOX(box_), label_);
+        set_icon(i);
+    }
+    GtkWidget* widget() const { return box_; }
+    // What the title's access key activates: the notebook's tab label (the
+    // box, which the notebook listens on), a sidebar's row.
+    void mnemonic_for(GtkWidget* w) { gtk_label_set_mnemonic_widget(GTK_LABEL(label_), w); }
+
+    void set_title(const std::string& t)
+    {
+        if (t == title_) return;  // (#91)
+        title_ = t;
+        gtk_label_set_text_with_mnemonic(GTK_LABEL(label_), t.c_str());
+    }
+    void set_icon(const icon& i)
+    {
+        if (same_icon(icon_, i)) return;  // (#91; none for none too)
+        GtkWidget* old = gtk_widget_get_first_child(slot_);
+        if (old && GTK_IS_DRAWING_AREA(old) && only_drawn(icon_) && only_drawn(i))
+        {
+            // Can't be compared: drawn again, in place (no relayout).
+            set_drawing(old, i.draw);
+            icon_ = i;
+            return;
+        }
+        // One theme icon for another, or one file type's for another: the
+        // same GtkImage, given the new one (a widget's kind changed: below,
+        // a new widget).
+        if (old && GTK_IS_IMAGE(old) && i.path.empty() && !only_drawn(i))
+        {
+            const GtkImageType kind = gtk_image_get_storage_type(GTK_IMAGE(old));
+            if (!i.name.empty() && i.file.empty() && kind == GTK_IMAGE_ICON_NAME &&
+                gtk_icon_theme_has_icon(gtk_icon_theme_get_for_display(gtk_widget_get_display(old)), i.name.c_str()))
+            {
+                gtk_image_set_from_icon_name(GTK_IMAGE(old), i.name.c_str());
+                gtk_image_set_pixel_size(GTK_IMAGE(old), 16);
+                icon_ = i;
+                return;
+            }
+            if (!i.file.empty() && kind == GTK_IMAGE_GICON)
+            {
+                gtk_image_set_from_gicon(GTK_IMAGE(old), file_type_icon(i.file));
+                gtk_image_set_pixel_size(GTK_IMAGE(old), 16);
+                icon_ = i;
+                return;
+            }
+        }
+        icon_ = i;
+        if (old) gtk_box_remove(GTK_BOX(slot_), old);
+        GtkWidget* w = i ? make_icon(i) : nullptr;
+        if (w) gtk_box_append(GTK_BOX(slot_), w);
+        gtk_widget_set_visible(slot_, w != nullptr);
+    }
+
+private:
+    using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
+    static bool only_drawn(const icon& i)
+    {
+        return i.draw && i.name.empty() && i.file.empty() && i.path.empty();
+    }
+    // As icon_widget's drawn icons: drawn whenever it paints, so it follows
+    // scale and theme.
+    static void set_drawing(GtkWidget* area, draw_fn draw)
+    {
+        gtk_drawing_area_set_draw_func(
+            GTK_DRAWING_AREA(area),
+            +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
+            {
+                snap_to_device(cr, GTK_WIDGET(a));
+                cairo_painter painter(cr, GTK_WIDGET(a));
+                (*static_cast<draw_fn*>(p))(painter, {float(w), float(h)});
+            },
+            new draw_fn(std::move(draw)), +[](gpointer p) { delete static_cast<draw_fn*>(p); });
+    }
+    static GtkWidget* make_icon(const icon& i)
+    {
+        constexpr int size = 16;
+        if (only_drawn(i))
+        {
+            GtkWidget* area = gtk_drawing_area_new();
+            gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(area), size);
+            gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), size);
+            gtk_widget_set_halign(area, GTK_ALIGN_CENTER);
+            gtk_widget_set_valign(area, GTK_ALIGN_CENTER);
+            set_drawing(area, i.draw);
+            return area;
+        }
+        if (!i.file.empty() && i.path.empty())
+        {
+            GtkWidget* img = gtk_image_new_from_gicon(file_type_icon(i.file));
+            gtk_image_set_pixel_size(GTK_IMAGE(img), size);
+            return img;
+        }
+        return icon_widget(i, size);
+    }
+
+    GtkWidget* box_;
+    GtkWidget* slot_;
+    GtkWidget* label_;
+    std::string title_;
+    icon icon_;  // the one it shows (empty: none)
 };
 
 class tabs_impl : public widget_base<rap::tabs>
@@ -2500,20 +2851,101 @@ public:
     explicit tabs_impl(GtkWidget* notebook)
         : widget_base(notebook)
     {
-        connect(
+        // After GtkNotebook's own switch, so a builder that switches again
+        // (set_current) has the last word, and on_changed has the page it
+        // ends on. The app's own switch builds after it (set_current, start).
+        connect_after(
             w_, "switch-page",
             +[](GtkNotebook*, GtkWidget*, guint page, gpointer p)
             {
                 auto* self = static_cast<tabs_impl*>(p);
+                if (self->quiet_) return;
+                const int before = self->settled_;
                 self->ensure_built(int(page));
-                if (self->changed_) self->changed_(int(page));
+                self->user_switched(before);
             },
             this);
     }
 
-    int current() const override { return gtk_notebook_get_current_page(GTK_NOTEBOOK(w_)); }
-    void set_current(int i) override { gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i); }
+    // The pages as built (their children already hidden as the spec has
+    // them): the first visible current, the strip as hide_single_tab has it.
+    void start(const spec::tabs& s)
+    {
+        shown_.start(s);
+        strip();
+        const int first = first_visible_page(shown_.visible, shown_.count());
+        if (first >= 0)
+        {
+            {
+                quiet_scope q(quiet_);
+                gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), first);
+            }
+            ensure_built(first);
+        }
+        settled_ = current();
+    }
+
+    int current() const override
+    {
+        return shown_.any() ? gtk_notebook_get_current_page(GTK_NOTEBOOK(w_)) : -1;
+    }
+    void set_current(int i) override
+    {
+        // Hidden (or out of range), or current already (#88): nothing.
+        if (!shown_.at(i) || current() == i) return;
+        {
+            quiet_scope q(quiet_);  // the app's own: no on_changed (#98)
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), i);
+        }
+        ensure_built(i);  // after: a builder calling set_current has the last word
+        settled_ = current();
+    }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= shown_.count() || shown_.at(page) == on) return;  // (#88)
+        const int now = shown_.set(page, on, current());
+        // GTK moves off a page hidden while current itself (with
+        // switch-page); then it's made the one the spec says, quietly.
+        {
+            quiet_scope q(quiet_);
+            GtkWidget* child = gtk_notebook_get_nth_page(GTK_NOTEBOOK(w_), page);
+            gtk_widget_set_visible(child, on);
+            // GtkNotebook hides the tab label of a page hidden in a shown
+            // window, and doesn't show it again with the page: shown, its
+            // label (icon and title) is shown too.
+            if (on)
+                if (GtkWidget* label = gtk_notebook_get_tab_label(GTK_NOTEBOOK(w_), child))
+                    gtk_widget_set_visible(label, true);
+            if (now >= 0) gtk_notebook_set_current_page(GTK_NOTEBOOK(w_), now);
+        }
+        if (now >= 0) ensure_built(now);
+        strip();
+        settled_ = current();
+    }
+    bool page_visible(int page) const override { return shown_.at(page); }
+    // The strip as the option now has it: the same value, or one that
+    // leaves the strip as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (shown_.hide_single == on) return;
+        const bool was = shown_.strip();
+        shown_.hide_single = on;
+        if (shown_.strip() != was) strip();
+    }
+    bool hide_single_tab() const override { return shown_.hide_single; }
+
+    // Each page's tab label (a heading), as built.
+    void set_headings(std::vector<tab_heading> h) { headings_ = std::move(h); }
+    void set_page_icon(int page, const icon& i) override
+    {
+        if (page >= 0 && size_t(page) < headings_.size()) headings_[size_t(page)].set_icon(i);
+    }
+    void set_page_title(int page, const std::string& t) override
+    {
+        if (page >= 0 && size_t(page) < headings_.size()) headings_[size_t(page)].set_title(t);
+    }
 
     // Lazy pages: an empty box each, filled the first time it's shown.
     void set_lazy(std::vector<std::function<node()>> lazy, std::vector<GtkWidget*> pages,
@@ -2523,10 +2955,11 @@ public:
         pages_ = std::move(pages);
         build_ = std::move(build);
         ensure_built(current());
+        settled_ = current();
     }
     void ensure_built(int i)
     {
-        if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)]) return;
+        if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)] || !shown_.at(i)) return;
         const auto build = std::move(lazy_[size_t(i)]);
         lazy_[size_t(i)] = nullptr;
         GtkWidget* w = build_(build());
@@ -2536,13 +2969,35 @@ public:
     }
 
 private:
+    // A user's switch from `before` (current() as it was), its page built:
+    // on_changed once, with the page current now (a builder may have switched
+    // again, or hidden every page), if there's one and it isn't `before`.
+    void user_switched(int before)
+    {
+        settled_ = current();
+        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+    }
+    void strip()
+    {
+        const bool on = shown_.strip();
+        gtk_notebook_set_show_tabs(GTK_NOTEBOOK(w_), on);
+        gtk_notebook_set_show_border(GTK_NOTEBOOK(w_), on);
+    }
+
+    page_shown shown_;
+    std::vector<tab_heading> headings_;  // per page
+    bool quiet_ = false;
+    int settled_ = 0;  // current() as the last operation or switch left it
     std::function<void(int)> changed_;
     std::vector<std::function<node()>> lazy_;
     std::vector<GtkWidget*> pages_;
     std::function<GtkWidget*(const node&)> build_;
 };
 
-// Tabs as a list of page names down the left, the page beside it.
+// Tabs as a list of page names down the left, the page beside it. A hidden
+// page's row is hidden, and its stack page (GtkStackPage:visible); with
+// hide_single_tab and one page or none shown, the list and its separator
+// are hidden too, and the page fills the box.
 class side_tabs_impl : public widget_base<rap::tabs>
 {
 public:
@@ -2558,20 +3013,87 @@ public:
                 auto* self = static_cast<side_tabs_impl*>(p);
                 if (!row) return;
                 const int i = gtk_list_box_row_get_index(row);
+                const int before = self->settled_;
                 self->ensure_built(i);
-                gtk_stack_set_visible_child_name(GTK_STACK(self->stack_), std::to_string(i).c_str());
-                if (self->changed_) self->changed_(i);
+                // A builder that selected another page has put that one up.
+                if (gtk_list_box_get_selected_row(GTK_LIST_BOX(self->list_)) == row)
+                    gtk_stack_set_visible_child_name(GTK_STACK(self->stack_), std::to_string(i).c_str());
+                if (!self->quiet_) self->user_switched(before);
             },
             this);
     }
 
+    // The rows and pages as built (already hidden as the spec has them):
+    // the first visible current, the list as hide_single_tab has it.
+    void start(const spec::tabs& s)
+    {
+        shown_.start(s);
+        strip();
+        select(first_visible_page(shown_.visible, shown_.count()));
+        settled_ = current();
+    }
+
+    // The selected row's, while it shows: a hidden row stays selected (a
+    // browse list can't have none) when every page is hidden.
     int current() const override
     {
         GtkListBoxRow* row = gtk_list_box_get_selected_row(GTK_LIST_BOX(list_));
-        return row ? gtk_list_box_row_get_index(row) : 0;
+        const int i = row ? gtk_list_box_row_get_index(row) : -1;
+        return shown_.at(i) ? i : -1;
     }
-    void set_current(int i) override { gtk_list_box_select_row(GTK_LIST_BOX(list_), gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i)); }
+    void set_current(int i) override
+    {
+        if (!shown_.at(i)) return;  // hidden, or out of range
+        if (gtk_list_box_get_selected_row(GTK_LIST_BOX(list_)) && current() == i) return;  // (#88)
+        {
+            quiet_scope q(quiet_);  // the app's own: no on_changed (#98)
+            gtk_list_box_select_row(GTK_LIST_BOX(list_), gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i));
+        }
+        settled_ = current();
+    }
     void on_changed(std::function<void(int)> f) override { changed_ = std::move(f); }
+
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= shown_.count() || shown_.at(page) == on) return;  // (#88)
+        const int now = shown_.set(page, on, current());
+        gtk_widget_set_visible(GTK_WIDGET(gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), page)), on);
+        if (GtkWidget* child = gtk_stack_get_child_by_name(GTK_STACK(stack_), std::to_string(page).c_str()))
+            show_page(GTK_STACK(stack_), child, on);
+        select(now);
+        strip();
+        settled_ = current();
+    }
+    bool page_visible(int page) const override { return shown_.at(page); }
+    // The strip as the option now has it: the same value, or one that
+    // leaves the strip as it is (two pages or more), touches nothing.
+    void set_hide_single_tab(bool on) override
+    {
+        if (shown_.hide_single == on) return;
+        const bool was = shown_.strip();
+        shown_.hide_single = on;
+        if (shown_.strip() != was) strip();
+    }
+    bool hide_single_tab() const override { return shown_.hide_single; }
+
+    // Each page's row's heading, as built.
+    void set_headings(std::vector<tab_heading> h) { headings_ = std::move(h); }
+    void set_page_icon(int page, const icon& i) override
+    {
+        if (page >= 0 && size_t(page) < headings_.size()) headings_[size_t(page)].set_icon(i);
+    }
+    void set_page_title(int page, const std::string& t) override
+    {
+        if (page >= 0 && size_t(page) < headings_.size()) headings_[size_t(page)].set_title(t);
+    }
+    // A stack page shown or hidden: GtkStackPage:visible is apart from its
+    // widget's own, and the stack needs both to show it (or to show none
+    // once every page is hidden).
+    static void show_page(GtkStack* stack, GtkWidget* child, bool on)
+    {
+        gtk_widget_set_visible(child, on);
+        gtk_stack_page_set_visible(gtk_stack_get_page(stack, child), on);
+    }
 
     // Lazy pages: an empty box each, filled the first time it's shown.
     void set_lazy(std::vector<std::function<node()>> lazy, std::vector<GtkWidget*> pages,
@@ -2581,10 +3103,11 @@ public:
         pages_ = std::move(pages);
         build_ = std::move(build);
         ensure_built(current());
+        settled_ = current();
     }
     void ensure_built(int i)
     {
-        if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)]) return;
+        if (i < 0 || size_t(i) >= lazy_.size() || !lazy_[size_t(i)] || !shown_.at(i)) return;
         const auto build = std::move(lazy_[size_t(i)]);
         lazy_[size_t(i)] = nullptr;
         GtkWidget* w = build_(build());
@@ -2594,8 +3117,40 @@ public:
     }
 
 private:
+    // As tabs_impl's: on_changed once, with the page current now, if there's
+    // one and it isn't `before`.
+    void user_switched(int before)
+    {
+        settled_ = current();
+        if (changed_ && settled_ >= 0 && settled_ != before) changed_(settled_);
+    }
+    // Page `i` current, quietly (row-selected doesn't come for the row
+    // already selected, so its page is put up here too); -1: none.
+    void select(int i)
+    {
+        if (i < 0) return;
+        {
+            quiet_scope q(quiet_);
+            gtk_list_box_select_row(GTK_LIST_BOX(list_), gtk_list_box_get_row_at_index(GTK_LIST_BOX(list_), i));
+        }
+        ensure_built(i);
+        if (current() != i) return;  // a builder that selected another page has put that one up
+        gtk_stack_set_visible_child_name(GTK_STACK(stack_), std::to_string(i).c_str());
+    }
+    // The list, and the separator after it, shown as hide_single_tab says.
+    void strip()
+    {
+        const bool on = shown_.strip();
+        gtk_widget_set_visible(list_, on);
+        if (GtkWidget* separator = gtk_widget_get_next_sibling(list_)) gtk_widget_set_visible(separator, on);
+    }
+
     GtkWidget* list_;
     GtkWidget* stack_;
+    page_shown shown_;
+    std::vector<tab_heading> headings_;  // per page
+    bool quiet_ = false;
+    int settled_ = 0;  // current() as the last operation or switch left it
     std::function<void(int)> changed_;
     std::vector<std::function<node()>> lazy_;
     std::vector<GtkWidget*> pages_;
@@ -2836,6 +3391,8 @@ public:
     void on_receive(receive_fn f) override { state.on_receive = std::move(f); }
     void set_group(const std::string& group) override
     {
+        if (group_set_ && state.group == group) return;  // (#88)
+        group_set_ = true;
         state.group = group;
         gtk_notebook_set_group_name(GTK_NOTEBOOK(w_), group.empty() ? nullptr : group.c_str());
         set_detachable();
@@ -2864,6 +3421,7 @@ public:
 
     GtkWidget* notebook() const { return w_; }
     doc_tabs::state state;
+    bool group_set_ = false;  // state.group applied (set_group)
     rap::window* window = nullptr;  // the window it's in: a transfer's source
 
 private:
@@ -3401,6 +3959,10 @@ public:
 
     void select(const std::vector<size_t>& rows) override
     {
+        std::vector<size_t> want = rows;
+        std::ranges::sort(want);
+        want.erase(std::unique(want.begin(), want.end()), want.end());
+        if (selection() == want) return;  // (#88)
         gtk_selection_model_unselect_all(sel_);
         for (size_t r : rows) gtk_selection_model_select_item(sel_, guint(r), false);
     }
@@ -3466,10 +4028,20 @@ public:
         apply_anchor();
     }
 
+    // The indicator the view shows: nothing (#88). Its sorter's state, as
+    // the user's click left it too, not the one last set.
     void set_sort_indicator(std::optional<size_t> column, sort_order order) override
     {
-        suppress_sort_ = true;
         GtkColumnViewColumn* col = column && *column < cols_.size() ? cols_[*column] : nullptr;
+        if (auto* sorter = gtk_column_view_get_sorter(GTK_COLUMN_VIEW(w_));
+            sorter && GTK_IS_COLUMN_VIEW_SORTER(sorter))
+        {
+            auto* cvs = GTK_COLUMN_VIEW_SORTER(sorter);
+            GtkColumnViewColumn* now = gtk_column_view_sorter_get_primary_sort_column(cvs);
+            const bool now_asc = gtk_column_view_sorter_get_primary_sort_order(cvs) == GTK_SORT_ASCENDING;
+            if (now == col && (!col || now_asc == (order == sort_order::ascending))) return;  // (#88)
+        }
+        suppress_sort_ = true;
         gtk_column_view_sort_by_column(GTK_COLUMN_VIEW(w_), col,
                                        order == sort_order::ascending ? GTK_SORT_ASCENDING
                                                                      : GTK_SORT_DESCENDING);
@@ -3498,7 +4070,7 @@ public:
     }
     void set_column_order(const std::vector<size_t>& order) override
     {
-        if (!is_column_order(order, cols_.size())) return;
+        if (!is_column_order(order, cols_.size()) || column_order() == order) return;  // (#88)
         // Inserting a column the view already has moves it.
         for (size_t pos = 0; pos < order.size(); ++pos)
             gtk_column_view_insert_column(GTK_COLUMN_VIEW(w_), guint(pos), cols_[order[pos]]);
@@ -3507,7 +4079,8 @@ public:
     void set_column_widths(const std::vector<float>& widths) override
     {
         for (size_t i = 0; i < widths.size() && i < cols_.size(); ++i)
-            if (widths[i] > 0) gtk_column_view_column_set_fixed_width(cols_[i], int(widths[i]));
+            if (widths[i] > 0 && gtk_column_view_column_get_fixed_width(cols_[i]) != int(widths[i]))  // (#88)
+                gtk_column_view_column_set_fixed_width(cols_[i], int(widths[i]));
     }
 
     void on_selection_changed(std::function<void()> f) override { sel_changed_ = std::move(f); }
@@ -3652,7 +4225,8 @@ public:
     }
     void set_column_visible(size_t column, bool v) override
     {
-        if (column < cols_.size()) gtk_column_view_column_set_visible(cols_[column], v);
+        if (column < cols_.size() && bool(gtk_column_view_column_get_visible(cols_[column])) != v)  // (#88)
+            gtk_column_view_column_set_visible(cols_[column], v);
     }
 
     // list_observer
@@ -4801,8 +5375,17 @@ public:
             {
                 auto* self = static_cast<canvas_impl*>(p);
                 self->scale_ = device_scale_of(self->w_);
-                if (self->resize_) self->resize_({float(w), float(h)});
-                self->target_changed();
+                // Told once a splitter it's in has placed all its panes.
+                const size_f size{float(w), float(h)};
+                pane_sizes::now_or_after(self, self->alive_,
+                                         [self, size, alive = std::weak_ptr<bool>(self->alive_)]
+                                         {
+                                             // A copy: on_resize may destroy the canvas, and it with it.
+                                             if (auto f = self->resize_) f(size);
+                                             // on_resize may have destroyed it (its window, say).
+                                             const std::shared_ptr<bool> still = alive.lock();
+                                             if (still && *still) self->target_changed();
+                                         });
             },
             this);
         focusable_ = s.focusable;
@@ -4849,6 +5432,8 @@ public:
     float device_scale() const override { return device_scale_of(w_); }
     void set_cursor(cursor c) override
     {
+        if (cursor_ && *cursor_ == c) return;  // (#88)
+        cursor_ = c;
         static const char* names[] = {"default",   "pointer",   "text",        "crosshair",  "grab",
                                       "grabbing",  "zoom-in",   "zoom-out",    "move",       "wait",
                                       "none",      "ew-resize", "ns-resize",   "nwse-resize", "nesw-resize"};
@@ -4966,6 +5551,7 @@ protected:
     }
 
 private:
+    std::optional<cursor> cursor_;  // the one it shows (set_cursor)
     float scale_ = 0;  // the device scale the app last heard of
     GdkSurface* scale_surface_ = nullptr;
     gulong scale_handler_ = 0;
@@ -5123,6 +5709,25 @@ private:
     point_f last_pos_{}, last_move_{};
 };
 
+// Test seam (#88): the fullscreen requests this backend has made, in order,
+// "F" for each fullscreen and "U" for each unfullscreen; read and cleared
+// through rapport_gtk4_fullscreen_requests_for_tests below. Nothing is kept
+// until a test first reads it (an app's requests aren't recorded).
+std::optional<std::string>& fullscreen_requests_for_tests()
+{
+    static std::optional<std::string> requests;
+    return requests;
+}
+// Test seam (#88): the state a notify::fullscreened reports instead of the
+// window's, set only while rapport_gtk4_fullscreen_seen_for_tests notifies
+// (an outside change, simulated: GTK can't be made fullscreen without a
+// compositor that answers).
+std::optional<bool>& fullscreen_seen_for_tests()
+{
+    static std::optional<bool> seen;
+    return seen;
+}
+
 class window_impl : public rap::window, public part
 {
 public:
@@ -5179,10 +5784,14 @@ public:
                 +[](GObject*, GParamSpec*, gpointer p)
                 {
                     auto* self = static_cast<window_impl*>(p);
-                    const bool fs = gtk_window_is_fullscreen(GTK_WINDOW(self->win_));
+                    const bool fs =
+                        fullscreen_seen_for_tests().value_or(gtk_window_is_fullscreen(GTK_WINDOW(self->win_)));
+                    // The state now; the pending request answered only by
+                    // its own state (see set_fullscreen).
+                    if (self->fullscreen_asked_ && *self->fullscreen_asked_ == fs) self->fullscreen_asked_.reset();
                     if (fs == self->fullscreen_) return;
                     self->fullscreen_ = fs;
-                    if (self->menu_bar) self->set_menu_bar_visible(self->menu_bar_wanted);  // hidden in fullscreen
+                    self->show_menu_bar();  // hidden in fullscreen
                     if (self->on_fullscreen) self->on_fullscreen(fs);
                 },
                 this);
@@ -5231,6 +5840,8 @@ public:
 
     void set_title(const std::string& t) override
     {
+        const char* now = gtk_window_get_title(GTK_WINDOW(win_));
+        if (now && t == now) return;  // (#88)
         gtk_window_set_title(GTK_WINDOW(win_), t.c_str());
     }
     void show() override
@@ -5392,7 +6003,13 @@ public:
         }
         gtk_window_set_default_size(GTK_WINDOW(win_), std::max(1, w), std::max(1, h));
     }
-    void set_min_size(size_f s) override { gtk_widget_set_size_request(win_, int(s.w), int(s.h)); }
+    void set_min_size(size_f s) override
+    {
+        int w = 0, h = 0;
+        gtk_widget_get_size_request(win_, &w, &h);
+        if (w == int(s.w) && h == int(s.h)) return;  // (#88)
+        gtk_widget_set_size_request(win_, int(s.w), int(s.h));
+    }
     std::optional<point_f> position() const override { return std::nullopt; }  // GTK 4: never
     void move(point_f) override {}
     rect_f work_area() const override
@@ -5423,8 +6040,22 @@ public:
         return surface && GDK_IS_TOPLEVEL(surface) &&
                (gdk_toplevel_get_state(GDK_TOPLEVEL(surface)) & GDK_TOPLEVEL_STATE_TILED);
     }
+    // Fullscreen is asynchronous (#88). The request still unanswered (pending)
+    // is compared if there is one, else the state last reported: the same is
+    // nothing asked. A notification records the state, and answers the
+    // pending request only when it reports what that asked for; one that
+    // reports otherwise answers an older request, so the newer stays pending
+    // (true, false, true's answer, true again: asked F, U, F). With nothing
+    // pending, a notification (the user's or the window manager's) is simply
+    // the state now. Known limit: a request the window manager refuses
+    // without a notification stays pending, so the same request again is
+    // skipped until a fullscreen notification comes; asking again wouldn't
+    // help.
     void set_fullscreen(bool on) override
     {
+        if (fullscreen_asked_ ? *fullscreen_asked_ == on : fullscreen_ == on) return;  // (#88)
+        fullscreen_asked_ = on;
+        if (auto& r = fullscreen_requests_for_tests()) *r += on ? 'F' : 'U';
         if (on)
             gtk_window_fullscreen(GTK_WINDOW(win_));
         else
@@ -5433,14 +6064,24 @@ public:
     void on_fullscreen_changed(std::function<void(bool)> f) override { on_fullscreen = std::move(f); }
     void set_icon(const icon& icon) override
     {
-        if (!icon.name.empty()) gtk_window_set_icon_name(GTK_WINDOW(win_), icon.name.c_str());
+        if (icon.name.empty()) return;
+        const char* now = gtk_window_get_icon_name(GTK_WINDOW(win_));
+        if (now && icon.name == now) return;  // (#88)
+        gtk_window_set_icon_name(GTK_WINDOW(win_), icon.name.c_str());
     }
     void on_key(std::function<bool(const key_event&)> f) override { on_key_ = std::move(f); }
     void set_app_id(const std::string&) override {}  // the process's (.desktop), not a window's
     void set_menu_bar_visible(bool on) override
     {
+        if (menu_bar_wanted == on) return;  // (#88)
         menu_bar_wanted = on;
-        if (menu_bar) gtk_widget_set_visible(menu_bar, on && !gtk_window_is_fullscreen(GTK_WINDOW(win_)));
+        show_menu_bar();
+    }
+    // The menu bar shown as wanted, hidden in fullscreen.
+    void show_menu_bar()
+    {
+        if (menu_bar)
+            gtk_widget_set_visible(menu_bar, menu_bar_wanted && !gtk_window_is_fullscreen(GTK_WINDOW(win_)));
     }
 
     // The menu bar: a row of flat menu buttons, each building its menu when
@@ -5539,13 +6180,24 @@ public:
             for (GtkWidget* w = focus; w; w = gtk_widget_get_parent(w))
                 if (GTK_IS_NOTEBOOK(w) && w != doc_tabs->notebook())
                 {
+                    // Round the visible pages (a hidden one's skipped), each
+                    // tried once at most: with none to go to, nothing.
                     auto* nb = GTK_NOTEBOOK(w);
                     const int n = gtk_notebook_get_n_pages(nb);
-                    if (n > 1)
-                        gtk_notebook_set_current_page(nb,
-                                                      (gtk_notebook_get_current_page(nb) +
-                                                       ((ev.modifiers & mod_shift) ? n - 1 : 1)) %
-                                                          n);
+                    if (n <= 0) return true;
+                    const int step = (ev.modifiers & mod_shift) ? n - 1 : 1;
+                    const int from = gtk_notebook_get_current_page(nb);
+                    const int base = from >= 0 ? from : (step == 1 ? n - 1 : 0);
+                    for (int k = 1; k <= n; ++k)
+                    {
+                        const int i = int((base + long(k) * step) % n);
+                        if (i == from) break;
+                        if (gtk_widget_get_visible(gtk_notebook_get_nth_page(nb, i)))
+                        {
+                            gtk_notebook_set_current_page(nb, i);
+                            break;
+                        }
+                    }
                     return true;
                 }
             if (focus && GTK_IS_TEXT_VIEW(focus) &&
@@ -5599,6 +6251,7 @@ public:
     bool to_canvas_ = false;     // the last press: to a canvas
     std::function<void(bool)> on_fullscreen;
     bool fullscreen_ = false;
+    std::optional<bool> fullscreen_asked_;  // a fullscreen request not yet answered (set_fullscreen)
 
     struct bar_menu
     {
@@ -5860,6 +6513,7 @@ private:
         // keep their size when the window grows.
         const bool rest_stretch = std::any_of(s.panes.begin() + std::ptrdiff_t(from + 1), s.panes.end(),
                                              [](auto& p) { return p.common.stretch > 0; });
+        paneds::watch();  // its panes told their sizes once all are placed (#105)
         GtkWidget* paned = gtk_paned_new(gtk_orientation(s.dir));
         auto* p = GTK_PANED(paned);
         // Thin: the theme's narrow handle, a line (Adwaita's 1 px), which
@@ -5914,6 +6568,7 @@ private:
         if (s.sidebar) return make_sidebar(n, s);
         GtkWidget* nb = gtk_notebook_new();
         std::vector<GtkWidget*> pages;
+        std::vector<tab_heading> headings;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
             const bool lazy = i < s.lazy.size() && s.lazy[i];
@@ -5923,10 +6578,17 @@ private:
             gtk_widget_set_margin_end(page, 6);
             gtk_widget_set_margin_top(page, 6);
             gtk_widget_set_margin_bottom(page, 6);
-            gtk_notebook_append_page(GTK_NOTEBOOK(nb), page,
-                                     gtk_label_new_with_mnemonic(s.titles[i].c_str()));
+            if (i < s.visible.size() && !s.visible[i]) gtk_widget_set_visible(page, false);
+            // Its tab: the page's icon (if any) and title. The notebook
+            // listens for the access key on the tab label, the box.
+            tab_heading heading(s.titles[i], i < s.icons.size() ? s.icons[i] : rap::icon{});
+            heading.mnemonic_for(heading.widget());
+            gtk_notebook_append_page(GTK_NOTEBOOK(nb), page, heading.widget());
+            headings.push_back(heading);
         }
         auto& tabs = add<tabs_impl>(n, nb);
+        tabs.set_headings(std::move(headings));
+        tabs.start(s);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),
                           [&win = win_, &sink = sink_, into = into_](const node& page)
@@ -5942,9 +6604,12 @@ private:
         gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_BROWSE);
         GtkWidget* stack = gtk_stack_new();
         std::vector<GtkWidget*> pages;
+        std::vector<tab_heading> headings;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
-            GtkWidget* label = gtk_label_new_with_mnemonic(s.titles[i].c_str());
+            // The page's icon (if any) and title, as a strip's tab has them.
+            tab_heading heading(s.titles[i], i < s.icons.size() ? s.icons[i] : rap::icon{});
+            GtkWidget* label = heading.widget();
             gtk_widget_set_halign(label, GTK_ALIGN_START);
             gtk_widget_set_margin_start(label, 12);
             gtk_widget_set_margin_end(label, 12);
@@ -5955,6 +6620,11 @@ private:
             gtk_widget_set_margin_bottom(label, fixed ? 0 : 8);
             GtkWidget* row = gtk_list_box_row_new();
             gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
+            // The access key selects the row, as the label alone in it did.
+            heading.mnemonic_for(row);
+            headings.push_back(heading);
+            const bool hidden = i < s.visible.size() && !s.visible[i];
+            if (hidden) gtk_widget_set_visible(row, false);
             gtk_list_box_append(GTK_LIST_BOX(list), row);
             const bool lazy = i < s.lazy.size() && s.lazy[i];
             GtkWidget* page = lazy ? gtk_box_new(GTK_ORIENTATION_VERTICAL, 0) : build(s.pages[i], orientation::vertical);
@@ -5962,7 +6632,10 @@ private:
             gtk_widget_set_margin_end(page, 6);
             gtk_widget_set_margin_top(page, 6);
             gtk_widget_set_margin_bottom(page, 6);
+            // Hidden before it's added, so the stack never shows it.
+            if (hidden) gtk_widget_set_visible(page, false);
             gtk_stack_add_named(GTK_STACK(stack), page, std::to_string(i).c_str());
+            if (hidden) side_tabs_impl::show_page(GTK_STACK(stack), page, false);
             pages.push_back(page);
         }
         if (adw::look().row_height > 0) set_row_height(list, adw::look().row_height);
@@ -5971,7 +6644,8 @@ private:
         gtk_widget_set_hexpand(stack, TRUE);
         gtk_box_append(GTK_BOX(box), stack);
         auto& tabs = add<side_tabs_impl>(n, box, list, stack);
-        tabs.set_current(0);
+        tabs.set_headings(std::move(headings));
+        tabs.start(s);
         if (!s.lazy.empty())
             tabs.set_lazy(s.lazy, std::move(pages),
                           [&win = win_, &sink = sink_, into = into_](const node& page)
@@ -6354,6 +7028,7 @@ public:
 
     void set_color_scheme(color_scheme s) override
     {
+        if (palette::app_scheme() == palette::scheme_number(s)) return;  // (#88)
         palette::app_scheme() = palette::scheme_number(s);
         if (adw::adopted())
             adw::apply_scheme();
@@ -6826,6 +7501,7 @@ public:
     // those busy of their own stay so.
     void set_busy(bool on) override
     {
+        if (window_impl::app_busy() == on) return;  // (#88)
         window_impl::app_busy() = on;
         GListModel* windows = gtk_window_get_toplevels();
         for (guint i = 0, n = g_list_model_get_n_items(windows); i < n; ++i)
@@ -6905,5 +7581,26 @@ private:
 
 }  // namespace
 }  // namespace rap::gtk4
+
+// Test seam (#88): the fullscreen requests made since the last call ("F",
+// "U", in order), cleared. The first call starts the recording. Not part of
+// the backend's interface.
+extern "C" RAPPORT_EXPORT const char* rapport_gtk4_fullscreen_requests_for_tests()
+{
+    static std::string out;
+    auto& r = rap::gtk4::fullscreen_requests_for_tests();
+    out = r.value_or(std::string());
+    r = std::string();
+    return out.c_str();
+}
+
+// Test seam (#88): `window` (a GtkWindow) notified as fullscreen or not,
+// whatever it is: an outside change, as the window manager's would come.
+extern "C" RAPPORT_EXPORT void rapport_gtk4_fullscreen_seen_for_tests(void* window, int fullscreen)
+{
+    rap::gtk4::fullscreen_seen_for_tests() = fullscreen != 0;
+    g_object_notify(G_OBJECT(window), "fullscreened");
+    rap::gtk4::fullscreen_seen_for_tests().reset();
+}
 
 RAPPORT_BACKEND_ENTRY(gtk4, rap::gtk4::gtk4_backend)

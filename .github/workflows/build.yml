@@ -76,6 +76,12 @@ jobs:
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-row-height-test-gtk3
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-row-height-test-gtk4
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-row-height-test-qt6
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-noop-test-gtk3
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-noop-test-gtk4
+          QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-noop-test-qt6
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-tabs-visibility-test-gtk3
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-tabs-visibility-test-gtk4
+          QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-tabs-visibility-test-qt6
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-stack-test-gtk4
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-stack-test-qt6
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-moved-test-gtk3
@@ -89,9 +95,24 @@ jobs:
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-quiet-test-gtk3
           GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-quiet-test-gtk4
           QT_QPA_PLATFORM=offscreen RAPPORT_NO_ACTIVATE=1 build/bin/rapport-setters-quiet-test-qt6
+          GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 RAPPORT_BACKEND=gtk3 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-sizes-in-resize-test
+          QT_QPA_PLATFORM=offscreen RAPPORT_BACKEND=qt6 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-sizes-in-resize-test
 
-  # MSVC with the static runtime, as the apps ship: as plugins and statically
-  # linked. The examples must run, and the shell extension must load into
+      # GTK 4 under Broadway lays a window out once and no more (no browser
+      # is there to take its frames), so what needs it laid out again runs
+      # on X11 in Xvfb, a display in the job's own container.
+      - name: GTK 4 on Xvfb
+        if: matrix.link != 'static'
+        run: |
+          apt-get install -y --no-install-recommends xvfb xauth
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          export G_DEBUG=fatal-criticals
+          xvfb-run -a env GDK_BACKEND=x11 RAPPORT_BACKEND=gtk4 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-sizes-in-resize-test
+          xvfb-run -a env GDK_BACKEND=x11 RAPPORT_NO_ACTIVATE=1 build/bin/rapport-splitter-moved-test-gtk4
+
+  # MSVC as plugins, with the shared runtime a plugin build needs (std:: types
+  # cross its DLLs, #136), and statically linked with the static runtime, as
+  # the apps ship. The examples must run, and the shell extension must load into
   # Explorer's way of calling it and need nothing but Windows. Server 2022 is
   # build 20348, below Windows 11's 22000, so what's gated on Windows 11 runs
   # only on Server 2025 (build 26100). The asan job is Server 2025's plugin
@@ -106,11 +127,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { link: plugins, flags: '',                    os: windows-2022, tag: '' }
-          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2022, tag: '' }
-          - { link: plugins, flags: '',                    os: windows-2025, tag: ' (build 26100)' }
-          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2025, tag: ' (build 26100)' }
-          - { link: asan,    flags: '-DRAPPORT_ASAN=ON',   os: windows-2025, tag: ' (build 26100)' }
+          - { link: plugins, flags: '',                    os: windows-2022, tag: '',               runtime: MultiThreadedDLL }
+          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2022, tag: '',               runtime: MultiThreaded }
+          - { link: plugins, flags: '',                    os: windows-2025, tag: ' (build 26100)', runtime: MultiThreadedDLL }
+          - { link: static,  flags: '-DRAPPORT_STATIC=ON', os: windows-2025, tag: ' (build 26100)', runtime: MultiThreaded }
+          - { link: asan,    flags: '-DRAPPORT_ASAN=ON',   os: windows-2025, tag: ' (build 26100)', runtime: MultiThreadedDLL }
     steps:
       - uses: actions/checkout@v4
 
@@ -126,8 +147,71 @@ jobs:
           # picks the newest there.
           $gen = if ('${{ matrix.os }}' -eq 'windows-2022') { @('-G', 'Visual Studio 17 2022') } else { @() }
           cmake -S . -B build @gen -A x64 `
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" ${{ matrix.flags }}
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=${{ matrix.runtime }}" ${{ matrix.flags }}
           cmake --build build --config Release --parallel
+
+      # A shared rapport library with the static runtime is refused (#136).
+      # At configure, for the documented ways: the variable, an expression
+      # that's static in some configurations, the core configured alone, the
+      # flags, and a target's own property set after it's made. Then, for the
+      # rest, by the post-build import check every build runs.
+      - name: Plugins refuse the static runtime
+        if: matrix.link == 'plugins'
+        run: |
+          $gen = if ('${{ matrix.os }}' -eq 'windows-2022') { @('-G', 'Visual Studio 17 2022') } else { @() }
+          'cmake_language(DEFER CALL set_target_properties rapport_win32 PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)' |
+            Set-Content override.cmake
+          $override = ($PWD.Path -replace '\\', '/') + '/override.cmake'
+          $cases = @(
+            @{ name = 'MultiThreaded'; src = '.'; args = @('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded') },
+            @{ name = 'an expression with DLL, static in Release'; src = '.'; args = @('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:DebugDLL>') },
+            @{ name = 'the core alone'; src = 'core'; args = @('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded') },
+            @{ name = '/MT in the flags'; src = '.'; args = @('-DCMAKE_CXX_FLAGS_RELEASE=/O2 /MT /DNDEBUG') },
+            @{ name = "a backend's own property"; src = '.'; args = @("-DCMAKE_PROJECT_rapport-win32_INCLUDE=$override") })
+          foreach ($c in $cases) {
+            $out = cmake -S $c.src -B build-mt @gen -A x64 -DRAPPORT_EXAMPLES=OFF -DRAPPORT_TESTS=OFF @($c.args) 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Remove-Item -Recurse -Force build-mt -ErrorAction SilentlyContinue
+            if ($code -eq 0) { $out; throw "$($c.name): a shared rapport library configured with the static runtime" }
+            if ($out -notmatch 'needs the shared C\+\+') { $out; throw "$($c.name): configure failed, but not on the runtime" }
+            "$($c.name): refused, as it should be"
+          }
+          # Ways configure can't see, built (ci/runtime-probe): refused by
+          # the post-build import check, or the linker for a mixed module.
+          # "none" builds.
+          $probes = @(
+            @{ case = 'none'; expect = '' },
+            # (msbuild wraps the message anywhere: any whitespace between words.)
+            @{ case = 'genex'; expect = "doesn't\s+import\s+the\s+shared\s+C\+\+" },
+            @{ case = 'interface'; expect = "doesn't\s+import\s+the\s+shared\s+C\+\+" },
+            @{ case = 'parent'; expect = "doesn't\s+import\s+the\s+shared\s+C\+\+" },
+            @{ case = 'mixed'; expect = 'LNK2038' },
+            @{ case = 'headerless'; expect = 'LNK1218' })
+          foreach ($p in $probes) {
+            $out = (cmake -S ci/runtime-probe -B build-probe @gen -A x64 "-DRAPPORT_PROBE_CASE=$($p.case)" 2>&1 | Out-String)
+            if ($LASTEXITCODE) { $out; throw "probe $($p.case): didn't configure" }
+            $out = (cmake --build build-probe --config Release 2>&1 | Out-String)
+            $code = $LASTEXITCODE
+            Remove-Item -Recurse -Force build-probe -ErrorAction SilentlyContinue
+            if (-not $p.expect) {
+              if ($code) { $out; throw "probe $($p.case): a shared-runtime library didn't build" }
+              "probe $($p.case): built, as it should"
+              continue
+            }
+            if ($code -eq 0) { $out; throw "probe $($p.case): built with the static runtime" }
+            if ($out -notmatch $p.expect) { $out; throw "probe $($p.case): the build failed, but not on the runtime" }
+            "probe $($p.case): refused, as it should be"
+          }
+          exit 0  # cmake's failing exit code isn't the step's
+
+      # The post-build check covers the core and the backends; this covers a
+      # program built against them too, from outside the build.
+      - name: Plugins import the shared runtime
+        if: matrix.link != 'static'
+        working-directory: build/bin/Release
+        run: |
+          python $env:GITHUB_WORKSPACE/ci/check-imports.py --shared-crt rapport.dll rapport_win32.dll rapport_null.dll rapport-win32-post-teardown-test.exe
+          if ($LASTEXITCODE) { throw 'a plugin build module without the shared runtime' }
 
       - name: Gallery snapshot
         working-directory: build/bin/Release
@@ -185,6 +269,20 @@ jobs:
         if: always()
         run: Get-ChildItem build/Testing/Temporary -Filter 'LastTest*.log' | Select-String -Pattern 'fringe check:' | ForEach-Object { $_.Line }
 
+      # win32-content-surface's tab body re-entrancy checks, through the
+      # backend's test seams (linked in, or found in rapport_win32.dll): that
+      # they ran in this job (under ASan in the asan one), from ctest's log.
+      - name: Tab body re-entrancy checks
+        if: always()
+        run: Get-ChildItem build/Testing/Temporary -Filter 'LastTest*.log' | Select-String -Pattern "seams found|a lone entry|gone with its window|asking destroyed:|the tab destroyed:|tab bodies forgotten:|a dying tab:|a dying entry:|a nested scan:" | ForEach-Object { $_.Line }
+
+      # win32-splitter-callbacks' nested layout checks, through the backend's
+      # layout seams (linked in, or found in rapport_win32.dll): that they
+      # ran in this job (under ASan in the asan one), from ctest's log.
+      - name: Nested layout checks
+        if: always()
+        run: Get-ChildItem build/Testing/Temporary -Filter 'LastTest*.log' | Select-String -Pattern "layout seams found|deep|passes in one go|posted, until|it settles|a pane resizing the window" | ForEach-Object { $_.Line }
+
       - name: Shell extension
         working-directory: build/bin/Release
         run: |
@@ -193,11 +291,14 @@ jobs:
 
       # Our own DLLs beside them (the plugin build's core and backends) are
       # fine; any runtime isn't. The shell extension may need nothing at all.
+      # (A plugin build imports the shared runtime's DLLs, as it must: #136.)
       - name: Imports
         if: matrix.link != 'asan'
         run: |
-          python ci/check-imports.py --allow-beside (Get-ChildItem build/bin/Release/*.exe, build/bin/Release/*.dll)
-          if ($LASTEXITCODE) { throw 'a runtime DLL is imported' }
+          if ('${{ matrix.link }}' -eq 'static') {
+            python ci/check-imports.py --allow-beside (Get-ChildItem build/bin/Release/*.exe, build/bin/Release/*.dll)
+            if ($LASTEXITCODE) { throw 'a runtime DLL is imported' }
+          }
           python ci/check-imports.py build/bin/Release/rapport-shell-example.dll
           if ($LASTEXITCODE) { throw 'the shell extension imports a DLL Explorer won''t find' }
 

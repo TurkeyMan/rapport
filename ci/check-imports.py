@@ -5,6 +5,11 @@ been linked in. For self-contained builds, and for shell extensions, which
 load into explorer.exe where none of ours can be found.
 
   check-imports.py [--allow NAME.dll]... [--allow-beside] FILE...
+  check-imports.py --shared-crt FILE...
+
+--shared-crt instead requires each file to import MSVC's shared runtime
+(vcruntime140*.dll, and ucrtbase.dll or the api-ms-win-crt-* sets): what a
+plugin build's DLLs and programs must share, as std:: types cross them.
 
 --allow names a DLL that ships beside the files (it's checked too, if given);
 --allow-beside allows any DLL in the same directory as the file importing it.
@@ -63,19 +68,38 @@ def imports(path):
     return names
 
 
+def require_shared_crt(files):
+    bad = 0
+    for f in files:
+        names = [n.lower() for n in imports(f)]
+        vcruntime = any(re.match(r'vcruntime140(_1)?(d)?\.dll$', n) for n in names)
+        ucrt = any(n in ('ucrtbase.dll', 'ucrtbased.dll') or n.startswith('api-ms-win-crt-') for n in names)
+        if not (vcruntime and ucrt):
+            print(f"{f}: doesn't import the shared C++ runtime (imports {', '.join(names) or 'nothing'})",
+                  file=sys.stderr)
+            bad += 1
+    if not bad:
+        print(f'{len(files)} file(s): the shared runtime')
+    return 1 if bad else 0
+
+
 def main(argv):
-    allowed, files, beside = set(), [], False
+    allowed, files, beside, shared_crt = set(), [], False, False
     args = iter(argv)
     for a in args:
         if a == '--allow':
             allowed.add(next(args).lower())
         elif a == '--allow-beside':
             beside = True
+        elif a == '--shared-crt':
+            shared_crt = True
         else:
             files.append(a)
     if not files:
         print(__doc__, file=sys.stderr)
         return 2
+    if shared_crt:
+        return require_shared_crt(files)
     bad = 0
     for f in files:
         here = {n.lower() for n in os.listdir(os.path.dirname(os.path.abspath(f)))} if beside else set()

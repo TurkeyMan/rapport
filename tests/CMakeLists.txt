@@ -1,3 +1,10 @@
+# Every test built with MSVC: a failure never opens a dialog on the desktop
+# (the Debug CRT's reports, an abort, a crash), only fails, to stderr
+# (win32_test_no_dialogs.h, force-included: it installs itself).
+if(MSVC)
+    add_compile_options(/FI${CMAKE_CURRENT_SOURCE_DIR}/win32_test_no_dialogs.h)
+endif()
+
 # Headless checks of the core: run by CI on every platform.
 add_executable(rapport-gpu-span-test gpu_span_test.cpp)
 target_include_directories(rapport-gpu-span-test PRIVATE ../core/src)
@@ -52,6 +59,16 @@ if(RAPPORT_STATIC)
 endif()
 add_dependencies(rapport-stack-test rapport_null)
 add_test(NAME stack COMMAND rapport-stack-test)
+# Tab page visibility (set_page_visible, page::visible, hide_single_tab)
+# through the headless backend.
+add_executable(rapport-tabs-visibility-test tabs_visibility_test.cpp)
+target_link_libraries(rapport-tabs-visibility-test PRIVATE rapport::rapport)
+if(RAPPORT_STATIC)
+    target_link_libraries(rapport-tabs-visibility-test PRIVATE rapport::backend_null)
+    target_compile_definitions(rapport-tabs-visibility-test PRIVATE RAPPORT_TEST_BUILTIN_NULL)
+endif()
+add_dependencies(rapport-tabs-visibility-test rapport_null)
+add_test(NAME tabs-visibility COMMAND rapport-tabs-visibility-test)
 # Which keys a window's on_key has from a focused text field.
 add_executable(rapport-window-chords-test window_chords_test.cpp)
 target_include_directories(rapport-window-chords-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
@@ -74,6 +91,8 @@ if(TARGET rapport_shell)
     target_include_directories(rapport-explorer-view-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../shell/src/win32)
     find_package(Threads REQUIRED)
     target_link_libraries(rapport-explorer-view-test PRIVATE rapport::shell Threads::Threads)
+    # The shell libraries' static runtime, whatever the build's (#136).
+    rapport_shell_static_runtime(rapport-explorer-view-test)
 endif()
 
 # Lists driven by synthesized input through the real backends, loaded as
@@ -133,6 +152,15 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-row-height-test-gtk3 gtk3_row_height_test.cpp)
         target_link_libraries(rapport-row-height-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3)
         add_dependencies(rapport-row-height-test-gtk3 rapport_gtk3)
+        # A setter given the value it has does nothing (#88).
+        add_executable(rapport-setters-noop-test-gtk3 gtk3_setters_noop_test.cpp)
+        target_link_libraries(rapport-setters-noop-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3 ${CMAKE_DL_LIBS})
+        add_dependencies(rapport-setters-noop-test-gtk3 rapport_gtk3)
+        # Tab page visibility and hide_single_tab (strips and sidebars), and
+        # a fixed-size canvas as a page's content (#92): measured, never shown.
+        add_executable(rapport-tabs-visibility-test-gtk3 gtk3_tabs_visibility_test.cpp)
+        target_link_libraries(rapport-tabs-visibility-test-gtk3 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK3 ${CMAKE_DL_LIBS})
+        add_dependencies(rapport-tabs-visibility-test-gtk3 rapport_gtk3)
     endif()
     # An entry's buttons on GTK 4: named, focusable, Tab order, menus.
     if(TARGET rapport_gtk4)
@@ -175,6 +203,15 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-row-height-test-gtk4 gtk4_row_height_test.cpp)
         target_link_libraries(rapport-row-height-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4)
         add_dependencies(rapport-row-height-test-gtk4 rapport_gtk4)
+        # A setter given the value it has does nothing (#88).
+        add_executable(rapport-setters-noop-test-gtk4 gtk4_setters_noop_test.cpp)
+        target_link_libraries(rapport-setters-noop-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4 ${CMAKE_DL_LIBS})
+        add_dependencies(rapport-setters-noop-test-gtk4 rapport_gtk4)
+        # Tab page visibility and hide_single_tab (strips and sidebars), and
+        # a fixed-size canvas as a page's content (#92): measured, never shown.
+        add_executable(rapport-tabs-visibility-test-gtk4 gtk4_tabs_visibility_test.cpp)
+        target_link_libraries(rapport-tabs-visibility-test-gtk4 PRIVATE rapport::rapport PkgConfig::RAPPORT_TEST_GTK4 ${CMAKE_DL_LIBS})
+        add_dependencies(rapport-tabs-visibility-test-gtk4 rapport_gtk4)
     endif()
     if(TARGET rapport_qt6)
         find_package(Qt6 QUIET COMPONENTS Widgets)
@@ -202,6 +239,15 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         add_executable(rapport-row-height-test-qt6 qt6_row_height_test.cpp)
         target_link_libraries(rapport-row-height-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
         add_dependencies(rapport-row-height-test-qt6 rapport_qt6)
+        # A setter given the value it has does nothing (#88).
+        add_executable(rapport-setters-noop-test-qt6 qt6_setters_noop_test.cpp)
+        target_link_libraries(rapport-setters-noop-test-qt6 PRIVATE rapport::rapport Qt6::Widgets ${CMAKE_DL_LIBS})
+        add_dependencies(rapport-setters-noop-test-qt6 rapport_qt6)
+        # Tab page visibility and hide_single_tab (strips and sidebars), and
+        # a fixed-size canvas as a page's content (#92): measured, never shown.
+        add_executable(rapport-tabs-visibility-test-qt6 qt6_tabs_visibility_test.cpp)
+        target_link_libraries(rapport-tabs-visibility-test-qt6 PRIVATE rapport::rapport Qt6::Widgets ${CMAKE_DL_LIBS})
+        add_dependencies(rapport-tabs-visibility-test-qt6 rapport_qt6)
         # QTest's keys go through Qt's shortcuts as a user's do.
         find_package(Qt6 QUIET COMPONENTS Test)
         if(TARGET Qt6::Test)
@@ -209,6 +255,10 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
             target_compile_definitions(rapport-window-chords-test-qt6 PRIVATE RAPPORT_TEST_QT6)
             target_link_libraries(rapport-window-chords-test-qt6 PRIVATE rapport::rapport Qt6::Widgets Qt6::Test)
             add_dependencies(rapport-window-chords-test-qt6 rapport_qt6)
+            # Alt+B on a hidden tab renamed "_Build" (#101): through Qt's
+            # shortcut map, as QTest's keys go.
+            target_link_libraries(rapport-tabs-visibility-test-qt6 PRIVATE Qt6::Test)
+            target_compile_definitions(rapport-tabs-visibility-test-qt6 PRIVATE RAPPORT_TEST_QTEST)
         endif()
     endif()
 endif()
@@ -451,6 +501,32 @@ if(TARGET rapport_win32)
     add_test(NAME win32-base-surface-light COMMAND rapport-win32-base-surface-test)
     set_tests_properties(win32-base-surface-light PROPERTIES ENVIRONMENT "RAPPORT_NO_ACTIVATE=1;RAPPORT_THEME=light")
 
+    # What a base surface window's content sits on (look_options::content_surface)
+    # and fluent controls' ground on a tab page; never shown.
+    add_executable(rapport-win32-content-surface-test win32_content_surface_test.cpp)
+    target_link_libraries(rapport-win32-content-surface-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-content-surface-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-content-surface-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-content-surface-test rapport_win32)
+    foreach(mode automatic plain layer native native-layer)
+        foreach(scheme light dark)
+            add_test(NAME win32-content-surface-${mode}-${scheme}
+                     COMMAND rapport-win32-content-surface-test ${mode} ${scheme})
+        endforeach()
+    endforeach()
+    # Mirrored (WS_EX_LAYOUTRTL): a tab page's fields on its body.
+    add_test(NAME win32-content-surface-rtl COMMAND rapport-win32-content-surface-test rtl light)
+    set_tests_properties(win32-content-surface-rtl PROPERTIES SKIP_RETURN_CODE 77)
+    # The app asking for the layer under high contrast: the system colours
+    # all the same (CI's throwaway runner only, as the other high contrast
+    # runs).
+    add_test(NAME win32-content-surface-layer-high-contrast
+             COMMAND rapport-win32-high-contrast-run $<TARGET_FILE:rapport-win32-content-surface-test> layer light)
+    set_tests_properties(win32-content-surface-layer-high-contrast PROPERTIES
+        ENVIRONMENT "RAPPORT_NO_ACTIVATE=1" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+
     # The document tabs' row beside its tabs: the window's surface, base or not.
     add_executable(rapport-win32-document-tabs-surface-test win32_document_tabs_surface_test.cpp)
     target_link_libraries(rapport-win32-document-tabs-surface-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi)
@@ -532,8 +608,8 @@ if(TARGET rapport_win32)
     # pass.
     if(MSVC)
         add_executable(rapport-win32-caption-glass-test win32_caption_glass_test.cpp)
-        target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::rapport user32 gdi32 dwmapi d3d11 dxgi
-                                                                       windowsapp)
+        target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::rapport user32 gdi32 comctl32 dwmapi
+                                                                       d3d11 dxgi windowsapp)
         target_compile_options(rapport-win32-caption-glass-test PRIVATE /bigobj)
         if(RAPPORT_STATIC)
             target_link_libraries(rapport-win32-caption-glass-test PRIVATE rapport::backend_win32)
@@ -744,6 +820,57 @@ if(TARGET rapport_win32)
                          win32-row-height-app-large PROPERTIES
         ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
 
+    # A setter given the value it has does nothing (#88): no native call,
+    # no relayout, no repaint; a changed one as before. Never shown;
+    # static builds count through the backend's test hooks.
+    add_executable(rapport-win32-setters-noop-test win32_setters_noop_test.cpp)
+    target_link_libraries(rapport-win32-setters-noop-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-setters-noop-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-setters-noop-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-setters-noop-test rapport_win32)
+    add_test(NAME win32-setters-noop COMMAND rapport-win32-setters-noop-test)
+    set_tests_properties(win32-setters-noop PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+    # Tab page visibility and hide_single_tab (strips and sidebars), and a
+    # fixed-size canvas as a page's or a stack's content (#92). Never shown.
+    # A scroll pane's off-screen copy: tab pages and a group box's contents
+    # printed over, not under, their tab control and box (#119). Never shown.
+    add_executable(rapport-win32-pane-print-test win32_pane_print_test.cpp)
+    target_link_libraries(rapport-win32-pane-print-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-pane-print-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-pane-print-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-pane-print-test rapport_win32)
+    add_test(NAME win32-pane-print COMMAND rapport-win32-pane-print-test)
+    set_tests_properties(win32-pane-print PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+    # Mirrored (WS_EX_LAYOUTRTL): the controls placed by their rects mapped whole.
+    add_test(NAME win32-pane-print-rtl COMMAND rapport-win32-pane-print-test rtl)
+    set_tests_properties(win32-pane-print-rtl PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+    add_executable(rapport-win32-tabs-visibility-test win32_tabs_visibility_test.cpp)
+    target_link_libraries(rapport-win32-tabs-visibility-test PRIVATE rapport::rapport user32 gdi32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-tabs-visibility-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-tabs-visibility-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-tabs-visibility-test rapport_win32)
+    add_test(NAME win32-tabs-visibility COMMAND rapport-win32-tabs-visibility-test)
+    set_tests_properties(win32-tabs-visibility PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+    # Shown (RAPPORT_NO_ACTIVATE: no focus taken): a page shown or the strip
+    # back grows the window's least size at once.
+    add_test(NAME win32-tabs-visibility-shown COMMAND rapport-win32-tabs-visibility-test --shown)
+    set_tests_properties(win32-tabs-visibility-shown PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+    # The native look's tab widths (#112): the control's own minimum.
+    add_test(NAME win32-tabs-visibility-native COMMAND rapport-win32-tabs-visibility-test --native)
+    set_tests_properties(win32-tabs-visibility-native PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 120)
+
     # A new text size while windows are open (WM_SETTINGCHANGE, through the
     # text size and message font test hooks: static builds; a plugin build
     # skips): never-shown windows.
@@ -877,6 +1004,120 @@ if(TARGET rapport_win32)
     add_test(NAME win32-pane-uncovered COMMAND rapport-win32-pane-uncovered-test)
     set_tests_properties(win32-pane-uncovered PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 
+    # A shown window's decisions while a relayout_at_once has drawing off (#108).
+    add_executable(rapport-win32-at-once-visibility-test win32_at_once_visibility_test.cpp)
+    target_link_libraries(rapport-win32-at-once-visibility-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-at-once-visibility-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-at-once-visibility-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-at-once-visibility-test rapport_win32)
+    add_test(NAME win32-at-once-visibility COMMAND rapport-win32-at-once-visibility-test)
+    set_tests_properties(win32-at-once-visibility PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+    # focus() within a relayout_at_once (#108): activates its window and
+    # moves the focus, so only on a CI runner (RAPPORT_TEST_SEND_INPUT=1),
+    # else skipped.
+    add_executable(rapport-win32-at-once-focus-test win32_at_once_focus_test.cpp)
+    target_link_libraries(rapport-win32-at-once-focus-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-at-once-focus-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-at-once-focus-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-at-once-focus-test rapport_win32)
+    add_test(NAME win32-at-once-focus COMMAND rapport-win32-at-once-focus-test)
+    set_tests_properties(win32-at-once-focus PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
+
+    # A relayout_at_once while its window is hidden, then shown (#108): grown
+    # as it would have been shown.
+    add_executable(rapport-win32-hidden-at-once-test win32_hidden_at_once_test.cpp)
+    target_link_libraries(rapport-win32-hidden-at-once-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-hidden-at-once-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-hidden-at-once-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-hidden-at-once-test rapport_win32)
+    add_test(NAME win32-hidden-at-once COMMAND rapport-win32-hidden-at-once-test)
+    set_tests_properties(win32-hidden-at-once PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
+
+    # show() of a window shown before, under RAPPORT_NO_ACTIVATE: as it was
+    # (restored, minimised, maximised). Its maximised case activates: CI only.
+    add_executable(rapport-win32-show-again-test win32_show_again_test.cpp)
+    target_link_libraries(rapport-win32-show-again-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-show-again-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-show-again-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-show-again-test rapport_win32)
+    add_test(NAME win32-show-again COMMAND rapport-win32-show-again-test)
+    set_tests_properties(win32-show-again PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
+
+    # A scroll pane's content loop under the single-entry layout rule (#108):
+    # a scrolled canvas asking for layouts; deepest 1, passes below the limit.
+    add_executable(rapport-win32-scroll-layout-depth-test win32_scroll_layout_depth_test.cpp)
+    target_link_libraries(rapport-win32-scroll-layout-depth-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-scroll-layout-depth-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-scroll-layout-depth-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-scroll-layout-depth-test rapport_win32)
+    add_test(NAME win32-scroll-layout-depth COMMAND rapport-win32-scroll-layout-depth-test)
+    set_tests_properties(win32-scroll-layout-depth PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+    # What reads or acts on laid-out geometry sees the layout as it'll be
+    # (#108): a list's scroll_to/row_offset/set_row_offset, a tree's select, a
+    # splitter's sizes(), a layout to come or within one.
+    add_executable(rapport-win32-layout-current-test win32_layout_current_test.cpp)
+    target_link_libraries(rapport-win32-layout-current-test PRIVATE rapport::rapport user32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-layout-current-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-layout-current-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-layout-current-test rapport_win32)
+    add_test(NAME win32-layout-current COMMAND rapport-win32-layout-current-test)
+    set_tests_properties(win32-layout-current PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+    # ui::post's functions destroyed, never leaked: past the queue's limit,
+    # and still queued when the backend's torn down (#108). No windows.
+    add_executable(rapport-win32-post-teardown-test win32_post_teardown_test.cpp)
+    target_link_libraries(rapport-win32-post-teardown-test PRIVATE rapport::rapport user32 advapi32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-post-teardown-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-post-teardown-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-post-teardown-test rapport_win32)
+    add_test(NAME win32-post-teardown COMMAND rapport-win32-post-teardown-test)
+    set_tests_properties(win32-post-teardown PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+    # A window dropped from its own canvas's on_resize (#108).
+    add_executable(rapport-win32-canvas-destroy-test win32_canvas_destroy_test.cpp)
+    target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-canvas-destroy-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-canvas-destroy-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-canvas-destroy-test rapport_win32)
+    add_test(NAME win32-canvas-destroy COMMAND rapport-win32-canvas-destroy-test)
+    set_tests_properties(win32-canvas-destroy PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+    # sizes() in a pane's on_resize, on_moved only for a drag, a canvas's
+    # size() after set_sizes, a drag at teardown (#90); never shown.
+    add_executable(rapport-win32-splitter-callbacks-test win32_splitter_callbacks_test.cpp)
+    target_link_libraries(rapport-win32-splitter-callbacks-test PRIVATE rapport::rapport user32 comctl32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-splitter-callbacks-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-splitter-callbacks-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-splitter-callbacks-test rapport_win32)
+    add_test(NAME win32-splitter-callbacks COMMAND rapport-win32-splitter-callbacks-test)
+    set_tests_properties(win32-splitter-callbacks PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+
     add_executable(rapport-win32-thin-divider-test win32_thin_divider_test.cpp)
     target_link_libraries(rapport-win32-thin-divider-test PRIVATE rapport::rapport user32 gdi32)
     if(RAPPORT_STATIC)
@@ -918,6 +1159,22 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-list-stretch-test rapport_win32)
     add_test(NAME win32-list-stretch COMMAND rapport-win32-list-stretch-test)
     set_tests_properties(win32-list-stretch PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+endif()
+
+# A fullscreen window's canvas kept composed (#121): its swap chain's alpha
+# premultiplied while fullscreen, ignored again after; never shown. Skips
+# (77) without a GPU device.
+if(TARGET rapport_win32)
+    add_executable(rapport-win32-fullscreen-composed-test win32_fullscreen_composed_test.cpp)
+    target_link_libraries(rapport-win32-fullscreen-composed-test PRIVATE rapport::rapport user32)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-fullscreen-composed-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-fullscreen-composed-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-fullscreen-composed-test rapport_win32)
+    add_test(NAME win32-fullscreen-composed COMMAND rapport-win32-fullscreen-composed-test)
+    set_tests_properties(win32-fullscreen-composed PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
+                         ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 endif()
 
 # UI Automation for drawn elements: a caption tab strip's, through an
@@ -1122,6 +1379,21 @@ if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
         target_link_libraries(rapport-setters-quiet-test-qt6 PRIVATE rapport::rapport Qt6::Widgets)
         add_dependencies(rapport-setters-quiet-test-qt6 rapport_qt6)
     endif()
+endif()
+
+# The queue a splitter's panes wait in to be told their sizes (#105, #138):
+# backends/common/pane_sizes.h on its own, no toolkit, so everywhere.
+add_executable(rapport-pane-sizes-test pane_sizes_test.cpp)
+target_include_directories(rapport-pane-sizes-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/common)
+target_compile_features(rapport-pane-sizes-test PRIVATE cxx_std_23)
+add_test(NAME pane-sizes COMMAND rapport-pane-sizes-test)
+
+# A splitter's sizes(), read from a pane's on_resize, are the sizes being
+# laid out, every pane's (#105). One program for any backend, as plugins:
+# GTK on Broadway, Qt offscreen (RAPPORT_BACKEND).
+if(NOT RAPPORT_STATIC AND NOT WIN32 AND NOT APPLE)
+    add_executable(rapport-splitter-sizes-in-resize-test splitter_sizes_in_resize_test.cpp)
+    target_link_libraries(rapport-splitter-sizes-in-resize-test PRIVATE rapport::rapport)
 endif()
 
 # A toolbar's buttons from the keyboard: one Tab stop, the arrows, Home,

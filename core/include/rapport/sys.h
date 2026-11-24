@@ -351,6 +351,14 @@ struct http_response
     std::string error;     // why there's no response, or why the body was cut short
 };
 
+// What to do with a redirect (http_options::on_redirect).
+enum class redirect_action
+{
+    follow,                      // as without the callback
+    follow_without_credentials,  // and none of the request's credentials, from this hop on
+    stop,                        // don't: the 3xx itself is the response
+};
+
 struct http_options
 {
     // Authorization, Accept, User-Agent, ... Authorization and Cookie go only
@@ -372,6 +380,43 @@ struct http_options
     // As the body arrives: bytes so far, and of how many (the Content-Length,
     // when it's given and the body isn't compressed on the way).
     std::function<void(std::uint64_t received, std::optional<std::uint64_t> total)> progress;
+    // Each redirect, before it's followed: where from (the URL that answered
+    // with it), where to and its status. Both are URLs as they're sent, the
+    // same on every transport: absolute, their paths' "." and ".." segments
+    // taken out ("/orgA/../orgB/x" is "/orgB/x", as it goes on the wire,
+    // the first request's URL too), no fragment; a Location of a fragment
+    // alone, or empty, the same path and query again. (Percent-escapes are
+    // as sent: "%2e%2e" isn't a "..".) Only for a hop that may be followed
+    // at all: one to an unsupported URL, or past the redirect limit, fails
+    // as ever without a call. Unset: every one followed, as ever.
+    // The request's credentials are what the caller gives it: Authorization,
+    // Cookie and Proxy-Authorization in `headers`, and the URL's userinfo
+    // ("http://user:pw@host/", which libcurl sends as credentials). Those
+    // of the proxy configuration (the environment's http_proxy or
+    // https_proxy, user:pw in its URL, on libcurl; the system's or
+    // automatic proxy settings on WinHTTP) aren't the request's but the
+    // machine's way to the network: they go to the proxy on every hop,
+    // whatever this returns (without them a hop behind an authenticating
+    // proxy is a 407), and never to an origin. (On libcurl they're sent in
+    // place of a Proxy-Authorization in `headers`.)
+    //  follow: as without it. Authorization, Cookie and the URL's userinfo
+    //    still go only while the hops stay at the first request's origin;
+    //    this can't send them elsewhere (to_url is told without the
+    //    userinfo). The caller's Proxy-Authorization (the proxy's, not the
+    //    origin's) goes on to any origin, as ever.
+    //  follow_without_credentials: the request's credentials (Authorization,
+    //    Cookie, the caller's Proxy-Authorization and the URL's userinfo;
+    //    to_url as told, less that) stay off this hop and every later one,
+    //    back at the first origin too (a host shared by tenants:
+    //    dev.azure.com/orgA to /orgB). The proxy configuration's still go
+    //    to the proxy.
+    //  stop: the 3xx is the response (its status, headers with Location, and
+    //    body), not an error.
+    // Called on the thread that called http_request (a worker's, as the
+    // request blocks), before the next hop's sent: it mustn't wait on the UI
+    // thread if that's waiting for the request. An exception from it fails
+    // the request (http_response::error), the hop not sent.
+    std::function<redirect_action(std::string_view from_url, std::string_view to_url, int status)> on_redirect;
 };
 
 // An HTTP(S) request, blocking: for a worker thread. TLS, certificates and

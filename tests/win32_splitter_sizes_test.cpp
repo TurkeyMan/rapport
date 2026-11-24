@@ -9,6 +9,7 @@
 #include <rapport/rapport.h>
 #define NOMINMAX
 #include <windows.h>
+#include "win32_test_windows.h"
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -93,7 +94,7 @@ int main(int argc, char** argv)
                 .bind(three)
                 .stretch(),
         }}});
-    HWND root = FindWindowW(nullptr, L"Splitter sizes");
+    HWND root = test_window(L"Splitter sizes");
     if (!root || !two || !three || !middle) return 2;
     expect(!IsWindowVisible(root), "the test window is never shown");
     const float scale = float(GetDpiForWindow(root)) / 96.f;

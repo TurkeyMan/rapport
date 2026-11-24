@@ -22,6 +22,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which it needs.
 #include <commctrl.h>
 
@@ -79,7 +80,7 @@ DWORD windows_build()
 HWND top_of(const wchar_t* title)
 {
     // Never shown: FindWindow finds hidden windows too.
-    return FindWindowW(nullptr, title);
+    return test_window(title);
 }
 
 HWND strip_of(HWND top)

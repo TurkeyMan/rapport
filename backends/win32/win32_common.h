@@ -95,6 +95,21 @@ UINT dpi_of(HWND h);
 // For tests: every window taken to be at `dpi` (0: its own again), so a
 // never-shown window can be sent WM_DPICHANGED for it.
 void set_dpi_for_tests(UINT dpi);
+// For tests: the layout pass counter (g_layout_pass), which every relayout
+// request moves on: a setter given the value it has asks none (#88).
+unsigned layout_requests_for_tests();
+// For tests: the deepest a window's layouts have been nested (1: never
+// within another; `reset` starts again), and how many passes the last
+// layout_now made (more than 1: layouts asked for within it, run after).
+unsigned layout_depth_max_for_tests(bool reset = false);
+unsigned layout_passes_for_tests();
+void layout_limits_for_tests(bool reset, unsigned* passes_max, unsigned* cap_hits);
+void set_teardown_hook_for_tests(void (*hook)(void*), void* data);
+void* post_producer_acquire_for_tests();
+void post_producer_post_for_tests(void* producer, void (*fn)(void*), void (*drop)(void*),
+                                  void* ctx);
+void post_producer_release_for_tests(void* producer);
+void scroll_loop_stats_for_tests(bool reset, unsigned* deepest, unsigned* layouts_in_standalone);
 // The system message font at `dpi` (cached; owned by the cache), in
 // Segoe UI Variable where it's Segoe UI and that's installed.
 HFONT ui_font(UINT dpi, bool bold = false, bool mono = false, float scale = 1.f);
@@ -197,11 +212,24 @@ HBRUSH theme_brush(theme_color role);
 // the window colour. And the text on it.
 theme_color surface_of(HWND h);
 theme_color surface_text_of(HWND h);
+// What a window's content is painted in: the surface's colour, except a
+// base surface's on WinUI's layer (look_options::content_surface, resolved
+// by layer_content()), and a brush of it (kept until the colours change).
+// Everything rapport fills with the surface uses these, not the role.
+color content_color_of(HWND h);
+HBRUSH content_brush_of(HWND h);
+bool layer_content();
+void set_content_surface(rap::content_surface c);
 // The colour itself, and a brush of it (kept until the colours change): the
-// surface's, or the toolbar band's fill for a control wholly in its
-// window's band (win32_caption_tabs.h).
+// content's (content_color_of); in light mode, the themed body of a tab
+// control the control lies wholly on (a sibling, as its pages' controls
+// are); or the toolbar band's fill for a control wholly in its window's
+// band (win32_caption_tabs.h).
 color surface_color_of(HWND h);
 HBRUSH surface_brush_of(HWND h);
+// The body brush of a visible tab control `control` lies wholly over (a
+// sibling, as its pages' controls are), if any (win32_backend.cpp).
+HBRUSH tab_body_brush_under(HWND control);
 // Marks top-level `h` as a base surface window (base_surface_supported()
 // checked by the caller).
 void set_base_surface(HWND h, bool on);
@@ -342,6 +370,7 @@ void want_icon(const icon& icon, int logical, UINT dpi);
 // measurement from the same pass is reused. Without it a nested layout
 // re-measures each leaf once per level, twice over.
 inline unsigned g_layout_pass = 1;
+
 
 struct band_density;  // win32_band_field.h
 

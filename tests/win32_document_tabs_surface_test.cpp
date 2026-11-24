@@ -1,6 +1,7 @@
 // The document tabs' strip (window_spec::tabs) beside its tabs: the row's
 // empty part takes the window's surface, as its content does. On a base
-// surface (window_spec::base_surface) on Windows 11 that's the base colour,
+// surface (window_spec::base_surface) on Windows 11 that's its content's
+// (WinUI's layer, as the controls are fluent: win32-content-surface),
 // where the style's own drawing left it the dialog colour; before Windows 11,
 // and on a window without one, the window colour. On screen and printed (as
 // a pane's copy prints it); light and dark (RAPPORT_THEME=light). On Windows
@@ -8,6 +9,7 @@
 // window without one has them in its caption: win32-caption-tabs).
 #include <rapport/rapport.h>
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which it needs.
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -152,7 +154,7 @@ void check(rap::ui& ui, bool base_surface, DWORD want, int x, int y)
             .menu_bar(menus)
             .tabs(document_tabs{{{"a", "Alpha", {}, {}}, {"b", "Beta", {}, {}}}}.current("a")));
     win->show();
-    HWND root = FindWindowW(nullptr, std::wstring(title, title + std::strlen(title)).c_str());
+    HWND root = test_window(std::wstring(title, title + std::strlen(title)).c_str());
     HWND strip = root ? strip_of(root) : nullptr;
     if (!strip)
     {
@@ -198,12 +200,16 @@ int main(int argc, char** argv)
     const DWORD build = windows_build();
     const bool hc = high_contrast();
     const bool dark = !hc && build >= 17763 && (!theme || std::strcmp(theme, "light"));
-    // The surfaces as win32-base-surface has them: Explorer's dark ones
-    // (backends/common/theme_palette.h), else the system colours. A base
-    // surface only from Windows 11 (build 22000).
+    // The surfaces as win32-base-surface has them: a base surface's content
+    // on WinUI's layer, as the controls are fluent (look_options::
+    // content_surface automatic, #96), high contrast's the system's; the
+    // window colour Explorer's dark one (backends/common/theme_palette.h),
+    // else the system's. A base surface only from Windows 11 (build 22000).
     const DWORD window_colour = dark ? 0x202020 : rgb(GetSysColor(COLOR_BTNFACE));
-    const DWORD base_colour =
-        build >= 22000 ? (dark ? 0x191919 : rgb(GetSysColor(COLOR_WINDOW))) : window_colour;
+    const DWORD base_colour = build < 22000 ? window_colour
+                              : hc          ? rgb(GetSysColor(COLOR_WINDOW))
+                              : dark        ? 0x282828
+                                            : 0xF9F9F9;
     std::printf("build %lu, %s\n", build, hc ? "high contrast" : dark ? "dark" : "light");
     int x = 0, y = 0;
     if (const char* at = std::getenv("RAPPORT_TEST_AT")) std::sscanf(at, "%d,%d", &x, &y);

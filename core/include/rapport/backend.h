@@ -11,6 +11,7 @@
 #include "layout.h"
 #include "sys.h"
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -22,7 +23,38 @@ namespace rap
 {
 
 // 88: spec::list and spec::tree's row_height, look_options::row_height.
-inline constexpr int abi_version = 88;
+// 89: tabs::set_page_visible and page_visible; spec::tabs visible and
+//     hide_single_tab.
+// 90: tabs::set_page_icon and set_page_title; spec::tabs icons.
+// 91: look_options::content_surface.
+// 92: tabs::set_hide_single_tab and hide_single_tab.
+inline constexpr int abi_version = 92;
+
+// For backends' tabs (rap::tabs::set_page_visible): the page made current
+// when page `from` is hidden, the nearest visible after it, else before it;
+// -1 with none visible. `visible` is per page; past its end, visible.
+inline int nearest_visible_page(const std::vector<bool>& visible, int pages, int from)
+{
+    auto shown = [&](int i) { return size_t(i) >= visible.size() || visible[size_t(i)]; };
+    for (int i = from + 1; i < pages; ++i)
+        if (shown(i)) return i;
+    for (int i = std::min(from, pages) - 1; i >= 0; --i)
+        if (shown(i)) return i;
+    return -1;
+}
+// The page current at the start: the first visible, or -1.
+inline int first_visible_page(const std::vector<bool>& visible, int pages)
+{
+    return nearest_visible_page(visible, pages, -1);
+}
+// Whether the strip shows: with hide_single_tab, only for two pages or more.
+inline bool tabs_strip_shown(const std::vector<bool>& visible, int pages, bool hide_single_tab)
+{
+    if (!hide_single_tab) return true;
+    int n = 0;
+    for (int i = 0; i < pages && n < 2; ++i) n += size_t(i) >= visible.size() || visible[size_t(i)];
+    return n >= 2;
+}
 
 // Light or dark: as the desktop has it (system), or the app's own choice
 // (an Appearance setting). RAPPORT_THEME=dark|light overrides both, for
@@ -45,6 +77,23 @@ enum class control_style
     automatic,
     native,
     fluent,
+};
+
+// Windows: what a base surface window's content (window_spec::base_surface,
+// below its toolbar band if it has one) sits on. layer is WinUI's layer,
+// as WinUI's apps put their controls on one, never on bare white:
+// LayerFillColorDefault over WinUI's base background, #F9F9F9 in light and
+// #282828 in dark. Controls' grounds and tab pages follow it; lists, trees,
+// text views and canvases keep their own backgrounds. plain is the base
+// colour, Win32's (COLOR_WINDOW; Explorer's dark #191919). automatic
+// follows the control style: layer where controls are fluent, plain where
+// they're native. High contrast is always the system colours. GTK and Qt
+// ignore it.
+enum class content_surface
+{
+    automatic,
+    layer,
+    plain,
 };
 
 // WinUI's densities, where controls are drawn in its look: standard (a text
@@ -168,7 +217,19 @@ public:
     // Light, dark, or the desktop's again, live in every window; before the
     // first window is shown, so it never shows in the other one.
     virtual void set_color_scheme(color_scheme) = 0;
-    virtual void post(std::function<void()>) = 0;  // thread-safe
+    // Runs the function on the UI thread, later. Callable from any thread
+    // while the backend is alive: the caller keeps it alive for the whole
+    // call, and destroying the backend while another thread is inside post()
+    // is the caller's bug. (Rapport's own producers, its background workers,
+    // hold a shared handle that outlives it safely.) One that can't be
+    // delivered (the thread's queue full, or the backend being torn down) is
+    // destroyed without being run, on the calling thread, usually a worker:
+    // so captures that own UI objects (a widget's shared_ptr) need the
+    // backend alive, and posted from the UI thread. Torn down, the backend
+    // destroys every post still queued, on the UI thread, without running
+    // it. Implemented on Win32 and the null backend; GTK's idle sources and
+    // Qt's queued calls not yet checked (#108).
+    virtual void post(std::function<void()>) = 0;
 
     // Native dialogs (xdg-desktop-portal where available). Async.
     virtual void message(window* parent, const message_spec&, std::function<void(dialog_role)>) = 0;
@@ -255,6 +316,10 @@ struct look_options
     // own least); on Qt the text size enters only through the line-and-2
     // least (Qt has no text size apart from the app's font).
     float row_height = 0;
+    // Windows: a base surface window's content on WinUI's layer or the
+    // plain base colour (content_surface). Last, so an initialiser that
+    // lists the members before it still compiles.
+    rap::content_surface content_surface = rap::content_surface::automatic;
 };
 
 // Backend entry point. Returns nullptr if the ABI doesn't match or the

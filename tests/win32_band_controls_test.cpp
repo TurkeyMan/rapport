@@ -44,6 +44,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 #include <d2d1.h>
@@ -253,7 +254,7 @@ DWORD accent_fill()
 
 HWND top_of(const char* title)
 {
-    return FindWindowW(nullptr, std::wstring(title, title + std::strlen(title)).c_str());
+    return test_window(std::wstring(title, title + std::strlen(title)).c_str());
 }
 
 RECT rect_in(HWND top, HWND child)

@@ -28,6 +28,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commctrl.h>
+#include "win32_test_windows.h"
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <dxgi.h>
@@ -291,7 +293,7 @@ int main(int argc, char** argv)
             .tabs(document_tabs{{{"a", "Alpha", {}, {}}, {"b", "Beta", {}, {}}}}.current("a")));
     win->show();
     pump(50);
-    HWND top = FindWindowW(nullptr, L"Caption glass");
+    HWND top = test_window(L"Caption glass");
     HWND strip = top ? FindWindowExW(top, nullptr, L"rapportCaptionTabs", nullptr) : nullptr;
     HWND edit = top ? FindWindowExW(top, nullptr, L"Edit", nullptr) : nullptr;
     expect(top && strip && edit, "the window, its tabs in the caption, its text field");
@@ -324,6 +326,123 @@ int main(int argc, char** argv)
                    efb.bottom <= mi.rcMonitor.bottom,
                "the window wholly on its monitor, where the compositor composes it");
     }
+
+    // The pointer and what's under it, and the text field's own state (its
+    // hover and focus, win32_band_field.h): a pair is steady only if none of
+    // them changed between its frames (#86: the field's clear button,
+    // hovered in one frame and not the other, read as holes there). On a CI
+    // runner (GITHUB_ACTIONS and RAPPORT_TEST_SEND_INPUT, as the tests that
+    // move it), the pointer's put away from the window first: an earlier
+    // test's input may have left it over the band.
+    struct pointer_state
+    {
+        POINT at{};
+        HWND under = nullptr;
+        LRESULT field = 0;
+        bool operator==(const pointer_state& o) const
+        {
+            return at.x == o.at.x && at.y == o.at.y && under == o.under && field == o.field;
+        }
+    };
+    static const UINT field_query = RegisterWindowMessageW(L"rapport-band-field");
+    // The field's own pointer messages while a pair's taken (moves, leaves,
+    // its hover timers), on it and the buttons in it: a hover that came and
+    // went inside the pair leaves no trace in its state after, but these.
+    static int pointer_messages = 0;
+    auto count = [](HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) -> LRESULT
+    {
+        if (msg == WM_MOUSEMOVE || msg == WM_MOUSELEAVE || msg == WM_TIMER) ++pointer_messages;
+        return DefSubclassProc(h, msg, wp, lp);
+    };
+    std::vector<HWND> watched;
+    if (edit)
+    {
+        watched.push_back(edit);
+        for (HWND c = GetWindow(edit, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) watched.push_back(c);
+        for (HWND w : watched) SetWindowSubclass(w, count, 0x86, 0);
+    }
+    auto pointer_now = [&]
+    {
+        pointer_state p;
+        GetCursorPos(&p.at);
+        p.under = WindowFromPoint(p.at);
+        p.field = edit ? SendMessageW(edit, field_query, 0, 0) : 0;
+        return p;
+    };
+    auto describe = [&](const pointer_state& p)
+    {
+        wchar_t cls[64]{};
+        if (p.under) GetClassNameW(p.under, cls, 64);
+        char name[80];
+        std::snprintf(name, sizeof name, "%ls", cls);
+        return "the pointer at " + str(p.at.x) + "," + str(p.at.y) + " over " + (p.under ? std::string(name) : "nothing") +
+               (p.under && (p.under == top || IsChild(top, p.under)) ? " (this window's)" : "") + ", the field's state " +
+               str(long(p.field)) + ((p.field & 4) ? " (hovered)" : "") + ((p.field & 8) ? " (focused)" : "");
+    };
+    {
+        char gh[8]{}, input[8]{};
+        GetEnvironmentVariableA("GITHUB_ACTIONS", gh, sizeof gh);
+        GetEnvironmentVariableA("RAPPORT_TEST_SEND_INPUT", input, sizeof input);
+        if (!std::strcmp(gh, "true") && !std::strcmp(input, "1"))
+        {
+            MONITORINFO mi{sizeof mi};
+            GetMonitorInfoW(MonitorFromWindow(top, MONITOR_DEFAULTTONEAREST), &mi);
+            SetCursorPos(mi.rcWork.right - 4, mi.rcWork.bottom - 4);
+            pump(20);  // the field's hover let go (its timer is 50 ms)
+            Sleep(120);
+            pump(20);
+        }
+        note(describe(pointer_now()) + ", before the pair");
+    }
+
+    // The field's clear button draws its face whole and opaque in one write
+    // (#86): its own drawing (the WM_DRAWITEM its WM_PAINT sends the edit)
+    // into a 32-bit bitmap at alpha 0, as the window's surface holds what GDI
+    // writes, comes out with every pixel at alpha 255. Drawn in parts
+    // straight onto the surface (its fill at alpha 0, then its glyph), a
+    // frame the compositor took before the band made it opaque (after the
+    // message) showed the button as a hole on the band's glass, or without
+    // its glyph. (Not WM_PRINTCLIENT: the band's printing makes a printed
+    // copy opaque itself, whatever the button drew.)
+    if (HWND clear = edit ? FindWindowExW(edit, nullptr, L"Button", nullptr) : nullptr)
+    {
+        RECT bc;
+        GetClientRect(clear, &bc);
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof bi.bmiHeader, bc.right, -bc.bottom, 1, 32, BI_RGB};
+        void* bits = nullptr;
+        HDC screen = GetDC(nullptr);
+        HDC mem = CreateCompatibleDC(screen);
+        HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        ReleaseDC(nullptr, screen);
+        if (mem && bmp && bits && bc.right > 0 && bc.bottom > 0)
+        {
+            HGDIOBJ old = SelectObject(mem, bmp);
+            std::memset(bits, 0, size_t(bc.right) * bc.bottom * 4);
+            DRAWITEMSTRUCT d{};
+            d.CtlType = ODT_BUTTON;
+            d.CtlID = UINT(GetDlgCtrlID(clear));
+            d.itemAction = ODA_DRAWENTIRE;
+            d.hwndItem = clear;
+            d.hDC = mem;
+            d.rcItem = bc;
+            SendMessageW(edit, WM_DRAWITEM, WPARAM(d.CtlID), reinterpret_cast<LPARAM>(&d));
+            GdiFlush();
+            int below = 0;
+            const auto* px = static_cast<const uint32_t*>(bits);
+            for (int i = 0; i < bc.right * bc.bottom; ++i) below += (px[i] >> 24) != 255;
+            expect(below == 0,
+                   "the field's clear button drawn whole and opaque, in one write: " + str(below) +
+                       " of " + str(bc.right * bc.bottom) + " pixels below alpha 255");
+            SelectObject(mem, old);
+        }
+        else
+            expect(false, "the field's clear button drawn into a 32-bit bitmap");
+        if (bmp) DeleteObject(bmp);
+        if (mem) DeleteDC(mem);
+    }
+    else
+        expect(false, "the field's clear button");
 
     capturer cap;
     if (!cap.make()) return skip("no Direct3D 11 device to capture with");
@@ -367,14 +486,31 @@ int main(int argc, char** argv)
             note(std::string("the caret's ") + name + (GetParent(owner) == top ? "" : " (in another control)") +
                  (hid ? ", hidden for the pair" : ", NOT hidden (HideCaret failed)"));
         }
+        const pointer_state before = pointer_now();
+        pointer_messages = 0;
         for (int i = 0; i < 2; ++i)
         {
+            // RAPPORT_GLASS_HOVER_ONCE=1: the field told the pointer's over
+            // it (a WM_MOUSEMOVE sent to it, no input) between the first
+            // attempt's frames, to see that pair taken again.
+            if (i == 1 && attempt == 0 && edit)
+            {
+                char once[4]{};
+                if (GetEnvironmentVariableA("RAPPORT_GLASS_HOVER_ONCE", once, sizeof once) && once[0] == '1')
+                    SendMessageW(edit, WM_MOUSEMOVE, 0, MAKELPARAM(4, 4));
+            }
             const BOOL frame_dark = i;
             DwmSetWindowAttribute(top, 20, &frame_dark, sizeof frame_dark);
             pump(10);
             DwmFlush();
             f[i] = cap.grab(top);
         }
+        const pointer_state after = pointer_now();
+        const int field_messages = pointer_messages;
+        const bool pointer_steady = before == after && field_messages == 0;
+        if (!pointer_steady)
+            note("the pointer or the field changed during the pair (" + str(field_messages) +
+                 " pointer messages to the field): " + describe(before) + "; then " + describe(after));
         const int moved = caret_hider::moved();
         const bool caret_lost = caret_hider::lost();
         caret_hider::show();
@@ -384,14 +520,17 @@ int main(int argc, char** argv)
                        ": its hide balanced");
         else if (caret_was)
             note("the caret made anew during the attempt: not compared");  // balanced whatever moved, unless the caret's gone
-        steady = moved == 0 && (!owner || hid);
-        moves_seen += (moves_seen.empty() ? "" : ", ") + str(moved) + (owner && !hid ? " (caret not hidden)" : "");
+        steady = moved == 0 && (!owner || hid) && pointer_steady;
+        moves_seen += (moves_seen.empty() ? "" : ", ") + str(moved) + (owner && !hid ? " (caret not hidden)" : "") +
+                      (pointer_steady ? "" : " (the pointer or the field changed)");
         if (!steady)
             note(owner && !hid ? std::string("the caret couldn't be hidden: taken again")
                                : "the focus or the activation moved while the pair was taken (" + str(moved) +
                                      " messages): taken again");
     }
     caret_hider::unwatch();
+    for (HWND w : watched)
+        if (IsWindow(w)) RemoveWindowSubclass(w, count, 0x86);
     // Every hide balanced: whatever caret there is now, it's shown
     // (GUI_CARETBLINKING: the caret visible).
     // Never measured from a pair the focus moved in (it would read false
@@ -400,8 +539,9 @@ int main(int argc, char** argv)
     if (!steady)
     {
         DwmSetWindowAttribute(top, 20, &was, sizeof was);
-        expect(false, "capture unstable: in every attempt the focus or the activation moved, or the caret "
-                      "couldn't be hidden (focus and activation messages per attempt: " +
+        expect(false, "capture unstable: in every attempt the focus or the activation moved, the caret "
+                      "couldn't be hidden, or the pointer or the field changed (focus and activation messages per "
+                      "attempt: " +
                           moves_seen + ")");
         std::printf("%d failed\n", fails);
         return 1;
@@ -495,6 +635,36 @@ int main(int argc, char** argv)
                                           ", at least the layer's alpha, " + fixed(layer) + " (" + str(holes) +
                                           " of " + str(checked) + " below; the least " + fixed(least) + " at " +
                                           str(worst.x) + "," + str(worst.y) + ")");
+    // A hole: what was where, to tell why (#86): the pointer and the field
+    // now, which control the worst pixel's in, and both frames round it.
+    if (holes)
+    {
+        note(describe(pointer_now()) + ", after the pair");
+        POINT sp{worst.x, worst.y};
+        ClientToScreen(top, &sp);
+        if (HWND at = WindowFromPoint(sp))
+        {
+            wchar_t cls[64]{};
+            GetClassNameW(at, cls, 64);
+            char name[80];
+            std::snprintf(name, sizeof name, "%ls", cls);
+            const RECT r = rect_in(top, at);
+            note("the worst pixel's in a " + std::string(name) + " at " + str(r.left) + "," + str(r.top) + ".." +
+                 str(r.right) + "," + str(r.bottom));
+        }
+        for (int i = 0; i < 2; ++i)
+            for (int dy = -2; dy <= 2; ++dy)
+            {
+                std::string row = "frame " + str(i) + ", row " + str(worst.y + dy) + ":";
+                for (int dx = -2; dx <= 2; ++dx)
+                {
+                    char b[16];
+                    std::snprintf(b, sizeof b, " %06x", f[i].at(worst.x + dx + ox, worst.y + dy + oy) & 0xffffff);
+                    row += b;
+                }
+                note(row);
+            }
+    }
     // The text field's inside: opaque.
     {
         const RECT e = rect_in(top, edit);

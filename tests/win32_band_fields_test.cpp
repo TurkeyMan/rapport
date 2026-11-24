@@ -41,6 +41,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 #include <ole2.h>
@@ -248,7 +249,7 @@ void show(rap::window& w)
 
 HWND top_of(const char* title)
 {
-    return FindWindowW(nullptr, std::wstring(title, title + std::strlen(title)).c_str());
+    return test_window(std::wstring(title, title + std::strlen(title)).c_str());
 }
 
 HWND strip_of(HWND top)

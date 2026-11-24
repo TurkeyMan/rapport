@@ -56,6 +56,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "win32_test_windows.h"
 // After windows.h, which they need.
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -246,8 +247,9 @@ palette expected(bool hc)
         p.separator_px = 0xFF000000u | rgb(GetSysColor(COLOR_WINDOWTEXT));
         return p;
     }
-    p.band = g_base ? (g_dark ? 0x191919 : rgb(GetSysColor(COLOR_WINDOW)))
-                    : (g_dark ? 0x202020 : rgb(GetSysColor(COLOR_BTNFACE)));
+    // A base surface's content on WinUI's layer, as its controls are fluent
+    // (look_options::content_surface automatic, #96).
+    p.band = g_base ? (g_dark ? 0x282828 : 0xF9F9F9) : (g_dark ? 0x202020 : rgb(GetSysColor(COLOR_BTNFACE)));
     p.line = over(g_dark ? dark_stroke : light_stroke, p.band);
     p.current = p.band;
     p.current_px = 0xFF000000u | p.current;
@@ -318,7 +320,7 @@ void show(rap::window& w)
 
 HWND top_of(const char* title)
 {
-    return FindWindowW(nullptr, std::wstring(title, title + std::strlen(title)).c_str());
+    return test_window(std::wstring(title, title + std::strlen(title)).c_str());
 }
 
 HWND strip_of(HWND top)

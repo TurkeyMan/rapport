@@ -698,7 +698,11 @@ public:
     virtual void set_items(std::vector<tree_item>) = 0;
     virtual std::optional<std::string> selected() const = 0;
     // Selects `id`, opening its ancestors and scrolling it into view; an id
-    // that isn't there clears the selection.
+    // that isn't there clears the selection. Into view as the tree will be
+    // laid out: a layout still to come (the window's content just changed)
+    // is made first; within a layout, it's scrolled once that's done.
+    // Implemented on Win32. GTK 3 and Qt 6 still read the layout as it was
+    // (#108 follow-up: issuecomment-7081451394); GTK 4 unconfirmed.
     virtual void select(const std::string& id) = 0;
     virtual void set_expanded(const std::string& id, bool) = 0;
 
@@ -879,6 +883,13 @@ public:
     virtual std::optional<size_t> current() const = 0;
     virtual void select(const std::vector<size_t>& rows) = 0;
     virtual void set_current(size_t row) = 0;
+    // These three work on the list as it will be laid out, not as it was: a
+    // layout still to come (the window's content just changed, a label above
+    // it grown, say) is made first. Within a layout (a callback it runs),
+    // scroll_to and set_row_offset are made once it's done, the latest one
+    // asked for only, and row_offset reads as laid out so far.
+    // Implemented on Win32. GTK 3 and Qt 6 still read the layout as it was
+    // (#108 follow-up: issuecomment-7081451394); GTK 4 unconfirmed.
     virtual void scroll_to(size_t row, scroll_align = scroll_align::nearest) = 0;
     // Where a row sits in the view: its top in logical px below the top of
     // the rows area (under any header); nullopt while it isn't in view, or
@@ -989,6 +1000,17 @@ public:
     // One size per pane along the split, in logical pixels, for saving
     // layout. set_sizes() restores them (sizes of 0 are left alone); called
     // before the window first shows, it replaces the stretch-based layout.
+    // Read from a pane's own size callback (a canvas's on_resize, told once
+    // the splitter has placed all its panes), they're the sizes being laid
+    // out, every pane's, on every backend (#105). Otherwise they're as the
+    // splitter will be laid out: a layout still to come (a label above it
+    // grown, say) is made first. The one exception: while set_sizes() waits
+    // for its layout, sizes() is what it asked for (0: the size now), so a
+    // restore then a save, before the window first shows or lays out,
+    // round-trips what was saved; laid out first, a size the window can't
+    // hold yet would be clamped, and saved layouts would drift.
+    // A layout still to come made first: implemented on Win32. GTK 3 and
+    // Qt 6 still read the layout as it was (#135); GTK 4 unconfirmed.
     virtual std::vector<float> sizes() const = 0;
     virtual void set_sizes(const std::vector<float>&) = 0;
     // A divider dragged by the user, once the drag ends; not layout, the
@@ -999,12 +1021,47 @@ public:
     virtual float divider() const = 0;
 };
 
+// Pages with a tab (or, as a sidebar, a row) each, one shown at a time.
+// Pages keep their index whether shown or hidden.
 class tabs : public widget
 {
 public:
+    // -1 when every page is hidden.
     virtual int current() const = 0;
+    // Doesn't fire on_changed. A hidden page (or an index out of range):
+    // nothing.
     virtual void set_current(int) = 0;
+    // Fires only for the user's switch of page, once, with current() as it
+    // ends (a lazy page's builder may switch again, or hide pages): never
+    // with -1, and not when the page ends where it was before the switch.
     virtual void on_changed(std::function<void(int)>) = 0;
+    // A hidden page's tab is gone, and the page takes no layout, paint or
+    // input; a lazy page stays unbuilt. Hiding the current page makes the
+    // nearest visible page after it current (before it, if there's none
+    // after), without on_changed; with every page hidden, current() is -1
+    // and no page shows. Shown again, its tab is back at its place among the
+    // visible ones, and the current page stays as it is. (layout::page's
+    // visible(false) hides one from the start.)
+    virtual void set_page_visible(int page, bool visible) = 0;
+    virtual bool page_visible(int page) const = 0;
+    // A page's icon, before its title on its tab (or sidebar row), at the
+    // toolkit's small-icon size: any form (named, for_file, for_path,
+    // drawn; a drawn one redrawn on theme and scale changes). An empty icon
+    // removes it. Swapping one icon for another keeps the tab's width;
+    // adding or removing one may change it (a placeholder icon keeps it
+    // steady). A hidden page keeps its icon and title, and has them when
+    // it's shown again. Pages out of range: nothing. Neither fires
+    // on_changed. (layout::page::icon sets one from the start.)
+    virtual void set_page_icon(int page, const icon& icon) = 0;
+    virtual void set_page_title(int page, const std::string& title) = 0;
+    // layout::tabs::hide_single_tab, live: on, with at most one page
+    // visible, the strip (or the sidebar's list) goes and the page fills
+    // the area; off, it's back with its one tab. With two pages or more
+    // visible the strip shows either way, and only the option changes. The
+    // natural and minimum sizes follow. The same value again: nothing.
+    // Neither fires on_changed, and current() stays.
+    virtual void set_hide_single_tab(bool on) = 0;
+    virtual bool hide_single_tab() const = 0;
 };
 
 class window;
@@ -1378,6 +1435,11 @@ class canvas : public widget
 {
 public:
     virtual void invalidate() = 0;  // repaint soon
+    // Its size as laid out. On Windows a layout still pending (a set_sizes,
+    // a pane shown or hidden) is done first, with what's pending, so the
+    // size is the one it's about to have; read from inside a layout (an
+    // on_resize), it's the size placed so far and nothing is laid out
+    // within it.
     virtual size_f size() const = 0;
     virtual float device_scale() const = 0;
     virtual void set_cursor(cursor) = 0;

@@ -333,23 +333,86 @@ class null_tabs : public stub<rap::tabs>
 {
 public:
     int current() const override { return current_; }
+    // A hidden page, or one out of range: nothing.
     void set_current(int i) override
     {
+        if (i < 0 || i >= pages || !page_visible(i)) return;
         current_ = i;
-        if (i >= 0 && size_t(i) < lazy.size() && lazy[size_t(i)])
-        {
-            const auto build = std::move(lazy[size_t(i)]);
-            lazy[size_t(i)] = nullptr;
-            build_page(build(), size_t(i));
-        }
+        ensure_built(i);
     }
     void on_changed(std::function<void(int)>) override {}
+    void set_page_icon(int page, const icon& i) override
+    {
+        if (page < 0 || page >= pages) return;
+        icons.resize(size_t(pages));
+        icons[size_t(page)] = i;
+        std::printf("tabs: page %d's icon %s\n", page, describe(i).c_str());
+    }
+    void set_page_title(int page, const std::string& title) override
+    {
+        if (page < 0 || page >= pages || size_t(page) >= titles.size() || titles[size_t(page)] == title) return;
+        titles[size_t(page)] = title;
+        std::printf("tabs: page %d's title \"%s\"\n", page, title.c_str());
+    }
+    // How an icon prints: its name, file or path, "drawn", or "none".
+    static std::string describe(const icon& i)
+    {
+        if (!i.name.empty()) return i.name;
+        if (!i.file.empty()) return "for " + i.file;
+        if (!i.path.empty()) return "of " + i.path;
+        return i.draw ? "drawn" : "none";
+    }
+    std::vector<std::string> titles;
+    std::vector<icon> icons;  // per page; empty: none
+    void set_page_visible(int page, bool on) override
+    {
+        if (page < 0 || page >= pages || page_visible(page) == on) return;  // (#88)
+        visible.resize(size_t(pages), true);
+        visible[size_t(page)] = on;
+        if (!on && page == current_)
+            current_ = nearest_visible_page(visible, pages, page);
+        else if (on && current_ < 0)
+            current_ = page;  // the first page shown again
+        ensure_built(current_);
+        std::printf("tabs: page %d %s, current %d, strip %s\n", page, on ? "shown" : "hidden", current_,
+                    strip_shown() ? "shown" : "hidden");
+    }
+    bool page_visible(int page) const override
+    {
+        return page >= 0 && page < pages && (size_t(page) >= visible.size() || visible[size_t(page)]);
+    }
+    bool strip_shown() const { return tabs_strip_shown(visible, pages, hide_single); }
+    // The option, live: the same value again, nothing (no line printed).
+    void set_hide_single_tab(bool on) override
+    {
+        if (hide_single == on) return;
+        hide_single = on;
+        std::printf("tabs: hide single tab %s, current %d, strip %s\n", on ? "on" : "off", current_,
+                    strip_shown() ? "shown" : "hidden");
+    }
+    bool hide_single_tab() const override { return hide_single; }
+    // The first current page: the first visible, built if it's lazy.
+    void start()
+    {
+        current_ = first_visible_page(visible, pages);
+        ensure_built(current_);
+    }
 
+    int pages = 0;
+    std::vector<bool> visible;  // per page; empty: all
+    bool hide_single = false;   // spec::tabs::hide_single_tab
     // Lazy pages: built (and printed) when first made current.
     std::vector<std::function<node()>> lazy;
     std::function<void(const node&, size_t)> build_page;
 
 private:
+    void ensure_built(int i)
+    {
+        if (i < 0 || size_t(i) >= lazy.size() || !lazy[size_t(i)]) return;
+        const auto build = std::move(lazy[size_t(i)]);
+        lazy[size_t(i)] = nullptr;
+        build_page(build(), size_t(i));
+    }
     int current_ = 0;
 };
 
@@ -654,23 +717,34 @@ private:
     void visit(const node& n, const spec::tabs& s, int d)
     {
         std::printf(s.sidebar ? "tabs (sidebar)" : "tabs");
+        if (s.hide_single_tab) std::printf(" (hide single tab)");
         suffix(n);
         auto* tabs = make<null_tabs>(n);
+        tabs->pages = int(s.pages.size());
+        tabs->visible = s.visible;
+        tabs->titles = s.titles;
+        tabs->icons = s.icons;
+        tabs->hide_single = s.hide_single_tab;
         for (size_t i = 0; i < s.pages.size(); ++i)
         {
+            const bool hidden = i < s.visible.size() && !s.visible[i];
+            std::string title = s.titles[i];
+            if (i < s.icons.size() && null_tabs::describe(s.icons[i]) != "none")
+                title += " (icon " + null_tabs::describe(s.icons[i]) + ")";
             if (i < s.lazy.size() && s.lazy[i])
-                std::printf("%*s[%s] (lazy)\n", (d + 1) * 2, "", s.titles[i].c_str());
+                std::printf("%*s[%s] (lazy%s)\n", (d + 1) * 2, "", title.c_str(), hidden ? ", hidden" : "");
             else
-                build(s.pages[i], d + 1, s.titles[i]);
+                build(s.pages[i], d + 1, hidden ? title + " (hidden)" : title);
         }
+        if (!tabs->strip_shown()) std::printf("%*s(no strip: one page)\n", (d + 1) * 2, "");
         if (!s.lazy.empty())
         {
             tabs->lazy = s.lazy;
             tabs->build_page = [&out = out_, &sink = sink_, post = post_, d,
                                 titles = s.titles](const node& page, size_t i)
             { builder(out, sink, post).build(page, d + 1, titles[i]); };
-            tabs->set_current(0);
         }
+        tabs->start();
     }
     void visit(const node& n, const spec::stack& s, int d)
     {
