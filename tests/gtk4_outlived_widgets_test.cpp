@@ -683,6 +683,52 @@ int main(int argc, char** argv)
     if (kept_check) g_object_unref(kept_check);
     gtk_window_destroy(GTK_WINDOW(keeper));
     pump(100);
+
+    // Last (the app quits): an icon's drawing ends its window and quits, in
+    // GTK's own paint under run(). Once run() returns, with nothing pumped
+    // after, the GtkWindow is gone (finalized), not left waiting for an idle
+    // the loop never ran.
+    {
+        std::unique_ptr<rap::window> own;
+        bool armed = false;
+        int quits = 0;
+        rap::icon ending;
+        ending.draw = [&own, &armed, &quits, &ui](rap::painter&, rap::size_f)
+        {
+            if (!own || !armed) return;
+            armed = false;
+            own.reset();
+            ++quits;
+            (*ui)->quit(0);
+        };
+        own = (*ui)->create(
+            window{"Icon ends and quits", {button{"Drawn"}.icon(ending)}}.size(200_px, 100_px));
+        own->show();
+        pump(300);
+        GWeakRef gone;
+        g_weak_ref_init(&gone, window_titled("Icon ends and quits"));
+        armed = true;
+        std::vector<GtkWidget*> areas;
+        all_of(content_of(window_titled("Icon ends and quits")), GTK_TYPE_DRAWING_AREA, areas);
+        for (GtkWidget* a : areas) gtk_widget_queue_draw(a);
+        // If it's never painted, run() is quit anyway, and the case fails.
+        const guint backstop = g_timeout_add(
+            5000,
+            +[](gpointer u) -> gboolean
+            {
+                static_cast<rap::ui*>(u)->quit(0);
+                return G_SOURCE_REMOVE;
+            },
+            ui->get());
+        (*ui)->run();
+        if (quits) g_source_remove(backstop);
+        GObject* left = static_cast<GObject*>(g_weak_ref_get(&gone));
+        expect(!own && quits == 1, "an icon's drawing ended its window and quit, under run() (" +
+                                       std::to_string(quits) + ")");
+        expect(left == nullptr, "and with nothing pumped after run(), its GtkWindow is finalized");
+        if (left) g_object_unref(left);
+        g_weak_ref_clear(&gone);
+    }
     std::printf(fails ? "%d failed\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

@@ -215,7 +215,7 @@ struct after_paint
 {
     std::vector<GtkWidget*> windows;  // to destroy (each held)
     std::vector<GtkWidget*> areas;    // to let go of (drawing areas, what they were in)
-    bool asked = false;               // the idle's there
+    guint idle = 0;                   // the idle asked for, while it's there
     bool empty() const { return windows.empty() && areas.empty(); }
 };
 after_paint& after_painting()
@@ -223,25 +223,33 @@ after_paint& after_painting()
     static after_paint p;
     return p;
 }
+// What's waiting goes now, if no draw func runs (else it waits for the last
+// to return). From the idle, and as the main loop returns or the backend
+// goes (a drawing may quit the app: the loop can return before the idle
+// runs). Calls nothing of the app's.
+void drain_after_paint()
+{
+    after_paint& p = after_painting();
+    if (drawing_depth > 0) return;
+    if (p.idle) g_source_remove(std::exchange(p.idle, 0));
+    const std::vector<GtkWidget*> windows = std::exchange(p.windows, {});
+    const std::vector<GtkWidget*> areas = std::exchange(p.areas, {});
+    for (GtkWidget* w : windows)
+    {
+        gtk_window_destroy(GTK_WINDOW(w));
+        g_object_unref(w);
+    }
+    for (GtkWidget* a : areas) g_object_unref(a);
+}
 void ask_after_paint()
 {
     after_paint& p = after_painting();
-    if (p.asked || p.empty()) return;
-    p.asked = true;
-    g_idle_add(
+    if (p.idle || p.empty()) return;
+    p.idle = g_idle_add(
         +[](gpointer) -> gboolean
         {
-            after_paint& p = after_painting();
-            p.asked = false;
-            if (drawing_depth > 0) return G_SOURCE_REMOVE;  // asked again as the last returns
-            const std::vector<GtkWidget*> windows = std::exchange(p.windows, {});
-            const std::vector<GtkWidget*> areas = std::exchange(p.areas, {});
-            for (GtkWidget* w : windows)
-            {
-                gtk_window_destroy(GTK_WINDOW(w));
-                g_object_unref(w);
-            }
-            for (GtkWidget* a : areas) g_object_unref(a);
+            after_painting().idle = 0;  // (removed as this returns)
+            drain_after_paint();        // nothing while a draw func runs: asked again as the last returns
             return G_SOURCE_REMOVE;
         },
         nullptr);
@@ -7371,6 +7379,7 @@ private:
 class gtk4_backend : public backend
 {
 public:
+    ~gtk4_backend() override { drain_after_paint(); }  // run() may never have been
     static backend* create(int* argc, char** argv, const look_options& look)
     {
         palette::app_scheme() = palette::scheme_number(look.color_scheme);
@@ -7455,6 +7464,7 @@ public:
         loop_ = g_main_loop_new(nullptr, false);
         window_impl::main_loop() = loop_;
         g_main_loop_run(loop_);
+        drain_after_paint();  // no draw func runs here
         window_impl::main_loop() = nullptr;
         g_main_loop_unref(loop_);
         loop_ = nullptr;
