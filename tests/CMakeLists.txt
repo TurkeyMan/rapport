@@ -1002,7 +1002,7 @@ if(TARGET rapport_win32)
     endif()
     add_dependencies(rapport-win32-pane-uncovered-test rapport_win32)
     add_test(NAME win32-pane-uncovered COMMAND rapport-win32-pane-uncovered-test)
-    set_tests_properties(win32-pane-uncovered PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
+    set_tests_properties(win32-pane-uncovered PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77)
 
     # A shown window's decisions while a relayout_at_once has drawing off (#108).
     add_executable(rapport-win32-at-once-visibility-test win32_at_once_visibility_test.cpp)
