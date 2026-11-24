@@ -169,7 +169,9 @@ using namespace gtkcommon;
 // drawing, a menu item's action, a model's paint) after the rapport object
 // that took it is destroyed, and checks again after each one it calls, as
 // that may destroy it. Owning the closure isn't enough: it may capture what
-// goes with the object (widgets.h, icon::draw).
+// goes with the object (widgets.h, icon::draw). An app's drawing may end
+// the very window being drawn: its rapport objects go at once, its GtkWindow
+// after the paint, from an idle (drawing, below).
 template <class T>
 class self_token
 {
@@ -197,6 +199,21 @@ public:
 
 private:
     std::shared_ptr<T*> self_;
+};
+
+// The draw funcs running now, each of which may call the app's drawing. An
+// app's drawing may destroy the window being drawn: its rapport objects go at
+// once, as ever, but GTK goes on painting that GtkWindow as the draw func
+// returns (destroyed, GTK complains). So a window destroyed while one runs
+// has its GtkWindow destroyed after, from an idle that calls nothing of the
+// app's (#143).
+int drawing_depth = 0;
+struct drawing
+{
+    drawing() { ++drawing_depth; }
+    ~drawing() { --drawing_depth; }
+    drawing(const drawing&) = delete;
+    drawing& operator=(const drawing&) = delete;
 };
 }  // namespace
 }  // namespace rap::gtk4
@@ -487,6 +504,7 @@ GtkWidget* icon_widget(const icon& icon, int size, std::weak_ptr<bool> owner)
         GTK_DRAWING_AREA(area),
         +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
         {
+            const drawing in_draw;
             auto* g = static_cast<gated_draw*>(p);
             const std::shared_ptr<bool> owner = g->owner.lock();
             if (!owner || !*owner) return;
@@ -3011,6 +3029,7 @@ private:
             GTK_DRAWING_AREA(area),
             +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
             {
+                const drawing in_draw;
                 auto* g = static_cast<gated_draw*>(p);
                 const std::shared_ptr<bool> open = g->gate.lock();
                 if (!open || !*open) return;
@@ -5326,6 +5345,7 @@ private:
                 GTK_DRAWING_AREA(area),
                 +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
                 {
+                    const drawing in_draw;
                     if (column_ctx* c = static_cast<cell_ref*>(p)->live())
                         c->list->draw_cell(area, cr, w, h, *c);
                 },
@@ -5389,6 +5409,7 @@ private:
                 GTK_DRAWING_AREA(badge),
                 +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
                 {
+                    const drawing in_draw;
                     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
                     for (const char* key : {"rapport-draw", "rapport-overlay"})
                         if (auto* draw = static_cast<draw_fn*>(g_object_get_data(G_OBJECT(a), key)))
@@ -5662,6 +5683,7 @@ public:
             GTK_DRAWING_AREA(w_),
             +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
             {
+                const drawing in_draw;
                 auto* self = static_cast<canvas_impl*>(p);
                 // A new device scale is a resize in device pixels
                 // (canvas::on_resize), told before the frame that uses it.
@@ -6168,6 +6190,22 @@ public:
             if (bar->button)
                 gtk_menu_button_set_create_popup_func(GTK_MENU_BUTTON(bar->button), nullptr,
                                                       nullptr, nullptr);
+        // Destroyed by the app's drawing (one of this window's, or any): GTK
+        // goes on painting it as that returns, so the GtkWindow goes after,
+        // held till then. Nothing of the app's is reached from it: what's
+        // connected is taken off above, and the rest holds tokens now empty.
+        if (drawing_depth > 0)
+        {
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,  // after the paint (GDK's is higher)
+                +[](gpointer w) -> gboolean
+                {
+                    gtk_window_destroy(GTK_WINDOW(w));
+                    return G_SOURCE_REMOVE;
+                },
+                g_object_ref(win_), g_object_unref);
+            return;
+        }
         gtk_window_destroy(GTK_WINDOW(win_));
     }
 

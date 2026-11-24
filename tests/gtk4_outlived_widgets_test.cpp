@@ -333,6 +333,43 @@ int main(int argc, char** argv)
                "an unretained icon's drawing destroyed its window, then read its capture (" +
                    std::to_string(captured_reads) + ")");
     }
+    // An icon whose drawing ends its window in GTK's own paint of that window
+    // (Xvfb in CI, with criticals fatal: GTK goes on painting it as the drawing
+    // returns, so its GtkWindow goes after, from an idle). Broadway with no
+    // viewer may not paint it.
+    {
+        std::unique_ptr<rap::window> own;
+        const std::string tag = "icon in its frame";
+        bool armed = false;
+        rap::icon ending;
+        ending.draw = [&own, &armed, tag](rap::painter&, rap::size_f)
+        {
+            if (!own || !armed) return;
+            own.reset();
+            use(tag);
+        };
+        own = (*ui)->create(
+            window{"Icon ends its frame", {button{"Drawn"}.icon(ending)}}.size(200_px, 100_px));
+        own->show();
+        pump(300);
+        captured_reads = 0;
+        armed = true;
+        for (int i = 0; i < 10 && own; ++i)
+        {
+            std::vector<GtkWidget*> areas;
+            all_of(content_of(window_titled("Icon ends its frame")), GTK_TYPE_DRAWING_AREA, areas);
+            for (GtkWidget* a : areas) gtk_widget_queue_draw(a);
+            pump(100);
+        }
+        armed = false;
+        pump(200);
+        expect(!own && captured_reads == 1,
+               "an icon's drawing ended its window in GTK's own paint of it, then read its "
+               "capture (" +
+                   std::to_string(captured_reads) + ")");
+        expect(window_titled("Icon ends its frame") == nullptr,
+               "and its GtkWindow went after the paint");
+    }
     // A canvas: its on_paint destroys the window, then reads its capture.
     // Its content kept in a window of the test's, so it's painted after.
     {
