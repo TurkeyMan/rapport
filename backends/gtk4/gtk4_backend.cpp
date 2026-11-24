@@ -171,7 +171,10 @@ using namespace gtkcommon;
 // that may destroy it. Owning the closure isn't enough: it may capture what
 // goes with the object (widgets.h, icon::draw). An app's drawing may end
 // the very window being drawn: its rapport objects go at once, its GtkWindow
-// after the paint, from an idle (drawing, below).
+// once no draw func runs (drawing and after_paint, below). Every draw func
+// counts itself (`drawing`) and holds its area (`held_area`) first, before
+// any call into the app's: what the app lets go of then waits for the paint
+// to end, as rapport's own guarantee, not GTK's.
 template <class T>
 class self_token
 {
@@ -582,12 +585,12 @@ GtkWidget* icon_widget(const icon& icon, int size, std::weak_ptr<bool> owner)
         +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
         {
             const drawing in_draw;
+            const held_area held(a);  // first: before any of the app's
             auto* g = static_cast<gated_draw*>(p);
             const std::shared_ptr<bool> owner = g->owner.lock();
             if (!owner || !*owner) return;
             snap_to_device(cr, GTK_WIDGET(a));
             cairo_painter painter(cr, GTK_WIDGET(a));
-            const held_area held(a);
             call_app(owner, g->draw, painter,
                      size_f{float(w), float(h)});  // a copy: it may end the owner, and g
         },
@@ -3105,12 +3108,12 @@ private:
             +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
             {
                 const drawing in_draw;
+                const held_area held(a);  // first: before any of the app's
                 auto* g = static_cast<gated_draw*>(p);
                 const std::shared_ptr<bool> open = g->gate.lock();
                 if (!open || !*open) return;
                 snap_to_device(cr, GTK_WIDGET(a));
                 cairo_painter painter(cr, GTK_WIDGET(a));
-                const held_area held(a);
                 call_app(open, g->draw, painter,
                          size_f{float(w), float(h)});  // a copy: it may end its tabs, and g
             },
@@ -5420,6 +5423,7 @@ private:
                 +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
                 {
                     const drawing in_draw;
+                    const held_area held(area);  // first: before any of the app's
                     if (column_ctx* c = static_cast<cell_ref*>(p)->live())
                         c->list->draw_cell(area, cr, w, h, *c);
                 },
@@ -5484,6 +5488,7 @@ private:
                 +[](GtkDrawingArea* a, cairo_t* cr, int w, int h, gpointer p)
                 {
                     const drawing in_draw;
+                    const held_area held(a);  // first: before any of the app's
                     using draw_fn = std::function<void(rap::painter&, rap::size_f)>;
                     for (const char* key : {"rapport-draw", "rapport-overlay"})
                         if (auto* draw = static_cast<draw_fn*>(g_object_get_data(G_OBJECT(a), key)))
@@ -5495,7 +5500,6 @@ private:
                                 static_cast<cell_ref*>(p)->life.lock();
                             if (!life || !*life) return;
                             cairo_painter painter(cr, GTK_WIDGET(a));
-                            const held_area held(a);
                             if (!call_app(life, *draw, painter, size_f{float(w), float(h)})) return;
                         }
                 },
@@ -5756,6 +5760,7 @@ public:
             +[](GtkDrawingArea* area, cairo_t* cr, int w, int h, gpointer p)
             {
                 const drawing in_draw;
+                const held_area held(area);  // first: before any of the app's
                 auto* self = static_cast<canvas_impl*>(p);
                 // A new device scale is a resize in device pixels
                 // (canvas::on_resize), told before the frame that uses it.
@@ -5785,7 +5790,6 @@ public:
                 cairo_translate(cr, span.shift.x, span.shift.y);
                 cairo_painter painter(cr, GTK_WIDGET(area));
                 self->frame_.paint(painter, span.size);
-                const held_area held(area);
                 call_app(*self, self->paint_, painter, span.size);
             },
             this, nullptr);
