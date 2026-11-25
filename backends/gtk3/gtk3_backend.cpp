@@ -408,8 +408,34 @@ class label_impl : public widget_base<rap::label>
 {
 public:
     explicit label_impl(const spec::label& s)
-        : widget_base(gtk_label_new(s.text.c_str()))
+        : widget_base(icon_only(s) ? gtk_event_box_new() : gtk_label_new(s.text.c_str()))
+        , link_(s.link)
+        , ellipsize_(s.ellipsize)
+        , focusable_(s.focusable)
+        , icon_only_(icon_only(s))
+        , on_click_(s.on_click)
+        , text_(s.text)
     {
+        if (icon_only_)
+        {
+            // A link that's only an icon: the icon, clickable, and no empty
+            // label beside it; no taller than a line of text. A link to
+            // screen readers, named by its tooltip.
+            PangoLayout* line = gtk_widget_create_pango_layout(w_, "Ag");
+            int line_w = 0, line_h = 16;
+            pango_layout_get_pixel_size(line, &line_w, &line_h);
+            g_object_unref(line);
+            if (GtkWidget* img = icon_widget(s.icon, std::min(16, line_h)))
+            {
+                gtk_container_add(GTK_CONTAINER(w_), img);
+                gtk_widget_show(img);
+            }
+            gtk_widget_set_halign(w_, GTK_ALIGN_START);
+            gtk_widget_set_valign(w_, GTK_ALIGN_CENTER);
+            clickable(w_);
+            atk_object_set_role(gtk_widget_get_accessible(w_), ATK_ROLE_LINK);
+            return;
+        }
         gtk_label_set_xalign(GTK_LABEL(w_), 0);
         gtk_label_set_selectable(GTK_LABEL(w_), s.selectable);
         if (s.ellipsize) gtk_label_set_ellipsize(GTK_LABEL(w_), PANGO_ELLIPSIZE_END);
@@ -424,8 +450,7 @@ public:
         {
             // A link in the label's markup: GTK's own link look, focus and
             // keyboard activation; activate-link runs it instead of a URI.
-            link_ = true;
-            on_click_ = s.on_click;
+            // Ellipsized, GTK shortens the link's text as it does a label's.
             apply_text(s.text);  // the link's markup, though the plain text's the same
             g_signal_connect(w_, "activate-link",
                              G_CALLBACK(+[](GtkLabel*, gchar*, gpointer p) -> gboolean
@@ -437,17 +462,30 @@ public:
                              this);
         }
         if (s.icon) add_icon(s.icon);
+        if (link_ && ellipsize_) apply_tip();
     }
 
     void set_text(const std::string& t) override
     {
         // Unchanged: nothing set, nothing laid out again (#88). (A link's
         // shown text is its markup's.)
-        if (t == gtk_label_get_text(GTK_LABEL(w_))) return;
+        if (t == text_) return;
+        text_ = t;
+        if (icon_only_) return;  // (it shows no text)
         apply_text(t);
+        if (link_ && ellipsize_) apply_tip();
+    }
+    // On the whole of it, the icon as well as the text; an ellipsized
+    // link's whole text when the app gives none.
+    void set_tooltip(const std::string& t) override
+    {
+        app_tip_ = t;
+        apply_tip();
     }
 
 private:
+    static bool icon_only(const spec::label& s) { return s.link && s.text.empty() && s.icon; }
+
     // The text set, as plain text or (a link) the link's markup: always.
     void apply_text(const std::string& t)
     {
@@ -456,11 +494,45 @@ private:
         gtk_label_set_markup(GTK_LABEL(w_),
                              (std::string("<a href=\"rapport:\">") + escaped + "</a>").c_str());
         g_free(escaped);
+        // A label with links makes itself focusable as it takes them.
+        if (!focusable_) gtk_widget_set_can_focus(w_, false);
+    }
+
+    void apply_tip()
+    {
+        const std::string& tip = app_tip_.empty() && link_ && ellipsize_ && !icon_only_ ? text_ : app_tip_;
+        gchar* now = gtk_widget_get_tooltip_text(outer_);
+        const bool same = tip == (now ? now : "");
+        g_free(now);
+        if (!same) gtk_widget_set_tooltip_text(outer_, tip.empty() ? nullptr : tip.c_str());
+        if (icon_only_) atk_object_set_name(gtk_widget_get_accessible(w_), app_tip_.c_str());
+    }
+
+    // `holder` (an event box: GTK 3's images have no window of their own)
+    // takes the link's click and pointer.
+    void clickable(GtkWidget* holder)
+    {
+        gtk_widget_add_events(holder, GDK_BUTTON_RELEASE_MASK);
+        g_signal_connect(holder, "button-release-event",
+                         G_CALLBACK(+[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
+                                    {
+                                        auto* self = static_cast<label_impl*>(p);
+                                        if (e->button == 1 && self->on_click_) self->on_click_();
+                                        return true;
+                                    }),
+                         this);
+        g_signal_connect(holder, "realize",
+                         G_CALLBACK(+[](GtkWidget* w, gpointer)
+                                    {
+                                        GdkCursor* c = gdk_cursor_new_from_name(gtk_widget_get_display(w), "pointer");
+                                        gdk_window_set_cursor(gtk_widget_get_window(w), c);
+                                        if (c) g_object_unref(c);
+                                    }),
+                         nullptr);
     }
 
     // The icon before the text, in a box that becomes the outer widget; on a
-    // link it takes the link's click and pointer (an event box, as GTK 3's
-    // images have no window of their own).
+    // link it takes the link's click and pointer.
     void add_icon(const icon& icon)
     {
         GtkWidget* img = icon_widget(icon, 16);
@@ -471,23 +543,7 @@ private:
         {
             holder = gtk_event_box_new();
             gtk_container_add(GTK_CONTAINER(holder), img);
-            gtk_widget_add_events(holder, GDK_BUTTON_RELEASE_MASK);
-            g_signal_connect(holder, "button-release-event",
-                             G_CALLBACK(+[](GtkWidget*, GdkEventButton* e, gpointer p) -> gboolean
-                                        {
-                                            auto* self = static_cast<label_impl*>(p);
-                                            if (e->button == 1 && self->on_click_) self->on_click_();
-                                            return true;
-                                        }),
-                             this);
-            g_signal_connect(holder, "realize",
-                             G_CALLBACK(+[](GtkWidget* w, gpointer)
-                                        {
-                                            GdkCursor* c = gdk_cursor_new_from_name(gtk_widget_get_display(w), "pointer");
-                                            gdk_window_set_cursor(gtk_widget_get_window(w), c);
-                                            if (c) g_object_unref(c);
-                                        }),
-                             nullptr);
+            clickable(holder);
         }
         gtk_box_pack_start(GTK_BOX(box), holder, false, false, 0);
         gtk_box_pack_start(GTK_BOX(box), w_, true, true, 0);
@@ -496,7 +552,12 @@ private:
     }
 
     bool link_ = false;
+    bool ellipsize_ = false;
+    bool focusable_ = true;
+    bool icon_only_ = false;  // a link that's only its icon (no text)
     std::function<void()> on_click_;
+    std::string text_;     // as last set
+    std::string app_tip_;  // the app's tooltip (set_tooltip)
 };
 
 // A GtkImage for a named icon the theme has; otherwise a drawing area

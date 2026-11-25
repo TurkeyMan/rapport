@@ -771,6 +771,9 @@ public:
     {
         setTextFormat(Qt::PlainText);
     }
+    // A link: its text is shown in a link's markup, which is cut short by
+    // its text, not its markup.
+    void set_link(bool link) { link_ = link; }
     void set_full_text(const QString& t)
     {
         full_ = t;
@@ -799,29 +802,40 @@ protected:
 private:
     void refit()
     {
-        QLabel::setText(elide_ ? fontMetrics().elidedText(full_, Qt::ElideRight,
-                                                          std::max(0, contentsRect().width()))
-                               : full_);
+        const QString shown = elide_ ? fontMetrics().elidedText(full_, Qt::ElideRight,
+                                                                std::max(0, contentsRect().width()))
+                                     : full_;
+        const QString text = link_ ? "<a href=\"rapport:\">" + shown.toHtmlEscaped() + "</a>" : shown;
+        if (text != QLabel::text()) QLabel::setText(text);
     }
     QString full_;
     bool elide_;
+    bool link_ = false;
 };
 
 class label_impl : public widget_base<rap::label>
 {
 public:
     explicit label_impl(const spec::label& s)
-        : widget_base(with_icon(new elided_label(s.ellipsize), s))
+        : widget_base(icon_only(s) ? icon_only_widget(s) : with_icon(new elided_label(s.ellipsize), s))
+        , ellipsize_(s.ellipsize)
+        , icon_only_(icon_only(s))
     {
+        if (icon_only_) return;  // (named by its tooltip, set_tooltip)
         // Qt fits the height to the width it's given (heightForWidth).
         if (s.wrap) label()->setWordWrap(true);
         if (s.link)
         {
             // A rich-text link: the style's link colour, focus and Enter.
+            // Ellipsized, its text is cut short as a label's is.
             link_ = true;
+            label()->set_link(true);
             label()->setTextFormat(Qt::RichText);
             label()->setTextInteractionFlags(Qt::LinksAccessibleByMouse |
-                                             Qt::LinksAccessibleByKeyboard);
+                                             (s.focusable ? Qt::TextInteractionFlags(Qt::LinksAccessibleByKeyboard)
+                                                          : Qt::TextInteractionFlags()));
+            // No Tab stop: still clicked, still a link to screen readers.
+            if (!s.focusable) label()->setFocusPolicy(Qt::NoFocus);
             QObject::connect(label(), &QLabel::linkActivated, label(),
                              [f = s.on_click](const QString&)
                              {
@@ -855,26 +869,64 @@ public:
     void set_text(const std::string& t) override
     {
         if (shown_ && t == text_) return;
+        if (icon_only_)
+        {
+            shown_ = true;
+            text_ = t;  // (it shows no text)
+            return;
+        }
         apply_text(t);
+    }
+    // On the whole of it, the icon as well as the text; an ellipsized
+    // link's whole text when the app gives none. An icon-only link is
+    // named by it.
+    void set_tooltip(const std::string& t) override
+    {
+        app_tip_ = t;
+        apply_tip();
     }
 
 private:
+    static bool icon_only(const spec::label& s) { return s.link && s.text.empty() && s.icon; }
+
     // The text set on the label, whatever it had: a rebuild (a new
     // palette) as well as a new text.
     void apply_text(const std::string& t)
     {
         shown_ = true;
         text_ = t;
-        if (link_)
-            // Through the full text the label re-applies on resize.
-            label()->set_full_text("<a href=\"rapport:\">" + qs(t).toHtmlEscaped() + "</a>");
-        else
-            label()->set_full_text(qs(t));
+        // (A link's, through the full text the label shows in its markup,
+        // cut short on resize.)
+        label()->set_full_text(qs(t));
+        // Its name the whole text, whatever it shows.
+        if (link_) label()->setAccessibleName(qs(t));
+        if (link_ && ellipsize_) apply_tip();
+    }
+    void apply_tip()
+    {
+        const std::string& tip = app_tip_.empty() && link_ && ellipsize_ ? text_ : app_tip_;
+        if (const QString q = qs(tip); w_->toolTip() != q) w_->setToolTip(q);
+        if (icon_only_) w_->setAccessibleName(qs(app_tip_));
     }
 
-private:
     std::string text_;
-    bool shown_ = false;  // text_ set on the label (set_text, once at least)
+    std::string app_tip_;  // the app's tooltip (set_tooltip)
+    bool shown_ = false;   // text_ set on the label (set_text, once at least)
+    bool ellipsize_ = false;
+    bool icon_only_ = false;  // a link that's only its icon (no text)
+    // A link that's only an icon: the icon, clickable, with no empty label
+    // beside it, and no taller than a line of text.
+    static QWidget* icon_only_widget(const spec::label& s)
+    {
+        auto* image = new QLabel;
+        const int size = std::min(16, image->fontMetrics().height());
+        const QIcon icon = to_q_icon(s.icon, size, nullptr);
+        if (!icon.isNull()) image->setPixmap(icon.pixmap(QSize(size, size), qApp->devicePixelRatio()));
+        image->setFixedSize(size, size);
+        image->setFocusPolicy(Qt::NoFocus);
+        clickable(image, s.on_click);
+        return image;
+    }
     // With an icon, the label sits after it in a row of its own; on a link
     // the icon takes the link's click and pointer.
     static QWidget* with_icon(elided_label* text, const spec::label& s)
@@ -890,12 +942,14 @@ private:
         image->setPixmap(icon.pixmap(QSize(16, 16), qApp->devicePixelRatio()));
         layout->addWidget(image);
         layout->addWidget(text, 1);
-        if (s.link && s.on_click)
-        {
-            image->setCursor(Qt::PointingHandCursor);
-            image->installEventFilter(new click_filter(image, s.on_click));
-        }
+        if (s.link) clickable(image, s.on_click);
         return row;
+    }
+    static void clickable(QLabel* image, const std::function<void()>& f)
+    {
+        if (!f) return;
+        image->setCursor(Qt::PointingHandCursor);
+        image->installEventFilter(new click_filter(image, f));
     }
     // A press and release of the left button on the icon.
     class click_filter : public QObject

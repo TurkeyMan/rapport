@@ -162,10 +162,21 @@ struct label
     bool wrap = false;
     // A hyperlink that runs on_click (TortoiseGit's "Check: All None ..."
     // links, a branch name that opens Switch): each toolkit's own link.
+    // Ellipsized, it measures as an ellipsized label does and shows as
+    // much of its text as fits, "..." at the end; the whole text is its
+    // tooltip (unless it has one of its own) and its accessible name.
     bool link = false;
     std::function<void()> on_click;
+    // A link's Tab stop. Off, it's still clicked with the pointer (the hand
+    // over it) and still a link to screen readers, but the keyboard doesn't
+    // reach it: give keyboard users its action some other way (a menu
+    // item, a shortcut). A label that isn't a link takes no focus anyway.
+    bool focusable = true;
     // Drawn before the text; on a link it's part of the link (its click and
-    // pointer), so an icon and its words read as one.
+    // pointer), so an icon and its words read as one. A link with an icon
+    // and no text is the icon alone, no taller than a line of text and no
+    // Tab stop (as focusable(false)): its tooltip, which it must have, is
+    // its accessible name.
     rap::icon icon;
     rap::label** bind = nullptr;
 };
@@ -831,6 +842,12 @@ public:
     {
         s().link = true;
         s().on_click = std::move(on_click);
+        return *this;
+    }
+    // A link without a Tab stop (see spec::label::focusable).
+    label& focusable(bool v = true)
+    {
+        s().focusable = v;
         return *this;
     }
     label& icon(rap::icon i)

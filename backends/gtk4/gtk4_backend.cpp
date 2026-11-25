@@ -325,8 +325,26 @@ class label_impl : public widget_base<rap::label>
 {
 public:
     explicit label_impl(const spec::label& s)
-        : widget_base(gtk_label_new(s.text.c_str()))
+        : widget_base(icon_only(s) ? nullptr : gtk_label_new(s.text.c_str()))
+        , link_(s.link)
+        , ellipsize_(s.ellipsize)
+        , focusable_(s.focusable)
+        , icon_only_(icon_only(s))
     {
+        on_click_ = s.on_click;
+        if (icon_only_)
+        {
+            // A link that's only an icon: the icon, clickable, and no empty
+            // label beside it; no taller than a line of text (as made).
+            // Named by its tooltip. (Made once it's a part: its drawing
+            // runs only while it's there.)
+            w_ = outer_ = icon_only_widget(s.icon, life());
+            text_ = s.text;
+            gtk_widget_set_halign(w_, GTK_ALIGN_START);
+            gtk_widget_set_valign(w_, GTK_ALIGN_CENTER);
+            clickable(w_);
+            return;
+        }
         if (!s.link) text_ = s.text;
         gtk_label_set_xalign(GTK_LABEL(w_), 0);
         gtk_label_set_selectable(GTK_LABEL(w_), s.selectable);
@@ -342,8 +360,7 @@ public:
         {
             // A link in the label's markup: GTK's own link look, focus and
             // keyboard activation; activate-link runs it instead of a URI.
-            link_ = true;
-            on_click_ = s.on_click;
+            // Ellipsized, GTK shortens the link's text as it does a label's.
             set_text(s.text);
             connect(
                 w_, "activate-link",
@@ -356,6 +373,7 @@ public:
                 this);
         }
         if (s.icon) add_icon(s.icon);
+        if (link_ && ellipsize_) apply_tip();
     }
 
     // The text it has: nothing (#88).
@@ -363,20 +381,53 @@ public:
     {
         if (text_ == t) return;
         text_ = t;
+        if (icon_only_) return;  // (it shows no text)
         if (!link_) return gtk_label_set_text(GTK_LABEL(w_), t.c_str());
         gchar* escaped = g_markup_escape_text(t.c_str(), -1);
         gtk_label_set_markup(GTK_LABEL(w_),
                              (std::string("<a href=\"rapport:\">") + escaped + "</a>").c_str());
         g_free(escaped);
+        // A label with links makes itself focusable as it takes them.
+        if (!focusable_) gtk_widget_set_focusable(w_, false);
+        if (ellipsize_) apply_tip();
+    }
+    // On the whole of it, the icon as well as the text; an ellipsized
+    // link's whole text when the app gives none.
+    void set_tooltip(const std::string& t) override
+    {
+        app_tip_ = t;
+        apply_tip();
     }
 
 private:
+    static bool icon_only(const spec::label& s) { return s.link && s.text.empty() && s.icon; }
+    // An icon-only link's widget: its icon, as tall as a line of text at
+    // most; a label (showing nothing) where the icon has none.
+    static GtkWidget* icon_only_widget(const icon& icon, std::weak_ptr<bool> owner);
+
+    void apply_tip()
+    {
+        const std::string& tip =
+            app_tip_.empty() && link_ && ellipsize_ && !icon_only_ ? text_.value_or(std::string()) : app_tip_;
+        const char* now = gtk_widget_get_tooltip_text(outer_);  // (GTK 4's own: not freed)
+        if (tip != (now ? now : "")) gtk_widget_set_tooltip_text(outer_, tip.empty() ? nullptr : tip.c_str());
+        if (icon_only_)
+            gtk_accessible_update_property(GTK_ACCESSIBLE(w_), GTK_ACCESSIBLE_PROPERTY_LABEL, app_tip_.c_str(), -1);
+    }
+
+    // `w` takes the link's click and pointer.
+    void clickable(GtkWidget* w);
+
     // The icon before the text, in a box that becomes the outer widget; on a
     // link it takes the link's click and pointer.
     void add_icon(const icon& icon);
 
     bool link_ = false;
+    bool ellipsize_ = false;
+    bool focusable_ = true;
+    bool icon_only_ = false;           // a link that's only its icon (no text)
     std::optional<std::string> text_;  // what it shows (set_text)
+    std::string app_tip_;              // the app's tooltip (set_tooltip)
     std::function<void()> on_click_;
 };
 
@@ -384,16 +435,23 @@ private:
 // drawing (icon::draw) is called only while that's there (#140).
 GtkWidget* icon_widget(const icon& icon, int size, std::weak_ptr<bool> owner);
 
-void label_impl::add_icon(const icon& icon)
+GtkWidget* label_impl::icon_only_widget(const icon& icon, std::weak_ptr<bool> owner)
 {
-    GtkWidget* img = icon_widget(icon, 16, life());
-    if (!img) return;
-    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    gtk_box_append(GTK_BOX(box), img);
-    gtk_box_append(GTK_BOX(box), w_);
-    outer_ = box;
-    if (!link_) return;
-    gtk_widget_set_cursor_from_name(img, "pointer");
+    // A line of the label's text: a label's font's, measured on a label
+    // that's never shown.
+    GtkWidget* probe = GTK_WIDGET(g_object_ref_sink(gtk_label_new(nullptr)));
+    PangoLayout* line = gtk_widget_create_pango_layout(probe, "Ag");
+    int line_w = 0, line_h = 16;
+    pango_layout_get_pixel_size(line, &line_w, &line_h);
+    g_object_unref(line);
+    g_object_unref(probe);
+    if (GtkWidget* img = icon_widget(icon, std::min(16, line_h), std::move(owner))) return img;
+    return gtk_label_new(nullptr);
+}
+
+void label_impl::clickable(GtkWidget* w)
+{
+    gtk_widget_set_cursor_from_name(w, "pointer");
     GtkGesture* click = gtk_gesture_click_new();
     connect(
         click, "released",
@@ -403,7 +461,18 @@ void label_impl::add_icon(const icon& icon)
             call_app(*self, self->on_click_);
         },
         this);
-    gtk_widget_add_controller(img, GTK_EVENT_CONTROLLER(click));
+    gtk_widget_add_controller(w, GTK_EVENT_CONTROLLER(click));
+}
+
+void label_impl::add_icon(const icon& icon)
+{
+    GtkWidget* img = icon_widget(icon, 16, life());
+    if (!img) return;
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_append(GTK_BOX(box), img);
+    gtk_box_append(GTK_BOX(box), w_);
+    outer_ = box;
+    if (link_) clickable(img);
 }
 
 // A button's content: its text, or its icon (named or drawn), or the icon
