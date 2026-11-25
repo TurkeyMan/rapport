@@ -1670,16 +1670,8 @@ public:
             });
     }
     unsigned focus_generation_ = 0;  // the latest focus()'s (focus_now_or_after)
-    // A relayout_at_once's visibility, taken before it turns drawing off
-    // (WM_SETREDRAW FALSE clears WS_VISIBLE): -1, none under way.
-    int at_once_visible = -1;
-    // Whether the window shows: as it did before a relayout_at_once turned
-    // its drawing off, while that's under way (IsWindowVisible reads it as
-    // hidden then); otherwise IsWindowVisible.
-    bool shown() const
-    {
-        return at_once_visible >= 0 ? at_once_visible != 0 : IsWindowVisible(hwnd()) != FALSE;
-    }
+    // Whether the window shows.
+    bool shown() const { return IsWindowVisible(hwnd()) != FALSE; }
     // Its canvases' swap chains kept composed by the DWM (see
     // gpu_target::compose): while the window's fullscreen.
     virtual bool keep_composed() const { return false; }
@@ -1869,6 +1861,7 @@ void move_control(HWND h, int x, int y, int w, int hgt)
 }
 
 void show_now(HWND h, bool shown);
+void shows_in_one_pass(const std::vector<std::pair<HWND, bool>>& shows);
 
 // The scroll pane's panel `h` lies on (or is), if any: what's drawn off
 // screen and shown in one go (see paint_pane).
@@ -1946,7 +1939,7 @@ public:
                 EndDeferWindowPos(dwp);
             }
         }
-        for (auto [h, shown] : batch_.shown) show_now(h, shown);
+        shows_in_one_pass(batch_.shown);
         buffered.insert(batch_.panes.begin(), batch_.panes.end());
         // Then painted, all of them, before anything else runs: left to their
         // WM_PAINTs, which come only once the queue is idle, they landed a
@@ -2005,6 +1998,59 @@ void show_now(HWND h, bool shown)
         ShowWindow(h, shown ? SW_SHOWNA : SW_HIDE);
     else
         SetWindowLongPtrW(h, GWL_STYLE, shown ? style | WS_VISIBLE : style & ~WS_VISIBLE);
+}
+
+// A pass's shows and hides, once its moves are made: each parent's
+// children's in one DeferWindowPos batch, so a page going and the one coming
+// in its place change together (the parent never erased under them between,
+// nor composed with neither), with drawing on. While the window's still
+// hidden, the style bit, as show_now has it. The last asked of each control
+// counts.
+void shows_in_one_pass(const std::vector<std::pair<HWND, bool>>& shows)
+{
+    std::unordered_map<HWND, size_t> last;
+    for (size_t i = 0; i < shows.size(); ++i) last[shows[i].first] = i;
+    std::vector<std::pair<HWND, std::vector<std::pair<HWND, bool>>>> by_parent;  // in the order asked
+    for (size_t i = 0; i < shows.size(); ++i)
+    {
+        const auto [h, shown] = shows[i];
+        if (last[h] != i || !IsWindow(h)) continue;
+        if (!IsWindowVisible(GetAncestor(h, GA_ROOT)))
+        {
+            show_now(h, shown);
+            continue;
+        }
+        if (bool(GetWindowLongPtrW(h, GWL_STYLE) & WS_VISIBLE) == shown) continue;
+        const HWND parent = GetParent(h);
+        auto it = std::find_if(by_parent.begin(), by_parent.end(), [&](const auto& p) { return p.first == parent; });
+        if (it == by_parent.end()) it = by_parent.insert(by_parent.end(), {parent, {}});
+        it->second.push_back({h, shown});
+    }
+    for (const auto& [parent, list] : by_parent)
+    {
+        HDWP dwp = BeginDeferWindowPos(int(list.size()));
+        for (const auto& [h, shown] : list)
+        {
+            if (!dwp) break;
+            UINT flags = move_flags | (shown ? SWP_SHOWWINDOW : SWP_HIDEWINDOW) | SWP_NOMOVE | SWP_NOSIZE;
+            RECT r{};
+            if (const auto it = g_parked.find(h); shown && it != g_parked.end())
+            {
+                r = it->second;
+                g_parked.erase(it);
+                if (!placed_at(h, r.left, r.top, r.right - r.left, r.bottom - r.top))
+                    flags = (flags & ~(SWP_NOMOVE | SWP_NOSIZE)) | SWP_NOCOPYBITS;
+            }
+            dwp = DeferWindowPos(dwp, h, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
+        }
+        if (dwp)
+        {
+            trace::scope timing(trace::phase::end_defer, uintptr_t(parent));
+            EndDeferWindowPos(dwp);
+        }
+        else
+            for (const auto& [h, shown] : list) show_now(h, shown);  // one at a time, as it can
+    }
 }
 
 // In a layout pass, once its moves are made: a control shown where it was
@@ -2088,7 +2134,6 @@ public:
                                 [this]
                                 {
                                     HWND root = GetAncestor(h_, GA_ROOT);
-                                    // (not IsWindowVisible: a relayout_at_once's drawing off hides it from that)
                                     if (win_.shown())
                                         SetFocus(h_);
                                     else
@@ -13267,7 +13312,10 @@ private:
         if (gpu_ && gpu_->device() != dev) gpu_.reset();  // lost, by another canvas
         if (gpu_frame_ && gpu_frame_->device != dev) drop_gpu_frame();
         if (!gpu_ && dev && (gpu_ = gpu_target::make(dev, h_, w, h, win_.keep_composed())))
+        {
             drop_cpu();
+            gdi_stale_ = true;
+        }
         if (gpu_)
         {
             if (gpu_frame_ && gpu_frame_->fence)
@@ -13285,6 +13333,7 @@ private:
                 draw(dc, dev->key, dc);
                 if (gpu_->end())
                 {
+                    if (std::exchange(gdi_stale_, false)) clear_gdi_surface();
                     painted_ = true;
                     finish_reads(false);
                     return;
@@ -13547,8 +13596,24 @@ private:
         if (cpu_key_) retire_resource_key(cpu_key_);
         cpu_key_ = 0;
     }
+    // The GDI surface under its GPU layer, once it's on it, filled with the
+    // window's background: the CPU frame drawn there before (its first) is
+    // otherwise what shows whenever the DWM composes the window without the
+    // layer (drawing turned off on an ancestor). Once its first GPU frame is
+    // in, so the fill itself isn't what shows until then.
+    void clear_gdi_surface()
+    {
+        if (HDC dc = GetDC(h_))
+        {
+            RECT c;
+            GetClientRect(h_, &c);
+            FillRect(dc, &c, content_brush_of(h_));
+            ReleaseDC(h_, dc);
+        }
+    }
 
     bool focusable_;
+    bool gdi_stale_ = false;  // on the GPU since its last CPU frame: clear_gdi_surface due
     std::unique_ptr<gpu_target> gpu_;
     com<ID2D1HwndRenderTarget> cpu_;
     uint64_t cpu_key_ = 0;
@@ -13834,17 +13899,21 @@ public:
         relayout_pending_ = true;
         PostMessageW(hwnd_, wm_rapport_relayout, 0, 0);
     }
-    // With drawing off, the old page goes and the new one comes (through
-    // the style bit, silently) and everything then paints in one pass,
-    // rather than control by control across several frames.
+    // The old page goes and the new one comes, in one batch with the moves
+    // (moves_in_one_pass, shows_in_one_pass), and what they made dirty then
+    // paints in one pass, rather than control by control across several
+    // frames. Drawing isn't turned off around it (WM_SETREDRAW): that hides
+    // the window from DWM's point of view, and while it was off DWM composed
+    // the window without its canvases' GPU layers, showing the GDI surface
+    // under them (a canvas's first frame, drawn there on the CPU) for a
+    // frame at every switch, as a splitter's drag once did (relayout_dragged).
     bool relayout_at_once() override
     {
         if (in_layout)
         {
             // After the one under way, as it would have been now: measured
             // anew, the window grown to its content and redrawn if it's
-            // shown, as decided now, or as the at-once under way decided
-            // before it turned drawing off (WM_SETREDRAW FALSE hides it).
+            // shown, as decided now.
             at_once_pending_ = true;
             at_once_grow_ = at_once_grow_ || shown();
             if (!shown()) grow_owed_ = true;  // hidden: grown when it's next shown, as below
@@ -13864,18 +13933,17 @@ public:
         // the strip back) may change the natural sizes, and grow_to_content
         // and WM_GETMINMAXINFO read them.
         ++g_layout_pass;
-        const int was_visible = std::exchange(at_once_visible, 1);  // shown: past the check above
         const std::weak_ptr<bool> alive = layout_alive;
-        SendMessageW(hwnd_, WM_SETREDRAW, FALSE, 0);
         grow_owed_ = false;  // grown now
         grow_to_content();
         if (alive.expired()) return false;
         layout_now();
         if (alive.expired()) return false;
-        SendMessageW(hwnd_, WM_SETREDRAW, TRUE, 0);
-        at_once_visible = was_visible;
-        redraw_now(hwnd_, nullptr, nullptr,
-                   RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        // What the moves, shows and hides made dirty, and what was before
+        // them (the tab control's new selection), painted now. Only that:
+        // the rest is as it was, and with drawing on, invalidating it all
+        // would erase it and draw it again in view.
+        redraw_now(hwnd_, nullptr, nullptr, RDW_ALLCHILDREN | RDW_UPDATENOW);
         return !alive.expired();
     }
     // A window made smaller than content it has since gained (a page built
@@ -14306,7 +14374,7 @@ public:
     }
     void present() override
     {
-        if (!shown()) show();  // (shown already within a relayout_at_once, its drawing off)
+        if (!shown()) show();
         const bool quiet = std::getenv("RAPPORT_SNAPSHOT") != nullptr || std::getenv("RAPPORT_NO_ACTIVATE") != nullptr;
         // Minimised: back to its size before, maximised if it was.
         // SW_SHOWNOACTIVATE restores as SW_RESTORE does, without the focus.
@@ -14477,7 +14545,7 @@ public:
         if (dwm_get && GetWindowRect(hwnd_, &outer) &&
             SUCCEEDED(
                 dwm_get(hwnd_, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, &visible, sizeof visible)) &&
-            shown())  // (a relayout_at_once's drawing off hides it from IsWindowVisible, not the screen)
+            shown())
             inset = RECT{visible.left - outer.left, visible.top - outer.top, outer.right - visible.right, outer.bottom - visible.bottom};
         const RECT& work = mi.rcWork;
         const auto fit = [](int pos, int size, int lo, int hi, int before, int after)

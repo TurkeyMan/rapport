@@ -774,7 +774,7 @@ int main(int argc, char** argv)
             RECT before{};
             GetClientRect(m_root, &before);
             m_once = [&] { m_inner->show("wide"); };
-            m_outer->show("bigger");  // at once, the window shown: drawing off around it
+            m_outer->show("bigger");  // at once, the window shown
             pump();
             RECT after{};
             GetClientRect(m_root, &after);
