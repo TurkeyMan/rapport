@@ -245,9 +245,9 @@ int main(int argc, char** argv)
     expect(size_of(icon).cx <= size_of(line).cy, "icon-only link: the icon alone, no gap after it");
     click(icon);
     expect(icon_clicks == 1, "icon-only link: clicking the icon runs it");
-    SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+    SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512) /* IDC_ARROW */));
     SendMessageW(icon, WM_SETCURSOR, reinterpret_cast<WPARAM>(icon), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
-    expect(GetCursor() == LoadCursorW(nullptr, IDC_HAND), "icon-only link: the pointer's hand over it");
+    expect(GetCursor() == LoadCursorW(nullptr, MAKEINTRESOURCEW(32649) /* IDC_HAND */), "icon-only link: the pointer's hand over it");
     expect(tip_for(root, icon) == copy_tip, "icon-only link: its tooltip on the icon");
     expect(acc_name(icon) == copy_tip, "icon-only link: named by its tooltip");
     expect(acc_role(icon) == ROLE_SYSTEM_LINK, "icon-only link: a link to screen readers");
