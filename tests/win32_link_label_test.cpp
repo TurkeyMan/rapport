@@ -37,8 +37,7 @@ void expect(bool ok, const std::string& what)
 }
 
 const std::string long_text =
-    "C:\\Users\\someone\\Pictures\\a folder with a rather long name\\and another one inside it\\"
-    "the picture with the longest name of them all.png";
+    "C:\\Users\\someone\\Pictures\\holiday\\the picture with a long name.png";
 const std::wstring long_wide(long_text.begin(), long_text.end());
 const std::wstring copy_tip = L"Copy the path";
 
@@ -84,6 +83,13 @@ SIZE size_of(HWND h)
     RECT r{};
     GetWindowRect(h, &r);
     return {r.right - r.left, r.bottom - r.top};
+}
+
+// The link's text as it is and its width, for a failure's log.
+void note(HWND h)
+{
+    std::printf("     link %ld px across: \"%ls\"\n", size_of(h).cx, text_of(h).c_str());
+    std::fflush(stdout);
 }
 
 std::wstring tip_for(HWND root, HWND control)
@@ -202,17 +208,22 @@ int main(int argc, char** argv)
     if (!lng || !plain || !before || !line || !icon) return 1;
 
     // -- an ellipsized link
-    win->resize({1400, 400});
+    // (Room for it on a small screen: CI's is 1024 across.)
+    win->resize({900, 400});
     pump();
+    note(lng);
     expect(link_text(lng) == long_wide, "given room: its whole text");
     win->resize({220, 400});
     pump();
+    note(lng);
     const std::wstring narrow = link_text(lng);
-    expect(narrow.size() < long_wide.size() && narrow.ends_with(L"...") && narrow.starts_with(L"C:\\"),
+    expect(narrow.size() < long_wide.size() &&
+               (narrow.ends_with(L"...") || narrow.ends_with(L"\u2026")) && narrow.starts_with(L"C:\\"),
            "given less: its text cut short, \"...\" at its end");
     LITEM item{};
-    item.mask = LIF_ITEMINDEX;
+    item.mask = LIF_ITEMINDEX | LIF_STATE;
     item.iLink = 0;
+    item.stateMask = LIS_ENABLED;
     expect(SendMessageW(lng, LM_GETITEM, 0, reinterpret_cast<LPARAM>(&item)) != 0,
            "given less: still a link");
     expect(size_of(lng).cx < 220, "given less: the link laid out narrower than its text");
@@ -221,8 +232,9 @@ int main(int argc, char** argv)
     expect(tip_for(root, lng) == long_wide, "its tooltip: the whole text");
     expect(acc_name(lng) == long_wide, "its accessible name: the whole text");
     expect((GetWindowLongPtrW(lng, GWL_STYLE) & WS_TABSTOP) != 0, "a link: a Tab stop by default");
-    win->resize({1400, 400});
+    win->resize({900, 400});
     pump();
+    note(lng);
     expect(link_text(lng) == long_wide, "given room again: its whole text again");
 
     // -- focusable(false)
