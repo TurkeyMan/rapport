@@ -93,13 +93,15 @@ std::vector<HWND> canvases(HWND top)
     return out;
 }
 
-HWND first_child(HWND top, const wchar_t* cls)
+// The tab control with `tabs` tabs (the strip's: the document tabs' row is
+// a tab control too, on some builds).
+HWND tab_control(HWND top, int tabs)
 {
     struct q
     {
-        const wchar_t* cls;
+        int tabs;
         HWND found = nullptr;
-    } f{cls};
+    } f{tabs};
     EnumChildWindows(
         top,
         [](HWND h, LPARAM lp) -> BOOL
@@ -107,7 +109,7 @@ HWND first_child(HWND top, const wchar_t* cls)
             auto* f = reinterpret_cast<q*>(lp);
             wchar_t c[64]{};
             GetClassNameW(h, c, 64);
-            if (_wcsicmp(c, f->cls)) return TRUE;
+            if (_wcsicmp(c, WC_TABCONTROLW) || TabCtrl_GetItemCount(h) != f->tabs) return TRUE;
             f->found = h;
             return FALSE;
         },
@@ -197,7 +199,7 @@ int main(int argc, char** argv)
     check("strip: set_current to the lazy page (built)");
     expect(canvases(top).size() == 4, "the lazy page's canvas built");
     // A user's switch: the selection, then TCN_SELCHANGE to its parent.
-    if (HWND tab = first_child(top, WC_TABCONTROLW))
+    if (HWND tab = tab_control(top, 3))
     {
         TabCtrl_SetCurSel(tab, 0);
         NMHDR n{tab, UINT_PTR(GetDlgCtrlID(tab)), UINT(TCN_SELCHANGE)};
