@@ -65,7 +65,9 @@ std::vector<HWND> descendants(HWND root, const wchar_t* cls)
 std::wstring text_of(HWND h)
 {
     std::wstring s(size_t(GetWindowTextLengthW(h)) + 1, L'\0');
-    s.resize(size_t(GetWindowTextW(h, s.data(), int(s.size()))));
+    GetWindowTextW(h, s.data(), int(s.size()));
+    // (Up to its terminator: SysLink's count of what it copied takes that in.)
+    s.resize(std::wcslen(s.c_str()));
     return s;
 }
 
@@ -88,7 +90,8 @@ SIZE size_of(HWND h)
 // The link's text as it is and its width, for a failure's log.
 void note(HWND h)
 {
-    std::printf("     link %ld px across: \"%ls\"\n", size_of(h).cx, text_of(h).c_str());
+    std::printf("     link %ld px across: \"%ls\" (%zu characters untagged; the whole text %zu)\n",
+                size_of(h).cx, text_of(h).c_str(), link_text(h).size(), long_wide.size());
     std::fflush(stdout);
 }
 
