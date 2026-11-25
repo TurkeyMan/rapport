@@ -999,7 +999,7 @@ if(TARGET rapport_win32)
     add_test(NAME win32-splitter-sizes COMMAND rapport-win32-splitter-sizes-test)
     set_tests_properties(win32-splitter-sizes PROPERTIES ENVIRONMENT RAPPORT_NO_ACTIVATE=1)
 
-    # A shown window's decisions while a relayout_at_once has drawing off (#108).
+    # A shown window's decisions within a relayout_at_once (#108).
     add_executable(rapport-win32-at-once-visibility-test win32_at_once_visibility_test.cpp)
     target_link_libraries(rapport-win32-at-once-visibility-test PRIVATE rapport::rapport user32)
     if(RAPPORT_STATIC)
@@ -1009,6 +1009,20 @@ if(TARGET rapport_win32)
     add_dependencies(rapport-win32-at-once-visibility-test rapport_win32)
     add_test(NAME win32-at-once-visibility COMMAND rapport-win32-at-once-visibility-test)
     set_tests_properties(win32-at-once-visibility PROPERTIES
+        ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+    # A page switch in a shown window never turns its drawing off
+    # (WM_SETREDRAW FALSE), which showed a canvas's stale GDI frame for a
+    # frame. Cloaked, never on the desktop.
+    add_executable(rapport-win32-at-once-redraw-test win32_at_once_redraw_test.cpp)
+    target_link_libraries(rapport-win32-at-once-redraw-test PRIVATE rapport::rapport user32 comctl32 dwmapi)
+    if(RAPPORT_STATIC)
+        target_link_libraries(rapport-win32-at-once-redraw-test PRIVATE rapport::backend_win32)
+        target_compile_definitions(rapport-win32-at-once-redraw-test PRIVATE RAPPORT_TEST_BUILTIN_WIN32)
+    endif()
+    add_dependencies(rapport-win32-at-once-redraw-test rapport_win32)
+    add_test(NAME win32-at-once-redraw COMMAND rapport-win32-at-once-redraw-test)
+    set_tests_properties(win32-at-once-redraw PROPERTIES
         ENVIRONMENT RAPPORT_NO_ACTIVATE=1 SKIP_RETURN_CODE 77 TIMEOUT 60)
 
     # focus() within a relayout_at_once (#108): activates its window and

@@ -1,7 +1,8 @@
-// focus() within a relayout_at_once (#108): the window is shown and active,
-// but its drawing is off (WM_SETREDRAW FALSE clears WS_VISIBLE), so a
-// focus() that asked IsWindowVisible kept the request for when the window
-// next activates, which it never does: the focus stayed where it was. A
+// focus() within a relayout_at_once (#108): the window is shown and active.
+// When the switch turned its drawing off (WM_SETREDRAW FALSE clears
+// WS_VISIBLE), a focus() that asked IsWindowVisible kept the request for
+// when the window next activates, which it never does: the focus stayed
+// where it was. A
 // control's focus(), a stack's (into its page), a toolbar button's (its
 // strip, that button current), each from app code run as a tab's page
 // comes in (its canvas first sized), lands. And a focus() within a layout
@@ -162,7 +163,7 @@ int main(int argc, char** argv)
             case target::tool_button: tool->focus(); break;
             }
         };
-        pages->set_current(1);  // relayout_at_once: drawing off, the page laid out, its canvas sized
+        pages->set_current(1);  // relayout_at_once: the page laid out, its canvas sized
         pump();
         expect(!in_layout, what + ": called within the switch (the second page's canvas sized)");
         const bool landed = t == target::control ? field->has_focus()
