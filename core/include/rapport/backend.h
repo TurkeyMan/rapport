@@ -28,7 +28,8 @@ namespace rap
 // 90: tabs::set_page_icon and set_page_title; spec::tabs icons.
 // 91: look_options::content_surface.
 // 92: tabs::set_hide_single_tab and hide_single_tab.
-inline constexpr int abi_version = 92;
+// 93: spec::label focusable; a link that's ellipsized, or only an icon.
+inline constexpr int abi_version = 93;
 
 // For backends' tabs (rap::tabs::set_page_visible): the page made current
 // when page `from` is hidden, the nearest visible after it, else before it;

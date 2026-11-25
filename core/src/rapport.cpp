@@ -2,6 +2,7 @@
 #include "rapport/sys.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -99,6 +100,11 @@ public:
         if (!n.common.enabled) w.set_enabled(false);
         if (!n.common.visible) w.set_visible(false);
         if (!n.common.tooltip.empty()) w.set_tooltip(n.common.tooltip);
+        // An icon-only link is named by its tooltip: without one, a screen
+        // reader has nothing to say for it.
+        if ([[maybe_unused]] const auto* l = std::get_if<spec::label>(&n.spec))
+            assert(!(l->link && l->text.empty() && l->icon && n.common.tooltip.empty()) &&
+                   "an icon-only link needs a tooltip");
         if (n.common.handle) *n.common.handle = &w;
         std::visit([&](const auto& s) { apply(s, w); }, n.spec);
     }

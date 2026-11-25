@@ -1203,6 +1203,43 @@ void apply_tooltip(HWND control, const std::string& text)
     if (!text.empty()) SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
 }
 
+// Dynamic annotation (IAccPropServices): what screen readers are told of a
+// control's accessible object in place of what the control says. Its GUIDs
+// (CLSID_AccPropServices, IID_IAccPropServices, PROPID_ACC_NAME and
+// PROPID_ACC_ROLE) declared here, as MinGW and the SDK put them in
+// different libraries.
+IAccPropServices* acc_prop_services()
+{
+    static const GUID clsid{0xb5f8350b, 0x0548, 0x48b1, {0xa6, 0xee, 0x88, 0xbd, 0x00, 0xb4, 0xa5, 0xe7}};
+    static const GUID iid{0x6e26e776, 0x04f0, 0x495d, {0x80, 0xe4, 0x33, 0x30, 0x35, 0x2e, 0x31, 0x69}};
+    static IAccPropServices* services = []
+    {
+        IAccPropServices* s = nullptr;
+        CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, iid, reinterpret_cast<void**>(&s));
+        return s;
+    }();
+    return services;
+}
+constexpr GUID acc_name_prop{0x608d3df8, 0x8128, 0x4aa7, {0xa4, 0x28, 0xf5, 0x5e, 0x49, 0x26, 0x72, 0x91}};
+constexpr GUID acc_role_prop{0xcb905ff2, 0x7bd1, 0x4c05, {0xb3, 0xc8, 0xe6, 0xc2, 0x41, 0x36, 0x4d, 0x70}};
+
+// `h`'s accessible name (its `child`'s: CHILDID_SELF, the control itself).
+void annotate_name(HWND h, DWORD child, const std::wstring& name)
+{
+    if (auto* services = acc_prop_services())
+        services->SetHwndPropStr(h, DWORD(OBJID_CLIENT), child, acc_name_prop, name.c_str());
+}
+// `h`'s accessible role (ROLE_SYSTEM_...).
+void annotate_role(HWND h, long role)
+{
+    VARIANT v;
+    VariantInit(&v);
+    v.vt = VT_I4;
+    v.lVal = role;
+    if (auto* services = acc_prop_services())
+        services->SetHwndProp(h, DWORD(OBJID_CLIENT), CHILDID_SELF, acc_role_prop, v);
+}
+
 // A layout container's children often share an HWND parent with controls
 // outside it. Track logical ancestry independently of native parenting.
 struct container_state
@@ -2658,6 +2695,21 @@ LRESULT CALLBACK link_icon_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
     return DefSubclassProc(h, msg, wp, lp);
 }
 
+// A link that's no Tab stop (spec::label::focusable off): SysLink takes the
+// focus as it's pressed, and gives it back once the click is done to the
+// control that had it (unless the click put it somewhere else).
+LRESULT CALLBACK unfocusable_link_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg == WM_LBUTTONDOWN) SetPropW(h, L"rapport-focus-before", GetFocus());
+    const LRESULT r = DefSubclassProc(h, msg, wp, lp);
+    if (msg == WM_LBUTTONUP || msg == WM_NCDESTROY)
+    {
+        const HWND had = static_cast<HWND>(RemovePropW(h, L"rapport-focus-before"));
+        if (msg == WM_LBUTTONUP && had && had != h && IsWindow(had) && GetFocus() == h) SetFocus(had);
+    }
+    return r;
+}
+
 class label_impl : public leaf<rap::label>
 {
 public:
@@ -2667,6 +2719,7 @@ public:
         , wrap_(s.wrap && !s.link)
         , selectable_(s.selectable && !s.link)
         , link_(s.link)
+        , icon_only_(s.link && s.text.empty() && bool(s.icon))
         , on_click_(s.on_click)
         , icon_(s.icon)
         , text_(s.text)
@@ -2679,11 +2732,26 @@ public:
             handlers()[icon_h_] = this;
             if (link_) SetWindowSubclass(icon_h_, link_icon_proc, 3, 0);
         }
-        if (link_)
+        if (icon_only_)
+        {
+            // A link that's only an icon: the icon is the control, with no
+            // empty SysLink beside it. To screen readers it's a link, named
+            // by its tooltip (set_tooltip).
+            adopt(icon_h_);
+            annotate_role(h_, ROLE_SYSTEM_LINK);
+        }
+        else if (link_)
         {
             // The system's link control: its colour, focus and Enter.
-            adopt(create_control(win, parent, WC_LINK, link_markup(s.text), WS_TABSTOP));
+            adopt(create_control(win, parent, WC_LINK, link_markup(wide(s.text)), s.focusable ? WS_TABSTOP : 0));
             paint_buffered(h_, buffer_bg::parent);
+            if (!s.focusable) SetWindowSubclass(h_, unfocusable_link_proc, 5, 0);
+            if (ellipsize_)
+            {
+                shown_ = wide(s.text);
+                name_link();
+                apply_tips();
+            }
         }
         else if (s.selectable)
         {
@@ -2705,7 +2773,18 @@ public:
     {
         if (t == text_) return;
         text_ = t;
-        SetWindowTextW(h_, link_         ? link_markup(t).c_str()
+        if (icon_only_) return;  // (it shows no text)
+        if (link_ && ellipsize_)
+        {
+            // Measured by its whole text, it shows as much of it as fits
+            // where it is now; named and tipped by all of it.
+            full_cx_ = text_extent(h_, wide(t)).cx;
+            fit_link();
+            name_link();
+            apply_tips();
+            return;
+        }
+        SetWindowTextW(h_, link_         ? link_markup(wide(t)).c_str()
                            : selectable_ ? to_crlf(wide(t)).c_str()
                                          : wide(t).c_str());
         // New markup, new link items: the colour they're to take (the
@@ -2715,12 +2794,19 @@ public:
     }
     ~label_impl() override
     {
-        if (icon_h_)
+        if (icon_h_ && icon_h_ != h_)
         {
             handlers().erase(icon_h_);
             DestroyWindow(icon_h_);
         }
         if (hicon_) DestroyIcon(hicon_);
+    }
+    // On every part of it, the icon as well as the text; an ellipsized
+    // link's whole text when the app gives none.
+    void set_tooltip(const std::string& t) override
+    {
+        app_tip_ = t;
+        apply_tips();
     }
     LRESULT notify(NMHDR* n, bool& handled) override
     {
@@ -2736,15 +2822,21 @@ public:
     void set_enabled(bool e) override
     {
         set_control_enabled(h_, e);
-        if (icon_h_) set_control_enabled(icon_h_, e);
+        if (icon_h_ && icon_h_ != h_) set_control_enabled(icon_h_, e);
     }
     void show_all(bool shown) override
     {
         show_control(h_, shown && visible);
-        if (icon_h_) show_control(icon_h_, shown && visible);
+        if (icon_h_ && icon_h_ != h_) show_control(icon_h_, shown && visible);
     }
     void place(RECT r) override
     {
+        if (icon_only_)
+        {
+            const int size = icon_px_, h = r.bottom - r.top;
+            move_control(h_, r.left, r.top + (h - size) / 2, size, size);
+            return;
+        }
         if (icon_h_)
         {
             const int size = px(16), h = r.bottom - r.top;
@@ -2752,9 +2844,22 @@ public:
             r.left += size + px(4);
         }
         move_control(h_, r.left, r.top, r.right - r.left, r.bottom - r.top);
+        if (link_ && ellipsize_)
+        {
+            link_w_ = r.right - r.left;
+            fit_link();
+        }
     }
     SIZE measure() override
     {
+        if (icon_only_)
+        {
+            // The icon alone, no gap and no text: no taller than a line of
+            // the label's text (a status bar's row stays a row of text).
+            const int size = std::min<int>(px(16), int(line_height()));
+            if (size != icon_px_) make_icon(size);
+            return {size, size};
+        }
         SIZE s = measure_text();
         if (icon_h_)
         {
@@ -2785,7 +2890,12 @@ public:
         {
             SIZE ideal{};
             SendMessageW(h_, LM_GETIDEALSIZE, WPARAM(px(2000)), reinterpret_cast<LPARAM>(&ideal));
-            return ideal;
+            if (!ellipsize_) return ideal;
+            // What it shows may be shortened: measured by its whole text,
+            // then as an ellipsized label is.
+            const SIZE full = text_extent(h_, wide(text_));
+            full_cx_ = full.cx;
+            return {std::min<long>(full.cx, px(40)), std::max(ideal.cy, full.cy)};
         }
         // Line breaks in the text are lines (measured single-line, the
         // label asked for one line's height and showed only the first).
@@ -2823,11 +2933,65 @@ public:
 private:
     // SysLink takes its text as markup: <a> around it, & doubled (it marks
     // a mnemonic; SysLink knows no entities).
-    static std::wstring link_markup(const std::string& text)
+    static std::wstring link_markup(const std::wstring& text)
     {
         std::wstring out = L"<a>";
-        for (wchar_t c : wide(text)) out += c == L'&' ? std::wstring(L"&&") : std::wstring(1, c);
+        for (wchar_t c : text) out += c == L'&' ? std::wstring(L"&&") : std::wstring(1, c);
         return out + L"</a>";
+    }
+    // A line of the label's text: its font's (a static showing an icon
+    // keeps no font of its own).
+    long line_height() const
+    {
+        HDC dc = GetDC(nullptr);
+        HGDIOBJ old = SelectObject(dc, ui_font(win_.dpi()));
+        RECT r{};
+        DrawTextW(dc, L"Ag", -1, &r, DT_CALCRECT | DT_NOPREFIX | DT_SINGLELINE);
+        SelectObject(dc, old);
+        ReleaseDC(nullptr, dc);
+        return r.bottom - r.top;
+    }
+    // An ellipsized link: SysLink can't shorten its text, so rapport does,
+    // as DrawText would draw it link_w_ across in the control's font ("..."
+    // at its end), and puts that in the link; its whole text when it fits.
+    void fit_link()
+    {
+        std::wstring shown = wide(text_);
+        if (full_cx_ > link_w_ && !shown.empty())
+        {
+            HDC dc = GetDC(h_);
+            HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h_, WM_GETFONT, 0, 0)));
+            const int n = int(shown.size());
+            std::vector<wchar_t> buf(shown.begin(), shown.end());
+            buf.resize(buf.size() + 5, L'\0');  // DT_MODIFYSTRING's room for the "..."
+            RECT r{0, 0, int(std::max(1L, link_w_)), 0};
+            DrawTextW(dc, buf.data(), n, &r,
+                      DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS | DT_MODIFYSTRING);
+            SelectObject(dc, old);
+            ReleaseDC(h_, dc);
+            shown = buf.data();
+        }
+        if (shown == shown_) return;
+        shown_ = shown;
+        SetWindowTextW(h_, link_markup(shown).c_str());
+        theme_control(h_);  // (its new link item's colour)
+    }
+    // An ellipsized link's accessible name: its whole text, the control's
+    // and its link's, whatever it shows.
+    void name_link()
+    {
+        annotate_name(h_, CHILDID_SELF, wide(text_));
+        annotate_name(h_, 1, wide(text_));
+    }
+    // The tooltip, on each part: the app's, else an ellipsized link's whole
+    // text. An icon-only link is named by it.
+    void apply_tips()
+    {
+        const bool whole = app_tip_.empty() && link_ && ellipsize_ && !icon_only_;
+        const std::string& tip = whole ? text_ : app_tip_;
+        set_tooltip_text(h_, tip);
+        if (icon_h_ && icon_h_ != h_) set_tooltip_text(icon_h_, tip);
+        if (icon_only_) annotate_name(h_, CHILDID_SELF, wide(app_tip_));
     }
     // A selectable label's edit: Tab and Enter go on to the dialog (a
     // multi-line edit asks for every key, which kept the focus in it), and
@@ -2847,9 +3011,13 @@ private:
     bool selectable_;
     long full_cx_ = 0;
     bool link_;
+    bool icon_only_;  // a link that's only its icon (no text)
     std::function<void()> on_click_;
     icon icon_;
-    std::string text_;  // as last set (set_text: the same again does nothing)
+    std::string text_;        // as last set (set_text: the same again does nothing)
+    std::string app_tip_;     // the app's tooltip (set_tooltip)
+    std::wstring shown_;      // an ellipsized link's text as it shows (fit_link)
+    long link_w_ = LONG_MAX;  // an ellipsized link's width, as last placed
     HWND icon_h_ = nullptr;
     HICON hicon_ = nullptr;
     int icon_px_ = 0;
@@ -4853,18 +5021,7 @@ void name_from_frame(HWND h, const std::wstring& title)
     GetClassNameW(h, cls, 32);
     if (std::none_of(std::begin(takes_label), std::end(takes_label), [&](const wchar_t* c) { return !wcscmp(c, cls); }))
         return;
-    // CLSID_AccPropServices, IID_IAccPropServices and PROPID_ACC_NAME:
-    // declared here, as MinGW and the SDK put them in different libraries.
-    static const GUID clsid{0xb5f8350b, 0x0548, 0x48b1, {0xa6, 0xee, 0x88, 0xbd, 0x00, 0xb4, 0xa5, 0xe7}};
-    static const GUID iid{0x6e26e776, 0x04f0, 0x495d, {0x80, 0xe4, 0x33, 0x30, 0x35, 0x2e, 0x31, 0x69}};
-    static const GUID name{0x608d3df8, 0x8128, 0x4aa7, {0xa4, 0x28, 0xf5, 0x5e, 0x49, 0x26, 0x72, 0x91}};
-    static IAccPropServices* services = []
-    {
-        IAccPropServices* s = nullptr;
-        CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, iid, reinterpret_cast<void**>(&s));
-        return s;
-    }();
-    if (services) services->SetHwndPropStr(h, DWORD(OBJID_CLIENT), CHILDID_SELF, name, title.c_str());
+    annotate_name(h, CHILDID_SELF, title);
 }
 
 bool paint_group_frames(HWND h, HDC dc)
