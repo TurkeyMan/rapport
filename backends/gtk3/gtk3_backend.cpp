@@ -560,7 +560,7 @@ private:
     std::string app_tip_;  // the app's tooltip (set_tooltip)
 };
 
-/ A GtkImage for a named icon the theme has; otherwise a drawing area
+// A GtkImage for a named icon the theme has; otherwise a drawing area
 // (rapport's own drawing of that name, else icon::draw) that runs whenever
 // it paints, so drawn icons follow scale and theme (the area inherits its
 // parent's CSS colour, e.g. greyed when insensitive); else the theme's
